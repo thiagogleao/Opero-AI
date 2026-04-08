@@ -1,0 +1,56 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* ── Dark theme (default) ───────────────────────────────────────────── */
+:root, [data-theme="dark"] {
+  --bg:            #0B0D0F;
+  --bg-surface:    #111318;
+  --bg-sidebar:    #0F1115;
+  --bg-input:      rgba(255,255,255,0.04);
+  --bg-hover:      rgba(255,255,255,0.05);
+  --border:        #1E2028;
+  --border-strong: #2A2D38;
+  --text-primary:  #F4F4F5;
+  --text-secondary:#E4E4E7;
+  --text-muted:    #A1A1AA;
+  --text-dim:      #71717A;
+  --text-faint:    #52525B;
+  --text-ghost:    #3F3F46;
+  --scrollbar-track: #111318;
+  --scrollbar-thumb: #2A2D38;
+  --scrollbar-hover: #3F4251;
+}
+
+/* ── Light theme ────────────────────────────────────────────────────── */
+[data-theme="light"] {
+  --bg:            #F4F4F5;
+  --bg-surface:    #FFFFFF;
+  --bg-sidebar:    #FAFAFA;
+  --bg-input:      rgba(0,0,0,0.04);
+  --bg-hover:      rgba(0,0,0,0.04);
+  --border:        #E4E4E7;
+  --border-strong: #D4D4D8;
+  --text-primary:  #18181B;
+  --text-secondary:#27272A;
+  --text-muted:    #52525B;
+  --text-dim:      #71717A;
+  --text-faint:    #A1A1AA;
+  --text-ghost:    #D4D4D8;
+  --scrollbar-track: #F4F4F5;
+  --scrollbar-thumb: #D4D4D8;
+  --scrollbar-hover: #A1A1AA;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--text-primary);
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  transition: background-color 0.2s, color 0.2s;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--scrollbar-track); }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
