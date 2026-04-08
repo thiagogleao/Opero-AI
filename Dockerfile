@@ -23,7 +23,7 @@ COPY frontend/package*.json ./frontend/
 RUN cd frontend && npm ci
 
 COPY frontend ./frontend
-RUN cd frontend && npm run build
+RUN cd frontend && NODE_OPTIONS="--max-old-space-size=2048" npm run build
 
 # ── Runtime config ────────────────────────────────────────────
 ENV NODE_ENV=production
