@@ -201,7 +201,8 @@ function ProfitModuleInner() {
 
       // Merge product list into config.cogs.products — keep existing costs, add new products
       if (Array.isArray(products) && products.length > 0) {
-        const existingById = new Map((cfg.cogs.products ?? []).map((p: { product_id: string; name: string; cost_usd: number }) => [p.product_id, p]))
+        type ProductCost = { product_id: string; name: string; cost_usd: number }
+        const existingById = new Map<string, ProductCost>((cfg.cogs.products ?? []).map((p: ProductCost) => [p.product_id, p]))
         cfg.cogs.products = products.map((p: { product_id: string; title: string }) => ({
           product_id: p.product_id,
           name: p.title,
