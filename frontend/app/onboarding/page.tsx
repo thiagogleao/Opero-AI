@@ -12,6 +12,7 @@ export default function OnboardingPage() {
   const [fbAccountId, setFbAccountId] = useState('')
   const [fbToken, setFbToken] = useState('')
   const [claimLegacy, setClaimLegacy] = useState(false)
+  const [storeStartDate, setStoreStartDate] = useState('')
   const [loading, setLoading] = useState(false)
   const [syncStatus, setSyncStatus] = useState<{ shopify?: boolean; facebook?: boolean }>({})
   const [error, setError] = useState('')
@@ -45,10 +46,13 @@ export default function OnboardingPage() {
     if (step !== 'syncing') return
     async function firstSync() {
       try {
+        const days = storeStartDate
+          ? Math.max(1, Math.ceil((Date.now() - new Date(storeStartDate).getTime()) / 86_400_000))
+          : 90
         const res = await fetch('/api/refresh', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ days: 90 }),
+          body: JSON.stringify({ days }),
         })
         const data = await res.json()
         setSyncStatus({ shopify: data.shopify?.ok, facebook: data.facebook?.ok })
@@ -152,6 +156,18 @@ export default function OnboardingPage() {
                   <p style={hintStyle}>
                     Shopify Admin → Configurações → Aplicativos → Desenvolver apps → Criar app → API credentials → Admin API access token
                   </p>
+                </div>
+
+                <div style={{ marginBottom: 16 }}>
+                  <label style={labelStyle}>Data de início da loja <span style={{ color: '#52525B', fontWeight: 400 }}>(opcional)</span></label>
+                  <input
+                    type="date"
+                    value={storeStartDate}
+                    onChange={e => setStoreStartDate(e.target.value)}
+                    max={new Date().toISOString().split('T')[0]}
+                    style={{ ...inputStyle, colorScheme: 'dark' }}
+                  />
+                  <p style={hintStyle}>Vamos importar os dados a partir dessa data. Deixe em branco para importar os últimos 90 dias.</p>
                 </div>
 
                 <div style={{ background: '#0B0D0F', borderRadius: 8, padding: '12px 14px', marginBottom: 20, border: '1px solid #1E2028' }}>
