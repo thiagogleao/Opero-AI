@@ -50,14 +50,13 @@ def load_tenant_creds(tenant_id: str, session) -> dict:
     ).mappings().fetchone()
     if not row:
         raise ValueError(f"Tenant '{tenant_id}' not found in tenants table")
-    if not row["shopify_domain"] or not row["shopify_access_token"]:
-        raise ValueError(f"Tenant '{tenant_id}' has no Shopify credentials")
-    if not row["fb_access_token"] or not row["fb_ad_account_id"]:
-        raise ValueError(f"Tenant '{tenant_id}' has no Facebook credentials")
     return dict(row)
 
 
 def run_facebook(date_from: date, date_to: date, session, tenant_id=None, creds=None):
+    if creds and (not creds.get("fb_access_token") or not creds.get("fb_ad_account_id")):
+        print("  [facebook] skipped — no credentials configured")
+        return
     from app.collectors.facebook import FacebookCollector
     kwargs = {"tenant_id": tenant_id}
     if creds:
@@ -69,6 +68,9 @@ def run_facebook(date_from: date, date_to: date, session, tenant_id=None, creds=
 
 
 def run_shopify(date_from: date, date_to: date, session, tenant_id=None, creds=None):
+    if creds and (not creds.get("shopify_domain") or not creds.get("shopify_access_token")):
+        print("  [shopify]  skipped — no credentials configured")
+        return
     from app.collectors.shopify import ShopifyCollector
     kwargs = {"tenant_id": tenant_id}
     if creds:
