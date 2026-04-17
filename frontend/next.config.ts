@@ -2,12 +2,27 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   productionBrowserSourceMaps: false,
-  webpack: (config, { dev }) => {
+  serverExternalPackages: ['pg', 'pg-pool', 'pg-connection-string', 'pgpass'],
+  webpack: (config, { dev, isServer }) => {
+    if (!isServer) {
+      config.resolve.alias = {
+        ...config.resolve.alias,
+        pg: false,
+        pgpass: false,
+        'pg-pool': false,
+        'pg-connection-string': false,
+        'pg-native': false,
+        split2: false,
+      }
+      config.resolve.fallback = {
+        ...config.resolve.fallback,
+        fs: false, path: false, stream: false, crypto: false,
+        os: false, net: false, tls: false, dns: false,
+        string_decoder: false,
+      }
+    }
     if (dev) {
-      // Limit parallel compilation workers so memory stays bounded
       config.parallelism = 1;
-
-      // Disable filesystem cache in dev (can grow large)
       config.cache = false;
     }
     return config;
