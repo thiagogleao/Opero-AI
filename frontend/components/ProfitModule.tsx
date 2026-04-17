@@ -7,6 +7,8 @@ import {
   Tooltip, ResponsiveContainer, ReferenceLine,
 } from 'recharts'
 import TimeframeSelector from './TimeframeSelector'
+import { useSettings } from '@/contexts/SettingsContext'
+import { makeFmt } from '@/lib/format'
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -42,7 +44,6 @@ interface ProfitResult {
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
-const $fmt = (n: number) => `$${n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 const pct  = (n: number, decimals = 1) => `${n.toFixed(decimals)}%`
 
 function toISO(d: Date) {
@@ -108,8 +109,8 @@ function NumInput({ value, onChange, prefix, suffix, step = 0.01, width = 90 }: 
 
 // ─── Waterfall Bar ──────────────────────────────────────────────────────────────
 
-function WaterfallBar({ label, value, total, color, pctOfRevenue }: {
-  label: string; value: number; total: number; color: string; pctOfRevenue: number
+function WaterfallBar({ label, value, total, color, pctOfRevenue, fmt }: {
+  label: string; value: number; total: number; color: string; pctOfRevenue: number; fmt: (n: number) => string
 }) {
   const width = total > 0 ? Math.max((Math.abs(value) / total) * 100, 0.5) : 0
   const isProfit = label === 'Lucro Líquido'
@@ -125,7 +126,7 @@ function WaterfallBar({ label, value, total, color, pctOfRevenue }: {
         />
       </div>
       <span style={{ fontSize: 12, color: isProfit ? color : '#D4D4D8', fontWeight: isProfit ? 700 : 400, textAlign: 'right' }}>
-        {value >= 0 ? $fmt(value) : `-${$fmt(Math.abs(value))}`}
+        {fmt(value)}
       </span>
       <span style={{ fontSize: 11, color: '#52525B', textAlign: 'right' }}>
         {pct(Math.abs(pctOfRevenue))}
@@ -136,26 +137,28 @@ function WaterfallBar({ label, value, total, color, pctOfRevenue }: {
 
 // ─── Chart Tooltip ─────────────────────────────────────────────────────────────
 
-function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: { name: string; value: number; color: string }[]; label?: string }) {
-  if (!active || !payload?.length) return null
-  return (
-    <div style={{
-      background: '#111318', border: '1px solid #2A2D38', borderRadius: 8,
-      padding: '10px 14px', fontSize: 12,
-    }}>
-      <p style={{ color: '#71717A', marginBottom: 6 }}>{label}</p>
-      {payload.map(p => (
-        <p key={p.name} style={{ color: p.color, fontWeight: 600, marginBottom: 2 }}>
-          {p.name}: {$fmt(p.value)}
-        </p>
-      ))}
-    </div>
-  )
+function makeChartTooltip(fmt: (n: number) => string) {
+  return function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: { name: string; value: number; color: string }[]; label?: string }) {
+    if (!active || !payload?.length) return null
+    return (
+      <div style={{ background: '#111318', border: '1px solid #2A2D38', borderRadius: 8, padding: '10px 14px', fontSize: 12 }}>
+        <p style={{ color: '#71717A', marginBottom: 6 }}>{label}</p>
+        {payload.map(p => (
+          <p key={p.name} style={{ color: p.color, fontWeight: 600, marginBottom: 2 }}>
+            {p.name}: {fmt(p.value)}
+          </p>
+        ))}
+      </div>
+    )
+  }
 }
 
 // ─── Inner component ───────────────────────────────────────────────────────────
 
 function ProfitModuleInner() {
+  const { currency } = useSettings()
+  const $fmt = makeFmt(currency)
+  const ChartTooltip = makeChartTooltip($fmt)
   const searchParams = useSearchParams()
 
   const todayDate = new Date()
@@ -637,18 +640,18 @@ function ProfitModuleInner() {
                   <span style={{ fontSize: 10, color: '#3F3F46', textAlign: 'right' }}>Valor</span>
                   <span style={{ fontSize: 10, color: '#3F3F46', textAlign: 'right' }}>% Receita</span>
                 </div>
-                <WaterfallBar label="Receita Bruta"   value={result.totalRevenue}      total={total} color="#10B981" pctOfRevenue={100} />
-                <WaterfallBar label="Taxa Shopify"     value={-result.totalShopifyFees} total={total} color="#F43F5E" pctOfRevenue={result.totalRevenue > 0 ? (result.totalShopifyFees/result.totalRevenue)*100:0} />
-                <WaterfallBar label="Taxa Pagamento"   value={-result.totalPaymentFees} total={total} color="#F43F5E" pctOfRevenue={result.totalRevenue > 0 ? (result.totalPaymentFees/result.totalRevenue)*100:0} />
-                <WaterfallBar label="COGS (produto)"   value={-result.totalCogs}        total={total} color="#F59E0B" pctOfRevenue={result.totalRevenue > 0 ? (result.totalCogs/result.totalRevenue)*100:0} />
-                <WaterfallBar label="Embalagem"        value={-result.totalPackaging}   total={total} color="#F59E0B" pctOfRevenue={result.totalRevenue > 0 ? (result.totalPackaging/result.totalRevenue)*100:0} />
-                <WaterfallBar label="Frete"            value={-result.totalShipping}    total={total} color="#38BDF8" pctOfRevenue={result.totalRevenue > 0 ? (result.totalShipping/result.totalRevenue)*100:0} />
-                <WaterfallBar label="Facebook Ads"     value={-result.fbSpend}          total={total} color="#8B5CF6" pctOfRevenue={result.totalRevenue > 0 ? (result.fbSpend/result.totalRevenue)*100:0} />
+                <WaterfallBar label="Receita Bruta"   value={result.totalRevenue}      total={total} color="#10B981" pctOfRevenue={100} fmt={$fmt} />
+                <WaterfallBar label="Taxa Shopify"     value={-result.totalShopifyFees} total={total} color="#F43F5E" pctOfRevenue={result.totalRevenue > 0 ? (result.totalShopifyFees/result.totalRevenue)*100:0} fmt={$fmt} />
+                <WaterfallBar label="Taxa Pagamento"   value={-result.totalPaymentFees} total={total} color="#F43F5E" pctOfRevenue={result.totalRevenue > 0 ? (result.totalPaymentFees/result.totalRevenue)*100:0} fmt={$fmt} />
+                <WaterfallBar label="COGS (produto)"   value={-result.totalCogs}        total={total} color="#F59E0B" pctOfRevenue={result.totalRevenue > 0 ? (result.totalCogs/result.totalRevenue)*100:0} fmt={$fmt} />
+                <WaterfallBar label="Embalagem"        value={-result.totalPackaging}   total={total} color="#F59E0B" pctOfRevenue={result.totalRevenue > 0 ? (result.totalPackaging/result.totalRevenue)*100:0} fmt={$fmt} />
+                <WaterfallBar label="Frete"            value={-result.totalShipping}    total={total} color="#38BDF8" pctOfRevenue={result.totalRevenue > 0 ? (result.totalShipping/result.totalRevenue)*100:0} fmt={$fmt} />
+                <WaterfallBar label="Facebook Ads"     value={-result.fbSpend}          total={total} color="#8B5CF6" pctOfRevenue={result.totalRevenue > 0 ? (result.fbSpend/result.totalRevenue)*100:0} fmt={$fmt} />
                 {result.totalExtraCosts > 0 && (
-                  <WaterfallBar label="Custos Extras"  value={-result.totalExtraCosts}  total={total} color="#71717A" pctOfRevenue={result.totalRevenue > 0 ? (result.totalExtraCosts/result.totalRevenue)*100:0} />
+                  <WaterfallBar label="Custos Extras"  value={-result.totalExtraCosts}  total={total} color="#71717A" pctOfRevenue={result.totalRevenue > 0 ? (result.totalExtraCosts/result.totalRevenue)*100:0} fmt={$fmt} />
                 )}
                 {result.totalAdditionalUnitSavings > 0 && (
-                  <WaterfallBar label="Desc. Unid. Extra" value={result.totalAdditionalUnitSavings} total={total} color="#10B981" pctOfRevenue={result.totalRevenue > 0 ? (result.totalAdditionalUnitSavings/result.totalRevenue)*100:0} />
+                  <WaterfallBar label="Desc. Unid. Extra" value={result.totalAdditionalUnitSavings} total={total} color="#10B981" pctOfRevenue={result.totalRevenue > 0 ? (result.totalAdditionalUnitSavings/result.totalRevenue)*100:0} fmt={$fmt} />
                 )}
                 <div style={{ borderTop: '1px solid #1E2028', marginTop: 10, paddingTop: 10 }}>
                   <WaterfallBar
@@ -657,6 +660,7 @@ function ProfitModuleInner() {
                     total={total}
                     color={result.netProfit >= 0 ? '#10B981' : '#F43F5E'}
                     pctOfRevenue={result.margin}
+                    fmt={$fmt}
                   />
                 </div>
               </div>

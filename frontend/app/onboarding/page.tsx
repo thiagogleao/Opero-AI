@@ -176,17 +176,7 @@ export default function OnboardingPage() {
                   </p>
                 </div>
 
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 20, padding: '10px 14px', background: 'rgba(139,92,246,0.06)', borderRadius: 8, border: '1px solid rgba(139,92,246,0.15)', cursor: 'pointer' }} onClick={() => setClaimLegacy(!claimLegacy)}>
-                  <div style={{ width: 18, height: 18, borderRadius: 4, border: `2px solid ${claimLegacy ? '#8B5CF6' : '#3F3F46'}`, background: claimLegacy ? '#8B5CF6' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                    {claimLegacy && <span style={{ color: '#fff', fontSize: 11, fontWeight: 700 }}>✓</span>}
-                  </div>
-                  <div>
-                    <p style={{ fontSize: 12, fontWeight: 600, color: '#A78BFA' }}>Migrar dados existentes</p>
-                    <p style={{ fontSize: 11, color: '#52525B' }}>Vincular dados históricos já no banco a este tenant</p>
-                  </div>
-                </div>
-
-                {error && <p style={{ fontSize: 12, color: '#F43F5E', marginBottom: 12 }}>{error}</p>}
+{error && <p style={{ fontSize: 12, color: '#F43F5E', marginBottom: 12 }}>{error}</p>}
 
                 <button onClick={() => setStep('facebook')} disabled={!shopifyDomain || !shopifyToken}
                   style={{ background: 'linear-gradient(135deg,#8B5CF6,#6D28D9)', border: 'none', borderRadius: 8, padding: '11px 0', fontSize: 14, fontWeight: 600, color: '#fff', cursor: !shopifyDomain || !shopifyToken ? 'not-allowed' : 'pointer', opacity: !shopifyDomain || !shopifyToken ? 0.4 : 1, width: '100%' }}>
