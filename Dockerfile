@@ -32,4 +32,7 @@ ENV PORT=3000
 
 EXPOSE 3000
 
-CMD ["node", "frontend/node_modules/next/dist/bin/next", "start", "--dir", "frontend", "-p", "3000"]
+COPY start.sh .
+RUN chmod +x start.sh
+
+CMD ["./start.sh"]
