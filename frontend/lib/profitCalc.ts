@@ -106,16 +106,16 @@ export async function getProfitSummary(
     order_id: string; total_price: string; country_code: string | null
     total_units: string; product_id: string | null; product_units: string
   }>(`
-    SELECT o.order_id::text, o.total_price::text, o.country_code,
+    SELECT o.id::text AS order_id, o.total_price::text, o.country_code,
            COALESCE(SUM(oi.quantity), 1)::text AS total_units,
            oi.product_id,
            COALESCE(oi.quantity, 1)::text AS product_units
     FROM shopify_orders o
-    LEFT JOIN shopify_order_items oi ON o.order_id = oi.order_id
+    LEFT JOIN shopify_order_items oi ON o.id = oi.order_id
     WHERE o.tenant_id = $1
       AND o.created_at::date BETWEEN $2::date AND $3::date
       AND o.financial_status NOT IN ('refunded', 'voided')
-    GROUP BY o.order_id, o.total_price, o.country_code, oi.product_id, oi.quantity
+    GROUP BY o.id, o.total_price, o.country_code, oi.product_id, oi.quantity
   `, [tenantId, dateFrom, dateTo])
 
   // Group by order_id so we can compute per-order totals
@@ -227,12 +227,12 @@ export async function getCountryProfit(
     SELECT
       COALESCE(o.country_code, 'XX')             AS country_code,
       ROUND(SUM(o.total_price::numeric), 2)::text AS revenue,
-      COUNT(o.order_id)::text                     AS orders,
+      COUNT(o.id)::text                           AS orders,
       ROUND(
-        COALESCE(SUM(oia.total_quantity)::numeric / NULLIF(COUNT(o.order_id), 0), 1)
+        COALESCE(SUM(oia.total_quantity)::numeric / NULLIF(COUNT(o.id), 0), 1)
       , 2)::text                                  AS avg_units
     FROM shopify_orders o
-    LEFT JOIN order_items_agg oia ON o.order_id = oia.order_id
+    LEFT JOIN order_items_agg oia ON o.id = oia.order_id
     WHERE o.tenant_id = $1
       AND o.created_at::date BETWEEN $2::date AND $3::date
       AND o.financial_status NOT IN ('refunded', 'voided')

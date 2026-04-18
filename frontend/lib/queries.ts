@@ -7,7 +7,7 @@ export async function getOverviewMetrics(tenantId: string, dateFrom: string, dat
     abandoned_value: number; abandoned_count: number
   }>(`
     WITH period_orders AS (
-      SELECT order_id, total_price, customer_id
+      SELECT id AS order_id, total_price, customer_id
       FROM shopify_orders
       WHERE tenant_id = $1
         AND created_at::date BETWEEN $2::date AND $3::date
@@ -278,13 +278,13 @@ export async function getProductMetrics(tenantId: string, dateFrom: string, date
       COALESCE(p.title, oi.product_title)            AS title,
       p.image_url,
       COALESCE(SUM(oi.quantity), 0)                  AS units,
-      COUNT(DISTINCT o.order_id)                     AS orders,
+      COUNT(DISTINCT o.id)                           AS orders,
       ROUND(SUM(oi.quantity * oi.price)::numeric, 2) AS revenue,
-      ROUND(CASE WHEN COUNT(DISTINCT o.order_id) > 0
-        THEN SUM(oi.quantity * oi.price) / COUNT(DISTINCT o.order_id) ELSE 0
+      ROUND(CASE WHEN COUNT(DISTINCT o.id) > 0
+        THEN SUM(oi.quantity * oi.price) / COUNT(DISTINCT o.id) ELSE 0
         END::numeric, 2)                             AS aov
     FROM shopify_order_items oi
-    JOIN shopify_orders o ON oi.order_id = o.order_id
+    JOIN shopify_orders o ON oi.order_id = o.id
     LEFT JOIN shopify_products p ON oi.product_id = p.product_id
     WHERE o.tenant_id = $1
       AND o.created_at::date BETWEEN $2::date AND $3::date
