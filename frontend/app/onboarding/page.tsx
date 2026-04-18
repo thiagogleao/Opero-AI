@@ -1,6 +1,7 @@
 'use client'
-import { useState, useEffect } from 'react'
-import { useRouter } from 'next/navigation'
+import { useState, useEffect, useCallback } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
+import { Suspense } from 'react'
 
 type Step = 'shopify' | 'facebook' | 'syncing' | 'done'
 
@@ -32,20 +33,51 @@ function Tutorial({ title, steps, open, onToggle }: { title: string; steps: stri
   )
 }
 
-export default function OnboardingPage() {
+function OnboardingInner() {
   const router = useRouter()
+  const searchParams = useSearchParams()
+
   const [step, setStep] = useState<Step>('shopify')
   const [shopifyDomain, setShopifyDomain] = useState('')
-  const [shopifyToken, setShopifyToken] = useState('')
+  const [storeStartDate, setStoreStartDate] = useState('')
   const [fbAccountId, setFbAccountId] = useState('')
   const [fbToken, setFbToken] = useState('')
-  const [storeStartDate, setStoreStartDate] = useState('')
   const [loading, setLoading] = useState(false)
   const [syncStatus, setSyncStatus] = useState<{ shopify?: boolean; facebook?: boolean }>({})
   const [error, setError] = useState('')
   const [tutorialOpen, setTutorialOpen] = useState(false)
+  const [shopifyConnected, setShopifyConnected] = useState(false)
 
-  async function submit() {
+  // Handle return from Shopify OAuth
+  useEffect(() => {
+    const connected = searchParams.get('shopify_connected')
+    const dateParam = searchParams.get('storeStartDate')
+    const errorParam = searchParams.get('error')
+
+    if (connected === 'true') {
+      setShopifyConnected(true)
+      if (dateParam) setStoreStartDate(dateParam)
+      setStep('facebook')
+    }
+    if (errorParam) {
+      const messages: Record<string, string> = {
+        invalid_state: 'Erro de segurança. Tente novamente.',
+        invalid_hmac: 'Resposta inválida do Shopify. Tente novamente.',
+        token_exchange_failed: 'Não foi possível obter o token do Shopify. Verifique o app.',
+      }
+      setError(messages[errorParam] || 'Erro desconhecido. Tente novamente.')
+    }
+  }, [searchParams])
+
+  const startShopifyOAuth = useCallback(() => {
+    const domain = shopifyDomain.replace(/https?:\/\//, '').replace(/\/$/, '')
+    if (!domain) return
+    const params = new URLSearchParams({ shop: domain })
+    if (storeStartDate) params.set('storeStartDate', storeStartDate)
+    window.location.href = `/api/shopify/auth?${params}`
+  }, [shopifyDomain, storeStartDate])
+
+  const submit = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
@@ -53,10 +85,9 @@ export default function OnboardingPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          shopify_domain: shopifyDomain,
-          shopify_access_token: shopifyToken,
           fb_ad_account_id: fbAccountId || null,
           fb_access_token: fbToken || null,
+          onboarded: true,
         }),
       })
       const data = await res.json()
@@ -66,7 +97,7 @@ export default function OnboardingPage() {
       setError('Erro de conexão')
       setLoading(false)
     }
-  }
+  }, [fbAccountId, fbToken])
 
   useEffect(() => {
     if (step !== 'syncing') return
@@ -88,7 +119,7 @@ export default function OnboardingPage() {
       setStep('done')
     }
     firstSync()
-  }, [step])
+  }, [step, storeStartDate])
 
   const inputStyle = {
     width: '100%', background: '#111318', border: '1px solid #2A2D35',
@@ -99,13 +130,13 @@ export default function OnboardingPage() {
   const hintStyle = { fontSize: 11, color: '#52525B', marginTop: 4 }
 
   const shopifySteps = [
-    'No painel do Shopify, vá em <strong style="color:#A1A1AA">Configurações</strong> (ícone de engrenagem no canto inferior esquerdo).',
-    'Clique em <strong style="color:#A1A1AA">Aplicativos e canais de vendas</strong> → depois em <strong style="color:#A1A1AA">Desenvolver apps</strong>.',
-    'Clique em <strong style="color:#A1A1AA">Criar um app</strong>, dê um nome (ex: "Opero AI") e confirme.',
-    'Vá na aba <strong style="color:#A1A1AA">Configuração da API Admin</strong> e ative as permissões: <em>read_orders, write_orders, read_products, write_products, read_customers, read_checkouts, read_analytics, write_inventory, write_pages</em>.',
-    'Clique em <strong style="color:#A1A1AA">Salvar</strong>, depois vá na aba <strong style="color:#A1A1AA">Instalar app</strong> e confirme a instalação.',
-    'De volta na aba <strong style="color:#A1A1AA">Credenciais da API Admin</strong>, clique em <strong style="color:#A1A1AA">Revelar token</strong> e copie o valor — ele começa com <em>shpat_</em>.',
-    'O <strong style="color:#A1A1AA">domínio</strong> é o endereço da sua loja no formato <em>minhaloja.myshopify.com</em> (sem https://).',
+    'Acesse <strong style="color:#A1A1AA">partners.shopify.com</strong> e faça login na sua conta de parceiro.',
+    'Clique em <strong style="color:#A1A1AA">Apps</strong> no menu lateral → <strong style="color:#A1A1AA">Create app</strong>.',
+    'Escolha <strong style="color:#A1A1AA">Create app manually</strong>, dê um nome (ex: "Opero AI") e confirme.',
+    'Na aba <strong style="color:#A1A1AA">Configuration</strong>, em <strong style="color:#A1A1AA">URLs</strong>, adicione a URL de callback: <em>[sua URL]/api/shopify/callback</em>.',
+    'Copie o <strong style="color:#A1A1AA">Client ID</strong> e o <strong style="color:#A1A1AA">Client Secret</strong> e adicione nas variáveis de ambiente <em>SHOPIFY_CLIENT_ID</em> e <em>SHOPIFY_CLIENT_SECRET</em>.',
+    'Digite o domínio da sua loja abaixo (ex: <em>minhaloja.myshopify.com</em>) e clique em <strong style="color:#A1A1AA">Conectar com Shopify</strong>.',
+    'Você será redirecionado para o Shopify para autorizar o app — clique em <strong style="color:#A1A1AA">Install</strong> e pronto.',
   ]
 
   const fbSteps = [
@@ -191,7 +222,7 @@ export default function OnboardingPage() {
                 </div>
 
                 <Tutorial
-                  title="Como gerar o Access Token no Shopify"
+                  title="Como configurar o app no Shopify"
                   steps={shopifySteps}
                   open={tutorialOpen}
                   onToggle={() => setTutorialOpen(o => !o)}
@@ -201,12 +232,6 @@ export default function OnboardingPage() {
                   <label style={labelStyle}>Domínio da loja</label>
                   <input value={shopifyDomain} onChange={e => setShopifyDomain(e.target.value)} placeholder="minhaloja.myshopify.com" style={inputStyle} />
                   <p style={hintStyle}>Sem https://, apenas o domínio. Ex: minhaloja.myshopify.com</p>
-                </div>
-
-                <div style={{ marginBottom: 16 }}>
-                  <label style={labelStyle}>Access Token</label>
-                  <input value={shopifyToken} onChange={e => setShopifyToken(e.target.value)} placeholder="shpat_..." type="password" style={inputStyle} />
-                  <p style={hintStyle}>Começa com <strong>shpat_</strong>. Veja o tutorial acima para gerar.</p>
                 </div>
 
                 <div style={{ marginBottom: 20 }}>
@@ -223,9 +248,12 @@ export default function OnboardingPage() {
 
                 {error && <p style={{ fontSize: 12, color: '#F43F5E', marginBottom: 12 }}>{error}</p>}
 
-                <button onClick={() => setStep('facebook')} disabled={!shopifyDomain || !shopifyToken}
-                  style={{ background: 'linear-gradient(135deg,#8B5CF6,#6D28D9)', border: 'none', borderRadius: 8, padding: '11px 0', fontSize: 14, fontWeight: 600, color: '#fff', cursor: !shopifyDomain || !shopifyToken ? 'not-allowed' : 'pointer', opacity: !shopifyDomain || !shopifyToken ? 0.4 : 1, width: '100%' }}>
-                  Próximo →
+                <button
+                  onClick={startShopifyOAuth}
+                  disabled={!shopifyDomain}
+                  style={{ background: 'linear-gradient(135deg,#8B5CF6,#6D28D9)', border: 'none', borderRadius: 8, padding: '11px 0', fontSize: 14, fontWeight: 600, color: '#fff', cursor: !shopifyDomain ? 'not-allowed' : 'pointer', opacity: !shopifyDomain ? 0.4 : 1, width: '100%' }}
+                >
+                  Conectar com Shopify →
                 </button>
               </>
             )}
@@ -239,6 +267,13 @@ export default function OnboardingPage() {
                     <p style={{ fontSize: 11, color: '#71717A' }}>Passo 2 de 2 — opcional</p>
                   </div>
                 </div>
+
+                {shopifyConnected && (
+                  <div style={{ background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.2)', borderRadius: 8, padding: '10px 14px', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ color: '#10B981', fontSize: 14 }}>✓</span>
+                    <span style={{ fontSize: 12, color: '#10B981' }}>Shopify conectado com sucesso!</span>
+                  </div>
+                )}
 
                 <Tutorial
                   title="Como gerar o token do Facebook Ads"
@@ -282,5 +317,13 @@ export default function OnboardingPage() {
         )}
       </div>
     </div>
+  )
+}
+
+export default function OnboardingPage() {
+  return (
+    <Suspense>
+      <OnboardingInner />
+    </Suspense>
   )
 }
