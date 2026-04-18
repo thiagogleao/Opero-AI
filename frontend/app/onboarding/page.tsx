@@ -90,11 +90,13 @@ function OnboardingInner() {
           onboarded: true,
         }),
       })
-      const data = await res.json()
+      const text = await res.text()
+      let data: Record<string, string> = {}
+      try { data = JSON.parse(text) } catch { data = { error: text.slice(0, 200) } }
       if (!res.ok) { setError(data.error || 'Erro desconhecido'); setLoading(false); return }
       setStep('syncing')
-    } catch {
-      setError('Erro de conexão')
+    } catch (e) {
+      setError('Erro de conexão: ' + String(e))
       setLoading(false)
     }
   }, [fbAccountId, fbToken])

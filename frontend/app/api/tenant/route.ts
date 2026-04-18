@@ -19,14 +19,18 @@ export async function POST(req: NextRequest) {
 
   const user = await currentUser()
 
-  const tenant = await upsertTenant(userId, {
-    email: user?.emailAddresses[0]?.emailAddress,
-    shopify_domain: shopify_domain?.replace(/https?:\/\//, '').replace(/\/$/, ''),
-    shopify_access_token: shopify_access_token || undefined,
-    fb_ad_account_id,
-    fb_access_token,
-    onboarded: onboarded ?? true,
-  })
-
-  return NextResponse.json({ tenant })
+  try {
+    const tenant = await upsertTenant(userId, {
+      email: user?.emailAddresses[0]?.emailAddress,
+      shopify_domain: shopify_domain?.replace(/https?:\/\//, '').replace(/\/$/, ''),
+      shopify_access_token: shopify_access_token || undefined,
+      fb_ad_account_id,
+      fb_access_token,
+      onboarded: onboarded ?? true,
+    })
+    return NextResponse.json({ tenant })
+  } catch (err) {
+    console.error('[tenant POST]', err)
+    return NextResponse.json({ error: String(err) }, { status: 500 })
+  }
 }
