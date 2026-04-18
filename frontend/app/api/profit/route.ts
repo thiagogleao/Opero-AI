@@ -1,4 +1,5 @@
 import { NextRequest } from 'next/server'
+import { auth } from '@clerk/nextjs/server'
 import { query } from '@/lib/db'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -59,7 +60,7 @@ function calcCogs(units: number, cfg: ProfitConfig): number {
 
 // ─── Calculation ──────────────────────────────────────────────────────────────
 
-async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConfig) {
+async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConfig, tenantId: string) {
   const days = Math.round(
     (new Date(dateTo).getTime() - new Date(dateFrom).getTime()) / 86400000
   ) + 1
@@ -80,17 +81,19 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
       COALESCE(SUM(oi.quantity), 1)::text AS total_units
     FROM shopify_orders o
     LEFT JOIN shopify_order_items oi ON o.id = oi.order_id
-    WHERE o.created_at::date BETWEEN $1::date AND $2::date
+    WHERE o.tenant_id = $3
+      AND o.created_at::date BETWEEN $1::date AND $2::date
       AND o.financial_status NOT IN ('refunded', 'voided')
     GROUP BY o.id, o.total_price, o.country_code, o.financial_status
-  `, [dateFrom, dateTo])
+  `, [dateFrom, dateTo, tenantId])
 
   // 2. FB spend
   const [fbRow] = await query<{ spend: string }>(`
     SELECT COALESCE(SUM(spend), 0)::text AS spend
     FROM fb_ad_daily_metrics
-    WHERE date BETWEEN $1::date AND $2::date
-  `, [dateFrom, dateTo])
+    WHERE tenant_id = $3
+      AND date BETWEEN $1::date AND $2::date
+  `, [dateFrom, dateTo, tenantId])
   const fbSpend = Number(fbRow.spend)
 
   // 3. Extra costs
@@ -146,16 +149,18 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
   const dailyRevRows = await query<{ date: string; revenue: string }>(`
     SELECT date::text, COALESCE(SUM(total_revenue), 0)::text AS revenue
     FROM shopify_daily_metrics
-    WHERE date BETWEEN $1::date AND $2::date
+    WHERE tenant_id = $3
+      AND date BETWEEN $1::date AND $2::date
     GROUP BY date ORDER BY date
-  `, [dateFrom, dateTo])
+  `, [dateFrom, dateTo, tenantId])
 
   const dailyFbRows = await query<{ date: string; spend: string }>(`
     SELECT date::text, COALESCE(SUM(spend), 0)::text AS spend
     FROM fb_ad_daily_metrics
-    WHERE date BETWEEN $1::date AND $2::date
+    WHERE tenant_id = $3
+      AND date BETWEEN $1::date AND $2::date
     GROUP BY date ORDER BY date
-  `, [dateFrom, dateTo])
+  `, [dateFrom, dateTo, tenantId])
 
   const fbByDate: Record<string, number> = {}
   for (const r of dailyFbRows) fbByDate[r.date] = Number(r.spend)
@@ -188,29 +193,34 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
 // ─── Route handlers ───────────────────────────────────────────────────────────
 
 export async function GET() {
+  const { userId } = await auth()
+  if (!userId) return Response.json({ error: 'Unauthorized' }, { status: 401 })
   const rows = await query<{ value: ProfitConfig }>(
-    `SELECT value FROM profit_settings WHERE key = 'config'`
+    `SELECT settings AS value FROM profit_settings WHERE tenant_id = $1`,
+    [userId]
   )
-  // Return null config if nothing saved yet
   const config = rows[0]?.value ?? null
   return Response.json({ config })
 }
 
 export async function POST(req: NextRequest) {
+  const { userId } = await auth()
+  if (!userId) return Response.json({ error: 'Unauthorized' }, { status: 401 })
+
   const body = await req.json()
 
   if (body.action === 'save') {
     await query(
-      `INSERT INTO profit_settings (key, value, updated_at)
-       VALUES ('config', $1, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
-      [JSON.stringify(body.config)]
+      `INSERT INTO profit_settings (tenant_id, settings)
+       VALUES ($1, $2)
+       ON CONFLICT (tenant_id) DO UPDATE SET settings = $2`,
+      [userId, JSON.stringify(body.config)]
     )
     return Response.json({ ok: true })
   }
 
   if (body.action === 'calculate') {
-    const result = await calculateProfit(body.dateFrom, body.dateTo, body.config)
+    const result = await calculateProfit(body.dateFrom, body.dateTo, body.config, userId)
     return Response.json(result)
   }
 

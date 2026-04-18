@@ -77,7 +77,7 @@ export async function getProfitSummary(
 ): Promise<ProfitSummary> {
   // Load saved config
   const rows = await query<{ value: ProfitConfig }>(
-    `SELECT value FROM profit_settings WHERE key = 'config' AND tenant_id = $1`,
+    `SELECT settings AS value FROM profit_settings WHERE tenant_id = $1`,
     [tenantId]
   )
   const cfg = rows[0]?.value
@@ -207,7 +207,7 @@ export async function getCountryProfit(
   dateTo: string
 ): Promise<CountryProfit[]> {
   const rows = await query<{ value: ProfitConfig }>(
-    `SELECT value FROM profit_settings WHERE key = 'config' AND tenant_id = $1`,
+    `SELECT settings AS value FROM profit_settings WHERE tenant_id = $1`,
     [tenantId]
   )
   const cfg = rows[0]?.value

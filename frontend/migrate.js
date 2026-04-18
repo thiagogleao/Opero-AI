@@ -149,6 +149,17 @@ const sql = `
   ALTER TABLE sync_runs                   ADD COLUMN IF NOT EXISTS tenant_id TEXT REFERENCES tenants(id);
   ALTER TABLE profit_settings             ADD COLUMN IF NOT EXISTS tenant_id TEXT REFERENCES tenants(id);
 
+  -- Missing columns needed by TypeScript queries
+  ALTER TABLE shopify_daily_metrics    ADD COLUMN IF NOT EXISTS total_revenue NUMERIC DEFAULT 0;
+  ALTER TABLE shopify_daily_metrics    ADD COLUMN IF NOT EXISTS total_orders INT DEFAULT 0;
+  ALTER TABLE shopify_daily_metrics    ADD COLUMN IF NOT EXISTS avg_order_value NUMERIC DEFAULT 0;
+  ALTER TABLE shopify_country_metrics  ADD COLUMN IF NOT EXISTS orders_count INT DEFAULT 0;
+  ALTER TABLE shopify_country_metrics  ADD COLUMN IF NOT EXISTS avg_order_value NUMERIC DEFAULT 0;
+  ALTER TABLE fb_ad_daily_metrics      ADD COLUMN IF NOT EXISTS link_clicks INT DEFAULT 0;
+  ALTER TABLE fb_ad_daily_metrics      ADD COLUMN IF NOT EXISTS landing_page_views INT DEFAULT 0;
+  ALTER TABLE fb_ad_daily_metrics      ADD COLUMN IF NOT EXISTS add_to_cart INT DEFAULT 0;
+  ALTER TABLE fb_ad_daily_metrics      ADD COLUMN IF NOT EXISTS initiate_checkout INT DEFAULT 0;
+
   CREATE INDEX IF NOT EXISTS idx_shopify_orders_tenant      ON shopify_orders(tenant_id);
   CREATE INDEX IF NOT EXISTS idx_shopify_order_items_tenant ON shopify_order_items(tenant_id);
   CREATE INDEX IF NOT EXISTS idx_fb_ad_daily_tenant         ON fb_ad_daily_metrics(tenant_id);
