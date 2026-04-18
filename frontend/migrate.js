@@ -105,6 +105,38 @@ const sql = `
     settings JSONB NOT NULL DEFAULT '{}'
   );
 
+  ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS order_id BIGINT;
+  ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS product_id BIGINT;
+  ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS variant_id BIGINT;
+  ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS title TEXT;
+  ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS variant_title TEXT;
+  ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS sku TEXT;
+  ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS quantity INT;
+  ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS price NUMERIC;
+  ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS total_discount NUMERIC;
+  ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS fulfillment_status TEXT;
+
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS order_number INT;
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS financial_status TEXT;
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS fulfillment_status TEXT;
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS currency TEXT;
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS total_price NUMERIC;
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS subtotal_price NUMERIC;
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS total_discounts NUMERIC;
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS total_tax NUMERIC;
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS total_shipping NUMERIC;
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS customer_id BIGINT;
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS customer_email TEXT;
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS is_first_order BOOLEAN;
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS tags TEXT;
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS referring_site TEXT;
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS landing_site TEXT;
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS source_name TEXT;
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS cancel_reason TEXT;
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS refund_amount NUMERIC DEFAULT 0;
+
   ALTER TABLE shopify_orders              ADD COLUMN IF NOT EXISTS tenant_id TEXT REFERENCES tenants(id);
   ALTER TABLE shopify_order_items         ADD COLUMN IF NOT EXISTS tenant_id TEXT REFERENCES tenants(id);
   ALTER TABLE shopify_daily_metrics       ADD COLUMN IF NOT EXISTS tenant_id TEXT REFERENCES tenants(id);
