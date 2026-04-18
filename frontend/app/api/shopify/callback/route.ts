@@ -10,8 +10,9 @@ export async function GET(req: NextRequest) {
   const state = searchParams.get('state')
   const hmac = searchParams.get('hmac')
 
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || req.nextUrl.origin
   const fail = (reason: string) =>
-    NextResponse.redirect(new URL(`/onboarding?error=${reason}`, req.url))
+    NextResponse.redirect(new URL(`/onboarding?error=${reason}`, appUrl))
 
   // Verify state matches cookie
   const cookieState = req.cookies.get('shopify_oauth_state')?.value
@@ -45,7 +46,7 @@ export async function GET(req: NextRequest) {
   const cleanShop = shop!.replace(/https?:\/\//, '').replace(/\/$/, '')
 
   const { userId } = await auth()
-  if (!userId) return NextResponse.redirect(new URL('/sign-in', req.url))
+  if (!userId) return NextResponse.redirect(new URL('/sign-in', appUrl))
 
   const user = await currentUser()
   await upsertTenant(userId, {
@@ -57,7 +58,7 @@ export async function GET(req: NextRequest) {
   const [, encodedDate] = (state || '').split(':')
   const storeStartDate = encodedDate ? decodeURIComponent(encodedDate) : ''
 
-  const redirectUrl = new URL('/onboarding', req.url)
+  const redirectUrl = new URL('/onboarding', appUrl)
   redirectUrl.searchParams.set('shopify_connected', 'true')
   if (storeStartDate) redirectUrl.searchParams.set('storeStartDate', storeStartDate)
 
