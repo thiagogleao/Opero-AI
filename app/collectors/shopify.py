@@ -479,6 +479,10 @@ class ShopifyCollector(BaseCollector):
         meta.reflect(bind=self.session.bind, only=[table_name])
         table = meta.tables[table_name]
 
+        # Strip keys not present in the DB table so extra collector fields never cause errors
+        col_names = {c.name for c in table.columns}
+        rows = [{k: v for k, v in row.items() if k in col_names} for row in rows]
+
         update_cols = [
             c.name for c in table.columns
             if c.name not in conflict_columns and c.name != "id"
