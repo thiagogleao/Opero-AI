@@ -287,7 +287,7 @@ async function executeTool(name: string, input: Input, shopify: ShopifyAdmin, te
                      ${date_from ? `AND m.date >= '${date_from}'` : ''}
                      ${date_to   ? `AND m.date <= '${date_to}'`   : ''}
                    WHERE a.tenant_id = '${tid}'
-                   GROUP BY a.ad_id, a.name, a.status, a.effective_status, a.creative_url, a.thumbnail_url, a.adset_name, a.campaign_name
+                   GROUP BY a.ad_id, a.name, a.status, a.effective_status, a.landing_url, a.creative_url, a.thumbnail_url, a.adset_name, a.campaign_name
                    ORDER BY spend DESC NULLS LAST
                    LIMIT ${limit}`,
           fb_metrics: `SELECT m.date, a.name AS ad_name, m.spend, m.impressions, m.clicks,
