@@ -5,21 +5,22 @@ import { useTr } from '@/lib/translations'
 
 type Status = 'idle' | 'loading' | 'done' | 'warn' | 'error'
 
-const DAY_OPTIONS = [
-  { label: '2 dias', value: 2 },
-  { label: '7 dias', value: 7 },
-  { label: '30 dias', value: 30 },
-  { label: '90 dias', value: 90 },
-]
+function toDateStr(d: Date) {
+  return d.toISOString().split('T')[0]
+}
+function daysAgo(n: number) {
+  const d = new Date(); d.setDate(d.getDate() - n); return toDateStr(d)
+}
 
 export default function RefreshButton() {
   const router = useRouter()
   const tr = useTr()
   const [status, setStatus] = useState<Status>('idle')
   const [msg, setMsg] = useState('')
-  const [days, setDays] = useState(2)
   const [open, setOpen] = useState(false)
+  const [dateFrom, setDateFrom] = useState(() => daysAgo(2))
   const ref = useRef<HTMLDivElement>(null)
+  const today = toDateStr(new Date())
 
   useEffect(() => {
     function close(e: MouseEvent) {
@@ -30,10 +31,15 @@ export default function RefreshButton() {
   }, [])
 
   async function handleRefresh() {
+    setOpen(false)
     setStatus('loading')
     setMsg('')
     try {
-      const res  = await fetch('/api/refresh', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ days }) })
+      const res  = await fetch('/api/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dateFrom, dateTo: today }),
+      })
       const data = await res.json()
 
       if (data.shopify.ok && data.facebook.ok) {
@@ -62,28 +68,35 @@ export default function RefreshButton() {
   const c = theme[status]
   const isIdle = status === 'idle'
 
+  const quickOptions = [
+    { label: 'Hoje',     date: today },
+    { label: '7 dias',   date: daysAgo(7) },
+    { label: '30 dias',  date: daysAgo(30) },
+    { label: '90 dias',  date: daysAgo(90) },
+  ]
+
   return (
     <div ref={ref} style={{ position: 'relative', display: 'inline-flex' }}>
-      <div style={{ display: 'flex', border: `1px solid ${c.border}`, borderRadius: 8, overflow: 'hidden', transition: 'all 0.2s' }}>
+      <div style={{ display: 'flex', border: `1px solid ${c.border}`, borderRadius: 8, overflow: 'visible', transition: 'all 0.2s' }}>
         {/* Main button */}
         <button
-          onClick={handleRefresh}
+          onClick={isIdle ? handleRefresh : undefined}
           disabled={status === 'loading'}
-          title={isIdle ? tr.refresh_title : msg}
-          style={{ background: c.bg, border: 'none', padding: '6px 10px', fontSize: 12, fontWeight: 600, color: c.color, cursor: status === 'loading' ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 6, transition: 'all 0.2s', whiteSpace: 'nowrap' }}
+          title={isIdle ? `Sincronizar de ${dateFrom} até hoje` : msg}
+          style={{ background: c.bg, border: 'none', borderRadius: '8px 0 0 8px', padding: '6px 10px', fontSize: 12, fontWeight: 600, color: c.color, cursor: status === 'loading' ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 6, transition: 'all 0.2s', whiteSpace: 'nowrap' }}
         >
           {status === 'loading' ? <><Spinner />{tr.refresh_loading}</> :
            status === 'done'    ? <>✓ {msg}</> :
            status === 'warn'    ? <>⚠ {msg}</> :
            status === 'error'   ? <>✗ {msg}</> :
-           <><RefreshIcon />{tr.refresh_idle} <span style={{ opacity: 0.6, fontWeight: 400 }}>({DAY_OPTIONS.find(o => o.value === days)?.label})</span></>}
+           <><RefreshIcon />{tr.refresh_idle} <span style={{ opacity: 0.55, fontWeight: 400 }}>desde {dateFrom}</span></>}
         </button>
 
-        {/* Dropdown toggle — only shown when idle */}
+        {/* Dropdown toggle */}
         {isIdle && (
           <button
             onClick={() => setOpen(o => !o)}
-            style={{ background: c.bg, border: 'none', borderLeft: `1px solid ${c.border}`, padding: '6px 7px', color: c.color, cursor: 'pointer', display: 'flex', alignItems: 'center', transition: 'all 0.2s' }}
+            style={{ background: c.bg, border: 'none', borderLeft: `1px solid ${c.border}`, borderRadius: '0 8px 8px 0', padding: '6px 7px', color: c.color, cursor: 'pointer', display: 'flex', alignItems: 'center', transition: 'all 0.2s' }}
           >
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
               <path d="M2 3.5L5 6.5L8 3.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
@@ -92,18 +105,34 @@ export default function RefreshButton() {
         )}
       </div>
 
-      {/* Dropdown menu */}
+      {/* Dropdown */}
       {open && (
-        <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 4, background: '#1A1D23', border: '1px solid #2A2D35', borderRadius: 8, overflow: 'hidden', zIndex: 50, minWidth: 120 }}>
-          {DAY_OPTIONS.map(opt => (
-            <button
-              key={opt.value}
-              onClick={() => { setDays(opt.value); setOpen(false) }}
-              style={{ display: 'block', width: '100%', padding: '8px 14px', fontSize: 12, fontWeight: opt.value === days ? 700 : 400, color: opt.value === days ? '#A78BFA' : '#A1A1AA', background: 'transparent', border: 'none', cursor: 'pointer', textAlign: 'left', whiteSpace: 'nowrap' }}
-            >
-              {opt.label} {opt.value === days ? '✓' : ''}
-            </button>
-          ))}
+        <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 4, background: '#1A1D23', border: '1px solid #2A2D35', borderRadius: 8, zIndex: 50, minWidth: 200, padding: 12 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: '#52525B', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Data inicial</div>
+
+          {/* Quick options */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 10 }}>
+            {quickOptions.map(opt => (
+              <button key={opt.label} onClick={() => setDateFrom(opt.date)}
+                style={{ padding: '4px 8px', fontSize: 11, fontWeight: 500, borderRadius: 5, border: `1px solid ${dateFrom === opt.date ? '#7C3AED' : '#2A2D35'}`, background: dateFrom === opt.date ? 'rgba(124,58,237,0.15)' : 'transparent', color: dateFrom === opt.date ? '#A78BFA' : '#A1A1AA', cursor: 'pointer' }}>
+                {opt.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Custom date input */}
+          <input
+            type="date"
+            value={dateFrom}
+            max={today}
+            onChange={e => setDateFrom(e.target.value)}
+            style={{ width: '100%', background: '#111318', border: '1px solid #2A2D35', borderRadius: 6, padding: '6px 8px', fontSize: 12, color: '#F4F4F5', outline: 'none', boxSizing: 'border-box', marginBottom: 10 }}
+          />
+
+          <button onClick={handleRefresh}
+            style={{ width: '100%', padding: '7px 0', fontSize: 12, fontWeight: 600, borderRadius: 6, border: 'none', background: 'rgba(124,58,237,0.2)', color: '#A78BFA', cursor: 'pointer' }}>
+            Sincronizar desde {dateFrom}
+          </button>
         </div>
       )}
     </div>
