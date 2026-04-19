@@ -352,30 +352,33 @@ export async function POST(req: NextRequest) {
           }
 
           if (response.stop_reason === 'tool_use') {
-            const toolBlock = response.content.find(b => b.type === 'tool_use') as Anthropic.ToolUseBlock
+            const toolBlocks = response.content.filter(b => b.type === 'tool_use') as Anthropic.ToolUseBlock[]
 
-            if (WRITE_TOOLS.has(toolBlock.name)) {
-              // Pause — needs user confirmation
+            // If any write tool is requested, pause for confirmation (use the first write tool found)
+            const writeBlock = toolBlocks.find(b => WRITE_TOOLS.has(b.name))
+            if (writeBlock) {
               send({
                 type: 'confirm_required',
-                tool_use_id: toolBlock.id,
-                name: toolBlock.name,
-                input: toolBlock.input,
-                preview: previewText(toolBlock.name, toolBlock.input as Input),
+                tool_use_id: writeBlock.id,
+                name: writeBlock.name,
+                input: writeBlock.input,
+                preview: previewText(writeBlock.name, writeBlock.input as Input),
                 messages: currentMessages,
               })
               break
             }
 
-            // Auto-execute read tool
-            send({ type: 'tool_run', name: toolBlock.name, label: toolLabel(toolBlock.name) })
-            const result = await executeTool(toolBlock.name, toolBlock.input as Input, shopify)
-            send({ type: 'tool_done', name: toolBlock.name })
+            // Execute ALL tool_use blocks and collect results — the API requires a
+            // tool_result for every tool_use in the same assistant message
+            const toolResults: Anthropic.ToolResultBlockParam[] = []
+            for (const toolBlock of toolBlocks) {
+              send({ type: 'tool_run', name: toolBlock.name, label: toolLabel(toolBlock.name) })
+              const result = await executeTool(toolBlock.name, toolBlock.input as Input, shopify)
+              send({ type: 'tool_done', name: toolBlock.name })
+              toolResults.push({ type: 'tool_result', tool_use_id: toolBlock.id, content: result })
+            }
 
-            currentMessages = [...currentMessages, {
-              role: 'user',
-              content: [{ type: 'tool_result', tool_use_id: toolBlock.id, content: result }],
-            }]
+            currentMessages = [...currentMessages, { role: 'user', content: toolResults }]
           }
         }
       } catch (err) {
