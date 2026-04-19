@@ -275,6 +275,12 @@ const sql = `
     settings  JSONB NOT NULL DEFAULT '{}'
   );
 
+  -- Add missing columns to sync_runs (safe on existing tables)
+  ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS date_from        TEXT;
+  ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS date_to          TEXT;
+  ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS records_upserted INT DEFAULT 0;
+  ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS error_message    TEXT;
+
   -- ══════════════════════════════════════════════════════════════
   -- Unique indexes for Python collector conflict resolution
   -- ══════════════════════════════════════════════════════════════
