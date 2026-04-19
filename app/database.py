@@ -5,8 +5,11 @@ from contextlib import contextmanager
 from app.config import settings
 
 
-# psycopg3 requires the +psycopg dialect prefix
-_db_url = settings.database_url.replace("postgresql://", "postgresql+psycopg://", 1)
+# psycopg3 requires the +psycopg dialect prefix; handle both postgres:// and postgresql://
+_raw = settings.database_url
+if _raw.startswith("postgres://"):
+    _raw = "postgresql" + _raw[8:]
+_db_url = _raw.replace("postgresql://", "postgresql+psycopg://", 1)
 
 engine = create_engine(
     _db_url,

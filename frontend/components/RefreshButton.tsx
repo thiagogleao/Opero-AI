@@ -25,6 +25,9 @@ export default function RefreshButton() {
       } else if (!data.shopify.ok && data.facebook.ok) {
         setStatus('warn'); setMsg(tr.refresh_warn_shopify); router.refresh(); setTimeout(() => setStatus('idle'), 6000)
       } else {
+        const debugOut = [data.shopify?.output, data.facebook?.output].filter(Boolean).join('\n').slice(0, 300)
+        console.error('[refresh] shopify:', data.shopify?.output)
+        console.error('[refresh] facebook:', data.facebook?.output)
         setStatus('error'); setMsg(data.facebook?.tokenExpired ? tr.refresh_error_token : tr.refresh_error_both); setTimeout(() => setStatus('idle'), 6000)
       }
     } catch {

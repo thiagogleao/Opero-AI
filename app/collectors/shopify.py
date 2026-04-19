@@ -64,7 +64,7 @@ class ShopifyCollector(BaseCollector):
         url   = store_url   or settings.shopify_store_url
         token = access_token or settings.shopify_access_token
         ver   = api_version  or settings.shopify_api_version
-        shop_url = f"https://{url}"
+        shop_url = url if url.startswith("https://") else f"https://{url}"
         sess = shopify.Session(shop_url, ver, token)
         shopify.ShopifyResource.activate_session(sess)
 

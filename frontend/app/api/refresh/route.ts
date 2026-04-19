@@ -43,8 +43,8 @@ export async function POST(req: Request) {
   )
 
   return Response.json({
-    shopify: { ok: shopify.ok },
-    facebook: { ok: facebook.ok, tokenExpired: isFbTokenError },
+    shopify: { ok: shopify.ok, output: shopify.output },
+    facebook: { ok: facebook.ok, tokenExpired: isFbTokenError, output: facebook.output },
     anyOk: shopify.ok || facebook.ok,
   })
 }
