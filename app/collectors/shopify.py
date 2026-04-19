@@ -202,7 +202,7 @@ class ShopifyCollector(BaseCollector):
                 "order_id": str(order.id),
                 "order_number": getattr(order, "order_number", None),
                 "customer_id": cid or None,
-                "email": getattr(order, "email", None) or None,
+                "customer_email": getattr(order, "email", None) or None,
                 "created_at": _parse_dt(order.created_at),
                 "total_price": _float(getattr(order, "total_price", 0)),
                 "subtotal_price": _float(getattr(order, "subtotal_price", 0)),

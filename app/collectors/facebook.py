@@ -214,7 +214,10 @@ class FacebookCollector(BaseCollector):
         _app_id     = app_id     or settings.facebook_app_id
         _app_secret = app_secret or settings.facebook_app_secret
         _token      = access_token or _refresh_token_if_needed()
-        _account_id = ad_account_id or settings.facebook_ad_account_id
+        _raw_id     = ad_account_id or settings.facebook_ad_account_id or ""
+        # Normalize: strip any prefix and rebuild as act_XXXXX (SDK format)
+        _numeric    = _raw_id.replace("act_", "").replace("act=", "").replace("act:", "").lstrip("_=: ")
+        _account_id = f"act_{_numeric}" if _numeric else _raw_id
         FacebookAdsApi.init(app_id=_app_id, app_secret=_app_secret, access_token=_token)
         self._account = AdAccount(_account_id)
         self._account_id = _account_id
