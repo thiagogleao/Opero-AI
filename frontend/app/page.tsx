@@ -300,7 +300,7 @@ ${promptLang.formatNote}`
               display: 'flex', alignItems: 'center', gap: 6,
             }}>
               <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#10B981', display: 'inline-block' }} />
-              MOKOO · themokoo.com
+              {tenant.shopify_domain ?? 'Loja conectada'}
             </div>
           </div>
         </div>

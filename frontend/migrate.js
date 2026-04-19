@@ -6,6 +6,9 @@ const pool = new Pool({
 })
 
 const sql = `
+  -- ══════════════════════════════════════════════════════════════
+  -- Tenants
+  -- ══════════════════════════════════════════════════════════════
   CREATE TABLE IF NOT EXISTS tenants (
     id                    TEXT PRIMARY KEY,
     email                 TEXT,
@@ -18,151 +21,275 @@ const sql = `
     updated_at            TIMESTAMPTZ DEFAULT NOW()
   );
 
+  -- ══════════════════════════════════════════════════════════════
+  -- Drop tables with old incompatible schema (no data yet)
+  -- ══════════════════════════════════════════════════════════════
+  DO $$
+  BEGIN
+    IF NOT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_name = 'shopify_orders' AND column_name = 'order_id'
+    ) THEN
+      DROP TABLE IF EXISTS shopify_order_items CASCADE;
+      DROP TABLE IF EXISTS shopify_orders CASCADE;
+    END IF;
+
+    IF NOT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_name = 'fb_ads' AND column_name = 'ad_id'
+    ) THEN
+      DROP TABLE IF EXISTS fb_ads CASCADE;
+    END IF;
+
+    IF NOT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_name = 'shopify_products' AND column_name = 'product_id'
+    ) THEN
+      DROP TABLE IF EXISTS shopify_products CASCADE;
+    END IF;
+
+    IF NOT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_name = 'shopify_abandoned_checkouts' AND column_name = 'checkout_id'
+    ) THEN
+      DROP TABLE IF EXISTS shopify_abandoned_checkouts CASCADE;
+    END IF;
+
+    IF NOT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_name = 'shopify_daily_metrics' AND column_name = 'total_revenue'
+    ) THEN
+      DROP TABLE IF EXISTS shopify_daily_metrics CASCADE;
+    END IF;
+
+    IF NOT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_name = 'shopify_country_metrics' AND column_name = 'orders_count'
+    ) THEN
+      DROP TABLE IF EXISTS shopify_country_metrics CASCADE;
+    END IF;
+  END $$;
+
+  -- ══════════════════════════════════════════════════════════════
+  -- Shopify tables (Python-model-compatible schema)
+  -- ══════════════════════════════════════════════════════════════
   CREATE TABLE IF NOT EXISTS shopify_orders (
-    id BIGINT PRIMARY KEY, tenant_id TEXT REFERENCES tenants(id),
-    order_number INT, created_at TIMESTAMPTZ, processed_at TIMESTAMPTZ,
-    financial_status TEXT, fulfillment_status TEXT, currency TEXT,
-    total_price NUMERIC, subtotal_price NUMERIC, total_discounts NUMERIC,
-    total_tax NUMERIC, total_shipping NUMERIC, customer_id BIGINT,
-    customer_email TEXT, is_first_order BOOLEAN, tags TEXT,
-    referring_site TEXT, landing_site TEXT, source_name TEXT,
-    cancel_reason TEXT, cancelled_at TIMESTAMPTZ, refund_amount NUMERIC DEFAULT 0
+    id               BIGSERIAL PRIMARY KEY,
+    order_id         TEXT UNIQUE NOT NULL,
+    tenant_id        TEXT REFERENCES tenants(id),
+    order_number     INT,
+    created_at       TIMESTAMPTZ,
+    processed_at     TIMESTAMPTZ,
+    financial_status TEXT,
+    fulfillment_status TEXT,
+    currency         TEXT,
+    total_price      NUMERIC,
+    subtotal_price   NUMERIC,
+    total_discounts  NUMERIC,
+    total_tax        NUMERIC,
+    total_shipping   NUMERIC,
+    country_code     TEXT,
+    customer_id      TEXT,
+    customer_email   TEXT,
+    is_first_order   BOOLEAN,
+    tags             TEXT,
+    referring_site   TEXT,
+    landing_site     TEXT,
+    source_name      TEXT,
+    cancel_reason    TEXT,
+    cancelled_at     TIMESTAMPTZ,
+    refund_amount    NUMERIC DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS shopify_order_items (
-    id BIGINT PRIMARY KEY, tenant_id TEXT REFERENCES tenants(id),
-    order_id BIGINT REFERENCES shopify_orders(id) ON DELETE CASCADE,
-    product_id BIGINT, variant_id BIGINT, title TEXT, variant_title TEXT,
-    sku TEXT, quantity INT, price NUMERIC, total_discount NUMERIC,
-    fulfillment_status TEXT
+    id               BIGSERIAL PRIMARY KEY,
+    tenant_id        TEXT REFERENCES tenants(id),
+    order_id         TEXT NOT NULL,
+    line_item_id     TEXT NOT NULL,
+    product_id       TEXT,
+    variant_id       TEXT,
+    product_title    TEXT,
+    variant_title    TEXT,
+    title            TEXT,
+    sku              TEXT,
+    quantity         INT DEFAULT 1,
+    price            NUMERIC DEFAULT 0,
+    total_discount   NUMERIC DEFAULT 0,
+    fulfillment_status TEXT,
+    UNIQUE (order_id, line_item_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS shopify_customers (
+    id               BIGSERIAL PRIMARY KEY,
+    customer_id      TEXT UNIQUE NOT NULL,
+    tenant_id        TEXT REFERENCES tenants(id),
+    email            TEXT,
+    created_at       TIMESTAMPTZ,
+    total_spent      NUMERIC DEFAULT 0,
+    orders_count     INT DEFAULT 0,
+    avg_order_value  NUMERIC DEFAULT 0,
+    first_order_at   TIMESTAMPTZ,
+    last_order_at    TIMESTAMPTZ,
+    country_code     TEXT,
+    is_returning     BOOLEAN DEFAULT FALSE
   );
 
   CREATE TABLE IF NOT EXISTS shopify_daily_metrics (
-    date DATE, tenant_id TEXT REFERENCES tenants(id),
-    sessions INT DEFAULT 0, orders INT DEFAULT 0, revenue NUMERIC DEFAULT 0,
-    conversion_rate NUMERIC DEFAULT 0, avg_order_value NUMERIC DEFAULT 0,
-    returning_customer_rate NUMERIC DEFAULT 0, abandoned_checkouts INT DEFAULT 0,
+    date                       DATE,
+    tenant_id                  TEXT REFERENCES tenants(id),
+    total_orders               INT DEFAULT 0,
+    total_revenue              NUMERIC DEFAULT 0,
+    avg_order_value            NUMERIC DEFAULT 0,
+    new_customers              INT DEFAULT 0,
+    returning_customers        INT DEFAULT 0,
+    new_customer_revenue       NUMERIC DEFAULT 0,
+    returning_customer_revenue NUMERIC DEFAULT 0,
+    cart_abandonment_count     INT DEFAULT 0,
+    cart_abandonment_value     NUMERIC DEFAULT 0,
     PRIMARY KEY (date, tenant_id)
   );
 
   CREATE TABLE IF NOT EXISTS shopify_abandoned_checkouts (
-    id BIGINT, tenant_id TEXT REFERENCES tenants(id),
-    created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ,
-    email TEXT, total_price NUMERIC, currency TEXT, recovered BOOLEAN DEFAULT FALSE,
-    PRIMARY KEY (id, tenant_id)
+    id            BIGSERIAL PRIMARY KEY,
+    checkout_id   TEXT UNIQUE NOT NULL,
+    tenant_id     TEXT REFERENCES tenants(id),
+    created_at    TIMESTAMPTZ,
+    updated_at    TIMESTAMPTZ,
+    customer_email TEXT,
+    email         TEXT,
+    total_price   NUMERIC,
+    currency      TEXT,
+    recovered     BOOLEAN DEFAULT FALSE
   );
 
   CREATE TABLE IF NOT EXISTS shopify_country_metrics (
-    date DATE, tenant_id TEXT REFERENCES tenants(id), country_code TEXT,
-    orders INT DEFAULT 0, revenue NUMERIC DEFAULT 0, customers INT DEFAULT 0,
+    date            DATE,
+    tenant_id       TEXT REFERENCES tenants(id),
+    country_code    TEXT,
+    orders_count    INT DEFAULT 0,
+    revenue         NUMERIC DEFAULT 0,
+    avg_order_value NUMERIC DEFAULT 0,
+    new_customers   INT DEFAULT 0,
     PRIMARY KEY (date, tenant_id, country_code)
   );
 
   CREATE TABLE IF NOT EXISTS shopify_products (
-    id BIGINT, tenant_id TEXT REFERENCES tenants(id),
-    title TEXT, product_type TEXT, vendor TEXT, status TEXT,
-    created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ,
-    price_min NUMERIC, price_max NUMERIC, inventory_quantity INT,
-    tags TEXT, image_url TEXT,
-    PRIMARY KEY (id, tenant_id)
+    id               BIGSERIAL PRIMARY KEY,
+    product_id       TEXT UNIQUE NOT NULL,
+    tenant_id        TEXT REFERENCES tenants(id),
+    title            TEXT,
+    handle           TEXT,
+    product_type     TEXT,
+    vendor           TEXT,
+    status           TEXT,
+    created_at       TIMESTAMPTZ,
+    updated_at       TIMESTAMPTZ,
+    price_min        NUMERIC,
+    price_max        NUMERIC,
+    inventory_quantity INT,
+    variants_count   INT DEFAULT 0,
+    tags             TEXT,
+    image_url        TEXT,
+    synced_at        TIMESTAMPTZ
+  );
+
+  -- ══════════════════════════════════════════════════════════════
+  -- Facebook tables
+  -- ══════════════════════════════════════════════════════════════
+  CREATE TABLE IF NOT EXISTS fb_ads (
+    id               BIGSERIAL PRIMARY KEY,
+    ad_id            TEXT UNIQUE NOT NULL,
+    tenant_id        TEXT REFERENCES tenants(id),
+    name             TEXT,
+    status           TEXT,
+    effective_status TEXT,
+    adset_id         TEXT,
+    adset_name       TEXT,
+    campaign_id      TEXT,
+    campaign_name    TEXT,
+    creative_type    TEXT,
+    creative_url     TEXT,
+    thumbnail_url    TEXT,
+    preview_url      TEXT,
+    synced_at        TIMESTAMPTZ,
+    created_time     TIMESTAMPTZ,
+    updated_time     TIMESTAMPTZ
   );
 
   CREATE TABLE IF NOT EXISTS fb_ad_daily_metrics (
-    date DATE, tenant_id TEXT REFERENCES tenants(id), ad_id TEXT,
-    impressions INT DEFAULT 0, clicks INT DEFAULT 0, spend NUMERIC DEFAULT 0,
-    purchases INT DEFAULT 0, purchase_value NUMERIC DEFAULT 0,
-    reach INT DEFAULT 0, frequency NUMERIC DEFAULT 0,
-    ctr NUMERIC DEFAULT 0, cpm NUMERIC DEFAULT 0, cpc NUMERIC DEFAULT 0,
-    roas NUMERIC DEFAULT 0,
+    date                DATE,
+    tenant_id           TEXT REFERENCES tenants(id),
+    ad_id               TEXT,
+    impressions         INT DEFAULT 0,
+    clicks              INT DEFAULT 0,
+    link_clicks         INT DEFAULT 0,
+    landing_page_views  INT DEFAULT 0,
+    add_to_cart         INT DEFAULT 0,
+    initiate_checkout   INT DEFAULT 0,
+    spend               NUMERIC DEFAULT 0,
+    purchases           INT DEFAULT 0,
+    purchase_value      NUMERIC DEFAULT 0,
+    reach               INT DEFAULT 0,
+    frequency           NUMERIC DEFAULT 0,
+    ctr                 NUMERIC DEFAULT 0,
+    cpm                 NUMERIC DEFAULT 0,
+    cpc                 NUMERIC DEFAULT 0,
+    roas                NUMERIC DEFAULT 0,
     PRIMARY KEY (date, tenant_id, ad_id)
   );
 
-  CREATE TABLE IF NOT EXISTS fb_ads (
-    id TEXT, tenant_id TEXT REFERENCES tenants(id),
-    name TEXT, status TEXT, effective_status TEXT,
-    adset_id TEXT, adset_name TEXT, campaign_id TEXT, campaign_name TEXT,
-    created_time TIMESTAMPTZ, updated_time TIMESTAMPTZ,
-    thumbnail_url TEXT, preview_url TEXT,
-    PRIMARY KEY (id, tenant_id)
-  );
-
   CREATE TABLE IF NOT EXISTS fb_ad_breakdowns (
-    date DATE, tenant_id TEXT REFERENCES tenants(id),
-    ad_id TEXT, breakdown_type TEXT, breakdown_value TEXT,
-    impressions INT DEFAULT 0, clicks INT DEFAULT 0, spend NUMERIC DEFAULT 0,
-    purchases INT DEFAULT 0, purchase_value NUMERIC DEFAULT 0,
+    date            DATE,
+    tenant_id       TEXT REFERENCES tenants(id),
+    ad_id           TEXT,
+    breakdown_type  TEXT,
+    breakdown_value TEXT,
+    impressions     INT DEFAULT 0,
+    clicks          INT DEFAULT 0,
+    spend           NUMERIC DEFAULT 0,
+    purchases       INT DEFAULT 0,
+    purchase_value  NUMERIC DEFAULT 0,
     PRIMARY KEY (date, tenant_id, ad_id, breakdown_type, breakdown_value)
   );
 
+  -- ══════════════════════════════════════════════════════════════
+  -- System tables
+  -- ══════════════════════════════════════════════════════════════
   CREATE TABLE IF NOT EXISTS sync_runs (
-    id SERIAL PRIMARY KEY, tenant_id TEXT REFERENCES tenants(id),
-    source TEXT, status TEXT, started_at TIMESTAMPTZ DEFAULT NOW(),
-    finished_at TIMESTAMPTZ, records_upserted INT DEFAULT 0, error_message TEXT
+    id               SERIAL PRIMARY KEY,
+    tenant_id        TEXT REFERENCES tenants(id),
+    source           TEXT,
+    status           TEXT,
+    started_at       TIMESTAMPTZ DEFAULT NOW(),
+    finished_at      TIMESTAMPTZ,
+    records_collected INT DEFAULT 0,
+    records_upserted  INT DEFAULT 0,
+    date_from        TEXT,
+    date_to          TEXT,
+    error_message    TEXT
   );
 
   CREATE TABLE IF NOT EXISTS profit_settings (
-    id SERIAL PRIMARY KEY, tenant_id TEXT REFERENCES tenants(id) UNIQUE,
-    settings JSONB NOT NULL DEFAULT '{}'
+    id        SERIAL PRIMARY KEY,
+    tenant_id TEXT REFERENCES tenants(id) UNIQUE,
+    settings  JSONB NOT NULL DEFAULT '{}'
   );
 
-  ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS order_id BIGINT;
-  ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS product_id BIGINT;
-  ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS variant_id BIGINT;
-  ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS title TEXT;
-  ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS variant_title TEXT;
-  ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS sku TEXT;
-  ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS quantity INT;
-  ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS price NUMERIC;
-  ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS total_discount NUMERIC;
-  ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS fulfillment_status TEXT;
+  -- ══════════════════════════════════════════════════════════════
+  -- Unique indexes for Python collector conflict resolution
+  -- ══════════════════════════════════════════════════════════════
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_fb_daily_ad_date
+    ON fb_ad_daily_metrics(ad_id, date);
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_fb_breakdown
+    ON fb_ad_breakdowns(ad_id, date, breakdown_type, breakdown_value);
 
-  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS order_number INT;
-  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
-  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS financial_status TEXT;
-  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS fulfillment_status TEXT;
-  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS currency TEXT;
-  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS total_price NUMERIC;
-  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS subtotal_price NUMERIC;
-  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS total_discounts NUMERIC;
-  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS total_tax NUMERIC;
-  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS total_shipping NUMERIC;
-  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS customer_id BIGINT;
-  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS customer_email TEXT;
-  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS is_first_order BOOLEAN;
-  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS tags TEXT;
-  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS referring_site TEXT;
-  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS landing_site TEXT;
-  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS source_name TEXT;
-  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS cancel_reason TEXT;
-  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;
-  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS refund_amount NUMERIC DEFAULT 0;
-  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS country_code TEXT;
-
-  ALTER TABLE shopify_orders              ADD COLUMN IF NOT EXISTS tenant_id TEXT REFERENCES tenants(id);
-  ALTER TABLE shopify_order_items         ADD COLUMN IF NOT EXISTS tenant_id TEXT REFERENCES tenants(id);
-  ALTER TABLE shopify_daily_metrics       ADD COLUMN IF NOT EXISTS tenant_id TEXT REFERENCES tenants(id);
-  ALTER TABLE shopify_abandoned_checkouts ADD COLUMN IF NOT EXISTS tenant_id TEXT REFERENCES tenants(id);
-  ALTER TABLE shopify_country_metrics     ADD COLUMN IF NOT EXISTS tenant_id TEXT REFERENCES tenants(id);
-  ALTER TABLE shopify_products            ADD COLUMN IF NOT EXISTS tenant_id TEXT REFERENCES tenants(id);
-  ALTER TABLE fb_ad_daily_metrics         ADD COLUMN IF NOT EXISTS tenant_id TEXT REFERENCES tenants(id);
-  ALTER TABLE fb_ads                      ADD COLUMN IF NOT EXISTS tenant_id TEXT REFERENCES tenants(id);
-  ALTER TABLE fb_ad_breakdowns            ADD COLUMN IF NOT EXISTS tenant_id TEXT REFERENCES tenants(id);
-  ALTER TABLE sync_runs                   ADD COLUMN IF NOT EXISTS tenant_id TEXT REFERENCES tenants(id);
-  ALTER TABLE profit_settings             ADD COLUMN IF NOT EXISTS tenant_id TEXT REFERENCES tenants(id);
-
-  -- Missing columns needed by TypeScript queries
-  ALTER TABLE shopify_daily_metrics    ADD COLUMN IF NOT EXISTS total_revenue NUMERIC DEFAULT 0;
-  ALTER TABLE shopify_daily_metrics    ADD COLUMN IF NOT EXISTS total_orders INT DEFAULT 0;
-  ALTER TABLE shopify_daily_metrics    ADD COLUMN IF NOT EXISTS avg_order_value NUMERIC DEFAULT 0;
-  ALTER TABLE shopify_country_metrics  ADD COLUMN IF NOT EXISTS orders_count INT DEFAULT 0;
-  ALTER TABLE shopify_country_metrics  ADD COLUMN IF NOT EXISTS avg_order_value NUMERIC DEFAULT 0;
-  ALTER TABLE fb_ad_daily_metrics      ADD COLUMN IF NOT EXISTS link_clicks INT DEFAULT 0;
-  ALTER TABLE fb_ad_daily_metrics      ADD COLUMN IF NOT EXISTS landing_page_views INT DEFAULT 0;
-  ALTER TABLE fb_ad_daily_metrics      ADD COLUMN IF NOT EXISTS add_to_cart INT DEFAULT 0;
-  ALTER TABLE fb_ad_daily_metrics      ADD COLUMN IF NOT EXISTS initiate_checkout INT DEFAULT 0;
-
+  -- ══════════════════════════════════════════════════════════════
+  -- Performance indexes
+  -- ══════════════════════════════════════════════════════════════
   CREATE INDEX IF NOT EXISTS idx_shopify_orders_tenant      ON shopify_orders(tenant_id);
+  CREATE INDEX IF NOT EXISTS idx_shopify_orders_created     ON shopify_orders(created_at);
   CREATE INDEX IF NOT EXISTS idx_shopify_order_items_tenant ON shopify_order_items(tenant_id);
+  CREATE INDEX IF NOT EXISTS idx_shopify_order_items_order  ON shopify_order_items(order_id);
   CREATE INDEX IF NOT EXISTS idx_fb_ad_daily_tenant         ON fb_ad_daily_metrics(tenant_id);
   CREATE INDEX IF NOT EXISTS idx_fb_ads_tenant              ON fb_ads(tenant_id);
   CREATE INDEX IF NOT EXISTS idx_sync_runs_tenant           ON sync_runs(tenant_id);

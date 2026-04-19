@@ -7,7 +7,7 @@ export async function getOverviewMetrics(tenantId: string, dateFrom: string, dat
     abandoned_value: number; abandoned_count: number
   }>(`
     WITH period_orders AS (
-      SELECT id AS order_id, total_price, customer_id
+      SELECT order_id, total_price, customer_id
       FROM shopify_orders
       WHERE tenant_id = $1
         AND created_at::date BETWEEN $2::date AND $3::date
@@ -130,8 +130,8 @@ export async function getTopCreatives(tenantId: string, dateFrom: string, dateTo
     purchases: number; score: number
   }>(`
     SELECT
-      a.id AS ad_id,
-      COALESCE(a.name, a.id)              AS name,
+      a.ad_id,
+      COALESCE(a.name, a.ad_id)              AS name,
       ROUND(SUM(m.spend)::numeric, 2)        AS spend,
       ROUND(SUM(m.purchase_value)::numeric, 2) AS revenue,
       ROUND(CASE WHEN SUM(m.spend) > 0
@@ -148,10 +148,10 @@ export async function getTopCreatives(tenantId: string, dateFrom: string, dateTo
         (1 - EXP(-SUM(m.spend) / 50.0)))::numeric
       , 2) AS score
     FROM fb_ad_daily_metrics m
-    JOIN fb_ads a ON m.ad_id = a.id AND m.tenant_id = a.tenant_id
+    JOIN fb_ads a ON m.ad_id = a.ad_id AND m.tenant_id = a.tenant_id
     WHERE m.tenant_id = $1
       AND m.date BETWEEN $2::date AND $3::date
-    GROUP BY a.id, a.name
+    GROUP BY a.ad_id, a.name
     HAVING SUM(m.spend) > 0
     ORDER BY score DESC
   `, [tenantId, dateFrom, dateTo])
@@ -274,18 +274,18 @@ export async function getProductMetrics(tenantId: string, dateFrom: string, date
     units: number; orders: number; revenue: number; aov: number
   }>(`
     SELECT
-      p.id::text AS product_id,
-      COALESCE(p.title, oi.title)                    AS title,
+      p.product_id,
+      COALESCE(p.title, oi.product_title, oi.title)  AS title,
       p.image_url,
       COALESCE(SUM(oi.quantity), 0)                  AS units,
-      COUNT(DISTINCT o.id)                           AS orders,
+      COUNT(DISTINCT o.order_id)                     AS orders,
       ROUND(SUM(oi.quantity * oi.price)::numeric, 2) AS revenue,
-      ROUND(CASE WHEN COUNT(DISTINCT o.id) > 0
-        THEN SUM(oi.quantity * oi.price) / COUNT(DISTINCT o.id) ELSE 0
+      ROUND(CASE WHEN COUNT(DISTINCT o.order_id) > 0
+        THEN SUM(oi.quantity * oi.price) / COUNT(DISTINCT o.order_id) ELSE 0
         END::numeric, 2)                             AS aov
     FROM shopify_order_items oi
-    JOIN shopify_orders o ON oi.order_id = o.id
-    LEFT JOIN shopify_products p ON oi.product_id = p.id
+    JOIN shopify_orders o ON oi.order_id = o.order_id
+    LEFT JOIN shopify_products p ON oi.product_id = p.product_id
     WHERE o.tenant_id = $1
       AND o.created_at::date BETWEEN $2::date AND $3::date
       AND o.financial_status NOT IN ('refunded', 'voided')

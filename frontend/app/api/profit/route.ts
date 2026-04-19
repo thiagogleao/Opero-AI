@@ -74,17 +74,17 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
     financial_status: string | null
   }>(`
     SELECT
-      o.id::text AS order_id,
+      o.order_id,
       o.total_price::text,
       o.country_code,
       o.financial_status,
       COALESCE(SUM(oi.quantity), 1)::text AS total_units
     FROM shopify_orders o
-    LEFT JOIN shopify_order_items oi ON o.id = oi.order_id
+    LEFT JOIN shopify_order_items oi ON o.order_id = oi.order_id
     WHERE o.tenant_id = $3
       AND o.created_at::date BETWEEN $1::date AND $2::date
       AND o.financial_status NOT IN ('refunded', 'voided')
-    GROUP BY o.id, o.total_price, o.country_code, o.financial_status
+    GROUP BY o.order_id, o.total_price, o.country_code, o.financial_status
   `, [dateFrom, dateTo, tenantId])
 
   // 2. FB spend

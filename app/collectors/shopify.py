@@ -333,7 +333,7 @@ class ShopifyCollector(BaseCollector):
                 "cart_abandonment_value": 0.0,
             })
 
-        self._upsert_raw("shopify_daily_metrics", rows, ["date"])
+        self._upsert_raw("shopify_daily_metrics", rows, ["date", "tenant_id"])
 
     def _patch_daily_with_abandonment(self, checkouts: list):
         """Update daily rows with cart abandonment counts/values."""
@@ -407,7 +407,7 @@ class ShopifyCollector(BaseCollector):
                 "new_customers": agg["new_customers"],
             })
 
-        self._upsert_raw("shopify_country_metrics", rows, ["date", "country_code"])
+        self._upsert_raw("shopify_country_metrics", rows, ["date", "country_code", "tenant_id"])
 
     # ------------------------------------------------------------------
     # Abandoned checkouts
