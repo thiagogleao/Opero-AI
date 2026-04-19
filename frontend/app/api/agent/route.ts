@@ -278,7 +278,7 @@ async function executeTool(name: string, input: Input, shopify: ShopifyAdmin, te
         }
         const tid = tenantId
         const queries: Record<string, string> = {
-          fb_ads: `SELECT a.ad_id, a.name, a.status, a.effective_status, a.creative_url, a.thumbnail_url,
+          fb_ads: `SELECT a.ad_id, a.name, a.status, a.effective_status, a.landing_url, a.creative_url, a.thumbnail_url,
                           a.adset_name, a.campaign_name,
                           ROUND(SUM(m.spend)::numeric,2) AS spend,
                           ROUND(CASE WHEN SUM(m.spend)>0 THEN SUM(m.purchase_value)/SUM(m.spend) ELSE 0 END::numeric,2) AS roas

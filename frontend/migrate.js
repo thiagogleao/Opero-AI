@@ -283,6 +283,7 @@ const sql = `
   ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS error_message          TEXT;
 
   ALTER TABLE shopify_country_metrics ADD COLUMN IF NOT EXISTS new_customers  INT DEFAULT 0;
+  ALTER TABLE fb_ads ADD COLUMN IF NOT EXISTS landing_url TEXT;
 
   ALTER TABLE shopify_daily_metrics ADD COLUMN IF NOT EXISTS new_customers              INT DEFAULT 0;
   ALTER TABLE shopify_daily_metrics ADD COLUMN IF NOT EXISTS returning_customers        INT DEFAULT 0;

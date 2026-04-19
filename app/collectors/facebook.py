@@ -305,23 +305,41 @@ class FacebookCollector(BaseCollector):
         self._upsert_raw("fb_adsets", rows, ["adset_id"])
 
     def _sync_ads(self) -> list[str]:
+        # Request expanded creative fields using nested field syntax
+        # object_story_spec contains the destination URL (link_data.link or video_data CTA link)
         ads = self._paginate(
             self._account.get_ads(
-                fields=["id", "name", "status", "adset_id", "campaign_id", "creative"],
+                fields=[
+                    "id", "name", "status", "adset_id", "campaign_id",
+                    "creative{id,name,image_url,thumbnail_url,object_story_spec}",
+                ],
                 params={"limit": 200},
             )
         )
         rows = []
         for ad in ads:
             creative = ad.get("creative") or {}
+            story = creative.get("object_story_spec") or {}
+            link_data  = story.get("link_data")  or {}
+            video_data = story.get("video_data") or {}
+            cta_value  = (video_data.get("call_to_action") or {}).get("value") or {}
+
+            # Landing URL: from link ad, video ad CTA, or any other story type
+            landing_url = (
+                link_data.get("link")
+                or cta_value.get("link")
+                or story.get("template_data", {}).get("link") if isinstance(story.get("template_data"), dict) else None
+            )
+
             rows.append({
                 "ad_id": ad["id"],
                 "adset_id": ad.get("adset_id"),
                 "campaign_id": ad.get("campaign_id"),
                 "name": ad.get("name"),
                 "status": ad.get("status"),
-                "creative_type": None,   # enriched later by analyzer
-                "creative_url": creative.get("image_url") or creative.get("video_url"),
+                "creative_type": None,
+                "landing_url": landing_url,
+                "creative_url": creative.get("image_url"),
                 "thumbnail_url": creative.get("thumbnail_url"),
                 "synced_at": datetime.utcnow(),
             })
