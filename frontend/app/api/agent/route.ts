@@ -3,6 +3,7 @@ import { auth } from '@clerk/nextjs/server'
 import { NextRequest } from 'next/server'
 import { getTenant } from '@/lib/tenant'
 import { ShopifyAdmin } from '@/lib/shopify-admin'
+import { query } from '@/lib/db'
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
@@ -147,13 +148,31 @@ const TOOLS: Anthropic.Tool[] = [
       required: ['page_id'],
     },
   },
+  {
+    name: 'query_analytics',
+    description: 'Consulta dados de analytics coletados: anúncios do Facebook (com URLs dos criativos), métricas diárias, pedidos, produtos. Use para perguntas sobre performance de ads, criativos, ROAS, receita, etc.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        topic: {
+          type: 'string',
+          enum: ['fb_ads', 'fb_metrics', 'fb_campaigns', 'orders', 'products', 'daily_revenue'],
+          description: 'fb_ads = anúncios e URLs dos criativos; fb_metrics = métricas por anúncio/dia; fb_campaigns = campanhas; orders = pedidos; products = produtos; daily_revenue = receita diária',
+        },
+        date_from: { type: 'string', description: 'Data inicial YYYY-MM-DD (opcional)' },
+        date_to: { type: 'string', description: 'Data final YYYY-MM-DD (opcional)' },
+        limit: { type: 'number', description: 'Máximo de linhas (padrão 50)' },
+      },
+      required: ['topic'],
+    },
+  },
 ]
 
 const WRITE_TOOLS = new Set(['create_product', 'update_product', 'update_inventory', 'create_page', 'update_page'])
 
 type Input = Record<string, unknown>
 
-async function executeTool(name: string, input: Input, shopify: ShopifyAdmin): Promise<string> {
+async function executeTool(name: string, input: Input, shopify: ShopifyAdmin, tenantId: string): Promise<string> {
   try {
     switch (name) {
       case 'list_products': {
@@ -253,6 +272,52 @@ async function executeTool(name: string, input: Input, shopify: ShopifyAdmin): P
         const data = await shopify.put(`/pages/${page_id}.json`, { page: { id: page_id, ...fields } })
         return JSON.stringify({ success: true, page_id: data.page?.id })
       }
+      case 'query_analytics': {
+        const { topic, date_from, date_to, limit = 50 } = input as {
+          topic: string; date_from?: string; date_to?: string; limit?: number
+        }
+        const tid = tenantId
+        const queries: Record<string, string> = {
+          fb_ads: `SELECT a.ad_id, a.name, a.status, a.effective_status, a.creative_url, a.thumbnail_url,
+                          a.adset_name, a.campaign_name,
+                          ROUND(SUM(m.spend)::numeric,2) AS spend,
+                          ROUND(CASE WHEN SUM(m.spend)>0 THEN SUM(m.purchase_value)/SUM(m.spend) ELSE 0 END::numeric,2) AS roas
+                   FROM fb_ads a
+                   LEFT JOIN fb_ad_daily_metrics m ON a.ad_id = m.ad_id AND m.tenant_id = a.tenant_id
+                     ${date_from ? `AND m.date >= '${date_from}'` : ''}
+                     ${date_to   ? `AND m.date <= '${date_to}'`   : ''}
+                   WHERE a.tenant_id = '${tid}'
+                   GROUP BY a.ad_id, a.name, a.status, a.effective_status, a.creative_url, a.thumbnail_url, a.adset_name, a.campaign_name
+                   ORDER BY spend DESC NULLS LAST
+                   LIMIT ${limit}`,
+          fb_metrics: `SELECT m.date, a.name AS ad_name, m.spend, m.impressions, m.clicks,
+                               m.purchases, m.purchase_value,
+                               ROUND(CASE WHEN m.spend>0 THEN m.purchase_value/m.spend ELSE 0 END::numeric,2) AS roas
+                        FROM fb_ad_daily_metrics m
+                        JOIN fb_ads a ON m.ad_id = a.ad_id AND m.tenant_id = a.tenant_id
+                        WHERE m.tenant_id = '${tid}'
+                          ${date_from ? `AND m.date >= '${date_from}'` : ''}
+                          ${date_to   ? `AND m.date <= '${date_to}'`   : ''}
+                        ORDER BY m.date DESC, m.spend DESC
+                        LIMIT ${limit}`,
+          fb_campaigns: `SELECT campaign_id, name, status, objective FROM fb_campaigns WHERE tenant_id = '${tid}' ORDER BY name LIMIT ${limit}`,
+          orders: `SELECT order_id, order_number, created_at::date, total_price, financial_status, country_code, customer_email
+                   FROM shopify_orders WHERE tenant_id = '${tid}'
+                     ${date_from ? `AND created_at::date >= '${date_from}'` : ''}
+                     ${date_to   ? `AND created_at::date <= '${date_to}'`   : ''}
+                   ORDER BY created_at DESC LIMIT ${limit}`,
+          products: `SELECT product_id, title, status, price_min, price_max, inventory_quantity FROM shopify_products WHERE tenant_id = '${tid}' ORDER BY title LIMIT ${limit}`,
+          daily_revenue: `SELECT date, total_orders, total_revenue, avg_order_value, new_customers, returning_customers
+                          FROM shopify_daily_metrics WHERE tenant_id = '${tid}'
+                            ${date_from ? `AND date >= '${date_from}'` : ''}
+                            ${date_to   ? `AND date <= '${date_to}'`   : ''}
+                          ORDER BY date DESC LIMIT ${limit}`,
+        }
+        const sql = queries[topic]
+        if (!sql) return JSON.stringify({ error: `unknown topic: ${topic}` })
+        const rows = await query(sql, [])
+        return JSON.stringify(rows)
+      }
       default:
         return JSON.stringify({ error: `unknown tool: ${name}` })
     }
@@ -272,7 +337,7 @@ function previewText(name: string, input: Input): string {
   }
 }
 
-function toolLabel(name: string): string {
+function toolLabel(name: string, input?: Input): string {
   const labels: Record<string, string> = {
     list_products: 'Buscando produtos...',
     get_product: 'Carregando produto...',
@@ -281,6 +346,10 @@ function toolLabel(name: string): string {
     list_customers: 'Buscando clientes...',
     get_store_info: 'Carregando info da loja...',
     list_pages: 'Buscando páginas...',
+  }
+  if (name === 'query_analytics') {
+    const topicLabels: Record<string, string> = { fb_ads: 'anúncios do Facebook', fb_metrics: 'métricas', fb_campaigns: 'campanhas', orders: 'pedidos', products: 'produtos', daily_revenue: 'receita' }
+    return `Consultando ${topicLabels[input?.topic as string] ?? 'analytics'}...`
   }
   return labels[name] ?? `Executando ${name}...`
 }
@@ -372,8 +441,8 @@ export async function POST(req: NextRequest) {
             // tool_result for every tool_use in the same assistant message
             const toolResults: Anthropic.ToolResultBlockParam[] = []
             for (const toolBlock of toolBlocks) {
-              send({ type: 'tool_run', name: toolBlock.name, label: toolLabel(toolBlock.name) })
-              const result = await executeTool(toolBlock.name, toolBlock.input as Input, shopify)
+              send({ type: 'tool_run', name: toolBlock.name, label: toolLabel(toolBlock.name, toolBlock.input as Input) })
+              const result = await executeTool(toolBlock.name, toolBlock.input as Input, shopify, userId)
               send({ type: 'tool_done', name: toolBlock.name })
               toolResults.push({ type: 'tool_result', tool_use_id: toolBlock.id, content: result })
             }
