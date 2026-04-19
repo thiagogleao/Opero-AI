@@ -17,6 +17,7 @@ from typing import Optional
 
 from facebook_business.api import FacebookAdsApi
 from facebook_business.adobjects.adaccount import AdAccount
+from facebook_business.adobjects.adcreative import AdCreative
 from facebook_business.adobjects.campaign import Campaign
 from facebook_business.adobjects.adset import AdSet
 from facebook_business.adobjects.ad import Ad
@@ -304,33 +305,67 @@ class FacebookCollector(BaseCollector):
         ]
         self._upsert_raw("fb_adsets", rows, ["adset_id"])
 
+    def _fetch_creative_details(self, creative_ids: list[str]) -> dict[str, dict]:
+        """
+        Batch-fetch AdCreative objects and return a mapping of creative_id → details.
+        The nested field syntax on get_ads() doesn't populate object_story_spec reliably,
+        so we fetch creatives independently via the AdCreative endpoint.
+        """
+        creative_map: dict[str, dict] = {}
+        _CREATIVE_FIELDS = ["id", "name", "image_url", "thumbnail_url", "object_story_spec", "asset_feed_spec"]
+        for cid in creative_ids:
+            try:
+                creative = AdCreative(cid).api_get(fields=_CREATIVE_FIELDS)
+                story = creative.get("object_story_spec") or {}
+                link_data  = story.get("link_data")  or {}
+                video_data = story.get("video_data") or {}
+                cta_value  = (video_data.get("call_to_action") or {}).get("value") or {}
+
+                # Try multiple paths to extract the destination URL
+                landing_url = (
+                    link_data.get("link")
+                    or cta_value.get("link")
+                    or (story.get("template_data", {}).get("link") if isinstance(story.get("template_data"), dict) else None)
+                )
+
+                # Fallback: check asset_feed_spec for dynamic ads
+                if not landing_url:
+                    feed = creative.get("asset_feed_spec") or {}
+                    link_urls = feed.get("link_urls") or []
+                    if link_urls:
+                        landing_url = (link_urls[0] or {}).get("website_url")
+
+                creative_map[cid] = {
+                    "image_url": creative.get("image_url"),
+                    "thumbnail_url": creative.get("thumbnail_url"),
+                    "landing_url": landing_url,
+                }
+            except Exception as e:
+                logger.warning("[facebook] Could not fetch creative %s: %s", cid, e)
+        return creative_map
+
     def _sync_ads(self) -> list[str]:
-        # Request expanded creative fields using nested field syntax
-        # object_story_spec contains the destination URL (link_data.link or video_data CTA link)
-        ads = self._paginate(
+        ads = list(self._paginate(
             self._account.get_ads(
-                fields=[
-                    "id", "name", "status", "adset_id", "campaign_id",
-                    "creative{id,name,image_url,thumbnail_url,object_story_spec}",
-                ],
+                fields=["id", "name", "status", "adset_id", "campaign_id", "creative"],
                 params={"limit": 200},
             )
-        )
+        ))
+
+        # Collect unique creative IDs, then fetch their full details separately.
+        # The nested field syntax creative{...} in get_ads() is unreliable — object_story_spec
+        # is often empty even for active ads. The AdCreative endpoint returns full data.
+        creative_ids = list({
+            (ad.get("creative") or {}).get("id")
+            for ad in ads
+            if (ad.get("creative") or {}).get("id")
+        })
+        creative_map = self._fetch_creative_details(creative_ids)
+
         rows = []
         for ad in ads:
-            creative = ad.get("creative") or {}
-            story = creative.get("object_story_spec") or {}
-            link_data  = story.get("link_data")  or {}
-            video_data = story.get("video_data") or {}
-            cta_value  = (video_data.get("call_to_action") or {}).get("value") or {}
-
-            # Landing URL: from link ad, video ad CTA, or any other story type
-            landing_url = (
-                link_data.get("link")
-                or cta_value.get("link")
-                or story.get("template_data", {}).get("link") if isinstance(story.get("template_data"), dict) else None
-            )
-
+            cid = (ad.get("creative") or {}).get("id")
+            details = creative_map.get(cid, {}) if cid else {}
             rows.append({
                 "ad_id": ad["id"],
                 "adset_id": ad.get("adset_id"),
@@ -338,9 +373,9 @@ class FacebookCollector(BaseCollector):
                 "name": ad.get("name"),
                 "status": ad.get("status"),
                 "creative_type": None,
-                "landing_url": landing_url,
-                "creative_url": creative.get("image_url"),
-                "thumbnail_url": creative.get("thumbnail_url"),
+                "landing_url": details.get("landing_url"),
+                "creative_url": details.get("image_url"),
+                "thumbnail_url": details.get("thumbnail_url"),
                 "synced_at": datetime.utcnow(),
             })
         self._upsert_raw("fb_ads", rows, ["ad_id"])
