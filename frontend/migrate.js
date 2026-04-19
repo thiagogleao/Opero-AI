@@ -275,12 +275,51 @@ const sql = `
     settings  JSONB NOT NULL DEFAULT '{}'
   );
 
-  -- Add missing columns to sync_runs (safe on existing tables)
-  ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS date_from          TEXT;
-  ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS date_to            TEXT;
-  ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS records_collected  INT DEFAULT 0;
-  ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS records_upserted   INT DEFAULT 0;
-  ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS error_message      TEXT;
+  -- Add missing columns to existing tables (safe, idempotent)
+  ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS date_from              TEXT;
+  ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS date_to                TEXT;
+  ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS records_collected      INT DEFAULT 0;
+  ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS records_upserted       INT DEFAULT 0;
+  ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS error_message          TEXT;
+
+  ALTER TABLE shopify_daily_metrics ADD COLUMN IF NOT EXISTS new_customers              INT DEFAULT 0;
+  ALTER TABLE shopify_daily_metrics ADD COLUMN IF NOT EXISTS returning_customers        INT DEFAULT 0;
+  ALTER TABLE shopify_daily_metrics ADD COLUMN IF NOT EXISTS new_customer_revenue       NUMERIC DEFAULT 0;
+  ALTER TABLE shopify_daily_metrics ADD COLUMN IF NOT EXISTS returning_customer_revenue NUMERIC DEFAULT 0;
+  ALTER TABLE shopify_daily_metrics ADD COLUMN IF NOT EXISTS cart_abandonment_count     INT DEFAULT 0;
+  ALTER TABLE shopify_daily_metrics ADD COLUMN IF NOT EXISTS cart_abandonment_value     NUMERIC DEFAULT 0;
+
+  -- Facebook structure tables (used by Python collector but missing from schema)
+  CREATE TABLE IF NOT EXISTS fb_ad_accounts (
+    id          BIGSERIAL PRIMARY KEY,
+    account_id  TEXT UNIQUE NOT NULL,
+    tenant_id   TEXT REFERENCES tenants(id),
+    name        TEXT,
+    currency    TEXT,
+    account_status INT,
+    synced_at   TIMESTAMPTZ
+  );
+
+  CREATE TABLE IF NOT EXISTS fb_campaigns (
+    id          BIGSERIAL PRIMARY KEY,
+    campaign_id TEXT UNIQUE NOT NULL,
+    tenant_id   TEXT REFERENCES tenants(id),
+    account_id  TEXT,
+    name        TEXT,
+    status      TEXT,
+    objective   TEXT,
+    synced_at   TIMESTAMPTZ
+  );
+
+  CREATE TABLE IF NOT EXISTS fb_adsets (
+    id          BIGSERIAL PRIMARY KEY,
+    adset_id    TEXT UNIQUE NOT NULL,
+    tenant_id   TEXT REFERENCES tenants(id),
+    campaign_id TEXT,
+    name        TEXT,
+    status      TEXT,
+    synced_at   TIMESTAMPTZ
+  );
 
   -- ══════════════════════════════════════════════════════════════
   -- Unique indexes for Python collector conflict resolution
