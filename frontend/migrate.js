@@ -136,6 +136,7 @@ const sql = `
   ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS cancel_reason TEXT;
   ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;
   ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS refund_amount NUMERIC DEFAULT 0;
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS country_code TEXT;
 
   ALTER TABLE shopify_orders              ADD COLUMN IF NOT EXISTS tenant_id TEXT REFERENCES tenants(id);
   ALTER TABLE shopify_order_items         ADD COLUMN IF NOT EXISTS tenant_id TEXT REFERENCES tenants(id);
