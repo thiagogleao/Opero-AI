@@ -42,15 +42,17 @@ export default function RefreshButton() {
       })
       const data = await res.json()
 
-      if (data.shopify.ok && data.facebook.ok) {
+      if (data.started) {
+        // Fire-and-forget mode: sync runs in background on the server
+        setStatus('done'); setMsg('Sincronizando... aguarde ~2 min')
+        setTimeout(() => { router.refresh(); setStatus('idle') }, 120_000)
+      } else if (data.shopify?.ok && data.facebook?.ok) {
         setStatus('done'); setMsg(tr.refresh_done_both); router.refresh(); setTimeout(() => setStatus('idle'), 3000)
-      } else if (data.shopify.ok && !data.facebook.ok) {
-        setStatus('warn'); setMsg(data.facebook.tokenExpired ? tr.refresh_warn_token : tr.refresh_warn_fb); router.refresh(); setTimeout(() => setStatus('idle'), 6000)
-      } else if (!data.shopify.ok && data.facebook.ok) {
+      } else if (data.shopify?.ok && !data.facebook?.ok) {
+        setStatus('warn'); setMsg(data.facebook?.tokenExpired ? tr.refresh_warn_token : tr.refresh_warn_fb); router.refresh(); setTimeout(() => setStatus('idle'), 6000)
+      } else if (!data.shopify?.ok && data.facebook?.ok) {
         setStatus('warn'); setMsg(tr.refresh_warn_shopify); router.refresh(); setTimeout(() => setStatus('idle'), 6000)
       } else {
-        console.error('[refresh] shopify:', data.shopify?.output)
-        console.error('[refresh] facebook:', data.facebook?.output)
         setStatus('error'); setMsg(data.facebook?.tokenExpired ? tr.refresh_error_token : tr.refresh_error_both); setTimeout(() => setStatus('idle'), 6000)
       }
     } catch {

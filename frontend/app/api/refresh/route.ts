@@ -9,28 +9,20 @@ const PYTHON = process.env.PYTHON_BIN
     : 'python3')
 const SCRIPT = path.join(PROJECT_ROOT, 'collect_recent.py')
 
-const SYNC_TIMEOUT_MS = 8 * 60 * 1000 // 8 minutes
-
-function runSource(source: string, dateFrom: string, dateTo: string, tenantId: string): Promise<{ ok: boolean; output: string }> {
-  return new Promise(resolve => {
-    const args = [SCRIPT, '--source', source, '--date-from', dateFrom, '--date-to', dateTo, '--tenant', tenantId]
-    const proc = spawn(PYTHON, args, {
-      cwd: PROJECT_ROOT,
-      env: { ...process.env, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' },
-      shell: true,
-    })
-    const lines: string[] = []
-    proc.stdout.on('data', (d: Buffer) => lines.push(d.toString()))
-    proc.stderr.on('data', (d: Buffer) => lines.push(d.toString()))
-
-    const timer = setTimeout(() => {
-      proc.kill()
-      resolve({ ok: false, output: lines.join('') + '\n[timeout after 8 minutes]' })
-    }, SYNC_TIMEOUT_MS)
-
-    proc.on('close', code => { clearTimeout(timer); resolve({ ok: code === 0, output: lines.join('') }) })
-    proc.on('error', err => { clearTimeout(timer); resolve({ ok: false, output: err.message }) })
+// Fire-and-forget: starts the process and returns immediately.
+// The process keeps running on the server after the HTTP response is sent.
+function spawnSource(source: string, dateFrom: string, dateTo: string, tenantId: string) {
+  const args = [SCRIPT, '--source', source, '--date-from', dateFrom, '--date-to', dateTo, '--tenant', tenantId]
+  const proc = spawn(PYTHON, args, {
+    cwd: PROJECT_ROOT,
+    env: { ...process.env, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' },
+    shell: true,
+    detached: false,
   })
+  proc.stdout.on('data', (d: Buffer) => process.stdout.write(`[sync:${source}] ${d}`))
+  proc.stderr.on('data', (d: Buffer) => process.stderr.write(`[sync:${source}] ${d}`))
+  proc.on('close', code => console.log(`[sync:${source}] exited with code ${code}`))
+  proc.on('error', err => console.error(`[sync:${source}] error:`, err.message))
 }
 
 export async function POST(req: Request) {
@@ -39,24 +31,19 @@ export async function POST(req: Request) {
 
   const body = await req.json().catch(() => ({}))
   const today = new Date().toISOString().split('T')[0]
-  const dateTo: string = body.dateTo ?? today
+  const dateTo: string   = body.dateTo ?? today
   const dateFrom: string = body.dateFrom
     ?? (() => { const d = new Date(); d.setDate(d.getDate() - (body.days ?? 2)); return d.toISOString().split('T')[0] })()
 
-  const [shopify, facebook] = await Promise.all([
-    runSource('shopify', dateFrom, dateTo, userId),
-    runSource('facebook', dateFrom, dateTo, userId),
-  ])
-
-  const isFbTokenError = !facebook.ok && (
-    facebook.output.includes('OAuthException') ||
-    facebook.output.includes('access blocked') ||
-    facebook.output.includes('token')
-  )
+  // Start both syncs in the background — return immediately so Railway doesn't timeout
+  spawnSource('shopify',  dateFrom, dateTo, userId)
+  spawnSource('facebook', dateFrom, dateTo, userId)
 
   return Response.json({
-    shopify: { ok: shopify.ok, output: shopify.output },
-    facebook: { ok: facebook.ok, tokenExpired: isFbTokenError, output: facebook.output },
-    anyOk: shopify.ok || facebook.ok,
+    started: true,
+    dateFrom,
+    dateTo,
+    shopify:  { ok: true },
+    facebook: { ok: true },
   })
 }
