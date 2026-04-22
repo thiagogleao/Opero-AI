@@ -48,26 +48,21 @@ export async function GET(req: NextRequest) {
   const accountsData = await accountsRes.json()
   const accounts: { id: string; name: string; account_status: number }[] = accountsData.data || []
 
-  if (accounts.length === 0) {
-    // Save token even without account so user can pick later
-    await upsertTenant(userId, { fb_access_token: longToken })
-    return fail('no_ad_accounts')
-  }
+  // Save token; update account ID only if we found accounts
+  const update: Record<string, string> = { fb_access_token: longToken }
+  if (accounts.length === 1) update.fb_ad_account_id = accounts[0].id
+  await upsertTenant(userId, update)
 
-  // Save token now; account will be set in /facebook/accounts
-  await upsertTenant(userId, { fb_access_token: longToken })
-
-  if (accounts.length === 1) {
-    await upsertTenant(userId, { fb_ad_account_id: accounts[0].id })
-    const res = NextResponse.redirect(new URL('/settings?fb_connected=true', appUrl))
+  if (accounts.length > 1) {
+    // Multiple accounts: redirect to picker
+    const pickerUrl = new URL('/facebook/accounts', appUrl)
+    const res = NextResponse.redirect(pickerUrl.toString())
     res.cookies.delete('fb_oauth_state')
     return res
   }
 
-  // Multiple accounts: redirect to picker
-  const pickerUrl = new URL('/facebook/accounts', appUrl)
-  pickerUrl.searchParams.set('uid', userId)
-  const res = NextResponse.redirect(pickerUrl.toString())
+  // Zero or one account: token saved, redirect to success
+  const res = NextResponse.redirect(new URL('/settings?fb_connected=true', appUrl))
   res.cookies.delete('fb_oauth_state')
   return res
 }
