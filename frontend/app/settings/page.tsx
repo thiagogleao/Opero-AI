@@ -1,5 +1,6 @@
 'use client'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+import { useSearchParams } from 'next/navigation'
 import { motion } from 'framer-motion'
 import { useSettings, type Theme, type Language, type Currency, type DateFormat, type AttributionWindow } from '@/contexts/SettingsContext'
 import { getTranslations } from '@/lib/translations'
@@ -119,6 +120,23 @@ export default function SettingsPage() {
   const s = useSettings()
   const tr = getTranslations(s.language)
   const [resetConfirm, setResetConfirm] = useState(false)
+  const [fbConnected, setFbConnected]   = useState<boolean | null>(null)
+  const [fbAccountId, setFbAccountId]   = useState<string | null>(null)
+  const searchParams = useSearchParams()
+
+  useEffect(() => {
+    fetch('/api/tenant')
+      .then(r => r.json())
+      .then(d => {
+        setFbConnected(!!d.tenant?.fb_access_token)
+        setFbAccountId(d.tenant?.fb_ad_account_id || null)
+      })
+      .catch(() => setFbConnected(false))
+  }, [])
+
+  // Show banner if just connected via OAuth
+  const justConnected = searchParams.get('fb_connected') === 'true'
+  const fbError       = searchParams.get('fb_error')
 
   const attrOptions: { value: AttributionWindow; label: string }[] = [
     { value: '1d',  label: tr.settings_attr_1d  },
@@ -293,12 +311,29 @@ export default function SettingsPage() {
         </Section>
 
         {/* ── Integrations ── */}
+        {(justConnected || fbError) && (
+          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }}
+            style={{ padding: '12px 16px', borderRadius: 10, marginBottom: 16, fontSize: 13, fontWeight: 500,
+              background: justConnected ? 'rgba(16,185,129,0.1)' : 'rgba(244,63,94,0.1)',
+              border: `1px solid ${justConnected ? 'rgba(16,185,129,0.3)' : 'rgba(244,63,94,0.3)'}`,
+              color: justConnected ? '#10B981' : '#F43F5E' }}>
+            {justConnected ? '✓ Facebook Ads conectado com sucesso!' : `✗ Erro ao conectar Facebook: ${fbError}`}
+          </motion.div>
+        )}
         <Section title={tr.settings_integrations} delay={0.22}>
           <Row label={tr.settings_int_shopify} desc="REST Admin API">
             <StatusBadge connected={true} />
           </Row>
-          <Row label={tr.settings_int_facebook} desc="Marketing API v21" last>
-            <StatusBadge connected={true} />
+          <Row label={tr.settings_int_facebook} desc={fbAccountId ? `Conta: ${fbAccountId}` : 'Marketing API v20'} last>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <StatusBadge connected={fbConnected === true} />
+              <a href="/api/facebook/auth"
+                style={{ padding: '5px 12px', fontSize: 11, fontWeight: 600, borderRadius: 7, border: '1px solid #8B5CF6',
+                  background: 'rgba(139,92,246,0.12)', color: '#A78BFA', textDecoration: 'none', whiteSpace: 'nowrap',
+                  cursor: 'pointer' }}>
+                {fbConnected ? 'Reconectar' : 'Conectar'}
+              </a>
+            </div>
           </Row>
         </Section>
 
