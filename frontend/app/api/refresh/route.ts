@@ -9,6 +9,8 @@ const PYTHON = process.env.PYTHON_BIN
     : 'python3')
 const SCRIPT = path.join(PROJECT_ROOT, 'collect_recent.py')
 
+const SYNC_TIMEOUT_MS = 8 * 60 * 1000 // 8 minutes
+
 function runSource(source: string, dateFrom: string, dateTo: string, tenantId: string): Promise<{ ok: boolean; output: string }> {
   return new Promise(resolve => {
     const args = [SCRIPT, '--source', source, '--date-from', dateFrom, '--date-to', dateTo, '--tenant', tenantId]
@@ -20,8 +22,14 @@ function runSource(source: string, dateFrom: string, dateTo: string, tenantId: s
     const lines: string[] = []
     proc.stdout.on('data', (d: Buffer) => lines.push(d.toString()))
     proc.stderr.on('data', (d: Buffer) => lines.push(d.toString()))
-    proc.on('close', code => resolve({ ok: code === 0, output: lines.join('') }))
-    proc.on('error', err => resolve({ ok: false, output: err.message }))
+
+    const timer = setTimeout(() => {
+      proc.kill()
+      resolve({ ok: false, output: lines.join('') + '\n[timeout after 8 minutes]' })
+    }, SYNC_TIMEOUT_MS)
+
+    proc.on('close', code => { clearTimeout(timer); resolve({ ok: code === 0, output: lines.join('') }) })
+    proc.on('error', err => { clearTimeout(timer); resolve({ ok: false, output: err.message }) })
   })
 }
 

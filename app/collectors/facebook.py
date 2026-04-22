@@ -305,43 +305,48 @@ class FacebookCollector(BaseCollector):
         ]
         self._upsert_raw("fb_adsets", rows, ["adset_id"])
 
+    @staticmethod
+    def _parse_creative(creative: dict) -> dict:
+        story      = creative.get("object_story_spec") or {}
+        link_data  = story.get("link_data")  or {}
+        video_data = story.get("video_data") or {}
+        cta_value  = (video_data.get("call_to_action") or {}).get("value") or {}
+        landing_url = (
+            link_data.get("link")
+            or cta_value.get("link")
+            or (story.get("template_data", {}).get("link") if isinstance(story.get("template_data"), dict) else None)
+        )
+        if not landing_url:
+            feed = creative.get("asset_feed_spec") or {}
+            link_urls = feed.get("link_urls") or []
+            if link_urls:
+                landing_url = (link_urls[0] or {}).get("website_url")
+        return {
+            "image_url": creative.get("image_url"),
+            "thumbnail_url": creative.get("thumbnail_url"),
+            "landing_url": landing_url,
+        }
+
     def _fetch_creative_details(self, creative_ids: list[str]) -> dict[str, dict]:
-        """
-        Batch-fetch AdCreative objects and return a mapping of creative_id → details.
-        The nested field syntax on get_ads() doesn't populate object_story_spec reliably,
-        so we fetch creatives independently via the AdCreative endpoint.
-        """
-        creative_map: dict[str, dict] = {}
-        _CREATIVE_FIELDS = ["id", "name", "image_url", "thumbnail_url", "object_story_spec", "asset_feed_spec"]
-        for cid in creative_ids:
+        """Fetch AdCreative objects in parallel (5 workers) to avoid slow sequential calls."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        _CREATIVE_FIELDS = ["id", "image_url", "thumbnail_url", "object_story_spec", "asset_feed_spec"]
+
+        def fetch_one(cid: str):
             try:
                 creative = AdCreative(cid).api_get(fields=_CREATIVE_FIELDS)
-                story = creative.get("object_story_spec") or {}
-                link_data  = story.get("link_data")  or {}
-                video_data = story.get("video_data") or {}
-                cta_value  = (video_data.get("call_to_action") or {}).get("value") or {}
-
-                # Try multiple paths to extract the destination URL
-                landing_url = (
-                    link_data.get("link")
-                    or cta_value.get("link")
-                    or (story.get("template_data", {}).get("link") if isinstance(story.get("template_data"), dict) else None)
-                )
-
-                # Fallback: check asset_feed_spec for dynamic ads
-                if not landing_url:
-                    feed = creative.get("asset_feed_spec") or {}
-                    link_urls = feed.get("link_urls") or []
-                    if link_urls:
-                        landing_url = (link_urls[0] or {}).get("website_url")
-
-                creative_map[cid] = {
-                    "image_url": creative.get("image_url"),
-                    "thumbnail_url": creative.get("thumbnail_url"),
-                    "landing_url": landing_url,
-                }
+                return cid, self._parse_creative(creative)
             except Exception as e:
                 logger.warning("[facebook] Could not fetch creative %s: %s", cid, e)
+                return cid, {}
+
+        creative_map: dict[str, dict] = {}
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            for cid, details in pool.map(fetch_one, creative_ids):
+                if details:
+                    creative_map[cid] = details
+        logger.info("[facebook] Fetched %d/%d creative details", len(creative_map), len(creative_ids))
         return creative_map
 
     def _sync_ads(self) -> list[str]:
