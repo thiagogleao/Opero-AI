@@ -1,5 +1,5 @@
 'use client'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, Suspense } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { motion } from 'framer-motion'
 import { useSettings, type Theme, type Language, type Currency, type DateFormat, type AttributionWindow } from '@/contexts/SettingsContext'
@@ -116,7 +116,7 @@ function StatusBadge({ connected }: { connected: boolean }) {
   )
 }
 
-export default function SettingsPage() {
+function SettingsContent() {
   const s = useSettings()
   const tr = getTranslations(s.language)
   const [resetConfirm, setResetConfirm] = useState(false)
@@ -370,5 +370,13 @@ export default function SettingsPage() {
 
       </main>
     </div>
+  )
+}
+
+export default function SettingsPage() {
+  return (
+    <Suspense>
+      <SettingsContent />
+    </Suspense>
   )
 }
