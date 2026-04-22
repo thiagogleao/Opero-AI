@@ -42,6 +42,21 @@ def _parse_dt(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _local_date(value: Optional[str]) -> Optional[str]:
+    """Return the date in the store's LOCAL timezone for day-grouping.
+    Shopify timestamps include the store's UTC offset (e.g. '2024-01-15T21:00:00-03:00').
+    Using .date() on the original tz-aware datetime keeps the local date correct,
+    whereas converting to UTC first shifts late-night orders into the next day.
+    """
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+        return dt.date().isoformat()
+    except (ValueError, AttributeError):
+        return None
+
+
 def _float(value, default=0.0) -> float:
     try:
         return float(value)
@@ -297,10 +312,9 @@ class ShopifyCollector(BaseCollector):
         })
 
         for order in orders:
-            dt = _parse_dt(order.created_at)
-            if not dt:
+            d = _local_date(order.created_at)
+            if not d:
                 continue
-            d = dt.date().isoformat()
             revenue = _float(getattr(order, "total_price", 0))
             by_date[d]["total_orders"] += 1
             by_date[d]["total_revenue"] += revenue
@@ -342,10 +356,9 @@ class ShopifyCollector(BaseCollector):
 
         by_date: dict[str, dict] = defaultdict(lambda: {"count": 0, "value": 0.0})
         for checkout in checkouts:
-            dt = _parse_dt(getattr(checkout, "created_at", None))
-            if not dt:
+            d = _local_date(getattr(checkout, "created_at", None))
+            if not d:
                 continue
-            d = dt.date().isoformat()
             by_date[d]["count"] += 1
             by_date[d]["value"] += _float(getattr(checkout, "total_price", 0))
 
@@ -380,12 +393,11 @@ class ShopifyCollector(BaseCollector):
                 customer_first_order[cid] = str(order.id)
 
         for order in orders:
-            dt = _parse_dt(order.created_at)
-            if not dt:
+            d = _local_date(order.created_at)
+            if not d:
                 continue
             billing = getattr(order, "billing_address", None)
             country = (billing.country_code if billing else None) or "XX"
-            d = dt.date().isoformat()
             key = (d, country)
             revenue = _float(getattr(order, "total_price", 0))
             cid = str(getattr(order, "customer", None) and order.customer.id or "")
