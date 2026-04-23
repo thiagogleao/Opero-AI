@@ -120,8 +120,9 @@ function SettingsContent() {
   const s = useSettings()
   const tr = getTranslations(s.language)
   const [resetConfirm, setResetConfirm] = useState(false)
-  const [fbConnected, setFbConnected]   = useState<boolean | null>(null)
-  const [fbAccountId, setFbAccountId]   = useState<string | null>(null)
+  const [fbConnected, setFbConnected]     = useState<boolean | null>(null)
+  const [fbAccountId, setFbAccountId]     = useState<string | null>(null)
+  const [shopifyDomain, setShopifyDomain] = useState<string | null>(null)
   const searchParams = useSearchParams()
 
   useEffect(() => {
@@ -130,6 +131,7 @@ function SettingsContent() {
       .then(d => {
         setFbConnected(!!d.tenant?.fb_access_token)
         setFbAccountId(d.tenant?.fb_ad_account_id || null)
+        setShopifyDomain(d.tenant?.shopify_domain || null)
       })
       .catch(() => setFbConnected(false))
   }, [])
@@ -321,8 +323,17 @@ function SettingsContent() {
           </motion.div>
         )}
         <Section title={tr.settings_integrations} delay={0.22}>
-          <Row label={tr.settings_int_shopify} desc="REST Admin API">
-            <StatusBadge connected={true} />
+          <Row label={tr.settings_int_shopify} desc={shopifyDomain || 'REST Admin API'}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <StatusBadge connected={!!shopifyDomain} />
+              {shopifyDomain && (
+                <a href={`/api/shopify/auth?shop=${shopifyDomain}`}
+                  style={{ padding: '5px 12px', fontSize: 11, fontWeight: 600, borderRadius: 7, border: '1px solid #8B5CF6',
+                    background: 'rgba(139,92,246,0.12)', color: '#A78BFA', textDecoration: 'none', whiteSpace: 'nowrap' }}>
+                  Reconectar
+                </a>
+              )}
+            </div>
           </Row>
           <Row label={tr.settings_int_facebook} desc={fbAccountId ? `Conta: ${fbAccountId}` : 'Marketing API v20'} last>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
