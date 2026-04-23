@@ -8,12 +8,13 @@ import {
   getTopCreatives, getCountryMetrics, getCustomerSplit, getLastSyncTime,
   getFunnelMetrics, getCountrySpend,
 } from '@/lib/queries'
-import { getProfitSummary, getCountryProfit } from '@/lib/profitCalc'
+import { getProfitSummary, getCountryProfit, getDailyProfitData } from '@/lib/profitCalc'
 import RevenueChart from '@/components/RevenueChart'
 import RoasChart from '@/components/RoasChart'
 import CountryChart from '@/components/CountryChart'
 import CustomerChart from '@/components/CustomerChart'
 import CreativesTable from '@/components/CreativesTable'
+import DailyProfitChart from '@/components/DailyProfitChart'
 import MetricCard from '@/components/MetricCard'
 import TimeframeSelector from '@/components/TimeframeSelector'
 import RefreshButton from '@/components/RefreshButton'
@@ -76,7 +77,7 @@ export default async function Dashboard({ searchParams }: Props) {
   const toMs   = new Date(dateTo).getTime()
   const days   = Math.round((toMs - fromMs) / 86400000) + 1
 
-  const [metrics, revenue, roas, creatives, countries, customers, syncs, profit, funnel, countrySpend, countryProfit] = await Promise.all([
+  const [metrics, revenue, roas, creatives, countries, customers, syncs, profit, funnel, countrySpend, countryProfit, dailyProfit] = await Promise.all([
     getOverviewMetrics(tenantId, dateFrom, dateTo),
     getDailyRevenue(tenantId, dateFrom, dateTo),
     getDailyRoas(tenantId, dateFrom, dateTo),
@@ -88,6 +89,7 @@ export default async function Dashboard({ searchParams }: Props) {
     getFunnelMetrics(tenantId, dateFrom, dateTo),
     getCountrySpend(tenantId, dateFrom, dateTo),
     getCountryProfit(tenantId, dateFrom, dateTo),
+    getDailyProfitData(tenantId, dateFrom, dateTo),
   ])
 
   const lastSync = syncs[0]?.finished_at
@@ -421,8 +423,11 @@ ${promptLang.formatNote}`
         </div>
 
         {/* Charts row 3 */}
-        <div style={{ marginBottom: 24 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: dailyProfit.configured && dailyProfit.dailyData.length > 1 ? '1fr 1fr' : '1fr', gap: 12, marginBottom: 12 }}>
           <CustomerChart data={customers} days={days} />
+          {dailyProfit.configured && dailyProfit.dailyData.length > 1 && (
+            <DailyProfitChart data={dailyProfit.dailyData} days={days} />
+          )}
         </div>
 
         {/* AI Panel */}

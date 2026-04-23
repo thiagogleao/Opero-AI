@@ -201,6 +201,58 @@ export interface CountryProfit {
   configured: boolean
 }
 
+export interface DailyProfitPoint {
+  date: string
+  revenue: number
+  profit: number
+  fbSpend: number
+}
+
+export async function getDailyProfitData(
+  tenantId: string,
+  dateFrom: string,
+  dateTo: string
+): Promise<{ configured: boolean; dailyData: DailyProfitPoint[] }> {
+  const summary = await getProfitSummary(tenantId, dateFrom, dateTo)
+  if (!summary.configured || summary.totalRevenue === 0) {
+    return { configured: summary.configured, dailyData: [] }
+  }
+
+  const nonFbCostRatio = (summary.totalCosts - summary.fbSpend) / summary.totalRevenue
+
+  const [dailyRevRows, dailyFbRows] = await Promise.all([
+    query<{ date: string; revenue: string }>(`
+      SELECT date::text, COALESCE(SUM(total_revenue), 0)::text AS revenue
+      FROM shopify_daily_metrics
+      WHERE tenant_id = $1 AND date BETWEEN $2::date AND $3::date
+      GROUP BY date ORDER BY date
+    `, [tenantId, dateFrom, dateTo]),
+    query<{ date: string; spend: string }>(`
+      SELECT date::text, COALESCE(SUM(spend), 0)::text AS spend
+      FROM fb_ad_daily_metrics
+      WHERE tenant_id = $1 AND date BETWEEN $2::date AND $3::date
+      GROUP BY date ORDER BY date
+    `, [tenantId, dateFrom, dateTo]),
+  ])
+
+  const fbByDate: Record<string, number> = {}
+  for (const r of dailyFbRows) fbByDate[r.date] = Number(r.spend)
+
+  const dailyData: DailyProfitPoint[] = dailyRevRows.map(r => {
+    const rev = Number(r.revenue)
+    const fb = fbByDate[r.date] ?? 0
+    const profit = rev - rev * nonFbCostRatio - fb
+    return {
+      date: r.date,
+      revenue: Math.round(rev * 100) / 100,
+      profit: Math.round(profit * 100) / 100,
+      fbSpend: Math.round(fb * 100) / 100,
+    }
+  })
+
+  return { configured: true, dailyData }
+}
+
 export async function getCountryProfit(
   tenantId: string,
   dateFrom: string,
