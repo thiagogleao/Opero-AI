@@ -54,6 +54,20 @@ export async function upsertTenant(
   return rows[0]
 }
 
+/** Update shopify token on whichever tenant row owns this domain. Returns rows updated. */
+export async function updateShopifyTokenByDomain(
+  shopDomain: string,
+  token: string
+): Promise<number> {
+  const rows = await query<Tenant>(
+    `UPDATE tenants SET shopify_access_token = $1, shopify_domain = $2, updated_at = NOW()
+     WHERE shopify_domain = $2
+     RETURNING id`,
+    [token, shopDomain]
+  )
+  return rows.length
+}
+
 /** Claim all rows with no tenant_id (existing data from before multi-tenancy) */
 export async function claimLegacyData(tenantId: string): Promise<void> {
   const tables = [

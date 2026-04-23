@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import crypto from 'crypto'
 import { auth, currentUser } from '@clerk/nextjs/server'
-import { upsertTenant } from '@/lib/tenant'
+import { upsertTenant, updateShopifyTokenByDomain } from '@/lib/tenant'
 
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl
@@ -58,14 +58,21 @@ export async function GET(req: NextRequest) {
 
   const user = await currentUser()
   try {
-    await upsertTenant(userId, {
-      email: user?.emailAddresses[0]?.emailAddress,
-      shopify_domain: cleanShop,
-      shopify_access_token: access_token,
-    })
-    console.log('[shopify/callback] upsertTenant OK, token saved:', access_token?.slice(0, 15))
+    // First try to update the existing row that owns this domain (handles userId mismatch)
+    const updated = await updateShopifyTokenByDomain(cleanShop, access_token)
+    console.log('[shopify/callback] updateByDomain rows:', updated, 'token saved:', access_token?.slice(0, 15))
+
+    if (updated === 0) {
+      // No existing row with this domain — create/update by userId
+      await upsertTenant(userId, {
+        email: user?.emailAddresses[0]?.emailAddress,
+        shopify_domain: cleanShop,
+        shopify_access_token: access_token,
+      })
+      console.log('[shopify/callback] upsertTenant OK (new row), token saved:', access_token?.slice(0, 15))
+    }
   } catch (err) {
-    console.error('[shopify/callback] upsertTenant failed:', err)
+    console.error('[shopify/callback] save failed:', err)
   }
 
   const parts = (state || '').split(':')
