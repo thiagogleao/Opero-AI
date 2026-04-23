@@ -99,6 +99,7 @@ class ShopifyCollector(BaseCollector):
         self._upsert_order_items(orders)
         self._upsert_customers(orders)
         self._aggregate_and_upsert_daily(orders)
+        self._recalculate_daily_from_db(date_from, date_to)
         self._aggregate_and_upsert_countries(orders)
 
         logger.info("[shopify] Fetching abandoned checkouts %s → %s", date_from, date_to)
@@ -348,6 +349,36 @@ class ShopifyCollector(BaseCollector):
             })
 
         self._upsert_raw("shopify_daily_metrics", rows, ["date", "tenant_id"])
+
+    def _recalculate_daily_from_db(self, date_from: date, date_to: date) -> None:
+        """Re-aggregate total_orders/total_revenue/avg_order_value from the DB orders table.
+
+        Fixes the case where multiple partial syncs write overlapping date ranges and
+        the in-memory batch only has a subset of orders for a given day.
+        """
+        from sqlalchemy import text
+        self.session.execute(text("""
+            UPDATE shopify_daily_metrics dm
+            SET
+                total_orders     = sub.order_count,
+                total_revenue    = sub.order_sum,
+                avg_order_value  = CASE WHEN sub.order_count > 0
+                                        THEN sub.order_sum / sub.order_count ELSE 0 END
+            FROM (
+                SELECT
+                    DATE(created_at AT TIME ZONE 'America/Belem') AS d,
+                    COUNT(*)                                       AS order_count,
+                    COALESCE(SUM(total_price), 0)                  AS order_sum,
+                    tenant_id
+                FROM shopify_orders
+                WHERE tenant_id  = :tid
+                  AND financial_status = 'paid'
+                  AND DATE(created_at AT TIME ZONE 'America/Belem') BETWEEN :df AND :dt
+                GROUP BY DATE(created_at AT TIME ZONE 'America/Belem'), tenant_id
+            ) sub
+            WHERE dm.date = sub.d AND dm.tenant_id = sub.tenant_id
+        """), {"tid": self.tenant_id, "df": str(date_from), "dt": str(date_to)})
+        self.session.commit()
 
     def _patch_daily_with_abandonment(self, checkouts: list):
         """Update daily rows with cart abandonment counts/values."""
