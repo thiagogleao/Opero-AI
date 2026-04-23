@@ -327,7 +327,7 @@ function SettingsContent() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <StatusBadge connected={!!shopifyDomain} />
               {shopifyDomain && (
-                <a href={`/api/shopify/auth?shop=${shopifyDomain}`}
+                <a href={`/api/shopify/auth?shop=${shopifyDomain}&reconnect=1`}
                   style={{ padding: '5px 12px', fontSize: 11, fontWeight: 600, borderRadius: 7, border: '1px solid #8B5CF6',
                     background: 'rgba(139,92,246,0.12)', color: '#A78BFA', textDecoration: 'none', whiteSpace: 'nowrap' }}>
                   Reconectar

@@ -55,12 +55,18 @@ export async function GET(req: NextRequest) {
     shopify_access_token: access_token,
   })
 
-  const [, encodedDate] = (state || '').split(':')
-  const storeStartDate = encodedDate ? decodeURIComponent(encodedDate) : ''
+  const parts = (state || '').split(':')
+  const storeStartDate = parts[1] ? decodeURIComponent(parts[1]) : ''
+  const isReconnect    = parts[2] === '1'
 
-  const redirectUrl = new URL('/onboarding', appUrl)
-  redirectUrl.searchParams.set('shopify_connected', 'true')
-  if (storeStartDate) redirectUrl.searchParams.set('storeStartDate', storeStartDate)
+  let redirectUrl: URL
+  if (isReconnect) {
+    redirectUrl = new URL('/settings?shopify_connected=true', appUrl)
+  } else {
+    redirectUrl = new URL('/onboarding', appUrl)
+    redirectUrl.searchParams.set('shopify_connected', 'true')
+    if (storeStartDate) redirectUrl.searchParams.set('storeStartDate', storeStartDate)
+  }
 
   const res = NextResponse.redirect(redirectUrl.toString())
   res.cookies.delete('shopify_oauth_state')

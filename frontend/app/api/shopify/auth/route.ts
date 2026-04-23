@@ -36,8 +36,9 @@ export async function GET(req: NextRequest) {
   if (!clientId) return NextResponse.json({ error: 'SHOPIFY_CLIENT_ID not configured' }, { status: 500 })
 
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || origin
+  const reconnect = searchParams.get('reconnect') === '1'
   const nonce = crypto.randomBytes(16).toString('hex')
-  const state = `${nonce}:${encodeURIComponent(storeStartDate)}`
+  const state = `${nonce}:${encodeURIComponent(storeStartDate)}:${reconnect ? '1' : '0'}`
   const redirectUri = `${appUrl}/api/shopify/callback`
 
   const authUrl = new URL(`https://${shop}/admin/oauth/authorize`)
