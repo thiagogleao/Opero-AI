@@ -14,8 +14,11 @@ export async function GET(req: NextRequest) {
   const fail = (reason: string) =>
     NextResponse.redirect(new URL(`/onboarding?error=${reason}`, appUrl))
 
+  console.log('[shopify/callback] state:', state?.slice(0, 20), 'code:', !!code, 'shop:', shop)
+
   // Verify state matches cookie
   const cookieState = req.cookies.get('shopify_oauth_state')?.value
+  console.log('[shopify/callback] cookieState:', cookieState?.slice(0, 20), 'match:', cookieState === state)
   if (!cookieState || cookieState !== state) return fail('invalid_state')
 
   // Verify HMAC
@@ -28,6 +31,7 @@ export async function GET(req: NextRequest) {
     .createHmac('sha256', process.env.SHOPIFY_CLIENT_SECRET!)
     .update(message)
     .digest('hex')
+  console.log('[shopify/callback] hmac match:', digest === hmac)
   if (digest !== hmac) return fail('invalid_hmac')
 
   // Exchange code for access token
@@ -40,20 +44,29 @@ export async function GET(req: NextRequest) {
       code,
     }),
   })
+  console.log('[shopify/callback] token exchange status:', tokenRes.status)
   if (!tokenRes.ok) return fail('token_exchange_failed')
 
-  const { access_token } = await tokenRes.json()
+  const tokenData = await tokenRes.json()
+  console.log('[shopify/callback] token keys:', Object.keys(tokenData), 'token prefix:', tokenData.access_token?.slice(0, 10))
+  const access_token = tokenData.access_token
   const cleanShop = shop!.replace(/https?:\/\//, '').replace(/\/$/, '')
 
   const { userId } = await auth()
+  console.log('[shopify/callback] userId:', userId?.slice(0, 20))
   if (!userId) return NextResponse.redirect(new URL('/sign-in', appUrl))
 
   const user = await currentUser()
-  await upsertTenant(userId, {
-    email: user?.emailAddresses[0]?.emailAddress,
-    shopify_domain: cleanShop,
-    shopify_access_token: access_token,
-  })
+  try {
+    await upsertTenant(userId, {
+      email: user?.emailAddresses[0]?.emailAddress,
+      shopify_domain: cleanShop,
+      shopify_access_token: access_token,
+    })
+    console.log('[shopify/callback] upsertTenant OK, token saved:', access_token?.slice(0, 15))
+  } catch (err) {
+    console.error('[shopify/callback] upsertTenant failed:', err)
+  }
 
   const parts = (state || '').split(':')
   const storeStartDate = parts[1] ? decodeURIComponent(parts[1]) : ''
