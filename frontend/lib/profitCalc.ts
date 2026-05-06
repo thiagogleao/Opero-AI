@@ -111,9 +111,10 @@ export async function getProfitSummary(
            oi.product_id,
            COALESCE(oi.quantity, 1)::text AS product_units
     FROM shopify_orders o
+    JOIN tenants t ON t.id = o.tenant_id
     LEFT JOIN shopify_order_items oi ON o.order_id = oi.order_id
     WHERE o.tenant_id = $1
-      AND o.created_at::date BETWEEN $2::date AND $3::date
+      AND (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date BETWEEN $2::date AND $3::date
       AND o.financial_status NOT IN ('refunded', 'voided')
     GROUP BY o.order_id, o.total_price, o.country_code, oi.product_id, oi.quantity
   `, [tenantId, dateFrom, dateTo])
@@ -178,7 +179,7 @@ export async function getProfitSummary(
   const totalCosts     = totalFees + totalCogs + totalPackaging + totalShipping + totalExtraCosts + fbSpend - totalAdditionalUnitSavings
   const netProfit      = totalRevenue - totalCosts
   const margin         = totalRevenue > 0 ? (netProfit / totalRevenue) * 100 : 0
-  const orderCount     = orders.length
+  const orderCount     = groupedOrders.length
 
   return {
     configured: true,
@@ -220,35 +221,44 @@ export async function getDailyProfitData(
 
   const nonFbCostRatio = (summary.totalCosts - summary.fbSpend) / summary.totalRevenue
 
-  const [dailyRevRows, dailyFbRows] = await Promise.all([
-    query<{ date: string; revenue: string }>(`
-      SELECT date::text, COALESCE(SUM(total_revenue), 0)::text AS revenue
-      FROM shopify_daily_metrics
-      WHERE tenant_id = $1 AND date BETWEEN $2::date AND $3::date
-      GROUP BY date ORDER BY date
-    `, [tenantId, dateFrom, dateTo]),
-    query<{ date: string; spend: string }>(`
-      SELECT date::text, COALESCE(SUM(spend), 0)::text AS spend
+  const dailyRows = await query<{ date: string; revenue: string; spend: string }>(`
+    SELECT
+      dates.d::text AS date,
+      ROUND(COALESCE(s.total_revenue, 0)::numeric, 2)::text AS revenue,
+      ROUND(COALESCE(f.spend, 0)::numeric, 2)::text AS spend
+    FROM generate_series($2::date, $3::date, '1 day') AS dates(d)
+    LEFT JOIN (
+      SELECT
+        (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date AS date,
+        SUM(o.total_price::numeric) AS total_revenue
+      FROM shopify_orders o
+      JOIN tenants t ON t.id = o.tenant_id
+      WHERE o.tenant_id = $1
+        AND o.financial_status NOT IN ('refunded', 'voided')
+      GROUP BY 1
+    ) s ON s.date = dates.d
+    LEFT JOIN (
+      SELECT date, SUM(spend) AS spend
       FROM fb_ad_daily_metrics
-      WHERE tenant_id = $1 AND date BETWEEN $2::date AND $3::date
-      GROUP BY date ORDER BY date
-    `, [tenantId, dateFrom, dateTo]),
-  ])
+      WHERE tenant_id = $1
+      GROUP BY date
+    ) f ON f.date = dates.d
+    ORDER BY dates.d
+  `, [tenantId, dateFrom, dateTo])
 
-  const fbByDate: Record<string, number> = {}
-  for (const r of dailyFbRows) fbByDate[r.date] = Number(r.spend)
-
-  const dailyData: DailyProfitPoint[] = dailyRevRows.map(r => {
-    const rev = Number(r.revenue)
-    const fb = fbByDate[r.date] ?? 0
-    const profit = rev - rev * nonFbCostRatio - fb
-    return {
-      date: r.date,
-      revenue: Math.round(rev * 100) / 100,
-      profit: Math.round(profit * 100) / 100,
-      fbSpend: Math.round(fb * 100) / 100,
-    }
-  })
+  const dailyData: DailyProfitPoint[] = dailyRows
+    .filter(r => Number(r.revenue) > 0 || Number(r.spend) > 0)
+    .map(r => {
+      const rev = Number(r.revenue)
+      const fb = Number(r.spend)
+      const profit = rev - rev * nonFbCostRatio - fb
+      return {
+        date: r.date,
+        revenue: Math.round(rev * 100) / 100,
+        profit: Math.round(profit * 100) / 100,
+        fbSpend: Math.round(fb * 100) / 100,
+      }
+    })
 
   return { configured: true, dailyData }
 }
@@ -284,9 +294,10 @@ export async function getCountryProfit(
         COALESCE(SUM(oia.total_quantity)::numeric / NULLIF(COUNT(o.order_id), 0), 1)
       , 2)::text                                  AS avg_units
     FROM shopify_orders o
+    JOIN tenants t ON t.id = o.tenant_id
     LEFT JOIN order_items_agg oia ON o.order_id = oia.order_id
     WHERE o.tenant_id = $1
-      AND o.created_at::date BETWEEN $2::date AND $3::date
+      AND (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date BETWEEN $2::date AND $3::date
       AND o.financial_status NOT IN ('refunded', 'voided')
     GROUP BY o.country_code
     ORDER BY SUM(o.total_price::numeric) DESC
