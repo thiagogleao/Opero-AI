@@ -6,15 +6,18 @@ export async function getOverviewMetrics(tenantId: string, dateFrom: string, dat
     new_customers: number; returning_customers: number
     abandoned_value: number; abandoned_count: number
   }>(`
-    WITH period_orders AS (
+    WITH tz AS (
+      SELECT COALESCE(timezone, 'UTC') AS name FROM tenants WHERE id = $1
+    ),
+    period_orders AS (
       SELECT order_id, total_price, customer_id
-      FROM shopify_orders
+      FROM shopify_orders, tz
       WHERE tenant_id = $1
-        AND created_at::date BETWEEN $2::date AND $3::date
+        AND (created_at AT TIME ZONE tz.name)::date BETWEEN $2::date AND $3::date
         AND financial_status NOT IN ('refunded', 'voided')
     ),
     first_order_dates AS (
-      SELECT customer_id, MIN(created_at::date) AS first_date
+      SELECT customer_id, MIN((created_at AT TIME ZONE (SELECT name FROM tz))::date) AS first_date
       FROM shopify_orders
       WHERE tenant_id = $1
         AND financial_status NOT IN ('refunded', 'voided')
@@ -82,19 +85,27 @@ export async function getOverviewMetrics(tenantId: string, dateFrom: string, dat
 export async function getDailyRevenue(tenantId: string, dateFrom: string, dateTo: string) {
   const rows = await query<{ date: string; revenue: string; spend: string }>(`
     SELECT
-      s.date::text                        AS date,
-      ROUND(s.total_revenue::numeric, 2)  AS revenue,
-      ROUND(COALESCE(f.spend, 0)::numeric, 2) AS spend
-    FROM shopify_daily_metrics s
+      dates.d::text                               AS date,
+      ROUND(COALESCE(s.total_revenue, 0)::numeric, 2) AS revenue,
+      ROUND(COALESCE(f.spend, 0)::numeric, 2)     AS spend
+    FROM generate_series($2::date, $3::date, '1 day') AS dates(d)
+    LEFT JOIN (
+      SELECT
+        (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date AS date,
+        SUM(o.total_price::numeric) AS total_revenue
+      FROM shopify_orders o
+      JOIN tenants t ON t.id = o.tenant_id
+      WHERE o.tenant_id = $1
+        AND o.financial_status NOT IN ('refunded', 'voided')
+      GROUP BY 1
+    ) s ON s.date = dates.d
     LEFT JOIN (
       SELECT date, SUM(spend) AS spend
       FROM fb_ad_daily_metrics
       WHERE tenant_id = $1
       GROUP BY date
-    ) f ON s.date = f.date
-    WHERE s.tenant_id = $1
-      AND s.date BETWEEN $2::date AND $3::date
-    ORDER BY s.date
+    ) f ON f.date = dates.d
+    ORDER BY dates.d
   `, [tenantId, dateFrom, dateTo])
   return rows.map(r => ({ date: r.date, revenue: Number(r.revenue), spend: Number(r.spend) }))
 }
@@ -102,23 +113,31 @@ export async function getDailyRevenue(tenantId: string, dateFrom: string, dateTo
 export async function getDailyRoas(tenantId: string, dateFrom: string, dateTo: string) {
   const rows = await query<{ date: string; fb_roas: string; blended_roas: string }>(`
     SELECT
-      s.date::text AS date,
+      dates.d::text AS date,
       ROUND(COALESCE(
         CASE WHEN f.spend > 0 THEN f.purchase_value / f.spend ELSE 0 END,
       0)::numeric, 2) AS fb_roas,
       ROUND(COALESCE(
         CASE WHEN f.spend > 0 THEN s.total_revenue / f.spend ELSE 0 END,
       0)::numeric, 2) AS blended_roas
-    FROM shopify_daily_metrics s
+    FROM generate_series($2::date, $3::date, '1 day') AS dates(d)
+    LEFT JOIN (
+      SELECT
+        (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date AS date,
+        SUM(o.total_price::numeric) AS total_revenue
+      FROM shopify_orders o
+      JOIN tenants t ON t.id = o.tenant_id
+      WHERE o.tenant_id = $1
+        AND o.financial_status NOT IN ('refunded', 'voided')
+      GROUP BY 1
+    ) s ON s.date = dates.d
     LEFT JOIN (
       SELECT date, SUM(spend) AS spend, SUM(purchase_value) AS purchase_value
       FROM fb_ad_daily_metrics
       WHERE tenant_id = $1
       GROUP BY date
-    ) f ON s.date = f.date
-    WHERE s.tenant_id = $1
-      AND s.date BETWEEN $2::date AND $3::date
-    ORDER BY s.date
+    ) f ON f.date = dates.d
+    ORDER BY dates.d
   `, [tenantId, dateFrom, dateTo])
   return rows.map(r => ({ date: r.date, fb_roas: Number(r.fb_roas), blended_roas: Number(r.blended_roas) }))
 }
@@ -178,8 +197,9 @@ export async function getCountryMetrics(tenantId: string, dateFrom: string, date
 
 export async function getCustomerSplit(tenantId: string, dateFrom: string, dateTo: string) {
   return query<{ date: string; new_customers: number; returning_customers: number }>(`
-    WITH first_order_dates AS (
-      SELECT customer_id, MIN(created_at::date) AS first_date
+    WITH tz AS (SELECT COALESCE(timezone,'UTC') AS name FROM tenants WHERE id = $1),
+    first_order_dates AS (
+      SELECT customer_id, MIN((created_at AT TIME ZONE (SELECT name FROM tz))::date) AS first_date
       FROM shopify_orders
       WHERE tenant_id = $1
         AND financial_status NOT IN ('refunded', 'voided')
@@ -187,16 +207,16 @@ export async function getCustomerSplit(tenantId: string, dateFrom: string, dateT
       GROUP BY customer_id
     )
     SELECT
-      o.created_at::date::text                                                  AS date,
+      (o.created_at AT TIME ZONE (SELECT name FROM tz))::date::text            AS date,
       COUNT(*) FILTER (WHERE fo.first_date >= $2::date)                        AS new_customers,
       COUNT(*) FILTER (WHERE fo.first_date < $2::date OR fo.first_date IS NULL) AS returning_customers
     FROM shopify_orders o
     LEFT JOIN first_order_dates fo ON o.customer_id = fo.customer_id
     WHERE o.tenant_id = $1
-      AND o.created_at::date BETWEEN $2::date AND $3::date
+      AND (o.created_at AT TIME ZONE (SELECT name FROM tz))::date BETWEEN $2::date AND $3::date
       AND o.financial_status NOT IN ('refunded', 'voided')
-    GROUP BY o.created_at::date
-    ORDER BY o.created_at::date
+    GROUP BY 1
+    ORDER BY 1
   `, [tenantId, dateFrom, dateTo])
 }
 
@@ -251,7 +271,7 @@ export async function getFunnelMetrics(tenantId: string, dateFrom: string, dateT
 
   const [shopify] = await query<{ orders: number; abandoned: number }>(`
     SELECT
-      COUNT(*) FILTER (WHERE financial_status NOT IN ('refunded','voided')) AS orders,
+      COUNT(*) FILTER (WHERE o.financial_status NOT IN ('refunded','voided')) AS orders,
       (SELECT COUNT(*) FROM shopify_abandoned_checkouts
        WHERE tenant_id = $1
          AND created_at::date BETWEEN $2::date AND $3::date
@@ -260,9 +280,10 @@ export async function getFunnelMetrics(tenantId: string, dateFrom: string, dateT
            FROM shopify_orders WHERE tenant_id = $1 AND financial_status NOT IN ('refunded','voided')
          )
       ) AS abandoned
-    FROM shopify_orders
-    WHERE tenant_id = $1
-      AND created_at::date BETWEEN $2::date AND $3::date
+    FROM shopify_orders o
+    JOIN tenants t ON t.id = o.tenant_id
+    WHERE o.tenant_id = $1
+      AND (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date BETWEEN $2::date AND $3::date
   `, [tenantId, dateFrom, dateTo])
 
   return { ...fb, shopify_orders: Number(shopify.orders), shopify_abandoned: Number(shopify.abandoned) }
@@ -285,9 +306,10 @@ export async function getProductMetrics(tenantId: string, dateFrom: string, date
         END::numeric, 2)                             AS aov
     FROM shopify_order_items oi
     JOIN shopify_orders o ON oi.order_id = o.order_id
+    JOIN tenants t ON t.id = o.tenant_id
     LEFT JOIN shopify_products p ON oi.product_id = p.product_id
     WHERE o.tenant_id = $1
-      AND o.created_at::date BETWEEN $2::date AND $3::date
+      AND (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date BETWEEN $2::date AND $3::date
       AND o.financial_status NOT IN ('refunded', 'voided')
     GROUP BY p.product_id, p.title, oi.product_title, p.image_url
     ORDER BY revenue DESC
@@ -316,4 +338,12 @@ export async function getLastSyncTime(tenantId: string) {
     LIMIT 2
   `, [tenantId])
   return rows
+}
+
+export async function getTenantTimezone(tenantId: string): Promise<string> {
+  const rows = await query<{ timezone: string }>(
+    `SELECT COALESCE(timezone, 'UTC') AS timezone FROM tenants WHERE id = $1`,
+    [tenantId]
+  )
+  return rows[0]?.timezone ?? 'UTC'
 }
