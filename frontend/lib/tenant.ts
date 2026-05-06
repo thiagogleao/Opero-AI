@@ -8,6 +8,7 @@ export interface Tenant {
   fb_ad_account_id: string | null
   fb_access_token: string | null
   onboarded: boolean
+  timezone: string | null
   created_at: string
 }
 
@@ -28,11 +29,12 @@ export async function upsertTenant(
     fb_ad_account_id?: string
     fb_access_token?: string
     onboarded?: boolean
+    timezone?: string
   }
 ): Promise<Tenant> {
   const rows = await query<Tenant>(`
-    INSERT INTO tenants (id, email, shopify_domain, shopify_access_token, fb_ad_account_id, fb_access_token, onboarded)
-    VALUES ($1, $2, $3, $4, $5, $6, $7)
+    INSERT INTO tenants (id, email, shopify_domain, shopify_access_token, fb_ad_account_id, fb_access_token, onboarded, timezone)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
     ON CONFLICT (id) DO UPDATE SET
       email                 = COALESCE($2, tenants.email),
       shopify_domain        = COALESCE($3, tenants.shopify_domain),
@@ -40,6 +42,7 @@ export async function upsertTenant(
       fb_ad_account_id      = COALESCE($5, tenants.fb_ad_account_id),
       fb_access_token       = COALESCE($6, tenants.fb_access_token),
       onboarded             = COALESCE($7, tenants.onboarded),
+      timezone              = COALESCE($8, tenants.timezone),
       updated_at            = NOW()
     RETURNING *
   `, [
@@ -50,6 +53,7 @@ export async function upsertTenant(
     data.fb_ad_account_id ?? null,
     data.fb_access_token ?? null,
     data.onboarded ?? null,
+    data.timezone ?? null,
   ])
   return rows[0]
 }

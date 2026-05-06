@@ -15,7 +15,7 @@ export async function POST(req: NextRequest) {
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const body = await req.json()
-  const { shopify_domain, shopify_access_token, fb_ad_account_id, fb_access_token, onboarded } = body
+  const { shopify_domain, shopify_access_token, fb_ad_account_id, fb_access_token, onboarded, timezone } = body
 
   const user = await currentUser()
 
@@ -27,6 +27,7 @@ export async function POST(req: NextRequest) {
       fb_ad_account_id,
       fb_access_token,
       onboarded: onboarded ?? true,
+      timezone: timezone || undefined,
     })
     return NextResponse.json({ tenant })
   } catch (err) {

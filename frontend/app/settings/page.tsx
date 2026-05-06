@@ -25,11 +25,12 @@ const DATE_FORMATS: { value: DateFormat; example: string }[] = [
   { value: 'YYYY-MM-DD', example: '2024-12-25' },
 ]
 
-const TIMEZONES = [
-  'America/Sao_Paulo', 'America/New_York', 'America/Chicago',
-  'America/Denver', 'America/Los_Angeles', 'Europe/London',
-  'Europe/Paris', 'Europe/Berlin', 'Asia/Tokyo', 'Asia/Shanghai',
-  'Australia/Sydney', 'UTC',
+const TIMEZONES: { group: string; zones: string[] }[] = [
+  { group: 'América do Sul', zones: ['America/Sao_Paulo', 'America/Fortaleza', 'America/Manaus', 'America/Belem', 'America/Bogota', 'America/Lima', 'America/Santiago', 'America/Buenos_Aires'] },
+  { group: 'América do Norte', zones: ['America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'America/Phoenix', 'America/Toronto', 'America/Vancouver', 'America/Mexico_City'] },
+  { group: 'Europa', zones: ['Europe/London', 'Europe/Lisbon', 'Europe/Paris', 'Europe/Berlin', 'Europe/Madrid', 'Europe/Rome', 'Europe/Amsterdam', 'Europe/Stockholm'] },
+  { group: 'Ásia / Pacífico', zones: ['Asia/Dubai', 'Asia/Kolkata', 'Asia/Bangkok', 'Asia/Singapore', 'Asia/Tokyo', 'Asia/Shanghai', 'Asia/Seoul', 'Australia/Sydney', 'Pacific/Auckland'] },
+  { group: 'Outros', zones: ['UTC', 'Africa/Johannesburg', 'Africa/Lagos'] },
 ]
 
 function Section({ title, delay = 0, children }: { title: string; delay?: number; children: React.ReactNode }) {
@@ -132,9 +133,19 @@ function SettingsContent() {
         setFbConnected(!!d.tenant?.fb_access_token)
         setFbAccountId(d.tenant?.fb_ad_account_id || null)
         setShopifyDomain(d.tenant?.shopify_domain || null)
+        if (d.tenant?.timezone) s.setTimezone(d.tenant.timezone)
       })
       .catch(() => setFbConnected(false))
   }, [])
+
+  function handleTimezoneChange(tz: string) {
+    s.setTimezone(tz)
+    fetch('/api/tenant', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ timezone: tz }),
+    })
+  }
 
   // Show banner if just connected via OAuth
   const justConnected = searchParams.get('fb_connected') === 'true'
@@ -174,9 +185,13 @@ function SettingsContent() {
             <TextInput value={s.storeUrl} onChange={s.setStoreUrl} placeholder={tr.settings_store_url_ph} />
           </Row>
           <Row label={tr.settings_timezone} desc={tr.settings_timezone_desc} last>
-            <select value={s.timezone} onChange={e => s.setTimezone(e.target.value)}
-              style={{ background: 'var(--bg-input)', border: '1px solid var(--border-strong)', borderRadius: 7, padding: '6px 10px', fontSize: 12, color: 'var(--text-primary)', outline: 'none', cursor: 'pointer' }}>
-              {TIMEZONES.map(tz => <option key={tz} value={tz}>{tz}</option>)}
+            <select value={s.timezone} onChange={e => handleTimezoneChange(e.target.value)}
+              style={{ background: 'var(--bg-input)', border: '1px solid var(--border-strong)', borderRadius: 7, padding: '6px 10px', fontSize: 12, color: 'var(--text-primary)', outline: 'none', cursor: 'pointer', minWidth: 220 }}>
+              {TIMEZONES.map(g => (
+                <optgroup key={g.group} label={g.group}>
+                  {g.zones.map(tz => <option key={tz} value={tz}>{tz}</option>)}
+                </optgroup>
+              ))}
             </select>
           </Row>
         </Section>
