@@ -71,12 +71,29 @@ function CustomTooltip({ active, payload, label }: {
 export default function DailyProfitChart({ data, days }: Props) {
   if (data.length < 2) return null
 
+  // Clamp extreme margin outliers (e.g. $5 revenue + $400 FB spend = -8000%)
+  // so the Y axis scale stays meaningful
+  const MARGIN_CLAMP = 150
+  const chartData = data.map(d => ({
+    ...d,
+    margin: d.margin === null ? null : Math.max(-MARGIN_CLAMP, Math.min(MARGIN_CLAMP, d.margin)),
+  }))
+
+  // Symmetric domains so the $0 and 0% zero lines align visually
+  const moneyValues = data.flatMap(d => [d.revenue, d.profit]).filter(isFinite)
+  const maxMoneyAbs = Math.max(100, ...moneyValues.map(Math.abs))
+  const moneyDomain: [number, number] = [-maxMoneyAbs, maxMoneyAbs]
+
+  const clampedMargins = chartData.filter(d => d.margin !== null).map(d => d.margin as number)
+  const maxMarginAbs   = Math.max(30, ...clampedMargins.map(Math.abs))
+  const marginDomain: [number, number] = [-maxMarginAbs, maxMarginAbs]
+
   // Summary stats for header
-  const validMargins  = data.filter(d => d.margin !== null).map(d => d.margin as number)
-  const avgMargin     = validMargins.length ? validMargins.reduce((a, b) => a + b, 0) / validMargins.length : null
-  const totalProfit   = data.reduce((s, d) => s + d.profit, 0)
-  const profitDays    = data.filter(d => d.profit > 0).length
-  const marginColor   = avgMargin === null ? '#71717A' : avgMargin >= 20 ? '#10B981' : avgMargin >= 10 ? '#F59E0B' : '#F43F5E'
+  const rawMargins   = data.filter(d => d.margin !== null).map(d => d.margin as number)
+  const avgMargin    = rawMargins.length ? rawMargins.reduce((a, b) => a + b, 0) / rawMargins.length : null
+  const totalProfit  = data.reduce((s, d) => s + d.profit, 0)
+  const profitDays   = data.filter(d => d.profit > 0).length
+  const marginColor  = avgMargin === null ? '#71717A' : avgMargin >= 20 ? '#10B981' : avgMargin >= 10 ? '#F59E0B' : '#F43F5E'
 
   return (
     <motion.div
@@ -108,7 +125,7 @@ export default function DailyProfitChart({ data, days }: Props) {
 
       {/* Chart */}
       <ResponsiveContainer width="100%" height={240}>
-        <ComposedChart data={data} margin={{ top: 4, right: 48, left: 0, bottom: 0 }} barCategoryGap="25%">
+        <ComposedChart data={chartData} margin={{ top: 4, right: 48, left: 0, bottom: 0 }} barCategoryGap="25%">
           <defs>
             <linearGradient id="revenueGrad" x1="0" y1="0" x2="0" y2="1">
               <stop offset="5%"  stopColor="#8B5CF6" stopOpacity={0.15} />
@@ -126,19 +143,21 @@ export default function DailyProfitChart({ data, days }: Props) {
             interval="preserveStartEnd"
           />
 
-          {/* Left axis — money */}
+          {/* Left axis — money (symmetric so $0 sits at center) */}
           <YAxis
             yAxisId="money"
+            domain={moneyDomain}
             tick={{ fill: 'var(--text-faint)', fontSize: 11 }}
             tickLine={false} axisLine={false}
             tickFormatter={fmtMoney}
             width={52}
           />
 
-          {/* Right axis — margin % */}
+          {/* Right axis — margin % (same symmetric logic, zero aligns with left) */}
           <YAxis
             yAxisId="pct"
             orientation="right"
+            domain={marginDomain}
             tick={{ fill: '#F59E0B', fontSize: 11, fillOpacity: 0.7 }}
             tickLine={false} axisLine={false}
             tickFormatter={v => `${v.toFixed(0)}%`}
