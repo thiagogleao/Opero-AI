@@ -6,7 +6,7 @@ import { getTenant } from '@/lib/tenant'
 import {
   getOverviewMetrics, getDailyRevenue, getDailyRoas,
   getTopCreatives, getCountryMetrics, getCustomerSplit, getLastSyncTime,
-  getFunnelMetrics, getCountrySpend,
+  getFunnelMetrics, getCountrySpend, getTenantTimezone,
 } from '@/lib/queries'
 import { getProfitSummary, getCountryProfit, getDailyProfitData } from '@/lib/profitCalc'
 import RevenueChart from '@/components/RevenueChart'
@@ -18,6 +18,7 @@ import DailyProfitChart from '@/components/DailyProfitChart'
 import MetricCard from '@/components/MetricCard'
 import TimeframeSelector from '@/components/TimeframeSelector'
 import RefreshButton from '@/components/RefreshButton'
+import AutoSync from '@/components/AutoSync'
 import AiPanel from '@/components/AiPanel'
 import Sidebar from '@/components/Sidebar'
 import Link from 'next/link'
@@ -30,8 +31,9 @@ function fmt(n: number, prefix = '$') {
   return `${prefix}${n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
-function toISO(d: Date) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+/** Returns YYYY-MM-DD in the given IANA timezone. */
+function dateInTz(d: Date, tz: string): string {
+  return d.toLocaleDateString('en-CA', { timeZone: tz })
 }
 
 interface Props {
@@ -52,10 +54,10 @@ export default async function Dashboard({ searchParams }: Props) {
   const lang = (cookieStore.get('opero_lang')?.value ?? 'pt') as Language
   const tr = getTranslations(lang)
 
-  // Resolve date range: support legacy ?days=N as fallback
-  const todayDate = new Date()
-  todayDate.setHours(0, 0, 0, 0)
-  const todayISO = toISO(todayDate)
+  // Use the store's timezone for all date boundaries
+  const storeTimezone = await getTenantTimezone(tenantId)
+  const now = new Date()
+  const todayISO = dateInTz(now, storeTimezone)
 
   let dateFrom: string
   let dateTo: string
@@ -66,9 +68,8 @@ export default async function Dashboard({ searchParams }: Props) {
   } else {
     // Legacy ?days= or default 30 days
     const days = Math.min(Math.max(Number(sp.days) || 30, 1), 730)
-    const fromDate = new Date(todayDate)
-    fromDate.setDate(fromDate.getDate() - (days - 1))
-    dateFrom = toISO(fromDate)
+    const fromDate = new Date(now.getTime() - (days - 1) * 86400000)
+    dateFrom = dateInTz(fromDate, storeTimezone)
     dateTo   = todayISO
   }
 
@@ -92,8 +93,9 @@ export default async function Dashboard({ searchParams }: Props) {
     getDailyProfitData(tenantId, dateFrom, dateTo),
   ])
 
-  const lastSync = syncs[0]?.finished_at
-    ? new Date(syncs[0].finished_at).toLocaleString('pt-BR')
+  const lastSyncIso = syncs[0]?.finished_at ?? null
+  const lastSync = lastSyncIso
+    ? new Date(lastSyncIso).toLocaleString('pt-BR', { timeZone: storeTimezone })
     : 'Nunca'
 
   const totalTried = Number(metrics.orders) + Number(metrics.abandoned_count)
@@ -292,6 +294,7 @@ ${promptLang.formatNote}`
           </div>
 
           <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+            <AutoSync lastSyncIso={lastSyncIso} />
             <RefreshButton />
             <Suspense>
               <TimeframeSelector from={dateFrom} to={dateTo} />
@@ -410,6 +413,13 @@ ${promptLang.formatNote}`
           </Link>
         )}
 
+        {/* Daily Profit Chart — full width, primary position */}
+        {dailyProfit.configured && dailyProfit.dailyData.length > 1 && (
+          <div style={{ marginBottom: 12 }}>
+            <DailyProfitChart data={dailyProfit.dailyData} days={days} />
+          </div>
+        )}
+
         {/* Charts row 1 */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
           <RevenueChart data={revenue} days={days} />
@@ -423,11 +433,8 @@ ${promptLang.formatNote}`
         </div>
 
         {/* Charts row 3 */}
-        <div style={{ display: 'grid', gridTemplateColumns: dailyProfit.configured && dailyProfit.dailyData.length > 1 ? '1fr 1fr' : '1fr', gap: 12, marginBottom: 12 }}>
+        <div style={{ marginBottom: 12 }}>
           <CustomerChart data={customers} days={days} />
-          {dailyProfit.configured && dailyProfit.dailyData.length > 1 && (
-            <DailyProfitChart data={dailyProfit.dailyData} days={days} />
-          )}
         </div>
 
         {/* AI Panel */}

@@ -207,6 +207,7 @@ export interface DailyProfitPoint {
   revenue: number
   profit: number
   fbSpend: number
+  margin: number | null
 }
 
 export async function getDailyProfitData(
@@ -252,11 +253,13 @@ export async function getDailyProfitData(
       const rev = Number(r.revenue)
       const fb = Number(r.spend)
       const profit = rev - rev * nonFbCostRatio - fb
+      const margin = rev > 0 ? Math.round((profit / rev) * 1000) / 10 : null
       return {
         date: r.date,
         revenue: Math.round(rev * 100) / 100,
         profit: Math.round(profit * 100) / 100,
         fbSpend: Math.round(fb * 100) / 100,
+        margin,
       }
     })
 
