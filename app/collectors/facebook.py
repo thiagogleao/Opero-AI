@@ -30,6 +30,11 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Module-level cache for reflected table objects.
+# meta.reflect() is a DB round-trip that introspects the schema — calling it
+# once per table per process is enough since the schema never changes mid-run.
+_TABLE_CACHE: dict = {}
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -210,8 +215,14 @@ class FacebookCollector(BaseCollector):
         ad_account_id: Optional[str] = None,
         app_id: Optional[str] = None,
         app_secret: Optional[str] = None,
+        mode: str = "full",
     ):
         super().__init__(session, tenant_id)
+        # mode controls what this run collects:
+        #   "quick"     — only daily insights (spend/ROAS/purchases). Fast first-pass.
+        #   "structure" — only account structure + breakdowns. Background second-pass.
+        #   "full"      — everything (default, used for manual / scheduled runs).
+        self._mode = mode
         _app_id     = app_id     or settings.facebook_app_id
         _app_secret = app_secret or settings.facebook_app_secret
         _token      = access_token or _refresh_token_if_needed()
@@ -230,26 +241,89 @@ class FacebookCollector(BaseCollector):
     def _run(self, date_from: date, date_to: date) -> None:
         from datetime import timedelta
 
-        logger.info("[facebook] Syncing account structure...")
-        self._sync_account()
-        self._sync_campaigns()
-        self._sync_adsets()
-        ad_ids = self._sync_ads()
+        mode = self._mode
+        days_span = (date_to - date_from).days + 1
+        logger.info("[facebook] mode=%s  %s → %s  (%d days)", mode, date_from, date_to, days_span)
 
-        logger.info("[facebook] Collecting daily insights for %d ads...", len(ad_ids))
-        self._collect_daily_insights(date_from, date_to)
+        # ── Phase 1: daily insights (spend / ROAS / purchases) ────────────────
+        if mode in ("quick", "full"):
+            logger.info("[facebook] Collecting daily insights (spend/ROAS/purchases)...")
+            self._collect_daily_insights(date_from, date_to)
 
-        # Cap breakdowns to last _BREAKDOWN_MAX_DAYS days to avoid timeouts on long ranges
-        breakdown_from = max(date_from, date_to - timedelta(days=_BREAKDOWN_MAX_DAYS - 1))
-        if breakdown_from > date_from:
-            logger.info(
-                "[facebook] Breakdowns capped to last %d days (%s → %s)",
-                _BREAKDOWN_MAX_DAYS, breakdown_from, date_to,
-            )
+        # ── Phase 2: account structure (campaigns / adsets / ads / creatives) ─
+        if mode in ("structure", "full"):
+            # Skip heavy structure re-sync on short incremental runs (≤3 days).
+            # Campaigns/adsets/ads rarely change day-to-day; creatives are cached.
+            # Use mode="full" or a longer date range to force a full structure refresh.
+            if days_span <= 3 and mode == "structure":
+                logger.info(
+                    "[facebook] Short sync (%d days) — skipping structure re-sync, doing breakdowns only",
+                    days_span,
+                )
+            else:
+                logger.info("[facebook] Syncing account structure...")
+                self._sync_account()
+                self._sync_campaigns()
+                self._sync_adsets()
+                self._sync_ads()
 
-        logger.info("[facebook] Collecting breakdowns...")
-        for label, breakdowns in _BREAKDOWNS:
-            self._collect_breakdown(label, breakdowns, breakdown_from, date_to)
+            # Cap breakdowns to last _BREAKDOWN_MAX_DAYS days to avoid timeouts
+            breakdown_from = max(date_from, date_to - timedelta(days=_BREAKDOWN_MAX_DAYS - 1))
+            if breakdown_from > date_from:
+                logger.info(
+                    "[facebook] Breakdowns capped to last %d days (%s → %s)",
+                    _BREAKDOWN_MAX_DAYS, breakdown_from, date_to,
+                )
+
+            # Run the 4 breakdown types in parallel — each gets its own DB session
+            # so SQLAlchemy thread-safety is preserved.
+            logger.info("[facebook] Collecting breakdowns in parallel (4 workers)...")
+            self._collect_breakdowns_parallel(breakdown_from, date_to)
+
+    def _collect_breakdowns_parallel(self, date_from: date, date_to: date) -> None:
+        """Run all 4 breakdown types concurrently — each thread owns its DB session."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from app.database import SessionLocal
+
+        _account_id = self._account_id
+        _tenant_id  = self.tenant_id
+        # Snapshot API credentials from current initialized API
+        _api        = self._account.get_api()
+        _app_id     = _api.app_id
+        _app_secret = _api.app_secret
+        _token      = _api.access_token
+
+        def run_one(label: str, breakdowns: list):
+            """Thread worker: own session + own FacebookCollector (no token refresh)."""
+            session = SessionLocal()
+            try:
+                collector = FacebookCollector(
+                    session=session,
+                    tenant_id=_tenant_id,
+                    access_token=_token,
+                    ad_account_id=_account_id,
+                    app_id=_app_id,
+                    app_secret=_app_secret,
+                )
+                collector._collect_breakdown(label, breakdowns, date_from, date_to)
+                session.commit()
+            except Exception as exc:
+                session.rollback()
+                logger.error("[facebook] Breakdown '%s' failed: %s", label, exc, exc_info=True)
+            finally:
+                session.close()
+
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="fb-breakdown") as pool:
+            futures = {
+                pool.submit(run_one, label, bds): label
+                for label, bds in _BREAKDOWNS
+            }
+            for fut in as_completed(futures):
+                label = futures[fut]
+                if fut.exception():
+                    logger.error("[facebook] Breakdown '%s' error: %s", label, fut.exception())
+                else:
+                    logger.info("[facebook] Breakdown '%s' complete", label)
 
     # ------------------------------------------------------------------
     # Structure sync
@@ -357,20 +431,37 @@ class FacebookCollector(BaseCollector):
             )
         ))
 
-        # Collect unique creative IDs, then fetch their full details separately.
-        # The nested field syntax creative{...} in get_ads() is unreliable — object_story_spec
-        # is often empty even for active ads. The AdCreative endpoint returns full data.
+        # Only fetch creatives for ads that don't already have creative data cached.
+        # Re-fetching all creatives on every sync is the single biggest time sink.
+        from sqlalchemy import text as sa_text
+        cached_creative: dict[str, dict] = {}
+        if ads:
+            ad_id_list = [ad["id"] for ad in ads]
+            rows_db = self.session.execute(
+                sa_text("SELECT ad_id, creative_url, landing_url, thumbnail_url FROM fb_ads WHERE ad_id = ANY(:ids) AND creative_url IS NOT NULL"),
+                {"ids": ad_id_list},
+            ).fetchall()
+            # Use existing DB creative data so we don't overwrite with NULLs on upsert
+            cached_creative = {
+                r[0]: {"image_url": r[1], "landing_url": r[2], "thumbnail_url": r[3]}
+                for r in rows_db
+            }
+
         creative_ids = list({
             (ad.get("creative") or {}).get("id")
             for ad in ads
-            if (ad.get("creative") or {}).get("id")
+            if (ad.get("creative") or {}).get("id") and ad["id"] not in cached_creative
         })
-        creative_map = self._fetch_creative_details(creative_ids)
+        if creative_ids:
+            logger.info("[facebook] Fetching creatives for %d ads (skipping %d cached)", len(creative_ids), len(cached_creative))
+        else:
+            logger.info("[facebook] All creative data cached — skipping creative fetch")
+        creative_map = self._fetch_creative_details(creative_ids) if creative_ids else {}
 
         rows = []
         for ad in ads:
             cid = (ad.get("creative") or {}).get("id")
-            details = creative_map.get(cid, {}) if cid else {}
+            details = creative_map.get(cid) or cached_creative.get(ad["id"]) or {}
             rows.append({
                 "ad_id": ad["id"],
                 "adset_id": ad.get("adset_id"),
@@ -589,7 +680,7 @@ class FacebookCollector(BaseCollector):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _paginate(cursor, sleep_between_pages: float = 0.5):
+    def _paginate(cursor, sleep_between_pages: float = 0.2):
         """Iterate all pages of a Facebook API cursor with rate-limit sleep."""
         for item in cursor:
             yield item
@@ -610,9 +701,11 @@ class FacebookCollector(BaseCollector):
 
         rows = self._inject_tenant(rows)
 
-        meta = MetaData()
-        meta.reflect(bind=self.session.bind, only=[table_name])
-        table = meta.tables[table_name]
+        if table_name not in _TABLE_CACHE:
+            meta = MetaData()
+            meta.reflect(bind=self.session.bind, only=[table_name])
+            _TABLE_CACHE[table_name] = meta.tables[table_name]
+        table = _TABLE_CACHE[table_name]
 
         # Strip keys not present in the DB table so extra collector fields never cause errors
         col_names = {c.name for c in table.columns}

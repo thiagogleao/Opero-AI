@@ -27,6 +27,9 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Module-level cache for reflected table objects — same rationale as facebook.py.
+_TABLE_CACHE: dict = {}
+
 # Shopify returns timestamps in ISO 8601 with timezone, e.g. "2024-01-15T14:23:10-05:00"
 _DT_FMT = "%Y-%m-%dT%H:%M:%S%z"
 
@@ -90,6 +93,7 @@ class ShopifyCollector(BaseCollector):
     def _run(self, date_from: date, date_to: date) -> None:
         logger.info("[shopify] Syncing products catalog...")
         self._sync_products()
+        self._save_shop_timezone()
 
         logger.info("[shopify] Fetching orders %s → %s", date_from, date_to)
         orders = self._fetch_all_orders(date_from, date_to)
@@ -113,6 +117,24 @@ class ShopifyCollector(BaseCollector):
     # ------------------------------------------------------------------
     # Fetch helpers
     # ------------------------------------------------------------------
+
+    def _save_shop_timezone(self) -> None:
+        """Fetch IANA timezone from Shopify shop and persist to tenants table."""
+        if not self.tenant_id:
+            return
+        try:
+            shop = shopify.Shop.current()
+            tz = getattr(shop, "iana_timezone", None) or getattr(shop, "timezone", None)
+            if tz:
+                from sqlalchemy import text
+                self.session.execute(
+                    text("UPDATE tenants SET timezone = :tz WHERE id = :tid"),
+                    {"tz": tz, "tid": self.tenant_id},
+                )
+                self.session.commit()
+                logger.info("[shopify] Store timezone saved: %s", tz)
+        except Exception as e:
+            logger.warning("[shopify] Could not fetch shop timezone: %s", e)
 
     def _fetch_all_orders(self, date_from: date, date_to: date) -> list:
         """Return all orders in the date range.
@@ -351,33 +373,49 @@ class ShopifyCollector(BaseCollector):
         self._upsert_raw("shopify_daily_metrics", rows, ["date", "tenant_id"])
 
     def _recalculate_daily_from_db(self, date_from: date, date_to: date) -> None:
-        """Re-aggregate total_orders/total_revenue/avg_order_value from the DB orders table.
+        """Re-aggregate order metrics from shopify_orders for the sync window.
 
-        Fixes the case where multiple partial syncs write overlapping date ranges and
-        the in-memory batch only has a subset of orders for a given day.
+        Uses a 7-day buffer on each side of the window to catch timezone-shifted
+        orders and late-arriving refunds without recalculating the entire history
+        (which grows unboundedly and was the main cause of sync slowness).
         """
+        if not self.tenant_id:
+            return
+
         from sqlalchemy import text
-        self.session.execute(text("""
-            UPDATE shopify_daily_metrics dm
-            SET
-                total_orders     = sub.order_count,
-                total_revenue    = sub.order_sum,
-                avg_order_value  = CASE WHEN sub.order_count > 0
-                                        THEN sub.order_sum / sub.order_count ELSE 0 END
-            FROM (
-                SELECT
-                    DATE(created_at AT TIME ZONE 'America/Belem') AS d,
-                    COUNT(*)                                       AS order_count,
-                    COALESCE(SUM(total_price), 0)                  AS order_sum,
-                    tenant_id
-                FROM shopify_orders
-                WHERE tenant_id  = :tid
-                  AND financial_status = 'paid'
-                  AND DATE(created_at AT TIME ZONE 'America/Belem') BETWEEN :df AND :dt
-                GROUP BY DATE(created_at AT TIME ZONE 'America/Belem'), tenant_id
-            ) sub
-            WHERE dm.date = sub.d AND dm.tenant_id = sub.tenant_id
-        """), {"tid": self.tenant_id, "df": str(date_from), "dt": str(date_to)})
+        from datetime import timedelta
+
+        tz_row = self.session.execute(
+            text("SELECT COALESCE(timezone, 'UTC') AS tz FROM tenants WHERE id = :tid"),
+            {"tid": self.tenant_id},
+        ).fetchone()
+        store_tz = tz_row[0] if tz_row else "UTC"
+
+        calc_from = date_from - timedelta(days=7)
+        calc_to   = date_to   + timedelta(days=1)
+
+        self.session.execute(text(
+            "INSERT INTO shopify_daily_metrics "
+            "    (tenant_id, date, total_orders, total_revenue, avg_order_value, "
+            "     new_customers, returning_customers, new_customer_revenue, "
+            "     returning_customer_revenue, cart_abandonment_count, cart_abandonment_value) "
+            "SELECT "
+            "    :tid, "
+            "    DATE(created_at AT TIME ZONE :tz), "
+            "    COUNT(*), "
+            "    COALESCE(SUM(total_price), 0), "
+            "    CASE WHEN COUNT(*) > 0 THEN SUM(total_price) / COUNT(*) ELSE 0 END, "
+            "    0, 0, 0, 0, 0, 0 "
+            "FROM shopify_orders "
+            "WHERE tenant_id = :tid "
+            "  AND financial_status NOT IN ('refunded', 'voided') "
+            "  AND (created_at AT TIME ZONE :tz)::date BETWEEN :calc_from AND :calc_to "
+            "GROUP BY DATE(created_at AT TIME ZONE :tz) "
+            "ON CONFLICT (date, tenant_id) DO UPDATE SET "
+            "    total_orders    = EXCLUDED.total_orders, "
+            "    total_revenue   = EXCLUDED.total_revenue, "
+            "    avg_order_value = EXCLUDED.avg_order_value"
+        ), {"tid": self.tenant_id, "tz": store_tz, "calc_from": calc_from, "calc_to": calc_to})
         self.session.commit()
 
     def _patch_daily_with_abandonment(self, checkouts: list):
@@ -518,9 +556,11 @@ class ShopifyCollector(BaseCollector):
 
         rows = self._inject_tenant(rows)
 
-        meta = MetaData()
-        meta.reflect(bind=self.session.bind, only=[table_name])
-        table = meta.tables[table_name]
+        if table_name not in _TABLE_CACHE:
+            meta = MetaData()
+            meta.reflect(bind=self.session.bind, only=[table_name])
+            _TABLE_CACHE[table_name] = meta.tables[table_name]
+        table = _TABLE_CACHE[table_name]
 
         # Strip keys not present in the DB table so extra collector fields never cause errors
         col_names = {c.name for c in table.columns}
