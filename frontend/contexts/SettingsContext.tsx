@@ -24,29 +24,31 @@ export interface AlertSettings {
 }
 
 export interface Settings {
-  theme:             Theme
-  language:          Language
-  currency:          Currency
-  dateFormat:        DateFormat
-  attributionWindow: AttributionWindow
-  storeName:         string
-  storeUrl:          string
-  timezone:          string
-  goals:             KpiGoals
-  alerts:            AlertSettings
+  theme:                Theme
+  language:             Language
+  currency:             Currency
+  dateFormat:           DateFormat
+  attributionWindow:    AttributionWindow
+  storeName:            string
+  storeUrl:             string
+  timezone:             string
+  goals:                KpiGoals
+  alerts:               AlertSettings
+  autoRefreshInterval:  number  // minutes; 0 = disabled
 }
 
 interface SettingsCtx extends Settings {
-  setTheme:             (t: Theme)             => void
-  setLanguage:          (l: Language)          => void
-  setCurrency:          (c: Currency)          => void
-  setDateFormat:        (f: DateFormat)        => void
-  setAttributionWindow: (w: AttributionWindow) => void
-  setStoreName:         (s: string)            => void
-  setStoreUrl:          (s: string)            => void
-  setTimezone:          (s: string)            => void
-  setGoals:             (g: Partial<KpiGoals>) => void
-  setAlerts:            (a: Partial<AlertSettings>) => void
+  setTheme:                (t: Theme)             => void
+  setLanguage:             (l: Language)          => void
+  setCurrency:             (c: Currency)          => void
+  setDateFormat:           (f: DateFormat)        => void
+  setAttributionWindow:    (w: AttributionWindow) => void
+  setStoreName:            (s: string)            => void
+  setStoreUrl:             (s: string)            => void
+  setTimezone:             (s: string)            => void
+  setGoals:                (g: Partial<KpiGoals>) => void
+  setAlerts:               (a: Partial<AlertSettings>) => void
+  setAutoRefreshInterval:  (n: number)            => void
 }
 
 const defaults: Settings = {
@@ -55,6 +57,7 @@ const defaults: Settings = {
   storeName: '', storeUrl: '', timezone: 'America/Sao_Paulo',
   goals: { targetRoas: 2.0, targetMargin: 20, targetDailyRevenue: 0, targetCac: 0 },
   alerts: { roasDropEnabled: true, roasDropThreshold: 1.5, spendSpikeEnabled: false, spendSpikeThreshold: 200, marginDropEnabled: true, marginDropThreshold: 10 },
+  autoRefreshInterval: 30,
 }
 
 const Ctx = createContext<SettingsCtx>({
@@ -62,7 +65,7 @@ const Ctx = createContext<SettingsCtx>({
   setTheme: () => {}, setLanguage: () => {}, setCurrency: () => {},
   setDateFormat: () => {}, setAttributionWindow: () => {},
   setStoreName: () => {}, setStoreUrl: () => {}, setTimezone: () => {},
-  setGoals: () => {}, setAlerts: () => {},
+  setGoals: () => {}, setAlerts: () => {}, setAutoRefreshInterval: () => {},
 })
 
 export function SettingsProvider({ children }: { children: React.ReactNode }) {
@@ -97,9 +100,10 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
   function setTimezone(timezone: string)                   { setSettings(s => ({ ...s, timezone })) }
   function setGoals(g: Partial<KpiGoals>)                  { setSettings(s => ({ ...s, goals: { ...s.goals, ...g } })) }
   function setAlerts(a: Partial<AlertSettings>)            { setSettings(s => ({ ...s, alerts: { ...s.alerts, ...a } })) }
+  function setAutoRefreshInterval(n: number)               { setSettings(s => ({ ...s, autoRefreshInterval: n })) }
 
   return (
-    <Ctx.Provider value={{ ...settings, setTheme, setLanguage, setCurrency, setDateFormat, setAttributionWindow, setStoreName, setStoreUrl, setTimezone, setGoals, setAlerts }}>
+    <Ctx.Provider value={{ ...settings, setTheme, setLanguage, setCurrency, setDateFormat, setAttributionWindow, setStoreName, setStoreUrl, setTimezone, setGoals, setAlerts, setAutoRefreshInterval }}>
       {children}
     </Ctx.Provider>
   )

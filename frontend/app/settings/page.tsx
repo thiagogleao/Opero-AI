@@ -281,8 +281,21 @@ function SettingsContent() {
 
         {/* ── Attribution & Data ── */}
         <Section title={tr.settings_attribution} delay={0.13}>
-          <Row label={tr.settings_attr_window} desc={tr.settings_attr_window_desc} last>
+          <Row label={tr.settings_attr_window} desc={tr.settings_attr_window_desc}>
             <ChipGroup options={attrOptions} value={s.attributionWindow} onChange={s.setAttributionWindow} />
+          </Row>
+          <Row label="Atualização automática" desc="Sincroniza novos dados periodicamente em segundo plano" last>
+            <div style={{ display: 'flex', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 3, gap: 2 }}>
+              {([0, 15, 30, 60, 120] as const).map(mins => (
+                <button key={mins} onClick={() => s.setAutoRefreshInterval(mins)} style={{
+                  padding: '5px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer', transition: 'all 0.15s',
+                  background: s.autoRefreshInterval === mins ? 'rgba(139,92,246,0.2)' : 'transparent',
+                  color: s.autoRefreshInterval === mins ? '#A78BFA' : 'var(--text-faint)',
+                }}>
+                  {mins === 0 ? 'Off' : mins < 60 ? `${mins}min` : `${mins / 60}h`}
+                </button>
+              ))}
+            </div>
           </Row>
         </Section>
 
