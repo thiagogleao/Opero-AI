@@ -2,7 +2,7 @@
 import { motion } from 'framer-motion'
 import {
   ComposedChart, Bar, Line, Cell, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, ReferenceLine,
+  Tooltip, ResponsiveContainer, ReferenceLine, Area,
 } from 'recharts'
 import type { DailyProfitPoint } from '@/lib/profitCalc'
 
@@ -11,26 +11,59 @@ interface Props {
   days: number
 }
 
-const fmtMoney = (v: number) => {
+function fmtMoney(v: number) {
   const n = Number(v)
-  return n >= 1000 ? `$${(n / 1000).toFixed(1)}k` : n <= -1000 ? `-$${(Math.abs(n) / 1000).toFixed(1)}k` : `$${n.toFixed(0)}`
+  if (n >= 1000)  return `$${(n / 1000).toFixed(1)}k`
+  if (n <= -1000) return `-$${(Math.abs(n) / 1000).toFixed(1)}k`
+  return `$${n.toFixed(0)}`
+}
+
+// Handles both "2024-05-13" and "2024-05-13 00:00:00+00"
+function fmtAxisDate(v: string) {
+  const iso = v.substring(0, 10)
+  const [, m, d] = iso.split('-')
+  return `${d}/${m}`
 }
 
 function CustomTooltip({ active, payload, label }: {
   active?: boolean
-  payload?: { name: string; value: number; color: string }[]
+  payload?: { name: string; value: number; color: string; dataKey: string }[]
   label?: string
 }) {
   if (!active || !payload?.length) return null
-  const names: Record<string, string> = { profit: 'Lucro', revenue: 'Receita', fbSpend: 'Gasto FB', margin: 'Margem' }
+
+  const byKey = Object.fromEntries(payload.map(p => [p.dataKey, p]))
+  const profit  = byKey['profit']
+  const revenue = byKey['revenue']
+  const margin  = byKey['margin']
+
   return (
-    <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-strong)', borderRadius: 8, padding: '10px 14px', fontSize: 13 }}>
-      <p style={{ color: 'var(--text-dim)', marginBottom: 6 }}>{label}</p>
-      {payload.map(p => (
-        <p key={p.name} style={{ color: p.color, fontWeight: 600, marginBottom: 2 }}>
-          {names[p.name] ?? p.name}: {p.name === 'margin' ? `${p.value?.toFixed(1)}%` : fmtMoney(p.value)}
-        </p>
-      ))}
+    <div style={{
+      background: '#1A1D23', border: '1px solid #2A2D35',
+      borderRadius: 10, padding: '12px 16px', fontSize: 12, minWidth: 160,
+      boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+    }}>
+      <p style={{ color: '#71717A', marginBottom: 8, fontSize: 11, fontWeight: 600, letterSpacing: '0.05em' }}>
+        {fmtAxisDate(label ?? '')}
+      </p>
+      {revenue && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 24, marginBottom: 4 }}>
+          <span style={{ color: '#71717A' }}>Receita</span>
+          <span style={{ color: '#A78BFA', fontWeight: 600 }}>{fmtMoney(revenue.value)}</span>
+        </div>
+      )}
+      {profit && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 24, marginBottom: 4 }}>
+          <span style={{ color: '#71717A' }}>Lucro</span>
+          <span style={{ color: profit.value >= 0 ? '#10B981' : '#F43F5E', fontWeight: 700 }}>{fmtMoney(profit.value)}</span>
+        </div>
+      )}
+      {margin && margin.value !== null && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 24, borderTop: '1px solid #2A2D35', paddingTop: 6, marginTop: 4 }}>
+          <span style={{ color: '#71717A' }}>Margem</span>
+          <span style={{ color: '#F59E0B', fontWeight: 700 }}>{Number(margin.value).toFixed(1)}%</span>
+        </div>
+      )}
     </div>
   )
 }
@@ -38,69 +71,126 @@ function CustomTooltip({ active, payload, label }: {
 export default function DailyProfitChart({ data, days }: Props) {
   if (data.length < 2) return null
 
-  const hasMargin = data.some(d => d.margin !== null)
+  // Summary stats for header
+  const validMargins  = data.filter(d => d.margin !== null).map(d => d.margin as number)
+  const avgMargin     = validMargins.length ? validMargins.reduce((a, b) => a + b, 0) / validMargins.length : null
+  const totalProfit   = data.reduce((s, d) => s + d.profit, 0)
+  const profitDays    = data.filter(d => d.profit > 0).length
+  const marginColor   = avgMargin === null ? '#71717A' : avgMargin >= 20 ? '#10B981' : avgMargin >= 10 ? '#F59E0B' : '#F43F5E'
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.5, delay: 0.3 }}
-      style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 12, padding: 20 }}
+      initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.4, delay: 0.2 }}
+      style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 12, padding: '20px 20px 16px' }}
     >
-      <div style={{ marginBottom: 16 }}>
-        <h3 style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 15 }}>Lucro Diário</h3>
-        <p style={{ color: 'var(--text-faint)', fontSize: 12, marginTop: 2 }}>
-          Últimos {days} dias · Barras = lucro estimado por dia
-        </p>
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 }}>
+        <div>
+          <h3 style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 15 }}>Lucro Diário</h3>
+          <p style={{ color: 'var(--text-faint)', fontSize: 12, marginTop: 3 }}>
+            Últimos {days} dias · {profitDays}/{data.length} dias lucrativos
+          </p>
+        </div>
+        <div style={{ display: 'flex', gap: 20, alignItems: 'center' }}>
+          <div style={{ textAlign: 'right' }}>
+            <p style={{ fontSize: 11, color: 'var(--text-faint)', marginBottom: 2 }}>Lucro total</p>
+            <p style={{ fontSize: 16, fontWeight: 700, color: totalProfit >= 0 ? '#10B981' : '#F43F5E' }}>{fmtMoney(totalProfit)}</p>
+          </div>
+          {avgMargin !== null && (
+            <div style={{ textAlign: 'right' }}>
+              <p style={{ fontSize: 11, color: 'var(--text-faint)', marginBottom: 2 }}>Margem média</p>
+              <p style={{ fontSize: 16, fontWeight: 700, color: marginColor }}>{avgMargin.toFixed(1)}%</p>
+            </div>
+          )}
+        </div>
       </div>
-      <ResponsiveContainer width="100%" height={260}>
-        <ComposedChart data={data} margin={{ top: 5, right: hasMargin ? 48 : 5, left: 0, bottom: 0 }}>
+
+      {/* Chart */}
+      <ResponsiveContainer width="100%" height={240}>
+        <ComposedChart data={data} margin={{ top: 4, right: 48, left: 0, bottom: 0 }} barCategoryGap="25%">
+          <defs>
+            <linearGradient id="revenueGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%"  stopColor="#8B5CF6" stopOpacity={0.15} />
+              <stop offset="95%" stopColor="#8B5CF6" stopOpacity={0.02} />
+            </linearGradient>
+          </defs>
+
           <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+
           <XAxis
-            dataKey="date" tick={{ fill: 'var(--text-faint)', fontSize: 11 }}
-            tickLine={false} axisLine={false} tickFormatter={v => v.slice(5)}
+            dataKey="date"
+            tick={{ fill: 'var(--text-faint)', fontSize: 11 }}
+            tickLine={false} axisLine={false}
+            tickFormatter={fmtAxisDate}
             interval="preserveStartEnd"
           />
+
+          {/* Left axis — money */}
           <YAxis
             yAxisId="money"
             tick={{ fill: 'var(--text-faint)', fontSize: 11 }}
-            tickLine={false} axisLine={false} tickFormatter={fmtMoney} width={52}
+            tickLine={false} axisLine={false}
+            tickFormatter={fmtMoney}
+            width={52}
           />
-          {hasMargin && (
-            <YAxis
-              yAxisId="pct"
-              orientation="right"
-              tick={{ fill: '#F59E0B', fontSize: 11 }}
-              tickLine={false} axisLine={false}
-              tickFormatter={v => `${v.toFixed(0)}%`}
-              width={42}
-            />
-          )}
-          <Tooltip content={<CustomTooltip />} />
-          <ReferenceLine yAxisId="money" y={0} stroke="var(--border-strong)" strokeDasharray="4 4" />
-          {hasMargin && (
-            <ReferenceLine yAxisId="pct" y={0} stroke="rgba(245,158,11,0.2)" strokeDasharray="4 4" />
-          )}
 
-          <Bar yAxisId="money" dataKey="revenue" name="revenue" fill="rgba(139,92,246,0.2)" radius={[2,2,0,0]} maxBarSize={28} />
-          <Bar yAxisId="money" dataKey="profit" name="profit" radius={[3,3,0,0]} maxBarSize={16}>
+          {/* Right axis — margin % */}
+          <YAxis
+            yAxisId="pct"
+            orientation="right"
+            tick={{ fill: '#F59E0B', fontSize: 11, fillOpacity: 0.7 }}
+            tickLine={false} axisLine={false}
+            tickFormatter={v => `${v.toFixed(0)}%`}
+            width={40}
+          />
+
+          <Tooltip content={<CustomTooltip />} cursor={{ fill: 'rgba(255,255,255,0.03)' }} />
+
+          {/* Zero line */}
+          <ReferenceLine yAxisId="money" y={0} stroke="rgba(255,255,255,0.12)" strokeDasharray="0" />
+
+          {/* Revenue area (background context) */}
+          <Area
+            yAxisId="money"
+            type="monotone"
+            dataKey="revenue"
+            fill="url(#revenueGrad)"
+            stroke="#8B5CF6"
+            strokeWidth={1.5}
+            strokeOpacity={0.5}
+            dot={false}
+          />
+
+          {/* Profit bars (main element) */}
+          <Bar yAxisId="money" dataKey="profit" radius={[3, 3, 2, 2]}>
             {data.map((entry, i) => (
-              <Cell key={`cell-${i}`} fill={entry.profit >= 0 ? 'rgba(16,185,129,0.85)' : 'rgba(244,63,94,0.85)'} />
+              <Cell
+                key={`cell-${i}`}
+                fill={entry.profit >= 0 ? '#10B981' : '#F43F5E'}
+                fillOpacity={entry.profit >= 0 ? 0.9 : 0.8}
+              />
             ))}
           </Bar>
-          <Line yAxisId="money" type="monotone" dataKey="fbSpend" name="fbSpend" stroke="#8B5CF6" strokeWidth={1.5} dot={false} strokeDasharray="4 2" />
-          {hasMargin && (
-            <Line
-              yAxisId="pct" type="monotone" dataKey="margin" name="margin"
-              stroke="#F59E0B" strokeWidth={2} dot={false}
-              connectNulls
-            />
-          )}
+
+          {/* Margin % line */}
+          <Line
+            yAxisId="pct"
+            type="monotone"
+            dataKey="margin"
+            stroke="#F59E0B"
+            strokeWidth={2}
+            dot={{ fill: '#F59E0B', r: 3, strokeWidth: 0 }}
+            activeDot={{ r: 5, strokeWidth: 0 }}
+            connectNulls
+          />
         </ComposedChart>
       </ResponsiveContainer>
 
-      <div style={{ display: 'flex', gap: 16, marginTop: 10, fontSize: 11, color: 'var(--text-faint)', flexWrap: 'wrap' }}>
+      {/* Legend */}
+      <div style={{ display: 'flex', gap: 20, marginTop: 12, fontSize: 11, color: 'var(--text-faint)', flexWrap: 'wrap' }}>
         <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-          <span style={{ width: 10, height: 10, borderRadius: 2, background: 'rgba(139,92,246,0.4)', display: 'inline-block' }} />
+          <svg width="16" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke="#8B5CF6" strokeWidth="1.5" strokeOpacity="0.6" /></svg>
           Receita
         </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
@@ -112,15 +202,9 @@ export default function DailyProfitChart({ data, days }: Props) {
           Lucro negativo
         </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-          <span style={{ width: 16, height: 2, background: '#8B5CF6', display: 'inline-block' }} />
-          Gasto FB
+          <svg width="16" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke="#F59E0B" strokeWidth="2" /><circle cx="8" cy="4" r="2.5" fill="#F59E0B" /></svg>
+          Margem %
         </span>
-        {hasMargin && (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-            <span style={{ width: 16, height: 2, background: '#F59E0B', display: 'inline-block' }} />
-            Margem %
-          </span>
-        )}
       </div>
     </motion.div>
   )
