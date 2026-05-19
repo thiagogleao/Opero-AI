@@ -65,35 +65,49 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
     (new Date(dateTo).getTime() - new Date(dateFrom).getTime()) / 86400000
   ) + 1
 
-  // 1. Orders with quantities
-  const orders = await query<{
+  // 1. Orders with per-product line items (timezone-aware)
+  const rows = await query<{
     order_id: string
     total_price: string
     country_code: string | null
-    total_units: string
-    financial_status: string | null
+    product_id: string | null
+    product_units: string
   }>(`
-    SELECT
-      o.order_id,
-      o.total_price::text,
-      o.country_code,
-      o.financial_status,
-      COALESCE(SUM(oi.quantity), 1)::text AS total_units
+    SELECT o.order_id, o.total_price::text, o.country_code,
+           oi.product_id,
+           COALESCE(oi.quantity, 1)::text AS product_units
     FROM shopify_orders o
+    JOIN tenants t ON t.id = o.tenant_id
     LEFT JOIN shopify_order_items oi ON o.order_id = oi.order_id
-    WHERE o.tenant_id = $3
-      AND o.created_at::date BETWEEN $1::date AND $2::date
+    WHERE o.tenant_id = $1
+      AND (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date BETWEEN $2::date AND $3::date
       AND o.financial_status NOT IN ('refunded', 'voided')
-    GROUP BY o.order_id, o.total_price, o.country_code, o.financial_status
-  `, [dateFrom, dateTo, tenantId])
+  `, [tenantId, dateFrom, dateTo])
+
+  // Group rows into orders
+  const orderMap = new Map<string, { total_price: string; country_code: string | null; items: { product_id: string | null; units: number }[] }>()
+  for (const row of rows) {
+    if (!orderMap.has(row.order_id)) {
+      orderMap.set(row.order_id, { total_price: row.total_price, country_code: row.country_code, items: [] })
+    }
+    orderMap.get(row.order_id)!.items.push({ product_id: row.product_id, units: Number(row.product_units) })
+  }
+  const orders = Array.from(orderMap.values())
+
+  // Build per-product COGS lookup
+  const productCogs = new Map<string, number>()
+  for (const p of (cfg.cogs.products ?? [])) {
+    if (p.product_id && p.cost_usd > 0) productCogs.set(p.product_id, p.cost_usd)
+  }
+  const hasProductCogs = productCogs.size > 0
 
   // 2. FB spend
   const [fbRow] = await query<{ spend: string }>(`
     SELECT COALESCE(SUM(spend), 0)::text AS spend
     FROM fb_ad_daily_metrics
-    WHERE tenant_id = $3
-      AND date BETWEEN $1::date AND $2::date
-  `, [dateFrom, dateTo, tenantId])
+    WHERE tenant_id = $1
+      AND date BETWEEN $2::date AND $3::date
+  `, [tenantId, dateFrom, dateTo])
   const fbSpend = Number(fbRow.spend)
 
   // 3. Extra costs
@@ -117,24 +131,31 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
   let totalShipping = 0
   let totalPackaging = 0
   let totalPerOrderExtras = 0
-  // Savings from additional units in the same order (reduces total cost)
   let totalAdditionalUnitSavings = 0
 
   for (const order of orders) {
     const revenue = Number(order.total_price)
-    const units   = Number(order.total_units)
+    const totalUnits = order.items.reduce((s, i) => s + i.units, 0)
 
     totalRevenue       += revenue
     totalShopifyFees   += revenue * (cfg.shopify.transaction_fee_pct / 100)
     totalPaymentFees   += revenue * (cfg.shopify.payment_processing_pct / 100)
                         + cfg.shopify.payment_processing_fixed
-    totalCogs          += calcCogs(units, cfg)
+    if (hasProductCogs) {
+      for (const item of order.items) {
+        const perUnitCost = item.product_id && productCogs.has(item.product_id)
+          ? productCogs.get(item.product_id)!
+          : cfg.cogs.default_cost_usd
+        totalCogs += perUnitCost * item.units
+      }
+    } else {
+      totalCogs += calcCogs(totalUnits, cfg)
+    }
     totalPackaging     += cfg.cogs.packaging_cost_usd
     totalShipping      += getShippingCost(order.country_code, cfg)
     totalPerOrderExtras += perOrderExtras
-    // Each unit beyond the 1st gets a $X discount on total fulfillment cost
-    if (units > 1 && addlUnitDiscount > 0) {
-      totalAdditionalUnitSavings += (units - 1) * addlUnitDiscount
+    if (totalUnits > 1 && addlUnitDiscount > 0) {
+      totalAdditionalUnitSavings += (totalUnits - 1) * addlUnitDiscount
     }
   }
 
@@ -149,18 +170,18 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
   const dailyRevRows = await query<{ date: string; revenue: string }>(`
     SELECT date::text, COALESCE(SUM(total_revenue), 0)::text AS revenue
     FROM shopify_daily_metrics
-    WHERE tenant_id = $3
-      AND date BETWEEN $1::date AND $2::date
+    WHERE tenant_id = $1
+      AND date BETWEEN $2::date AND $3::date
     GROUP BY date ORDER BY date
-  `, [dateFrom, dateTo, tenantId])
+  `, [tenantId, dateFrom, dateTo])
 
   const dailyFbRows = await query<{ date: string; spend: string }>(`
     SELECT date::text, COALESCE(SUM(spend), 0)::text AS spend
     FROM fb_ad_daily_metrics
-    WHERE tenant_id = $3
-      AND date BETWEEN $1::date AND $2::date
+    WHERE tenant_id = $1
+      AND date BETWEEN $2::date AND $3::date
     GROUP BY date ORDER BY date
-  `, [dateFrom, dateTo, tenantId])
+  `, [tenantId, dateFrom, dateTo])
 
   const fbByDate: Record<string, number> = {}
   for (const r of dailyFbRows) fbByDate[r.date] = Number(r.spend)
