@@ -88,12 +88,12 @@ export default function DailyProfitChart({ data, days }: Props) {
   const maxMarginAbs   = Math.max(30, ...clampedMargins.map(Math.abs))
   const marginDomain: [number, number] = [-maxMarginAbs, maxMarginAbs]
 
-  // Summary stats for header
-  const rawMargins   = data.filter(d => d.margin !== null).map(d => d.margin as number)
-  const avgMargin    = rawMargins.length ? rawMargins.reduce((a, b) => a + b, 0) / rawMargins.length : null
-  const totalProfit  = data.reduce((s, d) => s + d.profit, 0)
-  const profitDays   = data.filter(d => d.profit > 0).length
-  const marginColor  = avgMargin === null ? '#71717A' : avgMargin >= 20 ? '#10B981' : avgMargin >= 10 ? '#F59E0B' : '#F43F5E'
+  // Summary stats for header — margin uses period total (same as banner), not average of daily %s
+  const totalProfit   = data.reduce((s, d) => s + d.profit, 0)
+  const totalRevenue  = data.reduce((s, d) => s + d.revenue, 0)
+  const avgMargin     = totalRevenue > 0 ? (totalProfit / totalRevenue) * 100 : null
+  const profitDays    = data.filter(d => d.profit > 0).length
+  const marginColor   = avgMargin === null ? '#71717A' : avgMargin >= 20 ? '#10B981' : avgMargin >= 10 ? '#F59E0B' : '#F43F5E'
 
   return (
     <motion.div
