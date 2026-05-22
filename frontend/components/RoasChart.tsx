@@ -4,7 +4,7 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 import { useTr } from '@/lib/translations'
 
 interface Props {
-  data: { date: string; fb_roas: number; blended_roas: number }[]
+  data: { date: string; blended_roas: number }[]
   days: number
 }
 
@@ -15,7 +15,7 @@ function CustomTooltip({ active, payload, label }: any) {
       <p style={{ color: 'var(--text-dim)', marginBottom: 6 }}>{label}</p>
       {payload.map((p: any) => (
         <p key={p.name} style={{ color: p.color, fontWeight: 600 }}>
-          {p.name === 'fb_roas' ? 'ROAS Facebook' : 'ROAS Real'}: {Number(p.value).toFixed(2)}x
+          ROAS: {Number(p.value).toFixed(2)}x
         </p>
       ))}
     </div>
@@ -24,7 +24,7 @@ function CustomTooltip({ active, payload, label }: any) {
 
 export default function RoasChart({ data, days }: Props) {
   const tr = useTr()
-  const hasData = data.some(d => Number(d.fb_roas) > 0 || Number(d.blended_roas) > 0)
+  const hasData = data.some(d => Number(d.blended_roas) > 0)
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
@@ -47,7 +47,6 @@ export default function RoasChart({ data, days }: Props) {
             <YAxis tick={{ fill: 'var(--text-faint)', fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={(v) => `${v}x`} width={40} />
             <Tooltip content={<CustomTooltip />} />
             <ReferenceLine y={1} stroke="#F43F5E" strokeDasharray="4 4" />
-            <Line type="monotone" dataKey="fb_roas" stroke="#8B5CF6" strokeWidth={2} dot={false} name="fb_roas" />
             <Line type="monotone" dataKey="blended_roas" stroke="#10B981" strokeWidth={2} dot={false} name="blended_roas" />
           </LineChart>
         </ResponsiveContainer>

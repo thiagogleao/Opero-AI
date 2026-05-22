@@ -15,6 +15,7 @@ import CountryChart from '@/components/CountryChart'
 import CustomerChart from '@/components/CustomerChart'
 import CreativesTable from '@/components/CreativesTable'
 import DailyProfitChart from '@/components/DailyProfitChart'
+import MarginBreakdownChart from '@/components/MarginBreakdownChart'
 import MetricCard from '@/components/MetricCard'
 import TimeframeSelector from '@/components/TimeframeSelector'
 import RefreshButton from '@/components/RefreshButton'
@@ -131,7 +132,7 @@ export default async function Dashboard({ searchParams }: Props) {
   ).join('\n')
 
   const recentRoas = roas.slice(-7).map(r =>
-    `  ${r.date}: ROAS FB ${Number(r.fb_roas).toFixed(2)}x, ROAS Real ${Number(r.blended_roas).toFixed(2)}x`
+    `  ${r.date}: ROAS ${Number(r.blended_roas).toFixed(2)}x`
   ).join('\n')
 
   const profitLine = profit.configured
@@ -333,7 +334,7 @@ ${promptLang.formatNote}`
           />
           <MetricCard
             title={tr.metric_fb_spend} value={fmt(Number(metrics.spend))}
-            sub={`${tr.metric_roas_fb}: ${Number(metrics.roas).toFixed(2)}x`} icon="📣"
+            sub={`${metrics.purchases} ${tr.creative_purchases}`} icon="📣"
             gradient="linear-gradient(135deg,#F59E0B,#D97706)" delay={0.21}
           />
           <MetricCard
@@ -413,10 +414,17 @@ ${promptLang.formatNote}`
           </Link>
         )}
 
-        {/* Daily Profit Chart — full width, primary position */}
-        {dailyProfit.configured && dailyProfit.dailyData.length > 1 && (
-          <div style={{ marginBottom: 12 }}>
-            <DailyProfitChart data={dailyProfit.dailyData} days={days} />
+        {/* Daily Profit Chart + Margin Breakdown */}
+        {profit.configured && (
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: dailyProfit.configured && dailyProfit.dailyData.length > 1 ? '2fr 1fr' : '1fr',
+            gap: 12, marginBottom: 12,
+          }}>
+            {dailyProfit.configured && dailyProfit.dailyData.length > 1 && (
+              <DailyProfitChart data={dailyProfit.dailyData} days={days} />
+            )}
+            <MarginBreakdownChart profit={profit} />
           </div>
         )}
 

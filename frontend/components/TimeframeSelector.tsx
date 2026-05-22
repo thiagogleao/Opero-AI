@@ -18,6 +18,7 @@ function today0() {
 }
 
 const PRESETS = [
+  { label: 'hoje', days: 2  },
   { label: '7d',  days: 7  },
   { label: '14d', days: 14 },
   { label: '30d', days: 30 },

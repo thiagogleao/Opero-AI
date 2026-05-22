@@ -111,12 +111,9 @@ export async function getDailyRevenue(tenantId: string, dateFrom: string, dateTo
 }
 
 export async function getDailyRoas(tenantId: string, dateFrom: string, dateTo: string) {
-  const rows = await query<{ date: string; fb_roas: string; blended_roas: string }>(`
+  const rows = await query<{ date: string; blended_roas: string }>(`
     SELECT
       dates.d::text AS date,
-      ROUND(COALESCE(
-        CASE WHEN f.spend > 0 THEN f.purchase_value / f.spend ELSE 0 END,
-      0)::numeric, 2) AS fb_roas,
       ROUND(COALESCE(
         CASE WHEN f.spend > 0 THEN s.total_revenue / f.spend ELSE 0 END,
       0)::numeric, 2) AS blended_roas
@@ -139,7 +136,7 @@ export async function getDailyRoas(tenantId: string, dateFrom: string, dateTo: s
     ) f ON f.date = dates.d
     ORDER BY dates.d
   `, [tenantId, dateFrom, dateTo])
-  return rows.map(r => ({ date: r.date, fb_roas: Number(r.fb_roas), blended_roas: Number(r.blended_roas) }))
+  return rows.map(r => ({ date: r.date, blended_roas: Number(r.blended_roas) }))
 }
 
 export async function getTopCreatives(tenantId: string, dateFrom: string, dateTo: string) {
