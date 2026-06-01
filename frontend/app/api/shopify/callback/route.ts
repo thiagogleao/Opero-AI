@@ -21,6 +21,16 @@ export async function GET(req: NextRequest) {
   console.log('[shopify/callback] cookieState:', cookieState?.slice(0, 20), 'match:', cookieState === state)
   if (!cookieState || cookieState !== state) return fail('invalid_state')
 
+  // Determine which secret to use for HMAC verification
+  let hmacSecret = process.env.SHOPIFY_CLIENT_SECRET!
+  const customCredsForHmac = req.cookies.get('shopify_custom_creds')?.value
+  if (customCredsForHmac) {
+    try {
+      const creds = JSON.parse(customCredsForHmac)
+      if (creds.clientSecret) hmacSecret = creds.clientSecret
+    } catch { /* ignore */ }
+  }
+
   // Verify HMAC
   const params: Record<string, string> = {}
   for (const [key, val] of searchParams.entries()) {
@@ -28,19 +38,31 @@ export async function GET(req: NextRequest) {
   }
   const message = Object.keys(params).sort().map(k => `${k}=${params[k]}`).join('&')
   const digest = crypto
-    .createHmac('sha256', process.env.SHOPIFY_CLIENT_SECRET!)
+    .createHmac('sha256', hmacSecret)
     .update(message)
     .digest('hex')
   console.log('[shopify/callback] hmac match:', digest === hmac)
   if (digest !== hmac) return fail('invalid_hmac')
+
+  // Use custom credentials if provided (for stores outside the Partners org)
+  let effectiveClientId     = process.env.SHOPIFY_CLIENT_ID!
+  let effectiveClientSecret = process.env.SHOPIFY_CLIENT_SECRET!
+  const customCredsRaw = req.cookies.get('shopify_custom_creds')?.value
+  if (customCredsRaw) {
+    try {
+      const creds = JSON.parse(customCredsRaw)
+      if (creds.clientId)     effectiveClientId     = creds.clientId
+      if (creds.clientSecret) effectiveClientSecret = creds.clientSecret
+    } catch { /* ignore */ }
+  }
 
   // Exchange code for access token
   const tokenRes = await fetch(`https://${shop}/admin/oauth/access_token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      client_id: process.env.SHOPIFY_CLIENT_ID,
-      client_secret: process.env.SHOPIFY_CLIENT_SECRET,
+      client_id: effectiveClientId,
+      client_secret: effectiveClientSecret,
       code,
     }),
   })
@@ -122,6 +144,7 @@ export async function GET(req: NextRequest) {
 
   const res = NextResponse.redirect(redirectUrl.toString())
   res.cookies.delete('shopify_oauth_state')
+  res.cookies.delete('shopify_custom_creds')
 
   // Set active_store_id cookie for new store
   if (newStoreId) {

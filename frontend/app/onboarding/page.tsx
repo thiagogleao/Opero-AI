@@ -51,6 +51,8 @@ function OnboardingInner() {
   const [shopifyConnected, setShopifyConnected] = useState(false)
   const [manualMode, setManualMode] = useState(false)
   const [manualToken, setManualToken] = useState('')
+  const [customClientId, setCustomClientId] = useState('')
+  const [customClientSecret, setCustomClientSecret] = useState('')
 
   // Handle return from Shopify OAuth
   useEffect(() => {
@@ -84,24 +86,10 @@ function OnboardingInner() {
 
   const connectManual = useCallback(async () => {
     const domain = shopifyDomain.replace(/https?:\/\//, '').replace(/\/$/, '')
-    if (!domain || !manualToken) return
-    setLoading(true)
-    setError('')
-    try {
-      const res = await fetch('/api/shopify/connect-manual', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ domain, accessToken: manualToken }),
-      })
-      const data = await res.json()
-      if (!res.ok) { setError(data.error || 'Erro ao conectar'); setLoading(false); return }
-      setShopifyConnected(true)
-      setStep('facebook')
-    } catch (e) {
-      setError('Erro de conexão: ' + String(e))
-    }
-    setLoading(false)
-  }, [shopifyDomain, manualToken])
+    if (!domain || !customClientId || !customClientSecret) return
+    const params = new URLSearchParams({ shop: domain, addStore: '1', clientId: customClientId, clientSecret: customClientSecret })
+    window.location.href = `/api/shopify/auth?${params}`
+  }, [shopifyDomain, customClientId, customClientSecret])
 
   const submit = useCallback(async () => {
     setLoading(true)
@@ -168,12 +156,11 @@ function OnboardingInner() {
   ]
 
   const manualSteps = [
-    'No admin da loja, vá em <strong style="color:#A1A1AA">Settings → Apps and sales channels → Develop apps</strong>.',
-    'Clique em <strong style="color:#A1A1AA">Create an app</strong>, dê um nome (ex: "Opero AI") e confirme.',
-    'Vá na aba <strong style="color:#A1A1AA">Configuration</strong> e em <strong style="color:#A1A1AA">Admin API integration</strong> clique em <strong style="color:#A1A1AA">Configure</strong>.',
-    'Ative todas as permissões de <strong style="color:#A1A1AA">Read access</strong> (orders, products, customers, analytics) e clique em <strong style="color:#A1A1AA">Save</strong>.',
-    'Vá na aba <strong style="color:#A1A1AA">API credentials</strong> → clique em <strong style="color:#A1A1AA">Install app</strong> → confirma.',
-    'Copie o <strong style="color:#A1A1AA">Admin API access token</strong> que aparecer (começa com <em>shpat_</em>) e cole abaixo.',
+    'No <strong style="color:#A1A1AA">dev dashboard</strong> da loja, clique em <strong style="color:#A1A1AA">Create app</strong> (ou abra o app já criado).',
+    'Vá em <strong style="color:#A1A1AA">Settings</strong> do app no dev dashboard.',
+    'Copie o <strong style="color:#A1A1AA">Client ID</strong> e o <strong style="color:#A1A1AA">Secret</strong> (começa com <em>shpss_</em>).',
+    'Cole os dois campos abaixo junto com o domínio da loja e clique em <strong style="color:#A1A1AA">Conectar →</strong>',
+    'Você será redirecionado para o Shopify para autorizar — clique em <strong style="color:#A1A1AA">Install</strong>.',
   ]
 
   const fbSteps = [
@@ -286,11 +273,11 @@ function OnboardingInner() {
                   </div>
                 )}
 
-                {/* Manual token flow */}
+                {/* Manual / dev dashboard flow */}
                 {manualMode ? (
                   <>
                     <Tutorial
-                      title="Como gerar o token no admin da loja"
+                      title="Como obter as credenciais no dev dashboard"
                       steps={manualSteps}
                       open={tutorialOpen}
                       onToggle={() => setTutorialOpen(o => !o)}
@@ -300,18 +287,23 @@ function OnboardingInner() {
                       <input value={shopifyDomain} onChange={e => setShopifyDomain(e.target.value)} placeholder="minhaloja.myshopify.com" style={inputStyle} />
                       <p style={hintStyle}>Sem https://, apenas o domínio.</p>
                     </div>
+                    <div style={{ marginBottom: 16 }}>
+                      <label style={labelStyle}>Client ID</label>
+                      <input value={customClientId} onChange={e => setCustomClientId(e.target.value)} placeholder="2da05587a6046cd..." style={inputStyle} />
+                      <p style={hintStyle}>Encontrado em Settings do app no dev dashboard.</p>
+                    </div>
                     <div style={{ marginBottom: 20 }}>
-                      <label style={labelStyle}>Admin API Access Token</label>
-                      <input value={manualToken} onChange={e => setManualToken(e.target.value)} placeholder="shpat_..." type="password" style={inputStyle} />
-                      <p style={hintStyle}>Começa com <strong>shpat_</strong>. Gerado no passo 6 do tutorial acima.</p>
+                      <label style={labelStyle}>Client Secret</label>
+                      <input value={customClientSecret} onChange={e => setCustomClientSecret(e.target.value)} placeholder="shpss_..." type="password" style={inputStyle} />
+                      <p style={hintStyle}>Começa com <strong>shpss_</strong>. Encontrado em Settings do app.</p>
                     </div>
                     {error && <p style={{ fontSize: 12, color: '#F43F5E', marginBottom: 12 }}>{error}</p>}
                     <button
                       onClick={connectManual}
-                      disabled={!shopifyDomain || !manualToken || loading}
-                      style={{ background: 'linear-gradient(135deg,#8B5CF6,#6D28D9)', border: 'none', borderRadius: 8, padding: '11px 0', fontSize: 14, fontWeight: 600, color: '#fff', cursor: (!shopifyDomain || !manualToken || loading) ? 'not-allowed' : 'pointer', opacity: (!shopifyDomain || !manualToken || loading) ? 0.4 : 1, width: '100%' }}
+                      disabled={!shopifyDomain || !customClientId || !customClientSecret}
+                      style={{ background: 'linear-gradient(135deg,#8B5CF6,#6D28D9)', border: 'none', borderRadius: 8, padding: '11px 0', fontSize: 14, fontWeight: 600, color: '#fff', cursor: (!shopifyDomain || !customClientId || !customClientSecret) ? 'not-allowed' : 'pointer', opacity: (!shopifyDomain || !customClientId || !customClientSecret) ? 0.4 : 1, width: '100%' }}
                     >
-                      {loading ? 'Verificando...' : 'Conectar com token →'}
+                      Conectar →
                     </button>
                   </>
                 ) : (

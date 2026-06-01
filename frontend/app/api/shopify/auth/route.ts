@@ -32,12 +32,15 @@ export async function GET(req: NextRequest) {
 
   if (!shop) return NextResponse.json({ error: 'Missing shop' }, { status: 400 })
 
-  const clientId = process.env.SHOPIFY_CLIENT_ID
+  // Support custom Client ID/Secret for stores not in the same Partners org
+  const customClientId     = searchParams.get('clientId')     || ''
+  const customClientSecret = searchParams.get('clientSecret') || ''
+  const clientId = customClientId || process.env.SHOPIFY_CLIENT_ID
   if (!clientId) return NextResponse.json({ error: 'SHOPIFY_CLIENT_ID not configured' }, { status: 500 })
 
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || origin
-  const reconnect  = searchParams.get('reconnect')  === '1'
-  const addStore   = searchParams.get('addStore')   === '1'
+  const reconnect = searchParams.get('reconnect') === '1'
+  const addStore  = searchParams.get('addStore')  === '1'
   const nonce = crypto.randomBytes(16).toString('hex')
   const state = `${nonce}:${encodeURIComponent(storeStartDate)}:${reconnect ? '1' : '0'}:${addStore ? '1' : '0'}`
   const redirectUri = `${appUrl}/api/shopify/callback`
@@ -52,5 +55,11 @@ export async function GET(req: NextRequest) {
   res.cookies.set('shopify_oauth_state', state, {
     httpOnly: true, maxAge: 600, path: '/', sameSite: 'lax',
   })
+  // Store custom credentials in cookie so callback can use them
+  if (customClientSecret) {
+    res.cookies.set('shopify_custom_creds', JSON.stringify({ clientId, clientSecret: customClientSecret }), {
+      httpOnly: true, maxAge: 600, path: '/', sameSite: 'lax',
+    })
+  }
   return res
 }
