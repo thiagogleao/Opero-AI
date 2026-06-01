@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server'
 import { auth } from '@clerk/nextjs/server'
 import { query } from '@/lib/db'
+import { getActiveTenantId } from '@/lib/activeStore'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -216,9 +217,10 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
 export async function GET() {
   const { userId } = await auth()
   if (!userId) return Response.json({ error: 'Unauthorized' }, { status: 401 })
+  const tenantId = await getActiveTenantId(userId)
   const rows = await query<{ value: ProfitConfig }>(
     `SELECT settings AS value FROM profit_settings WHERE tenant_id = $1`,
-    [userId]
+    [tenantId]
   )
   const config = rows[0]?.value ?? null
   return Response.json({ config })
@@ -227,6 +229,7 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   const { userId } = await auth()
   if (!userId) return Response.json({ error: 'Unauthorized' }, { status: 401 })
+  const tenantId = await getActiveTenantId(userId)
 
   const body = await req.json()
 
@@ -235,13 +238,13 @@ export async function POST(req: NextRequest) {
       `INSERT INTO profit_settings (tenant_id, settings)
        VALUES ($1, $2)
        ON CONFLICT (tenant_id) DO UPDATE SET settings = $2`,
-      [userId, JSON.stringify(body.config)]
+      [tenantId, JSON.stringify(body.config)]
     )
     return Response.json({ ok: true })
   }
 
   if (body.action === 'calculate') {
-    const result = await calculateProfit(body.dateFrom, body.dateTo, body.config, userId)
+    const result = await calculateProfit(body.dateFrom, body.dateTo, body.config, tenantId)
     return Response.json(result)
   }
 

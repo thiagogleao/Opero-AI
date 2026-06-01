@@ -1,6 +1,7 @@
 import { auth } from '@clerk/nextjs/server'
 import { redirect } from 'next/navigation'
 import { getTenant } from '@/lib/tenant'
+import { getActiveTenantId } from '@/lib/activeStore'
 import ProfitModule from '@/components/ProfitModule'
 import Sidebar from '@/components/Sidebar'
 
@@ -9,7 +10,8 @@ export const revalidate = 0
 export default async function ProfitPage() {
   const { userId } = await auth()
   if (!userId) redirect('/sign-in')
-  const tenant = await getTenant(userId)
+  const tenantId = await getActiveTenantId(userId)
+  const tenant = await getTenant(tenantId)
   if (!tenant?.onboarded) redirect('/onboarding')
   return (
     <div style={{ display: 'flex', minHeight: '100vh', backgroundColor: 'var(--bg)' }}>

@@ -2,6 +2,7 @@ import { spawn, ChildProcess } from 'child_process'
 import path from 'path'
 import { auth } from '@clerk/nextjs/server'
 import { getLastSyncTime, getTenantTimezone } from '@/lib/queries'
+import { getActiveTenantId } from '@/lib/activeStore'
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..')
 const PYTHON = process.env.PYTHON_BIN || 'python3'
@@ -52,10 +53,11 @@ export async function POST(req: Request) {
     const { userId } = await auth()
     if (!userId) return Response.json({ error: 'Unauthorized' }, { status: 401 })
 
+    const tenantId = await getActiveTenantId(userId)
     const body = await req.json().catch(() => ({}))
 
     // Always derive "today" from the store's timezone, not the server's UTC clock
-    const storeTimezone = await getTenantTimezone(userId)
+    const storeTimezone = await getTenantTimezone(tenantId)
     const today = todayInTz(storeTimezone)
 
     let dateFrom: string
@@ -64,7 +66,7 @@ export async function POST(req: Request) {
     if (body.dateFrom) {
       dateFrom = body.dateFrom
     } else {
-      const syncs = await getLastSyncTime(userId)
+      const syncs = await getLastSyncTime(tenantId)
       const lastFinished = syncs[0]?.finished_at ?? null
 
       if (lastFinished) {
@@ -78,12 +80,8 @@ export async function POST(req: Request) {
       }
     }
 
-    // Shopify and Facebook use independent APIs — safe to run in parallel.
-    // Facebook runs as a single full-mode process (no quick/structure split)
-    // to avoid two processes hitting the same FB account simultaneously and
-    // triggering rate limits that cause silent data gaps.
-    spawnSource('shopify',  dateFrom, dateTo, userId)
-    spawnSource('facebook', dateFrom, dateTo, userId)
+    spawnSource('shopify',  dateFrom, dateTo, tenantId)
+    spawnSource('facebook', dateFrom, dateTo, tenantId)
 
     return Response.json({ started: true, dateFrom, dateTo, storeTimezone })
   } catch (err) {

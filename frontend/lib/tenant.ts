@@ -1,7 +1,8 @@
 import { query } from './db'
 
 export interface Tenant {
-  id: string          // Clerk user_id
+  id: string          // Store ID (= Clerk userId for primary store, UUID for additional)
+  user_id: string     // Clerk user ID (owner of this store)
   email: string | null
   shopify_domain: string | null
   shopify_access_token: string | null
@@ -12,17 +13,31 @@ export interface Tenant {
   created_at: string
 }
 
-export async function getTenant(clerkUserId: string): Promise<Tenant | null> {
+/** Get a single store/tenant by its store ID. */
+export async function getTenant(storeId: string): Promise<Tenant | null> {
   const rows = await query<Tenant>(
     `SELECT * FROM tenants WHERE id = $1`,
-    [clerkUserId]
+    [storeId]
   )
   return rows[0] ?? null
 }
 
+/** Get all stores belonging to a Clerk user. */
+export async function getTenantsByUserId(userId: string): Promise<Tenant[]> {
+  const rows = await query<Tenant>(
+    `SELECT * FROM tenants
+     WHERE user_id = $1 OR (user_id IS NULL AND id = $1)
+     ORDER BY created_at ASC`,
+    [userId]
+  )
+  return rows
+}
+
+/** Upsert a store/tenant. For new stores, user_id defaults to id (primary store). */
 export async function upsertTenant(
-  clerkUserId: string,
+  storeId: string,
   data: {
+    user_id?: string
     email?: string
     shopify_domain?: string
     shopify_access_token?: string
@@ -33,20 +48,21 @@ export async function upsertTenant(
   }
 ): Promise<Tenant> {
   const rows = await query<Tenant>(`
-    INSERT INTO tenants (id, email, shopify_domain, shopify_access_token, fb_ad_account_id, fb_access_token, onboarded, timezone)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    INSERT INTO tenants (id, user_id, email, shopify_domain, shopify_access_token, fb_ad_account_id, fb_access_token, onboarded, timezone)
+    VALUES ($1, COALESCE($2, $1), $3, $4, $5, $6, $7, $8, $9)
     ON CONFLICT (id) DO UPDATE SET
-      email                 = COALESCE($2, tenants.email),
-      shopify_domain        = COALESCE($3, tenants.shopify_domain),
-      shopify_access_token  = COALESCE($4, tenants.shopify_access_token),
-      fb_ad_account_id      = COALESCE($5, tenants.fb_ad_account_id),
-      fb_access_token       = COALESCE($6, tenants.fb_access_token),
-      onboarded             = COALESCE($7, tenants.onboarded),
-      timezone              = COALESCE($8, tenants.timezone),
+      email                 = COALESCE($3, tenants.email),
+      shopify_domain        = COALESCE($4, tenants.shopify_domain),
+      shopify_access_token  = COALESCE($5, tenants.shopify_access_token),
+      fb_ad_account_id      = COALESCE($6, tenants.fb_ad_account_id),
+      fb_access_token       = COALESCE($7, tenants.fb_access_token),
+      onboarded             = COALESCE($8, tenants.onboarded),
+      timezone              = COALESCE($9, tenants.timezone),
       updated_at            = NOW()
     RETURNING *
   `, [
-    clerkUserId,
+    storeId,
+    data.user_id ?? null,
     data.email ?? null,
     data.shopify_domain ?? null,
     data.shopify_access_token ?? null,
@@ -58,17 +74,42 @@ export async function upsertTenant(
   return rows[0]
 }
 
-/** Update shopify token on whichever tenant row owns this domain. Returns rows updated. */
+/** Create a brand-new store for a user (used in add-store OAuth flow). */
+export async function createStoreForUser(
+  userId: string,
+  storeId: string,
+  data: {
+    email?: string
+    shopify_domain: string
+    shopify_access_token: string
+  }
+): Promise<Tenant> {
+  const rows = await query<Tenant>(`
+    INSERT INTO tenants (id, user_id, email, shopify_domain, shopify_access_token, onboarded)
+    VALUES ($1, $2, $3, $4, $5, false)
+    ON CONFLICT (id) DO UPDATE SET
+      shopify_access_token = $5,
+      updated_at = NOW()
+    RETURNING *
+  `, [storeId, userId, data.email ?? null, data.shopify_domain, data.shopify_access_token])
+  return rows[0]
+}
+
+/** Update shopify token on whichever store owns this domain for this user. */
 export async function updateShopifyTokenByDomain(
   shopDomain: string,
-  token: string
+  token: string,
+  userId?: string
 ): Promise<number> {
-  const rows = await query<Tenant>(
-    `UPDATE tenants SET shopify_access_token = $1, shopify_domain = $2, updated_at = NOW()
-     WHERE shopify_domain = $2
-     RETURNING id`,
-    [token, shopDomain]
-  )
+  const sql = userId
+    ? `UPDATE tenants SET shopify_access_token = $1, shopify_domain = $2, updated_at = NOW()
+       WHERE shopify_domain = $2 AND (user_id = $3 OR (user_id IS NULL AND id = $3))
+       RETURNING id`
+    : `UPDATE tenants SET shopify_access_token = $1, shopify_domain = $2, updated_at = NOW()
+       WHERE shopify_domain = $2
+       RETURNING id`
+  const params = userId ? [token, shopDomain, userId] : [token, shopDomain]
+  const rows = await query<Tenant>(sql, params)
   return rows.length
 }
 

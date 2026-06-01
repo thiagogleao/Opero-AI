@@ -1,12 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { auth, currentUser } from '@clerk/nextjs/server'
 import { getTenant, upsertTenant } from '@/lib/tenant'
+import { getActiveTenantId } from '@/lib/activeStore'
 
 export async function GET() {
   const { userId } = await auth()
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const tenant = await getTenant(userId)
+  const tenantId = await getActiveTenantId(userId)
+  const tenant = await getTenant(tenantId)
   return NextResponse.json({ tenant })
 }
 
@@ -14,13 +16,17 @@ export async function POST(req: NextRequest) {
   const { userId } = await auth()
   if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
+  // Use active store ID — for multi-store, this saves FB creds to the right store
+  const tenantId = await getActiveTenantId(userId)
+
   const body = await req.json()
   const { shopify_domain, shopify_access_token, fb_ad_account_id, fb_access_token, onboarded, timezone } = body
 
   const user = await currentUser()
 
   try {
-    const tenant = await upsertTenant(userId, {
+    const tenant = await upsertTenant(tenantId, {
+      user_id: userId,
       email: user?.emailAddresses[0]?.emailAddress,
       shopify_domain: shopify_domain?.replace(/https?:\/\//, '').replace(/\/$/, ''),
       shopify_access_token: shopify_access_token || undefined,

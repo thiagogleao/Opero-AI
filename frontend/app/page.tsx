@@ -2,7 +2,9 @@ import { Suspense } from 'react'
 import { cookies } from 'next/headers'
 import { auth } from '@clerk/nextjs/server'
 import { redirect } from 'next/navigation'
-import { getTenant } from '@/lib/tenant'
+import { getTenant, getTenantsByUserId } from '@/lib/tenant'
+import { getActiveTenantId } from '@/lib/activeStore'
+import StoreSwitcher from '@/components/StoreSwitcher'
 import {
   getOverviewMetrics, getDailyRevenue, getDailyRoas,
   getTopCreatives, getCountryMetrics, getCustomerSplit, getLastSyncTime,
@@ -45,10 +47,11 @@ export default async function Dashboard({ searchParams }: Props) {
   const { userId } = await auth()
   if (!userId) redirect('/sign-in')
 
-  const tenant = await getTenant(userId)
+  const tenantId = await getActiveTenantId(userId)
+  const tenant = await getTenant(tenantId)
   if (!tenant?.onboarded) redirect('/onboarding')
 
-  const tenantId = userId
+  const stores = await getTenantsByUserId(userId)
 
   const sp = await searchParams
   const cookieStore = await cookies()
@@ -300,14 +303,7 @@ ${promptLang.formatNote}`
             <Suspense>
               <TimeframeSelector from={dateFrom} to={dateTo} />
             </Suspense>
-            <div style={{
-              background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 8,
-              padding: '6px 14px', fontSize: 12, color: 'var(--text-muted)',
-              display: 'flex', alignItems: 'center', gap: 6,
-            }}>
-              <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#10B981', display: 'inline-block' }} />
-              {tenant.shopify_domain ?? 'Loja conectada'}
-            </div>
+            <StoreSwitcher stores={stores} activeStoreId={tenantId} />
           </div>
         </div>
 

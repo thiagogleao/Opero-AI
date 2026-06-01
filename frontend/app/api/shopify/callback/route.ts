@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import crypto from 'crypto'
 import { auth, currentUser } from '@clerk/nextjs/server'
-import { upsertTenant, updateShopifyTokenByDomain } from '@/lib/tenant'
+import { upsertTenant, updateShopifyTokenByDomain, createStoreForUser } from '@/lib/tenant'
 
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl
@@ -48,7 +48,6 @@ export async function GET(req: NextRequest) {
   if (!tokenRes.ok) return fail('token_exchange_failed')
 
   const tokenData = await tokenRes.json()
-  console.log('[shopify/callback] token keys:', Object.keys(tokenData), 'token prefix:', tokenData.access_token?.slice(0, 10))
   const access_token = tokenData.access_token
   const cleanShop = shop!.replace(/https?:\/\//, '').replace(/\/$/, '')
 
@@ -57,31 +56,64 @@ export async function GET(req: NextRequest) {
   if (!userId) return NextResponse.redirect(new URL('/sign-in', appUrl))
 
   const user = await currentUser()
-  try {
-    // First try to update the existing row that owns this domain (handles userId mismatch)
-    const updated = await updateShopifyTokenByDomain(cleanShop, access_token)
-    console.log('[shopify/callback] updateByDomain rows:', updated, 'token saved:', access_token?.slice(0, 15))
+  const email = user?.emailAddresses[0]?.emailAddress
 
-    if (updated === 0) {
-      // No existing row with this domain — create/update by userId
-      await upsertTenant(userId, {
-        email: user?.emailAddresses[0]?.emailAddress,
-        shopify_domain: cleanShop,
-        shopify_access_token: access_token,
-      })
-      console.log('[shopify/callback] upsertTenant OK (new row), token saved:', access_token?.slice(0, 15))
+  // Parse state flags: nonce:storeStartDate:reconnect:addStore
+  const parts = (state || '').split(':')
+  const storeStartDate = parts[1] ? decodeURIComponent(parts[1]) : ''
+  const isReconnect    = parts[2] === '1'
+  const isAddStore     = parts[3] === '1'
+
+  let newStoreId: string | null = null
+
+  try {
+    if (isAddStore) {
+      // Adding a new store: check if this domain already belongs to this user
+      const updated = await updateShopifyTokenByDomain(cleanShop, access_token, userId)
+      if (updated === 0) {
+        // Genuinely new store — create a new row with a UUID
+        newStoreId = crypto.randomUUID()
+        await createStoreForUser(userId, newStoreId, {
+          email,
+          shopify_domain: cleanShop,
+          shopify_access_token: access_token,
+        })
+        console.log('[shopify/callback] new store created:', newStoreId, cleanShop)
+      } else {
+        // Domain already exists for this user — find its ID to set the cookie
+        const { query } = await import('@/lib/db')
+        const rows = await query<{ id: string }>(
+          `SELECT id FROM tenants WHERE shopify_domain = $1 AND (user_id = $2 OR (user_id IS NULL AND id = $2))`,
+          [cleanShop, userId]
+        )
+        newStoreId = rows[0]?.id ?? null
+        console.log('[shopify/callback] reconnected existing store:', newStoreId)
+      }
+    } else {
+      // Original flow: first store for this user
+      const updated = await updateShopifyTokenByDomain(cleanShop, access_token)
+      if (updated === 0) {
+        await upsertTenant(userId, {
+          user_id: userId,
+          email,
+          shopify_domain: cleanShop,
+          shopify_access_token: access_token,
+        })
+        console.log('[shopify/callback] upsertTenant OK (new row)')
+      }
     }
   } catch (err) {
     console.error('[shopify/callback] save failed:', err)
   }
 
-  const parts = (state || '').split(':')
-  const storeStartDate = parts[1] ? decodeURIComponent(parts[1]) : ''
-  const isReconnect    = parts[2] === '1'
-
   let redirectUrl: URL
   if (isReconnect) {
     redirectUrl = new URL('/settings?shopify_connected=true', appUrl)
+  } else if (isAddStore) {
+    redirectUrl = new URL('/onboarding', appUrl)
+    redirectUrl.searchParams.set('addStore', 'true')
+    redirectUrl.searchParams.set('shopify_connected', 'true')
+    if (storeStartDate) redirectUrl.searchParams.set('storeStartDate', storeStartDate)
   } else {
     redirectUrl = new URL('/onboarding', appUrl)
     redirectUrl.searchParams.set('shopify_connected', 'true')
@@ -90,5 +122,13 @@ export async function GET(req: NextRequest) {
 
   const res = NextResponse.redirect(redirectUrl.toString())
   res.cookies.delete('shopify_oauth_state')
+
+  // Set active_store_id cookie for new store
+  if (newStoreId) {
+    res.cookies.set('active_store_id', newStoreId, {
+      httpOnly: true, path: '/', maxAge: 60 * 60 * 24 * 365, sameSite: 'lax',
+    })
+  }
+
   return res
 }

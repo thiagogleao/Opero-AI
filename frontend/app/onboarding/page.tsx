@@ -37,6 +37,8 @@ function OnboardingInner() {
   const router = useRouter()
   const searchParams = useSearchParams()
 
+  const addStoreMode = searchParams.get('addStore') === 'true'
+
   const [step, setStep] = useState<Step>('shopify')
   const [shopifyDomain, setShopifyDomain] = useState('')
   const [storeStartDate, setStoreStartDate] = useState('')
@@ -74,8 +76,9 @@ function OnboardingInner() {
     if (!domain) return
     const params = new URLSearchParams({ shop: domain })
     if (storeStartDate) params.set('storeStartDate', storeStartDate)
+    if (addStoreMode) params.set('addStore', '1')
     window.location.href = `/api/shopify/auth?${params}`
-  }, [shopifyDomain, storeStartDate])
+  }, [shopifyDomain, storeStartDate, addStoreMode])
 
   const submit = useCallback(async () => {
     setLoading(true)
@@ -156,8 +159,12 @@ function OnboardingInner() {
 
         <div style={{ textAlign: 'center', marginBottom: 32 }}>
           <div style={{ width: 48, height: 48, borderRadius: 12, background: 'linear-gradient(135deg,#8B5CF6,#6D28D9)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, fontWeight: 700, color: 'white', margin: '0 auto 12px' }}>O</div>
-          <h1 style={{ fontSize: 20, fontWeight: 700, color: '#F4F4F5' }}>Conecte sua loja</h1>
-          <p style={{ fontSize: 13, color: '#71717A', marginTop: 4 }}>Configure suas integrações para começar a analisar</p>
+          <h1 style={{ fontSize: 20, fontWeight: 700, color: '#F4F4F5' }}>
+            {addStoreMode ? 'Adicionar nova loja' : 'Conecte sua loja'}
+          </h1>
+          <p style={{ fontSize: 13, color: '#71717A', marginTop: 4 }}>
+            {addStoreMode ? 'Conecte uma nova loja Shopify à sua conta' : 'Configure suas integrações para começar a analisar'}
+          </p>
         </div>
 
         <div style={{ display: 'flex', gap: 8, marginBottom: 28 }}>
@@ -205,7 +212,7 @@ function OnboardingInner() {
               </div>
             </div>
             <button onClick={() => router.push('/')} style={{ background: 'linear-gradient(135deg,#8B5CF6,#6D28D9)', border: 'none', borderRadius: 8, padding: '11px 28px', fontSize: 14, fontWeight: 600, color: '#fff', cursor: 'pointer', width: '100%' }}>
-              Ir para o Dashboard →
+              {addStoreMode ? 'Ver Dashboard →' : 'Ir para o Dashboard →'}
             </button>
           </div>
         )}
