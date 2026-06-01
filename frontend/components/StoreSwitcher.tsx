@@ -47,15 +47,6 @@ export default function StoreSwitcher({ stores, activeStoreId }: Props) {
     display: 'flex', alignItems: 'center', gap: 6,
   }
 
-  if (stores.length <= 1) {
-    return (
-      <div style={badgeBase}>
-        <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#10B981', display: 'inline-block' }} />
-        {active?.shopify_domain ?? 'Loja conectada'}
-      </div>
-    )
-  }
-
   return (
     <div ref={ref} style={{ position: 'relative' }}>
       <button
@@ -65,6 +56,7 @@ export default function StoreSwitcher({ stores, activeStoreId }: Props) {
           ...badgeBase,
           cursor: loading ? 'wait' : 'pointer',
           border: open ? '1px solid rgba(139,92,246,0.5)' : '1px solid var(--border)',
+          transition: 'border-color 0.15s',
         }}
       >
         <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#10B981', display: 'inline-block' }} />
@@ -79,9 +71,11 @@ export default function StoreSwitcher({ stores, activeStoreId }: Props) {
           borderRadius: 10, padding: 6, minWidth: 220,
           boxShadow: '0 8px 24px rgba(0,0,0,0.3)',
         }}>
-          <p style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-faint)', letterSpacing: '0.08em', textTransform: 'uppercase', padding: '4px 8px 6px' }}>
-            Suas lojas
-          </p>
+          {stores.length > 0 && (
+            <p style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-faint)', letterSpacing: '0.08em', textTransform: 'uppercase', padding: '4px 8px 6px' }}>
+              Suas lojas
+            </p>
+          )}
           {stores.map(store => (
             <button
               key={store.id}
