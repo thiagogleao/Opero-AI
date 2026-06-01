@@ -49,6 +49,8 @@ function OnboardingInner() {
   const [error, setError] = useState('')
   const [tutorialOpen, setTutorialOpen] = useState(false)
   const [shopifyConnected, setShopifyConnected] = useState(false)
+  const [manualMode, setManualMode] = useState(false)
+  const [manualToken, setManualToken] = useState('')
 
   // Handle return from Shopify OAuth
   useEffect(() => {
@@ -79,6 +81,27 @@ function OnboardingInner() {
     if (addStoreMode) params.set('addStore', '1')
     window.location.href = `/api/shopify/auth?${params}`
   }, [shopifyDomain, storeStartDate, addStoreMode])
+
+  const connectManual = useCallback(async () => {
+    const domain = shopifyDomain.replace(/https?:\/\//, '').replace(/\/$/, '')
+    if (!domain || !manualToken) return
+    setLoading(true)
+    setError('')
+    try {
+      const res = await fetch('/api/shopify/connect-manual', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain, accessToken: manualToken }),
+      })
+      const data = await res.json()
+      if (!res.ok) { setError(data.error || 'Erro ao conectar'); setLoading(false); return }
+      setShopifyConnected(true)
+      setStep('facebook')
+    } catch (e) {
+      setError('Erro de conexão: ' + String(e))
+    }
+    setLoading(false)
+  }, [shopifyDomain, manualToken])
 
   const submit = useCallback(async () => {
     setLoading(true)
@@ -142,6 +165,15 @@ function OnboardingInner() {
     'Copie o <strong style="color:#A1A1AA">Client ID</strong> e o <strong style="color:#A1A1AA">Client Secret</strong> e adicione nas variáveis de ambiente <em>SHOPIFY_CLIENT_ID</em> e <em>SHOPIFY_CLIENT_SECRET</em>.',
     'Digite o domínio da sua loja abaixo (ex: <em>minhaloja.myshopify.com</em>) e clique em <strong style="color:#A1A1AA">Conectar com Shopify</strong>.',
     'Você será redirecionado para o Shopify para autorizar o app — clique em <strong style="color:#A1A1AA">Install</strong> e pronto.',
+  ]
+
+  const manualSteps = [
+    'No admin da loja, vá em <strong style="color:#A1A1AA">Settings → Apps and sales channels → Develop apps</strong>.',
+    'Clique em <strong style="color:#A1A1AA">Create an app</strong>, dê um nome (ex: "Opero AI") e confirme.',
+    'Vá na aba <strong style="color:#A1A1AA">Configuration</strong> e em <strong style="color:#A1A1AA">Admin API integration</strong> clique em <strong style="color:#A1A1AA">Configure</strong>.',
+    'Ative todas as permissões de <strong style="color:#A1A1AA">Read access</strong> (orders, products, customers, analytics) e clique em <strong style="color:#A1A1AA">Save</strong>.',
+    'Vá na aba <strong style="color:#A1A1AA">API credentials</strong> → clique em <strong style="color:#A1A1AA">Install app</strong> → confirma.',
+    'Copie o <strong style="color:#A1A1AA">Admin API access token</strong> que aparecer (começa com <em>shpat_</em>) e cole abaixo.',
   ]
 
   const fbSteps = [
@@ -230,40 +262,92 @@ function OnboardingInner() {
                   </div>
                 </div>
 
-                <Tutorial
-                  title="Como configurar o app no Shopify"
-                  steps={shopifySteps}
-                  open={tutorialOpen}
-                  onToggle={() => setTutorialOpen(o => !o)}
-                />
+                {/* Tabs: only show in addStore mode */}
+                {addStoreMode && (
+                  <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: '#0B0D0F', borderRadius: 8, padding: 4 }}>
+                    {[
+                      { key: false, label: 'Token manual', desc: 'Custom app' },
+                      { key: true,  label: 'Via OAuth',    desc: 'Partners app' },
+                    ].map(tab => (
+                      <button
+                        key={String(tab.key)}
+                        onClick={() => { setManualMode(!tab.key); setError('') }}
+                        style={{
+                          flex: 1, padding: '8px 12px', borderRadius: 6, border: 'none', cursor: 'pointer',
+                          background: manualMode === !tab.key ? '#1E2028' : 'transparent',
+                          color: manualMode === !tab.key ? '#F4F4F5' : '#52525B',
+                          fontSize: 12, fontWeight: 600,
+                        }}
+                      >
+                        {tab.label}
+                        <span style={{ display: 'block', fontSize: 10, fontWeight: 400, opacity: 0.6 }}>{tab.desc}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
 
-                <div style={{ marginBottom: 16 }}>
-                  <label style={labelStyle}>Domínio da loja</label>
-                  <input value={shopifyDomain} onChange={e => setShopifyDomain(e.target.value)} placeholder="minhaloja.myshopify.com" style={inputStyle} />
-                  <p style={hintStyle}>Sem https://, apenas o domínio. Ex: minhaloja.myshopify.com</p>
-                </div>
-
-                <div style={{ marginBottom: 20 }}>
-                  <label style={labelStyle}>Quando a loja abriu? <span style={{ color: '#52525B', fontWeight: 400 }}>(opcional)</span></label>
-                  <input
-                    type="date"
-                    value={storeStartDate}
-                    onChange={e => setStoreStartDate(e.target.value)}
-                    max={new Date().toISOString().split('T')[0]}
-                    style={{ ...inputStyle, colorScheme: 'dark' }}
-                  />
-                  <p style={hintStyle}>Importamos dados a partir desta data. Vazio = últimos 90 dias.</p>
-                </div>
-
-                {error && <p style={{ fontSize: 12, color: '#F43F5E', marginBottom: 12 }}>{error}</p>}
-
-                <button
-                  onClick={startShopifyOAuth}
-                  disabled={!shopifyDomain}
-                  style={{ background: 'linear-gradient(135deg,#8B5CF6,#6D28D9)', border: 'none', borderRadius: 8, padding: '11px 0', fontSize: 14, fontWeight: 600, color: '#fff', cursor: !shopifyDomain ? 'not-allowed' : 'pointer', opacity: !shopifyDomain ? 0.4 : 1, width: '100%' }}
-                >
-                  Conectar com Shopify →
-                </button>
+                {/* Manual token flow */}
+                {manualMode ? (
+                  <>
+                    <Tutorial
+                      title="Como gerar o token no admin da loja"
+                      steps={manualSteps}
+                      open={tutorialOpen}
+                      onToggle={() => setTutorialOpen(o => !o)}
+                    />
+                    <div style={{ marginBottom: 16 }}>
+                      <label style={labelStyle}>Domínio da loja</label>
+                      <input value={shopifyDomain} onChange={e => setShopifyDomain(e.target.value)} placeholder="minhaloja.myshopify.com" style={inputStyle} />
+                      <p style={hintStyle}>Sem https://, apenas o domínio.</p>
+                    </div>
+                    <div style={{ marginBottom: 20 }}>
+                      <label style={labelStyle}>Admin API Access Token</label>
+                      <input value={manualToken} onChange={e => setManualToken(e.target.value)} placeholder="shpat_..." type="password" style={inputStyle} />
+                      <p style={hintStyle}>Começa com <strong>shpat_</strong>. Gerado no passo 6 do tutorial acima.</p>
+                    </div>
+                    {error && <p style={{ fontSize: 12, color: '#F43F5E', marginBottom: 12 }}>{error}</p>}
+                    <button
+                      onClick={connectManual}
+                      disabled={!shopifyDomain || !manualToken || loading}
+                      style={{ background: 'linear-gradient(135deg,#8B5CF6,#6D28D9)', border: 'none', borderRadius: 8, padding: '11px 0', fontSize: 14, fontWeight: 600, color: '#fff', cursor: (!shopifyDomain || !manualToken || loading) ? 'not-allowed' : 'pointer', opacity: (!shopifyDomain || !manualToken || loading) ? 0.4 : 1, width: '100%' }}
+                    >
+                      {loading ? 'Verificando...' : 'Conectar com token →'}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <Tutorial
+                      title="Como configurar o app no Shopify"
+                      steps={shopifySteps}
+                      open={tutorialOpen}
+                      onToggle={() => setTutorialOpen(o => !o)}
+                    />
+                    <div style={{ marginBottom: 16 }}>
+                      <label style={labelStyle}>Domínio da loja</label>
+                      <input value={shopifyDomain} onChange={e => setShopifyDomain(e.target.value)} placeholder="minhaloja.myshopify.com" style={inputStyle} />
+                      <p style={hintStyle}>Sem https://, apenas o domínio. Ex: minhaloja.myshopify.com</p>
+                    </div>
+                    <div style={{ marginBottom: 20 }}>
+                      <label style={labelStyle}>Quando a loja abriu? <span style={{ color: '#52525B', fontWeight: 400 }}>(opcional)</span></label>
+                      <input
+                        type="date"
+                        value={storeStartDate}
+                        onChange={e => setStoreStartDate(e.target.value)}
+                        max={new Date().toISOString().split('T')[0]}
+                        style={{ ...inputStyle, colorScheme: 'dark' }}
+                      />
+                      <p style={hintStyle}>Importamos dados a partir desta data. Vazio = últimos 90 dias.</p>
+                    </div>
+                    {error && <p style={{ fontSize: 12, color: '#F43F5E', marginBottom: 12 }}>{error}</p>}
+                    <button
+                      onClick={startShopifyOAuth}
+                      disabled={!shopifyDomain}
+                      style={{ background: 'linear-gradient(135deg,#8B5CF6,#6D28D9)', border: 'none', borderRadius: 8, padding: '11px 0', fontSize: 14, fontWeight: 600, color: '#fff', cursor: !shopifyDomain ? 'not-allowed' : 'pointer', opacity: !shopifyDomain ? 0.4 : 1, width: '100%' }}
+                    >
+                      Conectar com Shopify →
+                    </button>
+                  </>
+                )}
               </>
             )}
 
