@@ -20,7 +20,7 @@ export async function POST(req: NextRequest) {
   const tenantId = await getActiveTenantId(userId)
 
   const body = await req.json()
-  const { shopify_domain, shopify_access_token, fb_ad_account_id, fb_access_token, onboarded, timezone } = body
+  const { shopify_domain, shopify_access_token, fb_ad_account_id, fb_access_token, facebook_app_id, facebook_app_secret, onboarded, timezone } = body
 
   const user = await currentUser()
 
@@ -32,6 +32,8 @@ export async function POST(req: NextRequest) {
       shopify_access_token: shopify_access_token || undefined,
       fb_ad_account_id,
       fb_access_token,
+      facebook_app_id: facebook_app_id || undefined,
+      facebook_app_secret: facebook_app_secret || undefined,
       onboarded: onboarded ?? true,
       timezone: timezone || undefined,
     })

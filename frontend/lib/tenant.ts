@@ -8,6 +8,8 @@ export interface Tenant {
   shopify_access_token: string | null
   fb_ad_account_id: string | null
   fb_access_token: string | null
+  facebook_app_id: string | null
+  facebook_app_secret: string | null
   onboarded: boolean
   timezone: string | null
   created_at: string
@@ -43,21 +45,25 @@ export async function upsertTenant(
     shopify_access_token?: string
     fb_ad_account_id?: string
     fb_access_token?: string
+    facebook_app_id?: string
+    facebook_app_secret?: string
     onboarded?: boolean
     timezone?: string
   }
 ): Promise<Tenant> {
   const rows = await query<Tenant>(`
-    INSERT INTO tenants (id, user_id, email, shopify_domain, shopify_access_token, fb_ad_account_id, fb_access_token, onboarded, timezone)
-    VALUES ($1, COALESCE($2, $1), $3, $4, $5, $6, $7, $8, COALESCE($9, 'UTC'))
+    INSERT INTO tenants (id, user_id, email, shopify_domain, shopify_access_token, fb_ad_account_id, fb_access_token, facebook_app_id, facebook_app_secret, onboarded, timezone)
+    VALUES ($1, COALESCE($2, $1), $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, 'UTC'))
     ON CONFLICT (id) DO UPDATE SET
       email                 = COALESCE($3, tenants.email),
       shopify_domain        = COALESCE($4, tenants.shopify_domain),
       shopify_access_token  = COALESCE($5, tenants.shopify_access_token),
       fb_ad_account_id      = COALESCE($6, tenants.fb_ad_account_id),
       fb_access_token       = COALESCE($7, tenants.fb_access_token),
-      onboarded             = COALESCE($8, tenants.onboarded),
-      timezone              = COALESCE($9, tenants.timezone, 'UTC'),
+      facebook_app_id       = COALESCE($8, tenants.facebook_app_id),
+      facebook_app_secret   = COALESCE($9, tenants.facebook_app_secret),
+      onboarded             = COALESCE($10, tenants.onboarded),
+      timezone              = COALESCE($11, tenants.timezone, 'UTC'),
       updated_at            = NOW()
     RETURNING *
   `, [
@@ -68,6 +74,8 @@ export async function upsertTenant(
     data.shopify_access_token ?? null,
     data.fb_ad_account_id ?? null,
     data.fb_access_token ?? null,
+    data.facebook_app_id ?? null,
+    data.facebook_app_secret ?? null,
     data.onboarded ?? null,
     data.timezone ?? null,
   ])

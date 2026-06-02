@@ -92,6 +92,12 @@ def run_facebook(date_from: date, date_to: date, session, tenant_id=None, creds=
     if creds:
         kwargs["access_token"]  = creds["fb_access_token"]
         kwargs["ad_account_id"] = creds["fb_ad_account_id"]
+        # Use per-tenant Facebook app credentials when available (for stores
+        # using a different Meta app than the default env-var app)
+        if creds.get("facebook_app_id"):
+            kwargs["app_id"] = creds["facebook_app_id"]
+        if creds.get("facebook_app_secret"):
+            kwargs["app_secret"] = creds["facebook_app_secret"]
     collector = FacebookCollector(session, **kwargs)
     n = collector.collect(date_from, date_to)
     print(f"  [facebook] {n} records collected")
