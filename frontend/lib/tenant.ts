@@ -49,7 +49,7 @@ export async function upsertTenant(
 ): Promise<Tenant> {
   const rows = await query<Tenant>(`
     INSERT INTO tenants (id, user_id, email, shopify_domain, shopify_access_token, fb_ad_account_id, fb_access_token, onboarded, timezone)
-    VALUES ($1, COALESCE($2, $1), $3, $4, $5, $6, $7, $8, $9)
+    VALUES ($1, COALESCE($2, $1), $3, $4, $5, $6, $7, $8, COALESCE($9, 'UTC'))
     ON CONFLICT (id) DO UPDATE SET
       email                 = COALESCE($3, tenants.email),
       shopify_domain        = COALESCE($4, tenants.shopify_domain),
@@ -57,7 +57,7 @@ export async function upsertTenant(
       fb_ad_account_id      = COALESCE($6, tenants.fb_ad_account_id),
       fb_access_token       = COALESCE($7, tenants.fb_access_token),
       onboarded             = COALESCE($8, tenants.onboarded),
-      timezone              = COALESCE($9, tenants.timezone),
+      timezone              = COALESCE($9, tenants.timezone, 'UTC'),
       updated_at            = NOW()
     RETURNING *
   `, [
@@ -85,8 +85,8 @@ export async function createStoreForUser(
   }
 ): Promise<Tenant> {
   const rows = await query<Tenant>(`
-    INSERT INTO tenants (id, user_id, email, shopify_domain, shopify_access_token, onboarded)
-    VALUES ($1, $2, $3, $4, $5, false)
+    INSERT INTO tenants (id, user_id, email, shopify_domain, shopify_access_token, onboarded, timezone)
+    VALUES ($1, $2, $3, $4, $5, false, 'UTC')
     ON CONFLICT (id) DO UPDATE SET
       shopify_access_token = $5,
       updated_at = NOW()
