@@ -289,9 +289,10 @@ class FacebookCollector(BaseCollector):
         _tenant_id  = self.tenant_id
         # Snapshot API credentials from current initialized API
         _api        = self._account.get_api()
-        _app_id     = _api.app_id
-        _app_secret = _api.app_secret
-        _token      = _api.access_token
+        _session    = _api._session
+        _app_id     = _session.app_id
+        _app_secret = _session.app_secret
+        _token      = _session.access_token
 
         def run_one(label: str, breakdowns: list):
             """Thread worker: own session + own FacebookCollector (no token refresh)."""
