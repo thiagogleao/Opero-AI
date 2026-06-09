@@ -223,8 +223,16 @@ class FacebookCollector(BaseCollector):
         #   "structure" — only account structure + breakdowns. Background second-pass.
         #   "full"      — everything (default, used for manual / scheduled runs).
         self._mode = mode
-        _app_id     = app_id     or settings.facebook_app_id
-        _app_secret = app_secret or settings.facebook_app_secret
+        _app_id = app_id or settings.facebook_app_id
+        # When using a tenant-supplied token we can only trust the app_secret if it
+        # was also explicitly supplied by that tenant. Falling back to the env-var
+        # secret for a different tenant's token generates a wrong appsecret_proof
+        # (HMAC of token with wrong secret), which Facebook rejects with error 100.
+        # Passing app_secret=None tells the SDK to skip the proof header entirely.
+        if access_token:
+            _app_secret = app_secret or None  # don't mix tenant token with env-var secret
+        else:
+            _app_secret = app_secret or settings.facebook_app_secret
         _token      = access_token or _refresh_token_if_needed()
         _raw_id     = ad_account_id or settings.facebook_ad_account_id or ""
         # Normalize: strip any prefix and rebuild as act_XXXXX (SDK format)
