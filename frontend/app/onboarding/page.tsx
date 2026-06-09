@@ -249,29 +249,27 @@ function OnboardingInner() {
                   </div>
                 </div>
 
-                {/* Tabs: only show in addStore mode */}
-                {addStoreMode && (
-                  <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: '#0B0D0F', borderRadius: 8, padding: 4 }}>
-                    {[
-                      { key: false, label: 'Token manual', desc: 'Custom app' },
-                      { key: true,  label: 'Via OAuth',    desc: 'Partners app' },
-                    ].map(tab => (
-                      <button
-                        key={String(tab.key)}
-                        onClick={() => { setManualMode(!tab.key); setError('') }}
-                        style={{
-                          flex: 1, padding: '8px 12px', borderRadius: 6, border: 'none', cursor: 'pointer',
-                          background: manualMode === !tab.key ? '#1E2028' : 'transparent',
-                          color: manualMode === !tab.key ? '#F4F4F5' : '#52525B',
-                          fontSize: 12, fontWeight: 600,
-                        }}
-                      >
-                        {tab.label}
-                        <span style={{ display: 'block', fontSize: 10, fontWeight: 400, opacity: 0.6 }}>{tab.desc}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
+                {/* Tabs: always show */}
+                <div style={{ display: 'flex', gap: 4, marginBottom: 20, background: '#0B0D0F', borderRadius: 8, padding: 4 }}>
+                  {[
+                    { key: false, label: 'Token manual', desc: 'Custom app' },
+                    { key: true,  label: 'Via OAuth',    desc: 'Partners app' },
+                  ].map(tab => (
+                    <button
+                      key={String(tab.key)}
+                      onClick={() => { setManualMode(!tab.key); setError('') }}
+                      style={{
+                        flex: 1, padding: '8px 12px', borderRadius: 6, border: 'none', cursor: 'pointer',
+                        background: manualMode === !tab.key ? '#1E2028' : 'transparent',
+                        color: manualMode === !tab.key ? '#F4F4F5' : '#52525B',
+                        fontSize: 12, fontWeight: 600,
+                      }}
+                    >
+                      {tab.label}
+                      <span style={{ display: 'block', fontSize: 10, fontWeight: 400, opacity: 0.6 }}>{tab.desc}</span>
+                    </button>
+                  ))}
+                </div>
 
                 {/* Manual / dev dashboard flow */}
                 {manualMode ? (
