@@ -1,3 +1,6 @@
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
+
 export async function GET() {
-  return Response.json({ status: 'ok', port: process.env.PORT, env: process.env.NODE_ENV })
+  return Response.json({ status: 'ok' }, { status: 200 })
 }

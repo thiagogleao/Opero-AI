@@ -47,19 +47,27 @@ export default async function Dashboard({ searchParams }: Props) {
   const { userId } = await auth()
   if (!userId) redirect('/sign-in')
 
-  const tenantId = await getActiveTenantId(userId)
-  const tenant = await getTenant(tenantId)
+  let tenantId: string | null = null
+  let tenant = null
+  try {
+    tenantId = await getActiveTenantId(userId)
+    tenant = await getTenant(tenantId)
+  } catch {
+    redirect('/onboarding')
+  }
   if (!tenant?.onboarded) redirect('/onboarding')
 
-  const stores = await getTenantsByUserId(userId)
+  let stores: Awaited<ReturnType<typeof getTenantsByUserId>> = []
+  let storeTimezone = 'UTC'
+  try {
+    stores = await getTenantsByUserId(userId)
+    storeTimezone = await getTenantTimezone(tenantId!)
+  } catch { /* use defaults */ }
 
   const sp = await searchParams
   const cookieStore = await cookies()
   const lang = (cookieStore.get('opero_lang')?.value ?? 'pt') as Language
   const tr = getTranslations(lang)
-
-  // Use the store's timezone for all date boundaries
-  const storeTimezone = await getTenantTimezone(tenantId)
   const now = new Date()
   const todayISO = dateInTz(now, storeTimezone)
 
@@ -82,20 +90,26 @@ export default async function Dashboard({ searchParams }: Props) {
   const toMs   = new Date(dateTo).getTime()
   const days   = Math.round((toMs - fromMs) / 86400000) + 1
 
-  const [metrics, revenue, roas, creatives, countries, customers, syncs, profit, funnel, countrySpend, countryProfit, dailyProfit] = await Promise.all([
-    getOverviewMetrics(tenantId, dateFrom, dateTo),
-    getDailyRevenue(tenantId, dateFrom, dateTo),
-    getDailyRoas(tenantId, dateFrom, dateTo),
-    getTopCreatives(tenantId, dateFrom, dateTo),
-    getCountryMetrics(tenantId, dateFrom, dateTo),
-    getCustomerSplit(tenantId, dateFrom, dateTo),
-    getLastSyncTime(tenantId),
-    getProfitSummary(tenantId, dateFrom, dateTo),
-    getFunnelMetrics(tenantId, dateFrom, dateTo),
-    getCountrySpend(tenantId, dateFrom, dateTo),
-    getCountryProfit(tenantId, dateFrom, dateTo),
-    getDailyProfitData(tenantId, dateFrom, dateTo),
-  ])
+  let queryResult
+  try {
+    queryResult = await Promise.all([
+      getOverviewMetrics(tenantId!, dateFrom, dateTo),
+      getDailyRevenue(tenantId!, dateFrom, dateTo),
+      getDailyRoas(tenantId!, dateFrom, dateTo),
+      getTopCreatives(tenantId!, dateFrom, dateTo),
+      getCountryMetrics(tenantId!, dateFrom, dateTo),
+      getCustomerSplit(tenantId!, dateFrom, dateTo),
+      getLastSyncTime(tenantId!),
+      getProfitSummary(tenantId!, dateFrom, dateTo),
+      getFunnelMetrics(tenantId!, dateFrom, dateTo),
+      getCountrySpend(tenantId!, dateFrom, dateTo),
+      getCountryProfit(tenantId!, dateFrom, dateTo),
+      getDailyProfitData(tenantId!, dateFrom, dateTo),
+    ])
+  } catch {
+    redirect('/onboarding')
+  }
+  const [metrics, revenue, roas, creatives, countries, customers, syncs, profit, funnel, countrySpend, countryProfit, dailyProfit] = queryResult
 
   const lastSyncIso = syncs[0]?.finished_at ?? null
   const lastSync = lastSyncIso

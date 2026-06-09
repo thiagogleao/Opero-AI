@@ -8,6 +8,8 @@ export const pool =
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false },
     max: 5,
+    connectionTimeoutMillis: 5000,
+    idleTimeoutMillis: 10000,
   })
 
 if (process.env.NODE_ENV !== 'production') globalForPg.pool = pool
