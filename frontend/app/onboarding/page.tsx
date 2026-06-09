@@ -87,9 +87,10 @@ function OnboardingInner() {
   const connectManual = useCallback(async () => {
     const domain = shopifyDomain.replace(/https?:\/\//, '').replace(/\/$/, '')
     if (!domain || !customClientId || !customClientSecret) return
-    const params = new URLSearchParams({ shop: domain, addStore: '1', clientId: customClientId, clientSecret: customClientSecret })
+    const params = new URLSearchParams({ shop: domain, clientId: customClientId, clientSecret: customClientSecret })
+    if (addStoreMode) params.set('addStore', '1')
     window.location.href = `/api/shopify/auth?${params}`
-  }, [shopifyDomain, customClientId, customClientSecret])
+  }, [shopifyDomain, customClientId, customClientSecret, addStoreMode])
 
   const submit = useCallback(async () => {
     setLoading(true)
@@ -128,14 +129,19 @@ function OnboardingInner() {
           body: JSON.stringify({ days }),
         })
         const data = await res.json()
-        setSyncStatus({ shopify: data.shopify?.ok, facebook: data.facebook?.ok })
+        // /api/refresh is fire-and-forget (returns { started: true }); treat as success
+        if (data.started) {
+          setSyncStatus({ shopify: true, facebook: fbToken ? true : undefined })
+        } else {
+          setSyncStatus({ shopify: data.shopify?.ok, facebook: data.facebook?.ok })
+        }
       } catch {
         setSyncStatus({ shopify: false, facebook: false })
       }
       setStep('done')
     }
     firstSync()
-  }, [step, storeStartDate])
+  }, [step, storeStartDate, fbToken])
 
   const inputStyle = {
     width: '100%', background: '#111318', border: '1px solid #2A2D35',
