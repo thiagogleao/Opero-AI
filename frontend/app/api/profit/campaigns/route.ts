@@ -20,26 +20,27 @@ export async function GET(req: NextRequest) {
     ? (summary.totalCosts - summary.fbSpend) / summary.totalRevenue
     : 0
 
-  // Campaign-level FB metrics
+  // Campaign-level FB metrics — grouped via fb_ads which always has campaign_id/campaign_name
+  // (avoids relying on fb_campaigns table which may be empty if not synced)
   const campaigns = await query<{
-    campaign_id: string; campaign_name: string; objective: string | null
+    campaign_id: string; campaign_name: string
     spend: string; fb_revenue: string; purchases: string; roas: string
   }>(`
     SELECT
-      c.campaign_id,
-      COALESCE(c.name, c.campaign_id) AS campaign_name,
-      c.objective,
+      a.campaign_id,
+      COALESCE(MAX(a.campaign_name), a.campaign_id) AS campaign_name,
       ROUND(SUM(m.spend)::numeric, 2)::text          AS spend,
       ROUND(SUM(m.purchase_value)::numeric, 2)::text AS fb_revenue,
       SUM(m.purchases)::text                          AS purchases,
       ROUND(CASE WHEN SUM(m.spend) > 0
         THEN SUM(m.purchase_value) / SUM(m.spend) ELSE 0
         END::numeric, 2)::text                        AS roas
-    FROM fb_campaigns c
-    JOIN fb_ad_daily_metrics m ON m.campaign_id = c.campaign_id
+    FROM fb_ad_daily_metrics m
+    JOIN fb_ads a ON m.ad_id = a.ad_id
     WHERE m.tenant_id = $1
       AND m.date BETWEEN $2::date AND $3::date
-    GROUP BY c.campaign_id, c.name, c.objective
+      AND a.campaign_id IS NOT NULL
+    GROUP BY a.campaign_id
     HAVING SUM(m.spend) > 0
     ORDER BY SUM(m.spend) DESC
   `, [tenantId, dateFrom, dateTo])
@@ -47,14 +48,13 @@ export async function GET(req: NextRequest) {
   const result = campaigns.map(c => {
     const spend     = Number(c.spend)
     const fbRevenue = Number(c.fb_revenue)
-    // Estimated profit: FB-attributed revenue minus FB spend minus proportional non-FB costs
     const nonFbCost = fbRevenue * nonFbCostRate
     const profit    = fbRevenue - spend - nonFbCost
     const margin    = fbRevenue > 0 ? (profit / fbRevenue) * 100 : 0
     return {
       campaign_id:      c.campaign_id,
       campaign_name:    c.campaign_name,
-      objective:        c.objective,
+      objective:        null as string | null,
       spend,
       fb_revenue:       fbRevenue,
       purchases:        Number(c.purchases),
