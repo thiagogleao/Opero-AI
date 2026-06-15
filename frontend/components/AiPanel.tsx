@@ -155,7 +155,7 @@ export default function AiPanel({ systemPrompt, cacheKey }: Props) {
               : insightError
               ? <div style={{ gridColumn: '1/-1', padding: '20px 0', color: '#F43F5E', fontSize: 12 }}>
                   {tr.ai_error}: {insightError}
-                  <button onClick={loadInsights} style={{ marginLeft: 10, color: '#A78BFA', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12 }}>{tr.ai_retry}</button>
+                  <button onClick={() => loadInsights(true)} style={{ marginLeft: 10, color: '#A78BFA', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12 }}>{tr.ai_retry}</button>
                 </div>
               : insights.length === 0
               ? <div style={{ gridColumn: '1/-1', padding: '32px 0', textAlign: 'center' }}>
