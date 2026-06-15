@@ -20,15 +20,15 @@ export async function GET(req: NextRequest) {
     ? (summary.totalCosts - summary.fbSpend) / summary.totalRevenue
     : 0
 
-  // Campaign-level FB metrics — grouped via fb_ads which always has campaign_id/campaign_name
-  // (avoids relying on fb_campaigns table which may be empty if not synced)
+  // Campaign-level FB metrics — base is fb_ad_daily_metrics → fb_ads (always has ad_id)
+  // LEFT JOIN fb_campaigns for the human-readable name
   const campaigns = await query<{
     campaign_id: string; campaign_name: string
     spend: string; fb_revenue: string; purchases: string; roas: string
   }>(`
     SELECT
       a.campaign_id,
-      COALESCE(MAX(a.campaign_name), a.campaign_id) AS campaign_name,
+      COALESCE(MAX(c.name), MAX(a.campaign_name), a.campaign_id) AS campaign_name,
       ROUND(SUM(m.spend)::numeric, 2)::text          AS spend,
       ROUND(SUM(m.purchase_value)::numeric, 2)::text AS fb_revenue,
       SUM(m.purchases)::text                          AS purchases,
@@ -37,6 +37,7 @@ export async function GET(req: NextRequest) {
         END::numeric, 2)::text                        AS roas
     FROM fb_ad_daily_metrics m
     JOIN fb_ads a ON m.ad_id = a.ad_id
+    LEFT JOIN fb_campaigns c ON a.campaign_id = c.campaign_id
     WHERE m.tenant_id = $1
       AND m.date BETWEEN $2::date AND $3::date
       AND a.campaign_id IS NOT NULL
