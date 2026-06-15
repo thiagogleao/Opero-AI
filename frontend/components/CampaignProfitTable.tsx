@@ -18,6 +18,7 @@ interface CampaignRow {
   real_profit: number
   real_margin: number
   configured: boolean
+  attribution_reliable: boolean
 }
 
 interface ApiResponse {
@@ -163,13 +164,13 @@ export default function CampaignProfitTable() {
                     <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-primary)', fontWeight: 500 }} title={row.campaign_name}>
                       {row.campaign_name}
                     </div>
-                    {row.matched_product && (
+                    {row.attribution_reliable && row.matched_product && (
                       <div style={{ fontSize: 10, color: '#A78BFA', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={`Produto identificado: ${row.matched_product}`}>
                         ↳ {row.matched_product}
                       </div>
                     )}
-                    {!row.matched_product && (
-                      <div style={{ fontSize: 10, color: 'var(--text-ghost)', marginTop: 2 }}>↳ produto não identificado</div>
+                    {!row.attribution_reliable && (
+                      <div style={{ fontSize: 10, color: '#F59E0B', marginTop: 2 }}>↳ dados insuficientes para estimar</div>
                     )}
                   </td>
                   <td style={{ padding: '10px 14px', textAlign: 'right', color: 'var(--text-secondary)' }}>{fmt(row.spend)}</td>
@@ -178,16 +179,16 @@ export default function CampaignProfitTable() {
                   <td style={{ padding: '10px 14px', textAlign: 'right', color: row.configured ? fbProfitColor : 'var(--text-ghost)' }}>
                     {row.configured ? fmt(row.fb_profit) : '—'}
                   </td>
-                  <td style={{ padding: '10px 14px', textAlign: 'right', color: row.matched_product ? 'var(--text-secondary)' : 'var(--text-ghost)' }}>
-                    {row.matched_product ? fmt(row.attributed_revenue) : '—'}
+                  <td style={{ padding: '10px 14px', textAlign: 'right', color: row.attribution_reliable ? 'var(--text-secondary)' : 'var(--text-ghost)' }}>
+                    {row.attribution_reliable ? fmt(row.attributed_revenue) : '—'}
                   </td>
                   <td style={{ padding: '10px 14px', textAlign: 'right' }}>
-                    {row.matched_product && row.configured
+                    {row.attribution_reliable && row.configured
                       ? <ProfitBadge value={row.real_profit} fmt={fmt} />
                       : <span style={{ color: 'var(--text-ghost)' }}>—</span>}
                   </td>
-                  <td style={{ padding: '10px 14px', textAlign: 'right', color: row.matched_product && row.configured ? realProfitColor : 'var(--text-ghost)', fontSize: 11 }}>
-                    {row.matched_product && row.configured ? `${row.real_margin.toFixed(1)}%` : '—'}
+                  <td style={{ padding: '10px 14px', textAlign: 'right', color: row.attribution_reliable && row.configured ? realProfitColor : 'var(--text-ghost)', fontSize: 11 }}>
+                    {row.attribution_reliable && row.configured ? `${row.real_margin.toFixed(1)}%` : '—'}
                   </td>
                 </tr>
               )
@@ -208,10 +209,10 @@ export default function CampaignProfitTable() {
                   {fmt(rows.reduce((s, r) => s + r.fb_profit, 0))}
                 </td>
                 <td style={{ padding: '10px 14px', textAlign: 'right', color: 'var(--text-muted)', fontSize: 11 }}>
-                  {fmt(rows.filter(r => r.matched_product).reduce((s, r) => s + r.attributed_revenue, 0))}
+                  {fmt(rows.filter(r => r.attribution_reliable).reduce((s, r) => s + r.attributed_revenue, 0))}
                 </td>
                 <td style={{ padding: '10px 14px', textAlign: 'right', fontSize: 11 }}>
-                  <ProfitBadge value={rows.filter(r => r.matched_product).reduce((s, r) => s + r.real_profit, 0)} fmt={fmt} />
+                  <ProfitBadge value={rows.filter(r => r.attribution_reliable).reduce((s, r) => s + r.real_profit, 0)} fmt={fmt} />
                 </td>
                 <td />
               </tr>

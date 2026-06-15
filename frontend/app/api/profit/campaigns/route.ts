@@ -210,29 +210,39 @@ export async function GET(req: NextRequest) {
     const realProfit = attributedRevenue - spend - attributedRevenue * nonFbCostRate
     const realMargin = attributedRevenue > 0 ? (realProfit / attributedRevenue) * 100 : 0
 
+    // Reliability check: if attributed revenue is much lower than what FB/spend suggests,
+    // the product+country match likely missed most sales → exclude from real profit
+    const reference = Math.max(spend, fbRevenue)
+    const MIN_RATIO = 0.15  // attributed must be >= 15% of reference to be trustworthy
+    const attribution_reliable = matchedProduct !== null && (
+      reference === 0 || attributedRevenue >= reference * MIN_RATIO
+    )
+
     return {
-      campaign_id:        c.campaign_id,
-      campaign_name:      c.campaign_name,
-      matched_product:    matchedProduct,
+      campaign_id:          c.campaign_id,
+      campaign_name:        c.campaign_name,
+      matched_product:      attribution_reliable ? matchedProduct : null,
       spend,
-      fb_revenue:         fbRevenue,
-      purchases:          Number(c.purchases),
-      roas:               Number(c.roas),
-      fb_profit:          Math.round(fbProfit * 100) / 100,
-      fb_margin:          Math.round(fbMargin * 10) / 10,
-      attributed_revenue: Math.round(attributedRevenue * 100) / 100,
-      real_profit:        Math.round(realProfit * 100) / 100,
-      real_margin:        Math.round(realMargin * 10) / 10,
-      configured:         summary.configured,
+      fb_revenue:           fbRevenue,
+      purchases:            Number(c.purchases),
+      roas:                 Number(c.roas),
+      fb_profit:            Math.round(fbProfit * 100) / 100,
+      fb_margin:            Math.round(fbMargin * 10) / 10,
+      attributed_revenue:   attribution_reliable ? Math.round(attributedRevenue * 100) / 100 : 0,
+      real_profit:          attribution_reliable ? Math.round(realProfit * 100) / 100 : 0,
+      real_margin:          attribution_reliable ? Math.round(realMargin * 10) / 10 : 0,
+      configured:           summary.configured,
+      attribution_reliable,
     }
   })
 
-  // Normalize: sum of real profits must not exceed actual total net profit
+  // Normalize: sum of reliable real profits must not exceed actual total net profit
   if (summary.configured && summary.netProfit !== 0) {
     const totalRealProfit = results.reduce((s, r) => s + r.real_profit, 0)
     if (totalRealProfit > summary.netProfit && totalRealProfit > 0) {
       const scale = summary.netProfit / totalRealProfit
       for (const r of results) {
+        if (!r.attribution_reliable) continue
         r.real_profit = Math.round(r.real_profit * scale * 100) / 100
         r.real_margin = r.attributed_revenue > 0
           ? Math.round((r.real_profit / r.attributed_revenue) * 1000) / 10
