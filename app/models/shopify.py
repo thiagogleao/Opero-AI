@@ -78,10 +78,11 @@ class ShopifyDailyMetric(Base):
 
     __tablename__ = "shopify_daily_metrics"
     __table_args__ = (
-        UniqueConstraint("date", name="uq_shopify_daily_date"),
+        UniqueConstraint("tenant_id", "date", name="uq_shopify_daily_tenant_date"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
     date: Mapped[date] = mapped_column(Date, nullable=False)
 
     total_orders: Mapped[int] = mapped_column(Integer, default=0)

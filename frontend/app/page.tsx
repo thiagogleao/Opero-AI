@@ -9,12 +9,15 @@ import {
   getOverviewMetrics, getDailyRevenue, getDailyRoas,
   getTopCreatives, getCountryMetrics, getCustomerSplit, getLastSyncTime,
   getFunnelMetrics, getCountrySpend, getTenantTimezone,
+  getBreakdownByType, getCustomerLtv,
 } from '@/lib/queries'
 import { getProfitSummary, getCountryProfit, getDailyProfitData } from '@/lib/profitCalc'
 import RevenueChart from '@/components/RevenueChart'
 import RoasChart from '@/components/RoasChart'
 import CountryChart from '@/components/CountryChart'
 import CustomerChart from '@/components/CustomerChart'
+import BreakdownTabs from '@/components/BreakdownTabs'
+import LtvSection from '@/components/LtvSection'
 import CreativesTable from '@/components/CreativesTable'
 import DailyProfitChart from '@/components/DailyProfitChart'
 import MarginBreakdownChart from '@/components/MarginBreakdownChart'
@@ -90,6 +93,9 @@ export default async function Dashboard({ searchParams }: Props) {
   const toMs   = new Date(dateTo).getTime()
   const days   = Math.round((toMs - fromMs) / 86400000) + 1
 
+  // Breakdowns always use last 14 days (limited by FB API)
+  const bd14From = dateInTz(new Date(now.getTime() - 13 * 86400000), storeTimezone)
+
   let queryResult
   try {
     queryResult = await Promise.all([
@@ -105,11 +111,15 @@ export default async function Dashboard({ searchParams }: Props) {
       getCountrySpend(tenantId!, dateFrom, dateTo),
       getCountryProfit(tenantId!, dateFrom, dateTo),
       getDailyProfitData(tenantId!, dateFrom, dateTo),
+      getBreakdownByType(tenantId!, bd14From, todayISO, 'device'),
+      getBreakdownByType(tenantId!, bd14From, todayISO, 'placement'),
+      getBreakdownByType(tenantId!, bd14From, todayISO, 'age_gender'),
+      getCustomerLtv(tenantId!),
     ])
   } catch {
     redirect('/onboarding')
   }
-  const [metrics, revenue, roas, creatives, countries, customers, syncs, profit, funnel, countrySpend, countryProfit, dailyProfit] = queryResult
+  const [metrics, revenue, roas, creatives, countries, customers, syncs, profit, funnel, countrySpend, countryProfit, dailyProfit, bdDevice, bdPlacement, bdAgeGender, ltvData] = queryResult
 
   const lastSyncIso = syncs[0]?.finished_at ?? null
   const lastSync = lastSyncIso
@@ -453,6 +463,12 @@ ${promptLang.formatNote}`
         {/* Charts row 3 */}
         <div style={{ marginBottom: 12 }}>
           <CustomerChart data={customers} days={days} />
+        </div>
+
+        {/* LTV & Breakdowns */}
+        <div style={{ display: 'grid', gridTemplateColumns: ltvData.length > 0 ? '1fr 1fr' : '1fr', gap: 12, marginBottom: 12 }}>
+          {ltvData.length > 0 && <LtvSection data={ltvData} />}
+          <BreakdownTabs device={bdDevice} placement={bdPlacement} ageGender={bdAgeGender} days={14} />
         </div>
 
         {/* AI Panel */}

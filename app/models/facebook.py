@@ -57,6 +57,7 @@ class FbAd(Base):
     creative_type: Mapped[Optional[str]] = mapped_column(String(16))
     creative_url: Mapped[Optional[str]] = mapped_column(Text)
     thumbnail_url: Mapped[Optional[str]] = mapped_column(Text)
+    landing_url: Mapped[Optional[str]] = mapped_column(Text)
     synced_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 

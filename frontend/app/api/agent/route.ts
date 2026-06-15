@@ -276,46 +276,65 @@ async function executeTool(name: string, input: Input, shopify: ShopifyAdmin, te
         const { topic, date_from, date_to, limit = 50 } = input as {
           topic: string; date_from?: string; date_to?: string; limit?: number
         }
-        const tid = tenantId
-        const queries: Record<string, string> = {
-          fb_ads: `SELECT a.ad_id, a.name, a.status, a.effective_status, a.landing_url, a.creative_url, a.thumbnail_url,
-                          a.adset_name, a.campaign_name,
-                          ROUND(SUM(m.spend)::numeric,2) AS spend,
-                          ROUND(CASE WHEN SUM(m.spend)>0 THEN SUM(m.purchase_value)/SUM(m.spend) ELSE 0 END::numeric,2) AS roas
-                   FROM fb_ads a
-                   LEFT JOIN fb_ad_daily_metrics m ON a.ad_id = m.ad_id AND m.tenant_id = a.tenant_id
-                     ${date_from ? `AND m.date >= '${date_from}'` : ''}
-                     ${date_to   ? `AND m.date <= '${date_to}'`   : ''}
-                   WHERE a.tenant_id = '${tid}'
-                   GROUP BY a.ad_id, a.name, a.status, a.effective_status, a.landing_url, a.creative_url, a.thumbnail_url, a.adset_name, a.campaign_name
-                   ORDER BY spend DESC NULLS LAST
-                   LIMIT ${limit}`,
-          fb_metrics: `SELECT m.date, a.name AS ad_name, m.spend, m.impressions, m.clicks,
-                               m.purchases, m.purchase_value,
-                               ROUND(CASE WHEN m.spend>0 THEN m.purchase_value/m.spend ELSE 0 END::numeric,2) AS roas
-                        FROM fb_ad_daily_metrics m
-                        JOIN fb_ads a ON m.ad_id = a.ad_id AND m.tenant_id = a.tenant_id
-                        WHERE m.tenant_id = '${tid}'
-                          ${date_from ? `AND m.date >= '${date_from}'` : ''}
-                          ${date_to   ? `AND m.date <= '${date_to}'`   : ''}
-                        ORDER BY m.date DESC, m.spend DESC
-                        LIMIT ${limit}`,
-          fb_campaigns: `SELECT campaign_id, name, status, objective FROM fb_campaigns WHERE tenant_id = '${tid}' ORDER BY name LIMIT ${limit}`,
-          orders: `SELECT order_id, order_number, created_at::date, total_price, financial_status, country_code, customer_email
-                   FROM shopify_orders WHERE tenant_id = '${tid}'
-                     ${date_from ? `AND created_at::date >= '${date_from}'` : ''}
-                     ${date_to   ? `AND created_at::date <= '${date_to}'`   : ''}
-                   ORDER BY created_at DESC LIMIT ${limit}`,
-          products: `SELECT product_id, title, status, price_min, price_max, inventory_quantity FROM shopify_products WHERE tenant_id = '${tid}' ORDER BY title LIMIT ${limit}`,
-          daily_revenue: `SELECT date, total_orders, total_revenue, avg_order_value, new_customers, returning_customers
-                          FROM shopify_daily_metrics WHERE tenant_id = '${tid}'
-                            ${date_from ? `AND date >= '${date_from}'` : ''}
-                            ${date_to   ? `AND date <= '${date_to}'`   : ''}
-                          ORDER BY date DESC LIMIT ${limit}`,
+        // Validate inputs — never interpolate user-supplied strings into SQL
+        const VALID_TOPICS = ['fb_ads', 'fb_metrics', 'fb_campaigns', 'orders', 'products', 'daily_revenue']
+        if (!VALID_TOPICS.includes(topic)) return JSON.stringify({ error: `unknown topic: ${topic}` })
+        const safeLimit = Math.min(Math.max(Number(limit) || 50, 1), 200)
+        // Validate date format (YYYY-MM-DD) to prevent injection via date params
+        const dateRe = /^\d{4}-\d{2}-\d{2}$/
+        const safeFrom = date_from && dateRe.test(date_from) ? date_from : null
+        const safeTo   = date_to   && dateRe.test(date_to)   ? date_to   : null
+
+        // All queries use parameterised $N placeholders — tenantId always $1
+        const queryDefs: Record<string, { sql: string; params: unknown[] }> = {
+          fb_ads: {
+            sql: `SELECT a.ad_id, a.name, a.status, a.landing_url, a.creative_url, a.thumbnail_url,
+                         ROUND(SUM(m.spend)::numeric,2) AS spend,
+                         ROUND(CASE WHEN SUM(m.spend)>0 THEN SUM(m.purchase_value)/SUM(m.spend) ELSE 0 END::numeric,2) AS roas
+                  FROM fb_ads a
+                  LEFT JOIN fb_ad_daily_metrics m ON a.ad_id = m.ad_id AND m.tenant_id = a.tenant_id
+                    ${safeFrom ? 'AND m.date >= $2::date' : ''} ${safeTo ? `AND m.date <= $${safeFrom ? 3 : 2}::date` : ''}
+                  WHERE a.tenant_id = $1
+                  GROUP BY a.ad_id, a.name, a.status, a.landing_url, a.creative_url, a.thumbnail_url
+                  ORDER BY spend DESC NULLS LAST LIMIT ${safeLimit}`,
+            params: [tenantId, ...(safeFrom ? [safeFrom] : []), ...(safeTo ? [safeTo] : [])],
+          },
+          fb_metrics: {
+            sql: `SELECT m.date, a.name AS ad_name, m.spend, m.impressions, m.clicks,
+                          m.purchases, m.purchase_value,
+                          ROUND(CASE WHEN m.spend>0 THEN m.purchase_value/m.spend ELSE 0 END::numeric,2) AS roas
+                   FROM fb_ad_daily_metrics m
+                   JOIN fb_ads a ON m.ad_id = a.ad_id AND m.tenant_id = a.tenant_id
+                   WHERE m.tenant_id = $1
+                     ${safeFrom ? 'AND m.date >= $2::date' : ''} ${safeTo ? `AND m.date <= $${safeFrom ? 3 : 2}::date` : ''}
+                   ORDER BY m.date DESC, m.spend DESC LIMIT ${safeLimit}`,
+            params: [tenantId, ...(safeFrom ? [safeFrom] : []), ...(safeTo ? [safeTo] : [])],
+          },
+          fb_campaigns: {
+            sql: `SELECT campaign_id, name, status, objective FROM fb_campaigns WHERE tenant_id = $1 ORDER BY name LIMIT ${safeLimit}`,
+            params: [tenantId],
+          },
+          orders: {
+            sql: `SELECT order_id, order_number, created_at::date, total_price, financial_status, country_code
+                  FROM shopify_orders WHERE tenant_id = $1
+                    ${safeFrom ? 'AND created_at::date >= $2::date' : ''} ${safeTo ? `AND created_at::date <= $${safeFrom ? 3 : 2}::date` : ''}
+                  ORDER BY created_at DESC LIMIT ${safeLimit}`,
+            params: [tenantId, ...(safeFrom ? [safeFrom] : []), ...(safeTo ? [safeTo] : [])],
+          },
+          products: {
+            sql: `SELECT product_id, title, status, price_min, price_max FROM shopify_products WHERE tenant_id = $1 ORDER BY title LIMIT ${safeLimit}`,
+            params: [tenantId],
+          },
+          daily_revenue: {
+            sql: `SELECT date, total_orders, total_revenue, avg_order_value, new_customers, returning_customers
+                  FROM shopify_daily_metrics WHERE tenant_id = $1
+                    ${safeFrom ? 'AND date >= $2::date' : ''} ${safeTo ? `AND date <= $${safeFrom ? 3 : 2}::date` : ''}
+                  ORDER BY date DESC LIMIT ${safeLimit}`,
+            params: [tenantId, ...(safeFrom ? [safeFrom] : []), ...(safeTo ? [safeTo] : [])],
+          },
         }
-        const sql = queries[topic]
-        if (!sql) return JSON.stringify({ error: `unknown topic: ${topic}` })
-        const rows = await query(sql, [])
+        const def = queryDefs[topic]
+        const rows = await query(def.sql, def.params)
         return JSON.stringify(rows)
       }
       default:

@@ -2,10 +2,17 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useTr } from '@/lib/translations'
+import Link from 'next/link'
 
 interface Creative {
   ad_id: string; name: string; spend: number
-  revenue: number; roas: number; ctr: number; purchases: number; score: number
+  revenue: number; roas: number; ctr: number; frequency: number
+  purchases: number; score: number
+  hook_rate: number | null
+  hold_rate_25: number | null; hold_rate_50: number | null
+  hold_rate_75: number | null; hold_rate_100: number | null
+  video_plays: number | null
+  thumbnail_url: string | null; creative_url: string | null
 }
 
 interface Props { data: Creative[]; days: number; breakEvenRoas?: number }
@@ -52,7 +59,49 @@ function ActionBadge({ verdict }: { verdict: 'off' | 'review' | 'scale' }) {
   )
 }
 
-const COLS = '1fr 100px 76px 70px 46px 88px'
+function HookBar({ value, max }: { value: number | null; max: number }) {
+  if (value === null || value === undefined) {
+    return <span style={{ fontSize: 11, color: 'var(--text-ghost)' }}>—</span>
+  }
+  const pct = max > 0 ? Math.min((value / max) * 100, 100) : 0
+  const color = value >= 10 ? '#10B981' : value >= 5 ? '#F59E0B' : '#F43F5E'
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+      <div style={{ width: 28, height: 3, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>
+        <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: 2 }} />
+      </div>
+      <span style={{ fontSize: 11, color, fontWeight: 600 }}>{Number(value).toFixed(1)}%</span>
+    </div>
+  )
+}
+
+// Compact video funnel: plays→P25→P50→P75 as tiny dots
+function VideoFunnel({ c }: { c: Creative }) {
+  const plays = c.video_plays
+  if (!plays || plays === 0) return null
+  const steps = [
+    { label: 'P25', v: c.hold_rate_25 },
+    { label: 'P50', v: c.hold_rate_50 },
+    { label: 'P75', v: c.hold_rate_75 },
+    { label: 'P100', v: c.hold_rate_100 },
+  ].filter(s => s.v !== null)
+  if (steps.length === 0) return null
+  return (
+    <div style={{ display: 'flex', gap: 4, alignItems: 'center', marginTop: 3 }}>
+      {steps.map(s => {
+        const v = Number(s.v)
+        const color = v >= 30 ? '#10B981' : v >= 15 ? '#F59E0B' : '#F43F5E'
+        return (
+          <span key={s.label} title={`${s.label}: ${v.toFixed(1)}%`} style={{ fontSize: 9, color, background: `${color}18`, borderRadius: 3, padding: '1px 4px', fontWeight: 600 }}>
+            {s.label} {v.toFixed(0)}%
+          </span>
+        )
+      })}
+    </div>
+  )
+}
+
+const COLS = '1fr 100px 76px 70px 46px 72px 88px'
 
 function TableHeader() {
   const tr = useTr()
@@ -63,6 +112,7 @@ function TableHeader() {
       <span style={{ textAlign: 'right' }}>{tr.creative_revenue}</span>
       <span style={{ textAlign: 'right' }}>ROAS</span>
       <span style={{ textAlign: 'right' }}>CTR</span>
+      <span style={{ textAlign: 'right' }} title="Hook Rate = % de quem viu o anúncio e assistiu">Hook</span>
       <span style={{ textAlign: 'right' }}>{tr.settings_display}</span>
     </div>
   )
@@ -81,6 +131,9 @@ export default function CreativesTable({ data, days, breakEvenRoas = 1.5 }: Prop
     return null
   }
 
+  const isFatigued = (c: Creative) =>
+    Number(c.frequency) > 3.5 && Number(c.spend) >= 30
+
   const worst = data
     .filter(c => { const v = getVerdict(Number(c.spend), Number(c.score), Number(c.roas)); return v === 'off' || v === 'review' })
     .sort((a, b) => Number(b.spend) - Number(a.spend))
@@ -94,8 +147,9 @@ export default function CreativesTable({ data, days, breakEvenRoas = 1.5 }: Prop
   const safePage   = Math.min(page, Math.max(0, totalPages - 1))
   const visible    = list.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE)
 
-  const maxSpend = Math.max(...data.map(c => Number(c.spend)), 1)
-  const maxScore = Math.max(...data.filter(c => Number(c.score) > 0).map(c => Number(c.score)), 1)
+  const maxSpend   = Math.max(...data.map(c => Number(c.spend)), 1)
+  const maxScore   = Math.max(...data.filter(c => Number(c.score) > 0).map(c => Number(c.score)), 1)
+  const maxHook    = Math.max(...data.map(c => Number(c.hook_rate ?? 0)), 1)
 
   function switchView(v: 'best' | 'worst') { setView(v); setPage(0) }
 
@@ -147,10 +201,13 @@ export default function CreativesTable({ data, days, breakEvenRoas = 1.5 }: Prop
                 const spend    = Number(creative.spend)
                 const score    = Number(creative.score)
                 const roas     = Number(creative.roas)
+                const freq     = Number(creative.frequency)
                 const scorePct = score > 0 && maxScore > 0 ? (score / maxScore) * 100 : 0
                 const lowData  = spend < 15
                 const midData  = spend >= 15 && spend < 50
                 const verdict  = getVerdict(spend, score, roas)
+                const fatigued = isFatigued(creative)
+                const isVideo  = (creative.video_plays ?? 0) > 0
 
                 return (
                   <div key={creative.ad_id} style={{ display: 'grid', gridTemplateColumns: COLS, padding: '8px 8px', borderRadius: 8, alignItems: 'center', opacity: lowData ? 0.5 : 1, borderBottom: i < visible.length - 1 ? '1px solid rgba(255,255,255,0.03)' : 'none' }}>
@@ -158,11 +215,37 @@ export default function CreativesTable({ data, days, breakEvenRoas = 1.5 }: Prop
                       <div style={{ width: 3, height: 34, background: 'var(--border)', borderRadius: 2, flexShrink: 0 }}>
                         <div style={{ width: '100%', height: `${Math.max(scorePct, score < 0 ? 100 : 0)}%`, background: score < 0 ? '#F43F5E' : lowData ? 'var(--text-ghost)' : midData ? '#F59E0B' : '#8B5CF6', borderRadius: 2, marginTop: score < 0 ? '0%' : `${100 - scorePct}%` }} />
                       </div>
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 12, fontWeight: 500, color: score < 0 ? '#F43F5E' : lowData ? 'var(--text-faint)' : 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 190 }}>
-                          {creative.name}
+                      {/* Thumbnail */}
+                      {(creative.thumbnail_url || creative.creative_url) && (
+                        <div style={{ width: 28, height: 28, borderRadius: 4, overflow: 'hidden', flexShrink: 0, background: 'var(--border)' }}>
+                          <img
+                            src={creative.thumbnail_url ?? creative.creative_url ?? ''}
+                            alt=""
+                            width={28} height={28}
+                            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                            onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
+                          />
                         </div>
-                        <div style={{ display: 'flex', gap: 8, marginTop: 2, alignItems: 'center' }}>
+                      )}
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+                          <Link href={`/creatives/${creative.ad_id}`} style={{ textDecoration: 'none' }}>
+                            <span style={{ fontSize: 12, fontWeight: 500, color: score < 0 ? '#F43F5E' : lowData ? 'var(--text-faint)' : 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 150, display: 'block' }}>
+                              {creative.name}
+                            </span>
+                          </Link>
+                          {fatigued && (
+                            <span title={`Frequência ${freq.toFixed(1)}x — criativo saturando`} style={{ fontSize: 9, fontWeight: 700, color: '#F59E0B', background: 'rgba(245,158,11,0.15)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: 3, padding: '1px 4px', flexShrink: 0 }}>
+                              ⚠ {freq.toFixed(1)}x
+                            </span>
+                          )}
+                          {isVideo && (
+                            <span title="Criativo de vídeo — métricas de retenção disponíveis" style={{ fontSize: 9, color: '#3B82F6', background: 'rgba(59,130,246,0.12)', borderRadius: 3, padding: '1px 4px', flexShrink: 0 }}>
+                              ▶
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, marginTop: 1, alignItems: 'center' }}>
                           <span style={{ fontSize: 9, color: 'var(--text-ghost)', fontFamily: 'monospace', background: 'var(--bg)', borderRadius: 3, padding: '1px 4px' }}>
                             {creative.ad_id}
                           </span>
@@ -171,6 +254,7 @@ export default function CreativesTable({ data, days, breakEvenRoas = 1.5 }: Prop
                             {lowData && ` · ${tr.creative_insufficient}`}
                           </span>
                         </div>
+                        {isVideo && <VideoFunnel c={creative} />}
                       </div>
                     </div>
 
@@ -185,6 +269,9 @@ export default function CreativesTable({ data, days, breakEvenRoas = 1.5 }: Prop
                     <span style={{ textAlign: 'right', fontSize: 12, color: 'var(--text-muted)' }}>
                       {Number(creative.ctr).toFixed(1)}%
                     </span>
+                    <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                      <HookBar value={creative.hook_rate} max={maxHook} />
+                    </div>
                     <div style={{ textAlign: 'right' }}>
                       {verdict && <ActionBadge verdict={verdict} />}
                     </div>
@@ -211,12 +298,16 @@ export default function CreativesTable({ data, days, breakEvenRoas = 1.5 }: Prop
             </div>
           )}
 
-          <div style={{ display: 'flex', gap: 14, marginTop: 10, fontSize: 10, color: 'var(--text-ghost)' }}>
+          <div style={{ display: 'flex', gap: 14, marginTop: 10, fontSize: 10, color: 'var(--text-ghost)', flexWrap: 'wrap' }}>
             {[['#8B5CF6', tr.confidence_high], ['#F59E0B', tr.confidence_mid], ['var(--text-ghost)', tr.confidence_low]].map(([c, l]) => (
               <span key={l} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                 <span style={{ width: 8, height: 8, borderRadius: 1, background: c, display: 'inline-block' }} />{l}
               </span>
             ))}
+            <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ fontSize: 9, color: '#F59E0B', background: 'rgba(245,158,11,0.15)', borderRadius: 3, padding: '1px 4px', fontWeight: 700 }}>⚠ 3.5x</span>
+              Fadiga de criativo (frequência alta)
+            </span>
           </div>
         </>
       )}

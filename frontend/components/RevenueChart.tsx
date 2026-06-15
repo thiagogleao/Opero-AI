@@ -1,7 +1,8 @@
 'use client'
 import { motion } from 'framer-motion'
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts'
 import { useTr } from '@/lib/translations'
+import { useSettings } from '@/contexts/SettingsContext'
 
 interface Props {
   data: { date: string; revenue: number; spend: number }[]
@@ -30,6 +31,8 @@ function CustomTooltip({ active, payload, label }: any) {
 
 export default function RevenueChart({ data, days }: Props) {
   const tr = useTr()
+  const { goals } = useSettings()
+  const targetDailyRevenue = goals?.targetDailyRevenue > 0 ? Number(goals.targetDailyRevenue) : null
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
@@ -56,6 +59,10 @@ export default function RevenueChart({ data, days }: Props) {
           <XAxis dataKey="date" tick={{ fill: 'var(--text-faint)', fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={(v) => v.slice(5)} />
           <YAxis tick={{ fill: 'var(--text-faint)', fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={fmt} width={50} />
           <Tooltip content={<CustomTooltip />} />
+          {targetDailyRevenue && targetDailyRevenue > 0 && (
+            <ReferenceLine y={targetDailyRevenue} stroke="#A78BFA" strokeDasharray="4 4"
+              label={{ value: `Meta ${fmt(targetDailyRevenue)}/dia`, fill: '#A78BFA', fontSize: 10, position: 'insideTopRight' }} />
+          )}
           <Area type="monotone" dataKey="revenue" stroke="#10B981" strokeWidth={2} fill="url(#gRevenue)" name="revenue" />
           <Area type="monotone" dataKey="spend" stroke="#8B5CF6" strokeWidth={2} fill="url(#gSpend)" name="spend" />
         </AreaChart>

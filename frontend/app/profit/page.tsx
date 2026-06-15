@@ -19,10 +19,10 @@ export default async function ProfitPage() {
 
       <main style={{ marginLeft: 56, flex: 1, padding: '28px 32px' }}>
         <div style={{ marginBottom: 24 }}>
-          <h1 style={{ fontSize: 22, fontWeight: 700, color: '#F4F4F5', letterSpacing: '-0.4px' }}>
+          <h1 style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-primary)', letterSpacing: '-0.4px' }}>
             Calculadora de Lucro
           </h1>
-          <p style={{ color: '#52525B', fontSize: 13, marginTop: 3 }}>
+          <p style={{ color: 'var(--text-faint)', fontSize: 13, marginTop: 3 }}>
             Configure seus custos reais e veja o lucro líquido da operação
           </p>
         </div>

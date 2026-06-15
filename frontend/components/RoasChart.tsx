@@ -2,6 +2,7 @@
 import { motion } from 'framer-motion'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts'
 import { useTr } from '@/lib/translations'
+import { useSettings } from '@/contexts/SettingsContext'
 
 interface Props {
   data: { date: string; blended_roas: number }[]
@@ -24,6 +25,8 @@ function CustomTooltip({ active, payload, label }: any) {
 
 export default function RoasChart({ data, days }: Props) {
   const tr = useTr()
+  const { goals } = useSettings()
+  const targetRoas = goals?.targetRoas > 0 ? Number(goals.targetRoas) : null
   const hasData = data.some(d => Number(d.blended_roas) > 0)
   return (
     <motion.div
@@ -47,6 +50,10 @@ export default function RoasChart({ data, days }: Props) {
             <YAxis tick={{ fill: 'var(--text-faint)', fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={(v) => `${v}x`} width={40} />
             <Tooltip content={<CustomTooltip />} />
             <ReferenceLine y={1} stroke="#F43F5E" strokeDasharray="4 4" />
+            {targetRoas && targetRoas > 0 && (
+              <ReferenceLine y={targetRoas} stroke="#A78BFA" strokeDasharray="4 4"
+                label={{ value: `Meta ${targetRoas}x`, fill: '#A78BFA', fontSize: 10, position: 'insideTopRight' }} />
+            )}
             <Line type="monotone" dataKey="blended_roas" stroke="#10B981" strokeWidth={2} dot={false} name="blended_roas" />
           </LineChart>
         </ResponsiveContainer>
