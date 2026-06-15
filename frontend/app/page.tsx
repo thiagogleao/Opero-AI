@@ -52,13 +52,31 @@ export default async function Dashboard({ searchParams }: Props) {
 
   let tenantId: string | null = null
   let tenant = null
+  let tenantError: string | null = null
   try {
-    tenantId = await getActiveTenantId(userId)
+    tenantId = await getActiveTenantId(userId!)
     tenant = await getTenant(tenantId)
-  } catch {
-    redirect('/onboarding')
+  } catch (e: unknown) {
+    tenantError = e instanceof Error ? e.message : String(e)
   }
-  if (!tenant?.onboarded) redirect('/onboarding')
+  if (tenantError || !tenant || !tenant.onboarded) {
+    return (
+      <div style={{ padding: 40, fontFamily: 'monospace', background: '#0a0a0a', color: '#e5e5e5', minHeight: '100vh' }}>
+        <h2 style={{ color: '#f43f5e', marginBottom: 24 }}>Dashboard Debug — Tenant Load Failed</h2>
+        <p>userId: <b style={{color:'#a1a1aa'}}>{userId}</b></p>
+        <p>tenantId: <b style={{color:'#a1a1aa'}}>{tenantId ?? 'null'}</b></p>
+        <p>tenant found: <b style={{color:'#a1a1aa'}}>{tenant ? 'yes' : 'no'}</b></p>
+        <p>tenant.onboarded: <b style={{color:'#a1a1aa'}}>{tenant ? String(tenant.onboarded) : 'n/a'}</b></p>
+        {tenantError && <pre style={{ color: '#fca5a5', marginTop: 16, background: '#1a0808', padding: 16, borderRadius: 8 }}>{tenantError}</pre>}
+        {!tenantError && tenant && !tenant.onboarded && (
+          <pre style={{ color: '#fbbf24', marginTop: 16 }}>tenant.onboarded = false → redirecting to /onboarding</pre>
+        )}
+        {!tenantError && !tenant && (
+          <pre style={{ color: '#fbbf24', marginTop: 16 }}>tenant not found for id: {tenantId}</pre>
+        )}
+      </div>
+    )
+  }
 
   let stores: Awaited<ReturnType<typeof getTenantsByUserId>> = []
   let storeTimezone = 'UTC'
