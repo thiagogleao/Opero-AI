@@ -202,18 +202,9 @@ export async function GET(req: NextRequest) {
         ? totalProductRev * (spend / totalSpendForProduct)
         : 0
     } else {
-      // No product match: proportional by total FB spend
+      // No product match → excluded from real profit calculation entirely
       matchedProduct = null
-      if (hasBreakdownData && countrySpend) {
-        const totalShopifyRev = Array.from(shopifyRevByProductCountry.values())
-          .flatMap(m => Array.from(m.values())).reduce((s, v) => s + v, 0)
-        const thisCampSpend = Array.from(countrySpend.values()).reduce((s, v) => s + v, 0)
-        attributedRevenue = totalFbSpend > 0 ? totalShopifyRev * (thisCampSpend / totalFbSpend) : 0
-      } else {
-        const totalShopifyRev = Array.from(shopifyRevByProductCountry.values())
-          .flatMap(m => Array.from(m.values())).reduce((s, v) => s + v, 0)
-        attributedRevenue = totalFbSpend > 0 ? totalShopifyRev * (spend / totalFbSpend) : 0
-      }
+      attributedRevenue = 0
     }
 
     const realProfit = attributedRevenue - spend - attributedRevenue * nonFbCostRate

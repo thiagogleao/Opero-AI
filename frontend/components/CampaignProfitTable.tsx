@@ -178,16 +178,16 @@ export default function CampaignProfitTable() {
                   <td style={{ padding: '10px 14px', textAlign: 'right', color: row.configured ? fbProfitColor : 'var(--text-ghost)' }}>
                     {row.configured ? fmt(row.fb_profit) : '—'}
                   </td>
-                  <td style={{ padding: '10px 14px', textAlign: 'right', color: 'var(--text-secondary)' }}>
-                    {fmt(row.attributed_revenue)}
+                  <td style={{ padding: '10px 14px', textAlign: 'right', color: row.matched_product ? 'var(--text-secondary)' : 'var(--text-ghost)' }}>
+                    {row.matched_product ? fmt(row.attributed_revenue) : '—'}
                   </td>
                   <td style={{ padding: '10px 14px', textAlign: 'right' }}>
-                    {row.configured
+                    {row.matched_product && row.configured
                       ? <ProfitBadge value={row.real_profit} fmt={fmt} />
                       : <span style={{ color: 'var(--text-ghost)' }}>—</span>}
                   </td>
-                  <td style={{ padding: '10px 14px', textAlign: 'right', color: row.configured ? realProfitColor : 'var(--text-ghost)', fontSize: 11 }}>
-                    {row.configured ? `${row.real_margin.toFixed(1)}%` : '—'}
+                  <td style={{ padding: '10px 14px', textAlign: 'right', color: row.matched_product && row.configured ? realProfitColor : 'var(--text-ghost)', fontSize: 11 }}>
+                    {row.matched_product && row.configured ? `${row.real_margin.toFixed(1)}%` : '—'}
                   </td>
                 </tr>
               )
@@ -208,10 +208,10 @@ export default function CampaignProfitTable() {
                   {fmt(rows.reduce((s, r) => s + r.fb_profit, 0))}
                 </td>
                 <td style={{ padding: '10px 14px', textAlign: 'right', color: 'var(--text-muted)', fontSize: 11 }}>
-                  {fmt(rows.reduce((s, r) => s + r.attributed_revenue, 0))}
+                  {fmt(rows.filter(r => r.matched_product).reduce((s, r) => s + r.attributed_revenue, 0))}
                 </td>
                 <td style={{ padding: '10px 14px', textAlign: 'right', fontSize: 11 }}>
-                  <ProfitBadge value={rows.reduce((s, r) => s + r.real_profit, 0)} fmt={fmt} />
+                  <ProfitBadge value={rows.filter(r => r.matched_product).reduce((s, r) => s + r.real_profit, 0)} fmt={fmt} />
                 </td>
                 <td />
               </tr>
