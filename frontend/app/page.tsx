@@ -296,7 +296,19 @@ FRAMEWORK DE DECISÃO (aplicar a todos os dados):
 🔍 LP ISSUE: CTR >2% + ROAS fraco = problema de landing page, NÃO de criativo
 🎯 DIAGNÓSTICO VÍDEO: Hook<25%=abertura/thumbnail ruim | P25<40%=conteúdo cai após hook | P100>30%=muito engajador, teste versão mais longa
 📊 CREATIVE FATIGUE: ads com 3+ semanas sem refresh costumam ter CPM 29% mais alto e CTR 35% menor (Meta benchmarks)
-💰 CAC REAL = gasto FB ÷ pedidos Shopify (não usar CPP do funil FB como CPA real)`
+💰 CAC REAL = gasto FB ÷ pedidos Shopify (não usar CPP do funil FB como CPA real)
+
+REGRAS DE PLACEMENT (CRÍTICO):
+- mobile_web e desktop_web têm ROAS estruturalmente menor que mobile_app — isso é COMPLETAMENTE NORMAL. O público está navegando, não comprando. Nunca reporte isso como problema.
+- Só considere um placement problemático se: spend >$50 E purchases = 0 (zero absoluto) naquele placement.
+- messenger_inbox, audience_network também são naturalmente menores — ignore se não há spend relevante.
+
+REGRAS DE AÇÃO ESPECÍFICA (CRÍTICO — sempre que recomendar pausar/excluir):
+- País numa campanha BROAD/ASC+: "Não é possível excluir país individualmente em ASC+. Para reduzir [PAÍS], crie uma campanha separada excluindo [PAÍS] e reduza o orçamento da campanha atual em X%."
+- País numa campanha de interesse/manual: "Em Ads Manager → [campanha] → [ad set] → editar → Locations → mude de 'Include' para 'Exclude' para [PAÍS]."
+- Placement num ad set: "Em Ads Manager → [campanha] → [ad set] → editar → Placements → troque para Manual Placements e desmarque [PLACEMENT]."
+- Nunca diga apenas "desative" ou "pause o país" sem especificar o mecanismo exato.
+- Se a CAMPANHA no geral é lucrativa mas um país/placement específico tem ROAS baixo, o insight deve dizer se deve excluir o segmento ou apenas monitorar — nunca sugira pausar a campanha inteira por causa de um segmento ruim dentro dela.`
 
   // Language-specific labels (data section)
   const promptLang = {

@@ -3,6 +3,8 @@ import { redirect } from 'next/navigation'
 import { getTenant } from '@/lib/tenant'
 import { getActiveTenantId } from '@/lib/activeStore'
 import ProfitModule from '@/components/ProfitModule'
+import CampaignProfitTable from '@/components/CampaignProfitTable'
+import ProductProfitTable from '@/components/ProductProfitTable'
 import Sidebar from '@/components/Sidebar'
 
 export const revalidate = 0
@@ -27,6 +29,17 @@ export default async function ProfitPage() {
           </p>
         </div>
         <ProfitModule />
+
+        <div style={{ marginTop: 32, marginBottom: 16 }}>
+          <h2 style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-primary)', marginBottom: 4 }}>
+            Análise de Lucratividade
+          </h2>
+          <p style={{ color: 'var(--text-faint)', fontSize: 12 }}>
+            Lucro estimado por campanha e produto com base nos custos configurados acima
+          </p>
+        </div>
+        <CampaignProfitTable />
+        <ProductProfitTable />
       </main>
     </div>
   )
