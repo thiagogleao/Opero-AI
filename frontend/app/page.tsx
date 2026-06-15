@@ -96,6 +96,53 @@ export default async function Dashboard({ searchParams }: Props) {
   // Breakdowns always use last 14 days (limited by FB API)
   const bd14From = dateInTz(new Date(now.getTime() - 13 * 86400000), storeTimezone)
 
+  // DEBUG: run each query individually to identify which one fails
+  const queryNames = [
+    'getOverviewMetrics', 'getDailyRevenue', 'getDailyRoas', 'getTopCreatives',
+    'getCountryMetrics', 'getCustomerSplit', 'getLastSyncTime', 'getProfitSummary',
+    'getFunnelMetrics', 'getCountrySpend', 'getCountryProfit', 'getDailyProfitData',
+    'getBreakdownByType(device)', 'getBreakdownByType(placement)', 'getBreakdownByType(age_gender)',
+    'getCustomerLtv',
+  ]
+  const queryFns = [
+    () => getOverviewMetrics(tenantId!, dateFrom, dateTo),
+    () => getDailyRevenue(tenantId!, dateFrom, dateTo),
+    () => getDailyRoas(tenantId!, dateFrom, dateTo),
+    () => getTopCreatives(tenantId!, dateFrom, dateTo),
+    () => getCountryMetrics(tenantId!, dateFrom, dateTo),
+    () => getCustomerSplit(tenantId!, dateFrom, dateTo),
+    () => getLastSyncTime(tenantId!),
+    () => getProfitSummary(tenantId!, dateFrom, dateTo),
+    () => getFunnelMetrics(tenantId!, dateFrom, dateTo),
+    () => getCountrySpend(tenantId!, dateFrom, dateTo),
+    () => getCountryProfit(tenantId!, dateFrom, dateTo),
+    () => getDailyProfitData(tenantId!, dateFrom, dateTo),
+    () => getBreakdownByType(tenantId!, bd14From, todayISO, 'device'),
+    () => getBreakdownByType(tenantId!, bd14From, todayISO, 'placement'),
+    () => getBreakdownByType(tenantId!, bd14From, todayISO, 'age_gender'),
+    () => getCustomerLtv(tenantId!),
+  ]
+  const debugResults: { name: string; ok: boolean; error?: string }[] = []
+  for (let i = 0; i < queryFns.length; i++) {
+    try { await queryFns[i](); debugResults.push({ name: queryNames[i], ok: true }) }
+    catch (e: unknown) { debugResults.push({ name: queryNames[i], ok: false, error: e instanceof Error ? e.message : String(e) }) }
+  }
+  const hasError = debugResults.some(r => !r.ok)
+  if (hasError) {
+    return (
+      <div style={{ padding: 40, fontFamily: 'monospace', background: '#0a0a0a', color: '#e5e5e5', minHeight: '100vh' }}>
+        <h2 style={{ color: '#f43f5e', marginBottom: 24 }}>Dashboard Debug — Query Errors</h2>
+        <p style={{ color: '#71717a', marginBottom: 24 }}>tenantId: <b style={{color:'#a1a1aa'}}>{tenantId}</b> | from: {dateFrom} to: {dateTo}</p>
+        {debugResults.map((r, i) => (
+          <div key={i} style={{ marginBottom: 12, padding: '10px 14px', background: r.ok ? 'rgba(16,185,129,0.08)' : 'rgba(244,63,94,0.12)', borderRadius: 8, border: `1px solid ${r.ok ? '#10b981' : '#f43f5e'}40` }}>
+            <span style={{ color: r.ok ? '#10b981' : '#f43f5e', fontWeight: 700 }}>{r.ok ? '✓' : '✗'} {r.name}</span>
+            {r.error && <pre style={{ color: '#fca5a5', marginTop: 6, fontSize: 12, whiteSpace: 'pre-wrap' }}>{r.error}</pre>}
+          </div>
+        ))}
+      </div>
+    )
+  }
+
   let queryResult
   try {
     queryResult = await Promise.all([
