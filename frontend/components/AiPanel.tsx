@@ -11,7 +11,30 @@ interface Insight {
   action: string
 }
 
-interface Props { systemPrompt: string }
+const CACHE_TTL_MS = 6 * 60 * 60 * 1000 // 6 hours
+
+interface CachedInsights {
+  insights: Insight[]
+  generatedAt: number
+}
+
+function loadCache(key: string): CachedInsights | null {
+  try {
+    const raw = localStorage.getItem(`opero_insights_${key}`)
+    if (!raw) return null
+    const parsed: CachedInsights = JSON.parse(raw)
+    if (Date.now() - parsed.generatedAt > CACHE_TTL_MS) return null
+    return parsed
+  } catch { return null }
+}
+
+function saveCache(key: string, insights: Insight[]) {
+  try {
+    localStorage.setItem(`opero_insights_${key}`, JSON.stringify({ insights, generatedAt: Date.now() }))
+  } catch {}
+}
+
+interface Props { systemPrompt: string; cacheKey: string }
 
 const TYPE_COLORS = {
   kill:        { color: '#F43F5E', bg: 'rgba(244,63,94,0.10)',  border: 'rgba(244,63,94,0.35)'  },
@@ -63,13 +86,22 @@ function SkeletonCard() {
   )
 }
 
-export default function AiPanel({ systemPrompt }: Props) {
+export default function AiPanel({ systemPrompt, cacheKey }: Props) {
   const tr = useTr()
   const [insights, setInsights] = useState<Insight[]>([])
   const [loading, setLoading] = useState(false)
   const [insightError, setInsightError] = useState('')
+  const [generatedAt, setGeneratedAt] = useState<number | null>(null)
 
-  async function loadInsights() {
+  async function loadInsights(forceRefresh = false) {
+    if (!forceRefresh) {
+      const cached = loadCache(cacheKey)
+      if (cached) {
+        setInsights(cached.insights)
+        setGeneratedAt(cached.generatedAt)
+        return
+      }
+    }
     setLoading(true); setInsights([]); setInsightError('')
     try {
       const res = await fetch('/api/ai', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'insights', systemPrompt }) })
@@ -77,7 +109,10 @@ export default function AiPanel({ systemPrompt }: Props) {
       if (data.error && (!data.insights || data.insights.length === 0)) {
         setInsightError(data.error)
       } else {
-        setInsights(data.insights ?? [])
+        const fresh = data.insights ?? []
+        setInsights(fresh)
+        setGeneratedAt(Date.now())
+        saveCache(cacheKey, fresh)
       }
     } catch (err: unknown) {
       setInsightError(err instanceof Error ? err.message : tr.refresh_error_conn)
@@ -85,7 +120,7 @@ export default function AiPanel({ systemPrompt }: Props) {
     setLoading(false)
   }
 
-  useEffect(() => { loadInsights() }, [])
+  useEffect(() => { loadInsights(false) }, [cacheKey])
 
   return (
     <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5, delay: 0.7 }}
@@ -96,10 +131,14 @@ export default function AiPanel({ systemPrompt }: Props) {
           <div style={{ width: 30, height: 30, borderRadius: 8, background: 'linear-gradient(135deg,#8B5CF6,#6D28D9)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14 }}>✦</div>
           <div>
             <h3 style={{ color: 'var(--text-primary)', fontWeight: 700, fontSize: 14 }}>{tr.ai_title}</h3>
-            <p style={{ color: 'var(--text-ghost)', fontSize: 11 }}>{tr.ai_subtitle}</p>
+            <p style={{ color: 'var(--text-ghost)', fontSize: 11 }}>
+              {generatedAt
+                ? `Gerado ${Math.round((Date.now() - generatedAt) / 60000)}min atrás · salvo por 6h`
+                : tr.ai_subtitle}
+            </p>
           </div>
         </div>
-        <button onClick={loadInsights} disabled={loading} style={{ background: 'rgba(139,92,246,0.1)', border: '1px solid rgba(139,92,246,0.25)', borderRadius: 7, padding: '5px 12px', fontSize: 12, color: '#A78BFA', cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.5 : 1, fontWeight: 500 }}>
+        <button onClick={() => loadInsights(true)} disabled={loading} style={{ background: 'rgba(139,92,246,0.1)', border: '1px solid rgba(139,92,246,0.25)', borderRadius: 7, padding: '5px 12px', fontSize: 12, color: '#A78BFA', cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.5 : 1, fontWeight: 500 }}>
           {loading ? tr.ai_refreshing : tr.ai_refresh}
         </button>
       </div>
@@ -119,8 +158,9 @@ export default function AiPanel({ systemPrompt }: Props) {
                   <button onClick={loadInsights} style={{ marginLeft: 10, color: '#A78BFA', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12 }}>{tr.ai_retry}</button>
                 </div>
               : insights.length === 0
-              ? <div style={{ gridColumn: '1/-1', padding: '20px 0', color: 'var(--text-faint)', fontSize: 12 }}>
-                  {tr.ai_no_insights} <button onClick={loadInsights} style={{ color: '#A78BFA', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12 }}>{tr.ai_generate}</button>
+              ? <div style={{ gridColumn: '1/-1', padding: '32px 0', textAlign: 'center' }}>
+                  <p style={{ color: 'var(--text-faint)', fontSize: 13, marginBottom: 12 }}>Nenhuma análise gerada ainda</p>
+                  <button onClick={() => loadInsights(true)} style={{ background: 'rgba(139,92,246,0.15)', border: '1px solid rgba(139,92,246,0.3)', borderRadius: 8, padding: '8px 20px', color: '#A78BFA', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>✦ Gerar análise agora</button>
                 </div>
               : insights.map((ins, i) => <InsightCard key={i} insight={ins} index={i} />)
             }

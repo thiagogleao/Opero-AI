@@ -640,7 +640,7 @@ ${promptLang.formatNote}`
         </div>
 
         {/* AI Panel */}
-        <AiPanel systemPrompt={systemPrompt} />
+        <AiPanel systemPrompt={systemPrompt} cacheKey={`${tid}:${dateFrom}:${dateTo}`} />
 
         {/* Notes */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
