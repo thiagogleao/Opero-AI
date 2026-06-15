@@ -188,7 +188,7 @@ export async function getTopCreatives(tenantId: string, dateFrom: string, dateTo
         ELSE NULL END::numeric, 2)          AS hold_rate_100,
       SUM(m.video_plays)                    AS video_plays
     FROM fb_ad_daily_metrics m
-    JOIN fb_ads a ON m.ad_id = a.ad_id AND m.tenant_id = a.tenant_id
+    JOIN fb_ads a ON m.ad_id = a.ad_id
     WHERE m.tenant_id = $1
       AND m.date BETWEEN $2::date AND $3::date
     GROUP BY a.ad_id, a.name, a.thumbnail_url, a.creative_url
@@ -370,9 +370,9 @@ export async function getCampaignMetrics(tenantId: string, dateFrom: string, dat
       COUNT(DISTINCT a.adset_id)              AS adset_count,
       COUNT(DISTINCT m.ad_id)                 AS ad_count
     FROM fb_campaigns c
-    JOIN fb_ad_daily_metrics m ON m.campaign_id = c.campaign_id AND m.tenant_id = c.tenant_id
-    JOIN fb_adsets a ON a.campaign_id = c.campaign_id AND a.tenant_id = c.tenant_id
-    WHERE c.tenant_id = $1
+    JOIN fb_ad_daily_metrics m ON m.campaign_id = c.campaign_id
+    LEFT JOIN fb_adsets a ON a.campaign_id = c.campaign_id
+    WHERE m.tenant_id = $1
       AND m.date BETWEEN $2::date AND $3::date
     GROUP BY c.campaign_id, c.name, c.objective
     HAVING SUM(m.spend) > 0
@@ -447,8 +447,8 @@ export async function getCreativeDetail(tenantId: string, adId: string, dateFrom
       ROUND(CASE WHEN SUM(m.video_plays) > 0 AND SUM(m.video_p100) > 0
         THEN SUM(m.video_p100)::numeric / SUM(m.video_plays) * 100 ELSE NULL END::numeric, 2) AS hold_rate_100
     FROM fb_ads a
-    JOIN fb_ad_daily_metrics m ON a.ad_id = m.ad_id AND a.tenant_id = m.tenant_id
-    WHERE a.tenant_id = $1 AND a.ad_id = $2
+    JOIN fb_ad_daily_metrics m ON a.ad_id = m.ad_id
+    WHERE m.tenant_id = $1 AND a.ad_id = $2
       AND m.date BETWEEN $3::date AND $4::date
     GROUP BY a.ad_id, a.name, a.status, a.thumbnail_url, a.creative_url, a.landing_url
   `, [tenantId, adId, dateFrom, dateTo])
