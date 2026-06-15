@@ -7,6 +7,7 @@ import { useSettings } from '@/contexts/SettingsContext'
 interface CampaignRow {
   campaign_id: string
   campaign_name: string
+  matched_product: string | null
   spend: number
   fb_revenue: number
   purchases: number
@@ -158,8 +159,18 @@ export default function CampaignProfitTable() {
               const roasColor       = row.roas >= 2 ? '#10B981' : row.roas >= 1 ? '#F59E0B' : '#F43F5E'
               return (
                 <tr key={row.campaign_id} style={{ borderBottom: '1px solid var(--border)', background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)' }}>
-                  <td style={{ padding: '10px 14px', color: 'var(--text-primary)', fontWeight: 500, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    <span title={row.campaign_name}>{row.campaign_name}</span>
+                  <td style={{ padding: '10px 14px', maxWidth: 260 }}>
+                    <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-primary)', fontWeight: 500 }} title={row.campaign_name}>
+                      {row.campaign_name}
+                    </div>
+                    {row.matched_product && (
+                      <div style={{ fontSize: 10, color: '#A78BFA', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={`Produto identificado: ${row.matched_product}`}>
+                        ↳ {row.matched_product}
+                      </div>
+                    )}
+                    {!row.matched_product && (
+                      <div style={{ fontSize: 10, color: 'var(--text-ghost)', marginTop: 2 }}>↳ produto não identificado</div>
+                    )}
                   </td>
                   <td style={{ padding: '10px 14px', textAlign: 'right', color: 'var(--text-secondary)' }}>{fmt(row.spend)}</td>
                   <td style={{ padding: '10px 14px', textAlign: 'right', color: 'var(--text-muted)' }}>{fmt(row.fb_revenue)}</td>

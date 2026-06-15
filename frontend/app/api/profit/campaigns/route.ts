@@ -4,6 +4,44 @@ import { query } from '@/lib/db'
 import { getActiveTenantId } from '@/lib/activeStore'
 import { getProfitSummary } from '@/lib/profitCalc'
 
+// Words stripped before matching campaign name → product title
+const NOISE_WORDS = new Set([
+  'cbo','cpa','asc','adv','advantage','advantage+','usa','eua','br','uk','de','au','ca',
+  'mundo','world','global','international','teste','test','inicial','initial','copia','copy',
+  'ultimo','tiro','final','novo','new','v2','v3','retargeting','ret','lookalike','lal',
+  'cold','warm','hot','broad','interest','remarketing','prospecting','dynamic','catalog',
+  'the','de','da','do','e','ou','em','para','com',
+])
+
+function extractKeywords(name: string): string[] {
+  return name.toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length >= 2 && !NOISE_WORDS.has(w))
+}
+
+function matchProductId(
+  campaignName: string,
+  products: Array<{ product_id: string; title: string }>
+): string | null {
+  const ckw = extractKeywords(campaignName)
+  if (ckw.length === 0) return null
+
+  let bestId: string | null = null
+  let bestScore = 0
+
+  for (const p of products) {
+    const pkw = extractKeywords(p.title)
+    const score = ckw.filter(w => pkw.some(pw => pw.includes(w) || w.includes(pw))).length
+    if (score > bestScore) {
+      bestScore = score
+      bestId = p.product_id
+    }
+  }
+
+  return bestScore >= 1 ? bestId : null
+}
+
 export async function GET(req: NextRequest) {
   const { userId } = await auth()
   if (!userId) return Response.json({ error: 'Unauthorized' }, { status: 401 })
@@ -14,119 +52,168 @@ export async function GET(req: NextRequest) {
   const dateTo   = searchParams.get('dateTo')   ?? ''
   if (!dateFrom || !dateTo) return Response.json({ error: 'dateFrom and dateTo required' }, { status: 400 })
 
-  // Full profit summary → non-FB cost rate + actual net profit for normalization
+  // Full profit summary for non-FB cost rate + net profit cap
   const summary = await getProfitSummary(tenantId, dateFrom, dateTo)
   const nonFbCostRate = summary.totalRevenue > 0
     ? (summary.totalCosts - summary.fbSpend) / summary.totalRevenue
     : 0
 
-  // Campaign-level FB metrics
-  const campaignRows = await query<{
-    campaign_id: string; campaign_name: string
-    spend: string; fb_revenue: string; purchases: string; roas: string
-  }>(`
-    SELECT
-      a.campaign_id,
-      COALESCE(MAX(c.name), MAX(a.campaign_name), a.campaign_id) AS campaign_name,
-      ROUND(SUM(m.spend)::numeric, 2)::text          AS spend,
-      ROUND(SUM(m.purchase_value)::numeric, 2)::text AS fb_revenue,
-      SUM(m.purchases)::text                          AS purchases,
-      ROUND(CASE WHEN SUM(m.spend) > 0
-        THEN SUM(m.purchase_value) / SUM(m.spend) ELSE 0
-        END::numeric, 2)::text                        AS roas
-    FROM fb_ad_daily_metrics m
-    JOIN fb_ads a ON m.ad_id = a.ad_id
-    LEFT JOIN fb_campaigns c ON a.campaign_id = c.campaign_id
-    WHERE m.tenant_id = $1
-      AND m.date BETWEEN $2::date AND $3::date
-      AND a.campaign_id IS NOT NULL
-    GROUP BY a.campaign_id
-    HAVING SUM(m.spend) > 0
-    ORDER BY SUM(m.spend) DESC
-  `, [tenantId, dateFrom, dateTo])
+  // --- All queries in parallel ---
+  const [campaignRows, breakdownRows, productRevenueRows] = await Promise.all([
+    // Campaign-level FB metrics
+    query<{ campaign_id: string; campaign_name: string; spend: string; fb_revenue: string; purchases: string; roas: string }>(`
+      SELECT
+        a.campaign_id,
+        COALESCE(MAX(c.name), MAX(a.campaign_name), a.campaign_id) AS campaign_name,
+        ROUND(SUM(m.spend)::numeric, 2)::text          AS spend,
+        ROUND(SUM(m.purchase_value)::numeric, 2)::text AS fb_revenue,
+        SUM(m.purchases)::text                          AS purchases,
+        ROUND(CASE WHEN SUM(m.spend) > 0
+          THEN SUM(m.purchase_value) / SUM(m.spend) ELSE 0
+          END::numeric, 2)::text AS roas
+      FROM fb_ad_daily_metrics m
+      JOIN fb_ads a ON m.ad_id = a.ad_id
+      LEFT JOIN fb_campaigns c ON a.campaign_id = c.campaign_id
+      WHERE m.tenant_id = $1
+        AND m.date BETWEEN $2::date AND $3::date
+        AND a.campaign_id IS NOT NULL
+      GROUP BY a.campaign_id
+      HAVING SUM(m.spend) > 0
+      ORDER BY SUM(m.spend) DESC
+    `, [tenantId, dateFrom, dateTo]),
 
-  // --- Country-based Shopify attribution ---
+    // Campaign spend by country from breakdowns
+    query<{ campaign_id: string; country_code: string; spend: string }>(`
+      SELECT
+        a.campaign_id,
+        b.breakdown_value AS country_code,
+        SUM(b.spend)::text AS spend
+      FROM fb_ad_breakdowns b
+      JOIN fb_ads a ON b.ad_id = a.ad_id
+      WHERE b.tenant_id = $1
+        AND b.date BETWEEN $2::date AND $3::date
+        AND b.breakdown_type = 'country'
+        AND a.campaign_id IS NOT NULL
+      GROUP BY a.campaign_id, b.breakdown_value
+    `, [tenantId, dateFrom, dateTo]),
 
-  // Campaign spend breakdown by country (from fb_ad_breakdowns)
-  const breakdownRows = await query<{
-    campaign_id: string; country_code: string; spend: string
-  }>(`
-    SELECT
-      a.campaign_id,
-      b.breakdown_value AS country_code,
-      SUM(b.spend)::text AS spend
-    FROM fb_ad_breakdowns b
-    JOIN fb_ads a ON b.ad_id = a.ad_id
-    WHERE b.tenant_id = $1
-      AND b.date BETWEEN $2::date AND $3::date
-      AND b.breakdown_type = 'country'
-      AND a.campaign_id IS NOT NULL
-    GROUP BY a.campaign_id, b.breakdown_value
-  `, [tenantId, dateFrom, dateTo])
-
-  // Shopify revenue by country
-  const shopifyCountryRows = await query<{
-    country_code: string; revenue: string
-  }>(`
-    SELECT
-      COALESCE(o.country_code, 'XX') AS country_code,
-      ROUND(SUM(o.total_price::numeric), 2)::text AS revenue
-    FROM shopify_orders o
-    JOIN tenants t ON t.id = o.tenant_id
-    WHERE o.tenant_id = $1
-      AND (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date BETWEEN $2::date AND $3::date
-      AND o.financial_status NOT IN ('refunded', 'voided')
-    GROUP BY o.country_code
-  `, [tenantId, dateFrom, dateTo])
-
-  const totalFbSpend = summary.fbSpend
-  const totalShopifyRevenue = shopifyCountryRows.reduce((s, r) => s + Number(r.revenue), 0)
-
-  // Build lookup maps
-  const shopifyByCountry = new Map<string, number>()
-  for (const r of shopifyCountryRows) shopifyByCountry.set(r.country_code, Number(r.revenue))
-
-  // Total FB spend per country (across all campaigns)
-  const totalSpendByCountry = new Map<string, number>()
-  for (const r of breakdownRows) {
-    totalSpendByCountry.set(r.country_code, (totalSpendByCountry.get(r.country_code) ?? 0) + Number(r.spend))
-  }
-
-  // Per-campaign spend by country
-  const campaignCountrySpend = new Map<string, Map<string, number>>()
-  for (const r of breakdownRows) {
-    if (!campaignCountrySpend.has(r.campaign_id)) campaignCountrySpend.set(r.campaign_id, new Map())
-    campaignCountrySpend.get(r.campaign_id)!.set(r.country_code, Number(r.spend))
-  }
+    // Shopify revenue by product × country (actual sales)
+    query<{ product_id: string; title: string; country_code: string; revenue: string }>(`
+      SELECT
+        COALESCE(oi.product_id, 'unknown')                            AS product_id,
+        COALESCE(p.title, oi.product_title, oi.title, 'Desconhecido') AS title,
+        COALESCE(o.country_code, 'XX')                                AS country_code,
+        ROUND(SUM(oi.quantity * oi.price)::numeric, 2)::text          AS revenue
+      FROM shopify_order_items oi
+      JOIN shopify_orders o ON oi.order_id = o.order_id
+      JOIN tenants t ON t.id = o.tenant_id
+      LEFT JOIN shopify_products p ON oi.product_id = p.product_id
+      WHERE o.tenant_id = $1
+        AND (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date BETWEEN $2::date AND $3::date
+        AND o.financial_status NOT IN ('refunded', 'voided')
+      GROUP BY oi.product_id, p.title, oi.product_title, oi.title, o.country_code
+    `, [tenantId, dateFrom, dateTo]),
+  ])
 
   const hasBreakdownData = breakdownRows.length > 0
 
-  // Build result with both FB-attributed and Shopify-attributed profit
+  // Build product list (deduplicated by product_id, keeping all titles)
+  const productMap = new Map<string, string>() // product_id → title
+  for (const r of productRevenueRows) {
+    if (!productMap.has(r.product_id)) productMap.set(r.product_id, r.title)
+  }
+  const productList = Array.from(productMap.entries()).map(([product_id, title]) => ({ product_id, title }))
+
+  // Shopify revenue: product_id → country_code → revenue
+  const shopifyRevByProductCountry = new Map<string, Map<string, number>>()
+  for (const r of productRevenueRows) {
+    if (!shopifyRevByProductCountry.has(r.product_id))
+      shopifyRevByProductCountry.set(r.product_id, new Map())
+    shopifyRevByProductCountry.get(r.product_id)!.set(r.country_code, Number(r.revenue))
+  }
+
+  // Campaign country spend: campaign_id → country_code → spend
+  const campaignCountrySpend = new Map<string, Map<string, number>>()
+  const totalSpendByCountry = new Map<string, number>()
+  for (const r of breakdownRows) {
+    if (!campaignCountrySpend.has(r.campaign_id))
+      campaignCountrySpend.set(r.campaign_id, new Map())
+    campaignCountrySpend.get(r.campaign_id)!.set(r.country_code, Number(r.spend))
+    totalSpendByCountry.set(r.country_code, (totalSpendByCountry.get(r.country_code) ?? 0) + Number(r.spend))
+  }
+
+  const totalFbSpend = summary.fbSpend
+
+  // 1. Match each campaign to a product
+  const campaignToProduct = new Map<string, string | null>()
+  for (const c of campaignRows) {
+    campaignToProduct.set(c.campaign_id, matchProductId(c.campaign_name, productList))
+  }
+
+  // 2. For each (product_id, country_code): total spend from campaigns matching that product in that country
+  //    Used to split revenue when multiple campaigns target the same product+country
+  const productCountryTotalSpend = new Map<string, number>() // key: `${product_id}::${country_code}`
+  for (const c of campaignRows) {
+    const pid = campaignToProduct.get(c.campaign_id)
+    if (!pid) continue
+    const countries = campaignCountrySpend.get(c.campaign_id)
+    if (!countries) continue
+    for (const [country, spend] of countries) {
+      const key = `${pid}::${country}`
+      productCountryTotalSpend.set(key, (productCountryTotalSpend.get(key) ?? 0) + spend)
+    }
+  }
+
+  // 3. Attribute revenue to each campaign
   const results = campaignRows.map(c => {
     const spend     = Number(c.spend)
     const fbRevenue = Number(c.fb_revenue)
+    const fbProfit  = fbRevenue - spend - fbRevenue * nonFbCostRate
+    const fbMargin  = fbRevenue > 0 ? (fbProfit / fbRevenue) * 100 : 0
 
-    // FB-attributed profit (existing metric)
-    const fbProfit = fbRevenue - spend - fbRevenue * nonFbCostRate
-    const fbMargin = fbRevenue > 0 ? (fbProfit / fbRevenue) * 100 : 0
-
-    // Shopify-attributed revenue: distribute Shopify sales by country proportionally
-    let attributedRevenue = 0
+    const pid = campaignToProduct.get(c.campaign_id)
     const countrySpend = campaignCountrySpend.get(c.campaign_id)
 
-    if (hasBreakdownData && countrySpend && countrySpend.size > 0) {
-      for (const [country, cSpend] of countrySpend) {
-        const totalInCountry = totalSpendByCountry.get(country) ?? 0
-        const shopifyRevenue = shopifyByCountry.get(country) ?? 0
-        if (totalInCountry > 0) {
-          attributedRevenue += (cSpend / totalInCountry) * shopifyRevenue
+    let attributedRevenue = 0
+    let matchedProduct = pid ? (productMap.get(pid) ?? null) : null
+
+    if (pid && hasBreakdownData && countrySpend && countrySpend.size > 0) {
+      // Best case: we know which product AND which countries
+      const productCountryRevMap = shopifyRevByProductCountry.get(pid)
+      if (productCountryRevMap) {
+        for (const [country, cSpend] of countrySpend) {
+          const shopifyRev = productCountryRevMap.get(country) ?? 0
+          const totalSpendForKey = productCountryTotalSpend.get(`${pid}::${country}`) ?? cSpend
+          const share = totalSpendForKey > 0 ? cSpend / totalSpendForKey : 1
+          attributedRevenue += share * shopifyRev
         }
       }
-    } else {
-      // No country breakdown: attribute proportionally by total FB spend share
-      attributedRevenue = totalFbSpend > 0
-        ? totalShopifyRevenue * (spend / totalFbSpend)
+    } else if (pid && !hasBreakdownData) {
+      // Know product but not countries: split total product revenue by spend share
+      const productCountryRevMap = shopifyRevByProductCountry.get(pid)
+      const totalProductRev = productCountryRevMap
+        ? Array.from(productCountryRevMap.values()).reduce((s, v) => s + v, 0)
         : 0
+      // Total spend for campaigns matching this product
+      const totalSpendForProduct = campaignRows
+        .filter(r => campaignToProduct.get(r.campaign_id) === pid)
+        .reduce((s, r) => s + Number(r.spend), 0)
+      attributedRevenue = totalSpendForProduct > 0
+        ? totalProductRev * (spend / totalSpendForProduct)
+        : 0
+    } else {
+      // No product match: proportional by total FB spend
+      matchedProduct = null
+      if (hasBreakdownData && countrySpend) {
+        const totalShopifyRev = Array.from(shopifyRevByProductCountry.values())
+          .flatMap(m => Array.from(m.values())).reduce((s, v) => s + v, 0)
+        const thisCampSpend = Array.from(countrySpend.values()).reduce((s, v) => s + v, 0)
+        attributedRevenue = totalFbSpend > 0 ? totalShopifyRev * (thisCampSpend / totalFbSpend) : 0
+      } else {
+        const totalShopifyRev = Array.from(shopifyRevByProductCountry.values())
+          .flatMap(m => Array.from(m.values())).reduce((s, v) => s + v, 0)
+        attributedRevenue = totalFbSpend > 0 ? totalShopifyRev * (spend / totalFbSpend) : 0
+      }
     }
 
     const realProfit = attributedRevenue - spend - attributedRevenue * nonFbCostRate
@@ -135,6 +222,7 @@ export async function GET(req: NextRequest) {
     return {
       campaign_id:        c.campaign_id,
       campaign_name:      c.campaign_name,
+      matched_product:    matchedProduct,
       spend,
       fb_revenue:         fbRevenue,
       purchases:          Number(c.purchases),
@@ -148,7 +236,7 @@ export async function GET(req: NextRequest) {
     }
   })
 
-  // Normalize: total real profits must not exceed actual net profit
+  // Normalize: sum of real profits must not exceed actual total net profit
   if (summary.configured && summary.netProfit !== 0) {
     const totalRealProfit = results.reduce((s, r) => s + r.real_profit, 0)
     if (totalRealProfit > summary.netProfit && totalRealProfit > 0) {
