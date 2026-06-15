@@ -111,10 +111,10 @@ export default async function Dashboard({ searchParams }: Props) {
       getCountrySpend(tenantId!, dateFrom, dateTo),
       getCountryProfit(tenantId!, dateFrom, dateTo),
       getDailyProfitData(tenantId!, dateFrom, dateTo),
-      getBreakdownByType(tenantId!, bd14From, todayISO, 'device'),
-      getBreakdownByType(tenantId!, bd14From, todayISO, 'placement'),
-      getBreakdownByType(tenantId!, bd14From, todayISO, 'age_gender'),
-      getCustomerLtv(tenantId!),
+      getBreakdownByType(tenantId!, bd14From, todayISO, 'device').catch(() => [] as Awaited<ReturnType<typeof getBreakdownByType>>),
+      getBreakdownByType(tenantId!, bd14From, todayISO, 'placement').catch(() => [] as Awaited<ReturnType<typeof getBreakdownByType>>),
+      getBreakdownByType(tenantId!, bd14From, todayISO, 'age_gender').catch(() => [] as Awaited<ReturnType<typeof getBreakdownByType>>),
+      getCustomerLtv(tenantId!).catch(() => [] as Awaited<ReturnType<typeof getCustomerLtv>>),
     ])
   } catch {
     redirect('/onboarding')
