@@ -292,6 +292,22 @@ const sql = `
   ALTER TABLE shopify_daily_metrics ADD COLUMN IF NOT EXISTS cart_abandonment_count     INT DEFAULT 0;
   ALTER TABLE shopify_daily_metrics ADD COLUMN IF NOT EXISTS cart_abandonment_value     NUMERIC DEFAULT 0;
 
+  -- Video metric columns for fb_ad_daily_metrics (added to ORM but not to existing tables)
+  ALTER TABLE fb_ad_daily_metrics ADD COLUMN IF NOT EXISTS video_plays    INT;
+  ALTER TABLE fb_ad_daily_metrics ADD COLUMN IF NOT EXISTS video_p25      INT;
+  ALTER TABLE fb_ad_daily_metrics ADD COLUMN IF NOT EXISTS video_p50      INT;
+  ALTER TABLE fb_ad_daily_metrics ADD COLUMN IF NOT EXISTS video_p75      INT;
+  ALTER TABLE fb_ad_daily_metrics ADD COLUMN IF NOT EXISTS video_p100     INT;
+  ALTER TABLE fb_ad_daily_metrics ADD COLUMN IF NOT EXISTS hook_rate      NUMERIC;
+  ALTER TABLE fb_ad_daily_metrics ADD COLUMN IF NOT EXISTS hold_rate_25   NUMERIC;
+  ALTER TABLE fb_ad_daily_metrics ADD COLUMN IF NOT EXISTS hold_rate_50   NUMERIC;
+  ALTER TABLE fb_ad_daily_metrics ADD COLUMN IF NOT EXISTS hold_rate_75   NUMERIC;
+  ALTER TABLE fb_ad_daily_metrics ADD COLUMN IF NOT EXISTS hold_rate_100  NUMERIC;
+  ALTER TABLE fb_ad_daily_metrics ADD COLUMN IF NOT EXISTS post_engagement INT DEFAULT 0;
+
+  -- landing_url for fb_ads (needed by creative detail page)
+  ALTER TABLE fb_ads ADD COLUMN IF NOT EXISTS landing_url TEXT;
+
   -- Facebook structure tables (used by Python collector but missing from schema)
   CREATE TABLE IF NOT EXISTS fb_ad_accounts (
     id          BIGSERIAL PRIMARY KEY,
