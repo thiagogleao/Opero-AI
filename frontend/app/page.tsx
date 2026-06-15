@@ -52,37 +52,20 @@ export default async function Dashboard({ searchParams }: Props) {
 
   let tenantId: string | null = null
   let tenant = null
-  let tenantError: string | null = null
   try {
     tenantId = await getActiveTenantId(userId!)
     tenant = await getTenant(tenantId)
-  } catch (e: unknown) {
-    tenantError = e instanceof Error ? e.message : String(e)
+  } catch {
+    redirect('/onboarding')
   }
-  if (tenantError || !tenant || !tenant.onboarded) {
-    return (
-      <div style={{ padding: 40, fontFamily: 'monospace', background: '#0a0a0a', color: '#e5e5e5', minHeight: '100vh' }}>
-        <h2 style={{ color: '#f43f5e', marginBottom: 24 }}>Dashboard Debug — Tenant Load Failed</h2>
-        <p>userId: <b style={{color:'#a1a1aa'}}>{userId}</b></p>
-        <p>tenantId: <b style={{color:'#a1a1aa'}}>{tenantId ?? 'null'}</b></p>
-        <p>tenant found: <b style={{color:'#a1a1aa'}}>{tenant ? 'yes' : 'no'}</b></p>
-        <p>tenant.onboarded: <b style={{color:'#a1a1aa'}}>{tenant ? String(tenant.onboarded) : 'n/a'}</b></p>
-        {tenantError && <pre style={{ color: '#fca5a5', marginTop: 16, background: '#1a0808', padding: 16, borderRadius: 8 }}>{tenantError}</pre>}
-        {!tenantError && tenant && !tenant.onboarded && (
-          <pre style={{ color: '#fbbf24', marginTop: 16 }}>tenant.onboarded = false → redirecting to /onboarding</pre>
-        )}
-        {!tenantError && !tenant && (
-          <pre style={{ color: '#fbbf24', marginTop: 16 }}>tenant not found for id: {tenantId}</pre>
-        )}
-      </div>
-    )
-  }
+  if (!tenant?.onboarded) redirect('/onboarding')
+  const tid = tenantId as string
 
   let stores: Awaited<ReturnType<typeof getTenantsByUserId>> = []
   let storeTimezone = 'UTC'
   try {
-    stores = await getTenantsByUserId(userId)
-    storeTimezone = await getTenantTimezone(tenantId!)
+    stores = await getTenantsByUserId(userId!)
+    storeTimezone = await getTenantTimezone(tid)
   } catch { /* use defaults */ }
 
   const sp = await searchParams
@@ -123,22 +106,22 @@ export default async function Dashboard({ searchParams }: Props) {
     'getCustomerLtv',
   ]
   const queryFns = [
-    () => getOverviewMetrics(tenantId!, dateFrom, dateTo),
-    () => getDailyRevenue(tenantId!, dateFrom, dateTo),
-    () => getDailyRoas(tenantId!, dateFrom, dateTo),
-    () => getTopCreatives(tenantId!, dateFrom, dateTo),
-    () => getCountryMetrics(tenantId!, dateFrom, dateTo),
-    () => getCustomerSplit(tenantId!, dateFrom, dateTo),
-    () => getLastSyncTime(tenantId!),
-    () => getProfitSummary(tenantId!, dateFrom, dateTo),
-    () => getFunnelMetrics(tenantId!, dateFrom, dateTo),
-    () => getCountrySpend(tenantId!, dateFrom, dateTo),
-    () => getCountryProfit(tenantId!, dateFrom, dateTo),
-    () => getDailyProfitData(tenantId!, dateFrom, dateTo),
-    () => getBreakdownByType(tenantId!, bd14From, todayISO, 'device'),
-    () => getBreakdownByType(tenantId!, bd14From, todayISO, 'placement'),
-    () => getBreakdownByType(tenantId!, bd14From, todayISO, 'age_gender'),
-    () => getCustomerLtv(tenantId!),
+    () => getOverviewMetrics(tid, dateFrom, dateTo),
+    () => getDailyRevenue(tid, dateFrom, dateTo),
+    () => getDailyRoas(tid, dateFrom, dateTo),
+    () => getTopCreatives(tid, dateFrom, dateTo),
+    () => getCountryMetrics(tid, dateFrom, dateTo),
+    () => getCustomerSplit(tid, dateFrom, dateTo),
+    () => getLastSyncTime(tid),
+    () => getProfitSummary(tid, dateFrom, dateTo),
+    () => getFunnelMetrics(tid, dateFrom, dateTo),
+    () => getCountrySpend(tid, dateFrom, dateTo),
+    () => getCountryProfit(tid, dateFrom, dateTo),
+    () => getDailyProfitData(tid, dateFrom, dateTo),
+    () => getBreakdownByType(tid, bd14From, todayISO, 'device'),
+    () => getBreakdownByType(tid, bd14From, todayISO, 'placement'),
+    () => getBreakdownByType(tid, bd14From, todayISO, 'age_gender'),
+    () => getCustomerLtv(tid),
   ]
   const debugResults: { name: string; ok: boolean; error?: string }[] = []
   for (let i = 0; i < queryFns.length; i++) {
@@ -150,7 +133,7 @@ export default async function Dashboard({ searchParams }: Props) {
     return (
       <div style={{ padding: 40, fontFamily: 'monospace', background: '#0a0a0a', color: '#e5e5e5', minHeight: '100vh' }}>
         <h2 style={{ color: '#f43f5e', marginBottom: 24 }}>Dashboard Debug — Query Errors</h2>
-        <p style={{ color: '#71717a', marginBottom: 24 }}>tenantId: <b style={{color:'#a1a1aa'}}>{tenantId}</b> | from: {dateFrom} to: {dateTo}</p>
+        <p style={{ color: '#71717a', marginBottom: 24 }}>tenantId: <b style={{color:'#a1a1aa'}}>{tid}</b> | from: {dateFrom} to: {dateTo}</p>
         {debugResults.map((r, i) => (
           <div key={i} style={{ marginBottom: 12, padding: '10px 14px', background: r.ok ? 'rgba(16,185,129,0.08)' : 'rgba(244,63,94,0.12)', borderRadius: 8, border: `1px solid ${r.ok ? '#10b981' : '#f43f5e'}40` }}>
             <span style={{ color: r.ok ? '#10b981' : '#f43f5e', fontWeight: 700 }}>{r.ok ? '✓' : '✗'} {r.name}</span>
@@ -164,22 +147,22 @@ export default async function Dashboard({ searchParams }: Props) {
   let queryResult
   try {
     queryResult = await Promise.all([
-      getOverviewMetrics(tenantId!, dateFrom, dateTo),
-      getDailyRevenue(tenantId!, dateFrom, dateTo),
-      getDailyRoas(tenantId!, dateFrom, dateTo),
-      getTopCreatives(tenantId!, dateFrom, dateTo),
-      getCountryMetrics(tenantId!, dateFrom, dateTo),
-      getCustomerSplit(tenantId!, dateFrom, dateTo),
-      getLastSyncTime(tenantId!),
-      getProfitSummary(tenantId!, dateFrom, dateTo),
-      getFunnelMetrics(tenantId!, dateFrom, dateTo),
-      getCountrySpend(tenantId!, dateFrom, dateTo),
-      getCountryProfit(tenantId!, dateFrom, dateTo),
-      getDailyProfitData(tenantId!, dateFrom, dateTo),
-      getBreakdownByType(tenantId!, bd14From, todayISO, 'device').catch(() => [] as Awaited<ReturnType<typeof getBreakdownByType>>),
-      getBreakdownByType(tenantId!, bd14From, todayISO, 'placement').catch(() => [] as Awaited<ReturnType<typeof getBreakdownByType>>),
-      getBreakdownByType(tenantId!, bd14From, todayISO, 'age_gender').catch(() => [] as Awaited<ReturnType<typeof getBreakdownByType>>),
-      getCustomerLtv(tenantId!).catch(() => [] as Awaited<ReturnType<typeof getCustomerLtv>>),
+      getOverviewMetrics(tid, dateFrom, dateTo),
+      getDailyRevenue(tid, dateFrom, dateTo),
+      getDailyRoas(tid, dateFrom, dateTo),
+      getTopCreatives(tid, dateFrom, dateTo),
+      getCountryMetrics(tid, dateFrom, dateTo),
+      getCustomerSplit(tid, dateFrom, dateTo),
+      getLastSyncTime(tid),
+      getProfitSummary(tid, dateFrom, dateTo),
+      getFunnelMetrics(tid, dateFrom, dateTo),
+      getCountrySpend(tid, dateFrom, dateTo),
+      getCountryProfit(tid, dateFrom, dateTo),
+      getDailyProfitData(tid, dateFrom, dateTo),
+      getBreakdownByType(tid, bd14From, todayISO, 'device').catch(() => [] as Awaited<ReturnType<typeof getBreakdownByType>>),
+      getBreakdownByType(tid, bd14From, todayISO, 'placement').catch(() => [] as Awaited<ReturnType<typeof getBreakdownByType>>),
+      getBreakdownByType(tid, bd14From, todayISO, 'age_gender').catch(() => [] as Awaited<ReturnType<typeof getBreakdownByType>>),
+      getCustomerLtv(tid).catch(() => [] as Awaited<ReturnType<typeof getCustomerLtv>>),
     ])
   } catch {
     redirect('/onboarding')
@@ -512,7 +495,7 @@ ${promptLang.formatNote}`
             <Suspense>
               <TimeframeSelector from={dateFrom} to={dateTo} />
             </Suspense>
-            <StoreSwitcher stores={stores} activeStoreId={tenantId} />
+            <StoreSwitcher stores={stores} activeStoreId={tid} />
           </div>
         </div>
 
