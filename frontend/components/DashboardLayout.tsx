@@ -301,7 +301,7 @@ export default function DashboardLayout(props: DashboardLayoutProps) {
   const { currency } = useSettings()
   const fmt = makeFmt(currency)
 
-  const storageKey = `dashboard_layout_v2_${tid}`
+  const storageKey = `dashboard_layout_v3_${tid}`
 
   const [blocks, setBlocks] = useState<BlockState[]>(() => getDefaultLayout())
   const [customizing, setCustomizing] = useState(false)
@@ -443,8 +443,37 @@ export default function DashboardLayout(props: DashboardLayoutProps) {
           </div>
         )
 
+      // ── Paired blocks (original side-by-side layout) ──────────────────────
+      case 'revenue-roas':
+        return (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+            <RevenueChart data={revenue} days={days} />
+            <RoasChart data={roas} days={days} />
+          </div>
+        )
+
+      case 'creatives-country':
+        return (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+            <CreativesTable data={creatives} days={days} breakEvenRoas={profit.configured ? profit.breakEvenRoas : 1.5} />
+            <CountryChart data={countries} days={days} profitData={countryProfit} />
+          </div>
+        )
+
+      case 'ltv-breakdowns':
+        return (
+          <div style={{ display: 'grid', gridTemplateColumns: ltvData.length > 0 ? '1fr 1fr' : '1fr', gap: 12, marginBottom: 12 }}>
+            {ltvData.length > 0 && <LtvSection data={ltvData} />}
+            <BreakdownTabs device={bdDevice} placement={bdPlacement} ageGender={bdAgeGender} days={14} />
+          </div>
+        )
+
+      // ── Extra blocks (individual, hidden by default) ───────────────────────
       case 'funnel-visual':
         return <FunnelVisual data={funnel} days={days} fmt={fmt} />
+
+      case 'country-spend':
+        return <CountrySpendTable data={countrySpend} days={days} fmt={fmt} />
 
       case 'revenue-chart':
         return (
@@ -473,9 +502,6 @@ export default function DashboardLayout(props: DashboardLayoutProps) {
             <CountryChart data={countries} days={days} profitData={countryProfit} />
           </div>
         )
-
-      case 'country-spend':
-        return <CountrySpendTable data={countrySpend} days={days} fmt={fmt} />
 
       case 'customer-chart':
         return (
