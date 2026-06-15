@@ -346,6 +346,21 @@ export type SourceSyncRun = {
   started_at: string | null
 }
 
+/** Duration (seconds) of the most recent successful sync per source. Used as ETA baseline. */
+export async function getLastSyncDurations(tenantId: string): Promise<{ source: string; duration_seconds: number }[]> {
+  return query<{ source: string; duration_seconds: number }>(`
+    SELECT DISTINCT ON (source)
+      source,
+      GREATEST(EXTRACT(EPOCH FROM (finished_at - started_at))::int, 1) AS duration_seconds
+    FROM sync_runs
+    WHERE tenant_id = $1
+      AND status = 'success'
+      AND finished_at IS NOT NULL
+      AND started_at  IS NOT NULL
+    ORDER BY source, finished_at DESC
+  `, [tenantId])
+}
+
 /** Returns the most recent sync_run per source (shopify / facebook) for a tenant.
  *  Timestamps are formatted as ISO 8601 UTC so the browser can parse them unambiguously. */
 export async function getCurrentSyncStatus(tenantId: string): Promise<SourceSyncRun[]> {

@@ -10,6 +10,8 @@ interface SourceRun {
   status: RunStatus
   records: number
   errorMessage: string | null
+  startedAt: string | null
+  estimatedDurationSeconds: number | null
 }
 interface SyncProgress {
   shopify:  SourceRun
@@ -24,20 +26,41 @@ function daysAgo(n: number) {
   const d = new Date(); d.setDate(d.getDate() - n); return toDateStr(d)
 }
 
+const EMPTY_RUN: SourceRun = { status: 'waiting', records: 0, errorMessage: null, startedAt: null, estimatedDurationSeconds: null }
+
 /** Classify the most recent sync_run for a source relative to the trigger time. */
 function classifyRun(
-  run: { status: string; startedAt: string | null; recordsCollected: number; errorMessage?: string | null } | null,
+  run: {
+    status: string
+    startedAt: string | null
+    recordsCollected: number
+    errorMessage?: string | null
+    estimatedDurationSeconds?: number | null
+  } | null,
   triggerMs: number,
 ): SourceRun {
-  if (!run || !run.startedAt) return { status: 'waiting', records: 0, errorMessage: null }
+  if (!run || !run.startedAt) return EMPTY_RUN
   const startedMs = new Date(run.startedAt).getTime()
   // 5 s tolerance for server spawn latency. Runs older than this are from a
   // previous auto-sync and should not be counted as belonging to this click.
-  if (startedMs < triggerMs - 5_000) return { status: 'waiting', records: 0, errorMessage: null }
+  if (startedMs < triggerMs - 5_000) return EMPTY_RUN
   const s = run.status === 'running' ? 'running'
            : run.status === 'success' ? 'success'
            : 'error'
-  return { status: s, records: run.recordsCollected ?? 0, errorMessage: run.errorMessage ?? null }
+  return {
+    status: s,
+    records: run.recordsCollected ?? 0,
+    errorMessage: run.errorMessage ?? null,
+    startedAt: run.startedAt,
+    estimatedDurationSeconds: run.estimatedDurationSeconds ?? null,
+  }
+}
+
+/** Format remaining seconds into a human-readable string. */
+function fmtRemaining(seconds: number): string {
+  if (seconds <= 5)  return 'finalizando...'
+  if (seconds < 60)  return `~${seconds}s`
+  return `~${Math.ceil(seconds / 60)}min`
 }
 
 // ── Sub-components ──────────────────────────────────────────────────────────
@@ -70,12 +93,27 @@ function ProgressBar({ runStatus, color }: { runStatus: RunStatus; color: string
   )
 }
 
-function SourceRow({ label, run, color, recordLabel }: {
-  label: string; run: SourceRun; color: string; recordLabel: string
+function SourceRow({ label, run, color, recordLabel, nowMs }: {
+  label: string; run: SourceRun; color: string; recordLabel: string; nowMs: number
 }) {
+  // ETA / elapsed display while running
+  let timeText = ''
+  if (run.status === 'running' && run.startedAt) {
+    const elapsedSec = Math.max(0, Math.floor((nowMs - new Date(run.startedAt).getTime()) / 1000))
+    if (run.estimatedDurationSeconds && run.estimatedDurationSeconds > 0) {
+      const remaining = run.estimatedDurationSeconds - elapsedSec
+      timeText = remaining > 0 ? fmtRemaining(remaining) : 'finalizando...'
+    } else {
+      // No historical estimate yet — just show elapsed time
+      timeText = elapsedSec >= 60
+        ? `${Math.floor(elapsedSec / 60)}min ${elapsedSec % 60}s`
+        : `${elapsedSec}s`
+    }
+  }
+
   const statusText =
     run.status === 'waiting' ? 'aguardando...' :
-    run.status === 'running' ? 'buscando dados...' :
+    run.status === 'running' ? timeText || 'buscando...' :
     run.status === 'success' ? (run.records > 0 ? `✓ ${run.records} ${recordLabel}` : '✓ concluído') :
     '✗ erro'
 
@@ -116,10 +154,12 @@ export default function RefreshButton() {
   const [progress,     setProgress]     = useState<SyncProgress | null>(null)
   const [otherStores,  setOtherStores]  = useState(0)
   const [showProgress, setShowProgress] = useState(false)
+  const [nowMs,        setNowMs]        = useState(Date.now())
 
   const ref          = useRef<HTMLDivElement>(null)
   const pollRef      = useRef<ReturnType<typeof setInterval> | null>(null)
   const fallbackRef  = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const tickRef      = useRef<ReturnType<typeof setInterval> | null>(null)
   const triggerMsRef = useRef(0)
   const today        = toDateStr(new Date())
 
@@ -133,8 +173,14 @@ export default function RefreshButton() {
   }, [])
 
   function stopPolling() {
-    if (pollRef.current)     { clearInterval(pollRef.current);  pollRef.current    = null }
+    if (pollRef.current)     { clearInterval(pollRef.current);   pollRef.current    = null }
     if (fallbackRef.current) { clearTimeout(fallbackRef.current); fallbackRef.current = null }
+    if (tickRef.current)     { clearInterval(tickRef.current);   tickRef.current    = null }
+  }
+
+  function startTick() {
+    if (tickRef.current) clearInterval(tickRef.current)
+    tickRef.current = setInterval(() => setNowMs(Date.now()), 1_000)
   }
 
   function finishSync(hasError: boolean) {
@@ -181,7 +227,7 @@ export default function RefreshButton() {
     setOpen(false)
     setBtnStatus('loading')
     setShowProgress(true)
-    setProgress({ shopify: { status: 'waiting', records: 0, errorMessage: null }, facebook: { status: 'waiting', records: 0, errorMessage: null } })
+    setProgress({ shopify: { ...EMPTY_RUN }, facebook: { ...EMPTY_RUN } })
     stopPolling()
     triggerMsRef.current = Date.now()
 
@@ -195,6 +241,7 @@ export default function RefreshButton() {
 
       if (data.started) {
         setOtherStores(data.otherStoresCount ?? 0)
+        startTick()
         startPolling()
       } else {
         setBtnStatus('error')
@@ -285,8 +332,8 @@ export default function RefreshButton() {
             Atualizando dados
           </div>
 
-          <SourceRow label="Shopify"  run={progress.shopify}  color="#10B981" recordLabel="registros" />
-          <SourceRow label="Facebook" run={progress.facebook} color="#3B82F6" recordLabel="métricas"  />
+          <SourceRow label="Shopify"  run={progress.shopify}  color="#10B981" recordLabel="registros" nowMs={nowMs} />
+          <SourceRow label="Facebook" run={progress.facebook} color="#3B82F6" recordLabel="métricas"  nowMs={nowMs} />
 
           {otherStores > 0 && (
             <div style={{ marginTop: 6, fontSize: 11, color: '#52525B', borderTop: '1px solid #2A2D35', paddingTop: 8 }}>
