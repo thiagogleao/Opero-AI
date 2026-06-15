@@ -26,6 +26,7 @@ import TimeframeSelector from '@/components/TimeframeSelector'
 import RefreshButton from '@/components/RefreshButton'
 import AutoSync from '@/components/AutoSync'
 import AiPanel from '@/components/AiPanel'
+import CampaignProfitTable from '@/components/CampaignProfitTable'
 import Sidebar from '@/components/Sidebar'
 import Link from 'next/link'
 import { getTranslations } from '@/lib/translations'
@@ -650,6 +651,9 @@ ${promptLang.formatNote}`
           {ltvData.length > 0 && <LtvSection data={ltvData} />}
           <BreakdownTabs device={bdDevice} placement={bdPlacement} ageGender={bdAgeGender} days={14} />
         </div>
+
+        {/* Campaign Profit */}
+        <CampaignProfitTable />
 
         {/* AI Panel */}
         <AiPanel systemPrompt={systemPrompt} cacheKey={`${tid}:${dateFrom}:${dateTo}`} />
