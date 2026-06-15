@@ -7,7 +7,16 @@ import { query } from './db'
 export async function getActiveTenantId(userId: string): Promise<string> {
   const cookieStore = await cookies()
   const fromCookie = cookieStore.get('active_store_id')?.value
-  if (fromCookie) return fromCookie
+
+  // Validate the cookie value actually belongs to this user before trusting it
+  if (fromCookie) {
+    const valid = await query<{ id: string }>(
+      'SELECT id FROM tenants WHERE id = $1 AND (user_id = $2 OR id = $2) LIMIT 1',
+      [fromCookie, userId]
+    )
+    if (valid.length > 0) return fromCookie
+    // Cookie is stale/invalid — fall through to lookup
+  }
 
   // Check if a primary store with id=userId exists
   const direct = await query<{ id: string }>(

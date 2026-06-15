@@ -1,4 +1,5 @@
 import { auth } from '@clerk/nextjs/server'
+import { cookies } from 'next/headers'
 import { NextResponse } from 'next/server'
 import { query } from '@/lib/db'
 
@@ -9,6 +10,9 @@ export async function GET() {
     const { userId } = await auth()
     result.userId = userId ?? null
     result.authOk = !!userId
+
+    const cookieStore = await cookies()
+    result.active_store_id_cookie = cookieStore.get('active_store_id')?.value ?? null
 
     if (userId) {
       // Check direct tenant (userId == tenant id)
