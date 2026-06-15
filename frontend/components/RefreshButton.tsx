@@ -181,7 +181,7 @@ export default function RefreshButton() {
     setOpen(false)
     setBtnStatus('loading')
     setShowProgress(true)
-    setProgress({ shopify: { status: 'waiting', records: 0 }, facebook: { status: 'waiting', records: 0 } })
+    setProgress({ shopify: { status: 'waiting', records: 0, errorMessage: null }, facebook: { status: 'waiting', records: 0, errorMessage: null } })
     stopPolling()
     triggerMsRef.current = Date.now()
 
