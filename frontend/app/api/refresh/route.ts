@@ -3,6 +3,7 @@ import path from 'path'
 import { auth } from '@clerk/nextjs/server'
 import { getLastSyncTime, getTenantTimezone } from '@/lib/queries'
 import { getActiveTenantId } from '@/lib/activeStore'
+import { getTenantsByUserId } from '@/lib/tenant'
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..')
 const PYTHON = process.env.PYTHON_BIN || 'python3'
@@ -40,12 +41,30 @@ function spawnSource(source: string, dateFrom: string, dateTo: string, tenantId:
     })
 
     proc.unref()
-    console.log(`[refresh] spawned ${source} pid=${proc.pid} from=${dateFrom} to=${dateTo}`)
+    console.log(`[refresh] spawned ${source} pid=${proc.pid} tenant=${tenantId} from=${dateFrom} to=${dateTo}`)
     return proc
   } catch (err) {
     console.error(`[refresh] failed to spawn ${source}:`, err)
     return null
   }
+}
+
+/** Compute dateFrom for a tenant based on its last sync time. */
+async function computeDateFrom(tenantId: string, tz: string, explicitDateFrom?: string): Promise<string> {
+  if (explicitDateFrom) return explicitDateFrom
+  const syncs = await getLastSyncTime(tenantId)
+  const lastFinished = syncs[0]?.finished_at ?? null
+  if (lastFinished) {
+    const lastSyncLocalDate = new Date(lastFinished)
+      .toLocaleDateString('en-CA', { timeZone: tz })
+    // Go back 1 day: Facebook Insights for a given day are only fully
+    // available the following morning. Re-fetching the previous day ensures
+    // we capture data that was incomplete at sync time.
+    const [y, m, day] = lastSyncLocalDate.split('-').map(Number)
+    return new Date(Date.UTC(y, m - 1, day - 1)).toISOString().slice(0, 10)
+  }
+  const thirtyDaysAgo = new Date(Date.now() - 29 * 86400000)
+  return thirtyDaysAgo.toLocaleDateString('en-CA', { timeZone: tz })
 }
 
 export async function POST(req: Request) {
@@ -56,38 +75,45 @@ export async function POST(req: Request) {
     const tenantId = await getActiveTenantId(userId)
     const body = await req.json().catch(() => ({}))
 
-    // Always derive "today" from the store's timezone, not the server's UTC clock
+    // --- Active store: sync immediately ---
     const storeTimezone = await getTenantTimezone(tenantId)
     const today = todayInTz(storeTimezone)
-
-    let dateFrom: string
     const dateTo: string = body.dateTo ?? today
-
-    if (body.dateFrom) {
-      dateFrom = body.dateFrom
-    } else {
-      const syncs = await getLastSyncTime(tenantId)
-      const lastFinished = syncs[0]?.finished_at ?? null
-
-      if (lastFinished) {
-        const lastSyncLocalDate = new Date(lastFinished)
-          .toLocaleDateString('en-CA', { timeZone: storeTimezone })
-        // Go back 1 day: Facebook Insights for a given day are only fully
-        // available the following morning. Re-fetching the day before the
-        // last sync ensures we capture data that was incomplete at sync time.
-        const [y, m, day] = lastSyncLocalDate.split('-').map(Number)
-        dateFrom = new Date(Date.UTC(y, m - 1, day - 1)).toISOString().slice(0, 10)
-      } else {
-        const d = new Date()
-        const thirtyDaysAgo = new Date(d.getTime() - 29 * 86400000)
-        dateFrom = thirtyDaysAgo.toLocaleDateString('en-CA', { timeZone: storeTimezone })
-      }
-    }
+    const dateFrom = await computeDateFrom(tenantId, storeTimezone, body.dateFrom)
 
     spawnSource('shopify',  dateFrom, dateTo, tenantId)
     spawnSource('facebook', dateFrom, dateTo, tenantId)
 
-    return Response.json({ started: true, dateFrom, dateTo, storeTimezone })
+    // --- Other stores: queue in background with staggered delay ---
+    // Only when this is a smart incremental refresh (no explicit date range),
+    // so we don't apply a custom range to stores the user didn't intend.
+    if (!body.dateFrom) {
+      const allTenants = await getTenantsByUserId(userId)
+      const otherTenants = allTenants.filter(t => t.id !== tenantId)
+
+      otherTenants.forEach((tenant, i) => {
+        // 8 s gap between stores so the active store gets a clear head start
+        const delayMs = (i + 1) * 8_000
+        setTimeout(async () => {
+          try {
+            const tz = await getTenantTimezone(tenant.id)
+            const tenantToday = todayInTz(tz)
+            const tenantDateFrom = await computeDateFrom(tenant.id, tz)
+            spawnSource('shopify',  tenantDateFrom, tenantToday, tenant.id)
+            spawnSource('facebook', tenantDateFrom, tenantToday, tenant.id)
+          } catch (err) {
+            console.error(`[refresh] failed to queue background tenant ${tenant.id}:`, err)
+          }
+        }, delayMs)
+      })
+
+      return Response.json({
+        started: true, dateFrom, dateTo, storeTimezone,
+        otherStoresCount: otherTenants.length,
+      })
+    }
+
+    return Response.json({ started: true, dateFrom, dateTo, storeTimezone, otherStoresCount: 0 })
   } catch (err) {
     console.error('[refresh] error:', err)
     return Response.json({ error: String(err) }, { status: 500 })

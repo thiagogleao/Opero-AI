@@ -337,6 +337,28 @@ export async function getLastSyncTime(tenantId: string) {
   return rows
 }
 
+export type SourceSyncRun = {
+  source: string
+  status: string
+  records_collected: number
+  finished_at: string | null
+  started_at: string | null
+}
+
+/** Returns the most recent sync_run per source (shopify / facebook) for a tenant.
+ *  Timestamps are formatted as ISO 8601 UTC so the browser can parse them unambiguously. */
+export async function getCurrentSyncStatus(tenantId: string): Promise<SourceSyncRun[]> {
+  return query<SourceSyncRun>(`
+    SELECT DISTINCT ON (source)
+      source, status, records_collected,
+      to_char(finished_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS finished_at,
+      to_char(started_at,  'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS started_at
+    FROM sync_runs
+    WHERE tenant_id = $1
+    ORDER BY source, started_at DESC
+  `, [tenantId])
+}
+
 export async function getTenantTimezone(tenantId: string): Promise<string> {
   const rows = await query<{ timezone: string }>(
     `SELECT COALESCE(timezone, 'UTC') AS timezone FROM tenants WHERE id = $1`,

@@ -3,9 +3,19 @@ import { useState, useRef, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { useTr } from '@/lib/translations'
 
-type Status = 'idle' | 'loading' | 'done' | 'warn' | 'error'
+type ButtonStatus = 'idle' | 'loading' | 'done' | 'error'
+type RunStatus    = 'waiting' | 'running' | 'success' | 'error'
 
-// Use local date to avoid UTC-shift bugs
+interface SourceRun {
+  status: RunStatus
+  records: number
+}
+interface SyncProgress {
+  shopify:  SourceRun
+  facebook: SourceRun
+}
+
+// Use local date to avoid UTC-shift bugs on the date picker max attribute
 function toDateStr(d: Date) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
@@ -13,19 +23,92 @@ function daysAgo(n: number) {
   const d = new Date(); d.setDate(d.getDate() - n); return toDateStr(d)
 }
 
-export default function RefreshButton() {
-  const router = useRouter()
-  const tr = useTr()
-  const [status, setStatus] = useState<Status>('idle')
-  const [msg, setMsg] = useState('')
-  const [open, setOpen] = useState(false)
-  // customFrom is only used when the user explicitly picks a range in the dropdown
-  const [customFrom, setCustomFrom] = useState(() => daysAgo(7))
-  const ref = useRef<HTMLDivElement>(null)
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const fallbackRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const today = toDateStr(new Date())
+/** Classify the most recent sync_run for a source relative to the trigger time. */
+function classifyRun(run: { status: string; startedAt: string | null; recordsCollected: number } | null, triggerMs: number): SourceRun {
+  if (!run || !run.startedAt) return { status: 'waiting', records: 0 }
+  const startedMs = new Date(run.startedAt).getTime()
+  // Ignore runs that predate the button click (10 s tolerance for server latency)
+  if (startedMs < triggerMs - 10_000) return { status: 'waiting', records: 0 }
+  const s = run.status === 'running' ? 'running'
+           : run.status === 'success' ? 'success'
+           : 'error'
+  return { status: s, records: run.recordsCollected ?? 0 }
+}
 
+// ── Sub-components ──────────────────────────────────────────────────────────
+
+function ProgressBar({ runStatus, color }: { runStatus: RunStatus; color: string }) {
+  const track: React.CSSProperties = {
+    height: 4, background: '#2A2D35', borderRadius: 2,
+    overflow: 'hidden', position: 'relative',
+  }
+  if (runStatus === 'running' || runStatus === 'waiting') {
+    return (
+      <div style={track}>
+        <style>{`@keyframes bar-slide{0%{transform:translateX(-100%)}100%{transform:translateX(350%)}}`}</style>
+        <div style={{
+          position: 'absolute', height: '100%', width: '30%',
+          background: color, borderRadius: 2, opacity: 0.85,
+          animation: runStatus === 'running' ? 'bar-slide 1.1s ease-in-out infinite' : 'none',
+        }} />
+      </div>
+    )
+  }
+  return (
+    <div style={track}>
+      <div style={{
+        height: '100%', width: '100%', borderRadius: 2,
+        background: runStatus === 'success' ? '#10B981' : '#F43F5E',
+        transition: 'width 0.3s ease',
+      }} />
+    </div>
+  )
+}
+
+function SourceRow({ label, run, color, recordLabel }: {
+  label: string; run: SourceRun; color: string; recordLabel: string
+}) {
+  const statusText =
+    run.status === 'waiting' ? 'aguardando...' :
+    run.status === 'running' ? 'buscando dados...' :
+    run.status === 'success' ? (run.records > 0 ? `✓ ${run.records} ${recordLabel}` : '✓ concluído') :
+    '✗ erro'
+
+  const statusColor =
+    run.status === 'success' ? '#10B981' :
+    run.status === 'error'   ? '#F43F5E' : '#71717A'
+
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: '#A1A1AA' }}>{label}</span>
+        <span style={{ fontSize: 11, color: statusColor, transition: 'color 0.2s' }}>{statusText}</span>
+      </div>
+      <ProgressBar runStatus={run.status} color={color} />
+    </div>
+  )
+}
+
+// ── Main component ───────────────────────────────────────────────────────────
+
+export default function RefreshButton() {
+  const router  = useRouter()
+  const tr      = useTr()
+
+  const [btnStatus,    setBtnStatus]    = useState<ButtonStatus>('idle')
+  const [open,         setOpen]         = useState(false)
+  const [customFrom,   setCustomFrom]   = useState(() => daysAgo(7))
+  const [progress,     setProgress]     = useState<SyncProgress | null>(null)
+  const [otherStores,  setOtherStores]  = useState(0)
+  const [showProgress, setShowProgress] = useState(false)
+
+  const ref          = useRef<HTMLDivElement>(null)
+  const pollRef      = useRef<ReturnType<typeof setInterval> | null>(null)
+  const fallbackRef  = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const triggerMsRef = useRef(0)
+  const today        = toDateStr(new Date())
+
+  // Close dropdown on outside click
   useEffect(() => {
     function close(e: MouseEvent) {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
@@ -35,97 +118,92 @@ export default function RefreshButton() {
   }, [])
 
   function stopPolling() {
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
+    if (pollRef.current)     { clearInterval(pollRef.current);  pollRef.current    = null }
     if (fallbackRef.current) { clearTimeout(fallbackRef.current); fallbackRef.current = null }
   }
 
-  function startPolling(triggerTime: number) {
+  function finishSync() {
+    stopPolling()
+    setBtnStatus('done')
+    router.refresh()
+    setTimeout(() => {
+      setBtnStatus('idle')
+      setShowProgress(false)
+      setProgress(null)
+    }, 3500)
+  }
+
+  function startPolling() {
+    const triggerMs = triggerMsRef.current
+
     pollRef.current = setInterval(async () => {
       try {
-        const res = await fetch('/api/sync-status')
-        const { lastSync } = await res.json()
-        if (lastSync && new Date(lastSync).getTime() > triggerTime) {
-          stopPolling()
-          setStatus('done')
-          setMsg('Dados atualizados!')
-          router.refresh()
-          setTimeout(() => setStatus('idle'), 3000)
-        }
-      } catch { /* keep polling */ }
-    }, 5000)
+        const res  = await fetch('/api/sync-status')
+        const data = await res.json()
 
-    // Fallback: force refresh after 3 minutes
-    fallbackRef.current = setTimeout(() => {
-      stopPolling()
-      setStatus('done')
-      setMsg('Pronto!')
-      router.refresh()
-      setTimeout(() => setStatus('idle'), 3000)
-    }, 180_000)
+        const shopifyRun  = classifyRun(data.shopify,  triggerMs)
+        const facebookRun = classifyRun(data.facebook, triggerMs)
+
+        setProgress({ shopify: shopifyRun, facebook: facebookRun })
+
+        const bothSettled =
+          (shopifyRun.status  === 'success' || shopifyRun.status  === 'error') &&
+          (facebookRun.status === 'success' || facebookRun.status === 'error')
+
+        if (bothSettled) finishSync()
+      } catch { /* keep polling on transient errors */ }
+    }, 3_000)
+
+    // Safety valve: give up after 3 minutes
+    fallbackRef.current = setTimeout(finishSync, 180_000)
   }
 
-  // Main button: smart incremental (no explicit dates)
-  async function handleRefresh() {
+  async function triggerRefresh(body: object) {
     setOpen(false)
-    setStatus('loading')
-    setMsg('Sincronizando...')
+    setBtnStatus('loading')
+    setShowProgress(true)
+    setProgress({ shopify: { status: 'waiting', records: 0 }, facebook: { status: 'waiting', records: 0 } })
     stopPolling()
-    const triggerTime = Date.now()
+    triggerMsRef.current = Date.now()
+
     try {
-      const res = await fetch('/api/refresh', {
+      const res  = await fetch('/api/refresh', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
+        body: JSON.stringify(body),
       })
       const data = await res.json()
 
       if (data.started) {
-        setMsg('Sincronizando...')
-        startPolling(triggerTime)
+        setOtherStores(data.otherStoresCount ?? 0)
+        startPolling()
       } else {
-        setStatus('error'); setMsg(tr.refresh_error_conn); setTimeout(() => setStatus('idle'), 4000)
+        setBtnStatus('error')
+        setTimeout(() => { setBtnStatus('idle'); setShowProgress(false); setProgress(null) }, 4_000)
       }
     } catch {
-      setStatus('error'); setMsg(tr.refresh_error_conn); setTimeout(() => setStatus('idle'), 4000)
+      setBtnStatus('error')
+      setTimeout(() => { setBtnStatus('idle'); setShowProgress(false); setProgress(null) }, 4_000)
     }
   }
 
-  const theme: Record<Status, { bg: string; border: string; color: string }> = {
-    idle:    { bg: 'var(--bg-surface)',         border: 'var(--border)',              color: 'var(--text-dim)' },
-    loading: { bg: 'rgba(139,92,246,0.1)',       border: 'rgba(139,92,246,0.4)',       color: '#A78BFA' },
-    done:    { bg: 'rgba(16,185,129,0.1)',        border: 'rgba(16,185,129,0.4)',       color: '#10B981' },
-    warn:    { bg: 'rgba(245,158,11,0.1)',        border: 'rgba(245,158,11,0.4)',       color: '#F59E0B' },
-    error:   { bg: 'rgba(244,63,94,0.1)',         border: 'rgba(244,63,94,0.4)',        color: '#F43F5E' },
-  }
-  const c = theme[status]
-  const isIdle = status === 'idle'
+  const handleRefresh       = () => triggerRefresh({})
+  const handleRefreshCustom = () => triggerRefresh({ dateFrom: customFrom, dateTo: today })
 
-  // Explicit range sync (from dropdown date picker)
-  async function handleRefreshCustom() {
-    setOpen(false)
-    setStatus('loading')
-    setMsg('Sincronizando...')
-    stopPolling()
-    const triggerTime = Date.now()
-    try {
-      const res = await fetch('/api/refresh', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dateFrom: customFrom, dateTo: today }),
-      })
-      const data = await res.json()
-      if (data.started) {
-        startPolling(triggerTime)
-      } else {
-        setStatus('error'); setMsg(tr.refresh_error_conn); setTimeout(() => setStatus('idle'), 4000)
-      }
-    } catch {
-      setStatus('error'); setMsg(tr.refresh_error_conn); setTimeout(() => setStatus('idle'), 4000)
-    }
-  }
+  // ── Styles ─────────────────────────────────────────────────────────────────
+  const isLoading = btnStatus === 'loading'
+  const isDone    = btnStatus === 'done'
+  const isError   = btnStatus === 'error'
+  const isIdle    = btnStatus === 'idle'
+
+  const accent =
+    isLoading ? { bg: 'rgba(139,92,246,0.1)', border: 'rgba(139,92,246,0.4)', color: '#A78BFA' } :
+    isDone    ? { bg: 'rgba(16,185,129,0.1)',  border: 'rgba(16,185,129,0.4)',  color: '#10B981' } :
+    isError   ? { bg: 'rgba(244,63,94,0.1)',   border: 'rgba(244,63,94,0.4)',   color: '#F43F5E' } :
+                { bg: 'var(--bg-surface)',      border: 'var(--border)',          color: 'var(--text-dim)' }
 
   const quickOptions = [
-    { label: '7 dias',  date: daysAgo(7) },
+    { label: '7 dias',  date: daysAgo(7)  },
     { label: '30 dias', date: daysAgo(30) },
     { label: '60 dias', date: daysAgo(60) },
     { label: '90 dias', date: daysAgo(90) },
@@ -133,26 +211,38 @@ export default function RefreshButton() {
 
   return (
     <div ref={ref} style={{ position: 'relative', display: 'inline-flex' }}>
-      <div style={{ display: 'flex', border: `1px solid ${c.border}`, borderRadius: 8, overflow: 'visible', transition: 'all 0.2s' }}>
-        {/* Main button — smart incremental */}
+
+      {/* ── Button row ──────────────────────────────────────────────────── */}
+      <div style={{ display: 'flex', border: `1px solid ${accent.border}`, borderRadius: 8, overflow: 'visible', transition: 'all 0.2s' }}>
+
+        {/* Main button */}
         <button
           onClick={isIdle ? handleRefresh : undefined}
-          disabled={status === 'loading'}
-          title={isIdle ? 'Sincronizar dados (incremental automático)' : msg}
-          style={{ background: c.bg, border: 'none', borderRadius: '8px 0 0 8px', padding: '6px 10px', fontSize: 12, fontWeight: 600, color: c.color, cursor: status === 'loading' ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 6, transition: 'all 0.2s', whiteSpace: 'nowrap' }}
+          disabled={isLoading}
+          title={isIdle ? 'Sincronizar dados de todas as lojas' : undefined}
+          style={{
+            background: accent.bg, border: 'none', borderRadius: '8px 0 0 8px',
+            padding: '6px 10px', fontSize: 12, fontWeight: 600, color: accent.color,
+            cursor: isLoading ? 'not-allowed' : 'pointer',
+            display: 'flex', alignItems: 'center', gap: 6,
+            transition: 'all 0.2s', whiteSpace: 'nowrap',
+          }}
         >
-          {status === 'loading' ? <><Spinner />{tr.refresh_loading}</> :
-           status === 'done'    ? <>✓ {msg}</> :
-           status === 'warn'    ? <>⚠ {msg}</> :
-           status === 'error'   ? <>✗ {msg}</> :
-           <><RefreshIcon />{tr.refresh_idle}</>}
+          {isLoading ? <><Spinner />{tr.refresh_loading}</> :
+           isDone    ? <>✓ Dados atualizados!</> :
+           isError   ? <>✗ {tr.refresh_error_conn}</> :
+                       <><RefreshIcon />{tr.refresh_idle}</>}
         </button>
 
-        {/* Dropdown toggle */}
+        {/* Dropdown toggle — only when idle */}
         {isIdle && (
           <button
             onClick={() => setOpen(o => !o)}
-            style={{ background: c.bg, border: 'none', borderLeft: `1px solid ${c.border}`, borderRadius: '0 8px 8px 0', padding: '6px 7px', color: c.color, cursor: 'pointer', display: 'flex', alignItems: 'center', transition: 'all 0.2s' }}
+            style={{
+              background: accent.bg, border: 'none', borderLeft: `1px solid ${accent.border}`,
+              borderRadius: '0 8px 8px 0', padding: '6px 7px', color: accent.color,
+              cursor: 'pointer', display: 'flex', alignItems: 'center', transition: 'all 0.2s',
+            }}
           >
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
               <path d="M2 3.5L5 6.5L8 3.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
@@ -161,33 +251,73 @@ export default function RefreshButton() {
         )}
       </div>
 
-      {/* Dropdown — re-sync historical range */}
-      {open && (
-        <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 4, background: '#1A1D23', border: '1px solid #2A2D35', borderRadius: 8, zIndex: 50, minWidth: 210, padding: 12 }}>
-          <div style={{ fontSize: 11, fontWeight: 600, color: '#52525B', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Re-sincronizar período</div>
-          <div style={{ fontSize: 11, color: '#52525B', marginBottom: 10 }}>Use para corrigir dados históricos</div>
+      {/* ── Progress panel (shown while syncing / just after done) ─────── */}
+      {showProgress && progress && (
+        <div style={{
+          position: 'absolute', top: 'calc(100% + 6px)', right: 0,
+          background: '#1A1D23', border: '1px solid #2A2D35',
+          borderRadius: 10, padding: '14px 16px', minWidth: 260, zIndex: 50,
+          boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+        }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: '#52525B', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 12 }}>
+            Atualizando dados
+          </div>
 
-          {/* Quick options */}
+          <SourceRow label="Shopify"  run={progress.shopify}  color="#10B981" recordLabel="registros" />
+          <SourceRow label="Facebook" run={progress.facebook} color="#3B82F6" recordLabel="métricas"  />
+
+          {otherStores > 0 && (
+            <div style={{ marginTop: 6, fontSize: 11, color: '#52525B', borderTop: '1px solid #2A2D35', paddingTop: 8 }}>
+              + {otherStores} loja{otherStores > 1 ? 's' : ''} em segundo plano
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Dropdown — re-sync historical range ────────────────────────── */}
+      {open && (
+        <div style={{
+          position: 'absolute', top: '100%', right: 0, marginTop: 4,
+          background: '#1A1D23', border: '1px solid #2A2D35',
+          borderRadius: 8, zIndex: 50, minWidth: 210, padding: 12,
+        }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: '#52525B', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            Re-sincronizar período
+          </div>
+          <div style={{ fontSize: 11, color: '#52525B', marginBottom: 10 }}>
+            Use para corrigir dados históricos
+          </div>
+
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 10 }}>
             {quickOptions.map(opt => (
               <button key={opt.label} onClick={() => setCustomFrom(opt.date)}
-                style={{ padding: '4px 8px', fontSize: 11, fontWeight: 500, borderRadius: 5, border: `1px solid ${customFrom === opt.date ? '#7C3AED' : '#2A2D35'}`, background: customFrom === opt.date ? 'rgba(124,58,237,0.15)' : 'transparent', color: customFrom === opt.date ? '#A78BFA' : '#A1A1AA', cursor: 'pointer' }}>
+                style={{
+                  padding: '4px 8px', fontSize: 11, fontWeight: 500, borderRadius: 5,
+                  border: `1px solid ${customFrom === opt.date ? '#7C3AED' : '#2A2D35'}`,
+                  background: customFrom === opt.date ? 'rgba(124,58,237,0.15)' : 'transparent',
+                  color: customFrom === opt.date ? '#A78BFA' : '#A1A1AA', cursor: 'pointer',
+                }}>
                 {opt.label}
               </button>
             ))}
           </div>
 
-          {/* Custom date input */}
           <input
-            type="date"
-            value={customFrom}
-            max={today}
+            type="date" value={customFrom} max={today}
             onChange={e => setCustomFrom(e.target.value)}
-            style={{ width: '100%', background: '#111318', border: '1px solid #2A2D35', borderRadius: 6, padding: '6px 8px', fontSize: 12, color: '#F4F4F5', outline: 'none', boxSizing: 'border-box', marginBottom: 10 }}
+            style={{
+              width: '100%', background: '#111318', border: '1px solid #2A2D35',
+              borderRadius: 6, padding: '6px 8px', fontSize: 12, color: '#F4F4F5',
+              outline: 'none', boxSizing: 'border-box', marginBottom: 10,
+            }}
           />
 
           <button onClick={handleRefreshCustom}
-            style={{ width: '100%', padding: '7px 0', fontSize: 12, fontWeight: 600, borderRadius: 6, border: 'none', background: 'rgba(124,58,237,0.2)', color: '#A78BFA', cursor: 'pointer' }}>
+            style={{
+              width: '100%', padding: '7px 0', fontSize: 12, fontWeight: 600,
+              borderRadius: 6, border: 'none', background: 'rgba(124,58,237,0.2)',
+              color: '#A78BFA', cursor: 'pointer',
+            }}>
             Re-sincronizar desde {customFrom}
           </button>
         </div>
@@ -196,15 +326,19 @@ export default function RefreshButton() {
   )
 }
 
+// ── Icons ────────────────────────────────────────────────────────────────────
+
 function Spinner() {
   return (
-    <svg width="13" height="13" viewBox="0 0 13 13" fill="none" style={{ animation: 'spin 0.8s linear infinite', flexShrink: 0 }}>
-      <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
+    <svg width="13" height="13" viewBox="0 0 13 13" fill="none"
+      style={{ animation: 'spin 0.8s linear infinite', flexShrink: 0 }}>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
       <circle cx="6.5" cy="6.5" r="5" stroke="currentColor" strokeWidth="1.5" strokeOpacity="0.25" />
       <path d="M11.5 6.5A5 5 0 0 0 6.5 1.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
     </svg>
   )
 }
+
 function RefreshIcon() {
   return (
     <svg width="13" height="13" viewBox="0 0 13 13" fill="none" style={{ flexShrink: 0 }}>
