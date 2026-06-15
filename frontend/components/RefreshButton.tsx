@@ -121,11 +121,6 @@ function SourceRow({ label, run, color, recordLabel, nowMs }: {
     run.status === 'success' ? '#10B981' :
     run.status === 'error'   ? '#F43F5E' : '#71717A'
 
-  // Truncate long error messages to keep the panel compact
-  const errMsg = run.errorMessage
-    ? (run.errorMessage.length > 80 ? run.errorMessage.slice(0, 80) + '…' : run.errorMessage)
-    : null
-
   return (
     <div style={{ marginBottom: 10 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
@@ -133,9 +128,12 @@ function SourceRow({ label, run, color, recordLabel, nowMs }: {
         <span style={{ fontSize: 11, color: statusColor, transition: 'color 0.2s' }}>{statusText}</span>
       </div>
       <ProgressBar runStatus={run.status} color={color} />
-      {run.status === 'error' && errMsg && (
-        <div style={{ marginTop: 4, fontSize: 10, color: '#71717A', lineHeight: 1.4, wordBreak: 'break-word' }}>
-          {errMsg}
+      {run.status === 'error' && run.errorMessage && (
+        <div style={{
+          marginTop: 4, fontSize: 10, color: '#71717A', lineHeight: 1.4,
+          wordBreak: 'break-word', maxHeight: 80, overflowY: 'auto',
+        }}>
+          {run.errorMessage}
         </div>
       )}
     </div>
