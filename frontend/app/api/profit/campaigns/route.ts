@@ -97,13 +97,14 @@ export async function GET(req: NextRequest) {
       GROUP BY a.campaign_id, b.breakdown_value
     `, [tenantId, dateFrom, dateTo]),
 
-    // Shopify revenue by product × country (actual sales)
-    query<{ product_id: string; title: string; country_code: string; revenue: string }>(`
+    // Shopify revenue by product × country — group by a stable product key so SUM is correct
+    // product_key = product_id if set, else fall back to product_title/title (handles NULL product_id)
+    query<{ product_key: string; title: string; country_code: string; revenue: string }>(`
       SELECT
-        COALESCE(oi.product_id, 'unknown')                            AS product_id,
-        COALESCE(p.title, oi.product_title, oi.title, 'Desconhecido') AS title,
-        COALESCE(o.country_code, 'XX')                                AS country_code,
-        ROUND(SUM(oi.quantity * oi.price)::numeric, 2)::text          AS revenue
+        COALESCE(oi.product_id, oi.product_title, oi.title, 'unknown') AS product_key,
+        MAX(COALESCE(p.title, oi.product_title, oi.title, 'Desconhecido')) AS title,
+        COALESCE(o.country_code, 'XX')                                  AS country_code,
+        ROUND(SUM(oi.quantity * oi.price)::numeric, 2)::text            AS revenue
       FROM shopify_order_items oi
       JOIN shopify_orders o ON oi.order_id = o.order_id
       JOIN tenants t ON t.id = o.tenant_id
@@ -111,25 +112,26 @@ export async function GET(req: NextRequest) {
       WHERE o.tenant_id = $1
         AND (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date BETWEEN $2::date AND $3::date
         AND o.financial_status NOT IN ('refunded', 'voided')
-      GROUP BY oi.product_id, p.title, oi.product_title, oi.title, o.country_code
+      GROUP BY COALESCE(oi.product_id, oi.product_title, oi.title, 'unknown'), COALESCE(o.country_code, 'XX')
     `, [tenantId, dateFrom, dateTo]),
   ])
 
   const hasBreakdownData = breakdownRows.length > 0
 
-  // Build product list (deduplicated by product_id, keeping all titles)
-  const productMap = new Map<string, string>() // product_id → title
+  // Build product list (one entry per product_key)
+  const productMap = new Map<string, string>() // product_key → title
   for (const r of productRevenueRows) {
-    if (!productMap.has(r.product_id)) productMap.set(r.product_id, r.title)
+    if (!productMap.has(r.product_key)) productMap.set(r.product_key, r.title)
   }
   const productList = Array.from(productMap.entries()).map(([product_id, title]) => ({ product_id, title }))
 
-  // Shopify revenue: product_id → country_code → revenue
+  // Shopify revenue: product_key → country_code → revenue (accumulated, not overwritten)
   const shopifyRevByProductCountry = new Map<string, Map<string, number>>()
   for (const r of productRevenueRows) {
-    if (!shopifyRevByProductCountry.has(r.product_id))
-      shopifyRevByProductCountry.set(r.product_id, new Map())
-    shopifyRevByProductCountry.get(r.product_id)!.set(r.country_code, Number(r.revenue))
+    if (!shopifyRevByProductCountry.has(r.product_key))
+      shopifyRevByProductCountry.set(r.product_key, new Map())
+    const countryMap = shopifyRevByProductCountry.get(r.product_key)!
+    countryMap.set(r.country_code, (countryMap.get(r.country_code) ?? 0) + Number(r.revenue))
   }
 
   // Campaign country spend: campaign_id → country_code → spend
