@@ -12,31 +12,15 @@ import {
   getBreakdownByType, getCustomerLtv,
 } from '@/lib/queries'
 import { getProfitSummary, getCountryProfit, getDailyProfitData } from '@/lib/profitCalc'
-import RevenueChart from '@/components/RevenueChart'
-import RoasChart from '@/components/RoasChart'
-import CountryChart from '@/components/CountryChart'
-import CustomerChart from '@/components/CustomerChart'
-import BreakdownTabs from '@/components/BreakdownTabs'
-import LtvSection from '@/components/LtvSection'
-import CreativesTable from '@/components/CreativesTable'
-import DailyProfitChart from '@/components/DailyProfitChart'
-import MarginBreakdownChart from '@/components/MarginBreakdownChart'
-import MetricCard from '@/components/MetricCard'
 import TimeframeSelector from '@/components/TimeframeSelector'
 import RefreshButton from '@/components/RefreshButton'
 import AutoSync from '@/components/AutoSync'
-import AiPanel from '@/components/AiPanel'
-import CampaignProfitTable from '@/components/CampaignProfitTable'
+import DashboardLayout from '@/components/DashboardLayout'
 import Sidebar from '@/components/Sidebar'
-import Link from 'next/link'
 import { getTranslations } from '@/lib/translations'
 import type { Language } from '@/contexts/SettingsContext'
 
 export const revalidate = 0
-
-function fmt(n: number, prefix = '$') {
-  return `${prefix}${n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-}
 
 /** Returns YYYY-MM-DD in the given IANA timezone. */
 function dateInTz(d: Date, tz: string): string {
@@ -512,175 +496,33 @@ ${promptLang.formatNote}`
           </div>
         </div>
 
-        {/* KPI Cards */}
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))',
-          gap: 12, marginBottom: 20,
-        }}>
-          <MetricCard
-            title={tr.metric_revenue} value={fmt(Number(metrics.revenue))}
-            sub={tr.metric_via_shopify} icon="💰"
-            gradient="linear-gradient(135deg,#10B981,#059669)" delay={0}
-          />
-          <MetricCard
-            title={tr.metric_orders} value={String(metrics.orders)}
-            sub={`${tr.metric_avg_ticket} ${fmt(Number(metrics.aov))}`} icon="🛒"
-            gradient="linear-gradient(135deg,#8B5CF6,#6D28D9)" delay={0.07}
-          />
-          <MetricCard
-            title={tr.metric_roas_real} value={`${Number(metrics.blended_roas).toFixed(2)}x`}
-            sub={tr.metric_revenue_shopify} icon="📈"
-            gradient="linear-gradient(135deg,#38BDF8,#0284C7)" delay={0.14}
-          />
-          <MetricCard
-            title={tr.metric_fb_spend} value={fmt(Number(metrics.spend))}
-            sub={`${metrics.purchases} ${tr.creative_purchases}`} icon="📣"
-            gradient="linear-gradient(135deg,#F59E0B,#D97706)" delay={0.21}
-          />
-          <MetricCard
-            title={tr.metric_new_customers} value={String(metrics.new_customers)}
-            sub={`${metrics.returning_customers} ${tr.metric_returning}`} icon="👥"
-            gradient="linear-gradient(135deg,#A78BFA,#7C3AED)" delay={0.28}
-          />
-          <MetricCard
-            title={tr.metric_abandoned} value={fmt(safeAbandonedValue)}
-            sub={`${abandonRate}% ${tr.metric_abandon_rate}`} icon="⚠️"
-            gradient="linear-gradient(135deg,#F43F5E,#BE123C)" delay={0.35}
-          />
-        </div>
-
-        {/* Profit Banner */}
-        {profit.configured ? (
-          <div style={{
-            background: 'linear-gradient(135deg, rgba(16,185,129,0.08) 0%, rgba(139,92,246,0.08) 100%)',
-            border: '1px solid rgba(16,185,129,0.25)',
-            borderRadius: 12, padding: '16px 20px', marginBottom: 20,
-            display: 'flex', alignItems: 'center', gap: 0,
-          }}>
-            <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8, borderRight: '1px solid var(--border)', paddingRight: 20 }}>
-              <span style={{ fontSize: 20 }}>💵</span>
-              <div>
-                <p style={{ fontSize: 11, color: 'var(--text-dim)', fontWeight: 500, marginBottom: 2 }}>{tr.profit_net}</p>
-                <p style={{ fontSize: 24, fontWeight: 700, color: profit.netProfit >= 0 ? '#10B981' : '#F43F5E', letterSpacing: '-0.5px' }}>
-                  {fmt(profit.netProfit)}
-                </p>
-              </div>
-            </div>
-            <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8, borderRight: '1px solid var(--border)', paddingLeft: 20, paddingRight: 20 }}>
-              <div>
-                <p style={{ fontSize: 11, color: 'var(--text-dim)', fontWeight: 500, marginBottom: 2 }}>{tr.profit_margin}</p>
-                <p style={{ fontSize: 24, fontWeight: 700, letterSpacing: '-0.5px', color: profit.margin >= 20 ? '#10B981' : profit.margin >= 10 ? '#F59E0B' : '#F43F5E' }}>
-                  {profit.margin.toFixed(1)}%
-                </p>
-              </div>
-            </div>
-            <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8, borderRight: '1px solid var(--border)', paddingLeft: 20, paddingRight: 20 }}>
-              <div>
-                <p style={{ fontSize: 11, color: 'var(--text-dim)', fontWeight: 500, marginBottom: 2 }}>{tr.profit_per_order}</p>
-                <p style={{ fontSize: 24, fontWeight: 700, color: profit.avgProfitPerOrder >= 0 ? '#A78BFA' : '#F43F5E', letterSpacing: '-0.5px' }}>
-                  {fmt(profit.avgProfitPerOrder)}
-                </p>
-              </div>
-            </div>
-            <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8, paddingLeft: 20 }}>
-              <div>
-                <p style={{ fontSize: 11, color: 'var(--text-dim)', fontWeight: 500, marginBottom: 2 }}>{tr.profit_breakeven}</p>
-                <p style={{ fontSize: 24, fontWeight: 700, color: '#38BDF8', letterSpacing: '-0.5px' }}>
-                  {profit.breakEvenRoas > 0 ? `${profit.breakEvenRoas.toFixed(2)}x` : '—'}
-                </p>
-              </div>
-            </div>
-            <Link href="/profit" style={{ textDecoration: 'none', marginLeft: 16, flexShrink: 0 }}>
-              <div style={{
-                background: 'rgba(139,92,246,0.15)', border: '1px solid rgba(139,92,246,0.3)',
-                borderRadius: 8, padding: '6px 12px', fontSize: 11, color: '#A78BFA',
-                fontWeight: 600, whiteSpace: 'nowrap',
-              }}>{tr.profit_details}</div>
-            </Link>
-          </div>
-        ) : (
-          <Link href="/profit" style={{ textDecoration: 'none' }}>
-            <div style={{
-              background: 'rgba(245,158,11,0.06)', border: '1px dashed rgba(245,158,11,0.3)',
-              borderRadius: 12, padding: '14px 20px', marginBottom: 20,
-              display: 'flex', alignItems: 'center', gap: 12,
-            }}>
-              <span style={{ fontSize: 18 }}>⚙️</span>
-              <div>
-                <p style={{ fontSize: 13, fontWeight: 600, color: '#F59E0B' }}>{tr.profit_setup_title}</p>
-                <p style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 2 }}>{tr.profit_setup_desc}</p>
-              </div>
-            </div>
-          </Link>
-        )}
-
-        {/* Daily Profit Chart + Margin Breakdown */}
-        {profit.configured && (
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: dailyProfit.configured && dailyProfit.dailyData.length > 1 ? '2fr 1fr' : '1fr',
-            gap: 12, marginBottom: 12,
-          }}>
-            {dailyProfit.configured && dailyProfit.dailyData.length > 1 && (
-              <DailyProfitChart data={dailyProfit.dailyData} days={days} />
-            )}
-            <MarginBreakdownChart profit={profit} />
-          </div>
-        )}
-
-        {/* Charts row 1 */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-          <RevenueChart data={revenue} days={days} />
-          <RoasChart data={roas} days={days} />
-        </div>
-
-        {/* Charts row 2 */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-          <CreativesTable data={creatives} days={days} breakEvenRoas={profit.configured ? profit.breakEvenRoas : 1.5} />
-          <CountryChart data={countries} days={days} profitData={countryProfit} />
-        </div>
-
-        {/* Charts row 3 */}
-        <div style={{ marginBottom: 12 }}>
-          <CustomerChart data={customers} days={days} />
-        </div>
-
-        {/* LTV & Breakdowns */}
-        <div style={{ display: 'grid', gridTemplateColumns: ltvData.length > 0 ? '1fr 1fr' : '1fr', gap: 12, marginBottom: 12 }}>
-          {ltvData.length > 0 && <LtvSection data={ltvData} />}
-          <BreakdownTabs device={bdDevice} placement={bdPlacement} ageGender={bdAgeGender} days={14} />
-        </div>
-
-        {/* Campaign Profit */}
-        <CampaignProfitTable />
-
-        {/* AI Panel */}
-        <AiPanel systemPrompt={systemPrompt} cacheKey={`${tid}:${dateFrom}:${dateTo}`} />
-
-        {/* Notes */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <div style={{
-            background: 'rgba(245,158,11,0.06)', border: '1px solid rgba(245,158,11,0.2)',
-            borderRadius: 10, padding: '14px 18px', display: 'flex', gap: 12, alignItems: 'flex-start',
-          }}>
-            <span style={{ fontSize: 18 }}>⚡</span>
-            <div>
-              <p style={{ fontSize: 13, fontWeight: 600, color: '#F59E0B' }}>{tr.note_roas_title}</p>
-              <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 3, lineHeight: 1.6 }}>{tr.note_roas_body}</p>
-            </div>
-          </div>
-          <div style={{
-            background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.2)',
-            borderRadius: 10, padding: '14px 18px', display: 'flex', gap: 12, alignItems: 'flex-start',
-          }}>
-            <span style={{ fontSize: 18 }}>ℹ️</span>
-            <div>
-              <p style={{ fontSize: 13, fontWeight: 600, color: '#818CF8' }}>{tr.note_divergence_title}</p>
-              <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 3, lineHeight: 1.6 }}>{tr.note_divergence_body}</p>
-            </div>
-          </div>
-        </div>
+        <DashboardLayout
+          metrics={metrics}
+          revenue={revenue}
+          roas={roas}
+          creatives={creatives}
+          countries={countries}
+          customers={customers}
+          profit={profit}
+          funnel={funnel}
+          countrySpend={countrySpend}
+          countryProfit={countryProfit}
+          dailyProfit={dailyProfit}
+          bdDevice={bdDevice}
+          bdPlacement={bdPlacement}
+          bdAgeGender={bdAgeGender}
+          ltvData={ltvData}
+          systemPrompt={systemPrompt}
+          cacheKey={`${tid}:${dateFrom}:${dateTo}`}
+          dateFrom={dateFrom}
+          dateTo={dateTo}
+          days={days}
+          tid={tid}
+          tr={tr as Record<string, string>}
+          abandonRate={abandonRate}
+          safeAbandonedValue={safeAbandonedValue}
+          beRoas={beRoas}
+        />
       </main>
     </div>
   )
