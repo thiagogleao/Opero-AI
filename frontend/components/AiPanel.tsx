@@ -5,7 +5,7 @@ import { useTr } from '@/lib/translations'
 import AgentChat from './AgentChat'
 
 interface Insight {
-  type: 'urgent' | 'warning' | 'opportunity' | 'tip'
+  type: 'kill' | 'scale' | 'creative' | 'urgent' | 'warning' | 'opportunity' | 'tip'
   title: string
   detail: string
   action: string
@@ -14,16 +14,27 @@ interface Insight {
 interface Props { systemPrompt: string }
 
 const TYPE_COLORS = {
-  urgent:      { color: '#F43F5E', bg: 'rgba(244,63,94,0.08)',  border: 'rgba(244,63,94,0.25)'  },
+  kill:        { color: '#F43F5E', bg: 'rgba(244,63,94,0.10)',  border: 'rgba(244,63,94,0.35)'  },
+  scale:       { color: '#10B981', bg: 'rgba(16,185,129,0.10)', border: 'rgba(16,185,129,0.35)' },
+  creative:    { color: '#38BDF8', bg: 'rgba(56,189,248,0.08)', border: 'rgba(56,189,248,0.28)' },
+  urgent:      { color: '#FB923C', bg: 'rgba(251,146,60,0.08)', border: 'rgba(251,146,60,0.25)' },
   warning:     { color: '#F59E0B', bg: 'rgba(245,158,11,0.08)', border: 'rgba(245,158,11,0.25)' },
-  opportunity: { color: '#10B981', bg: 'rgba(16,185,129,0.08)', border: 'rgba(16,185,129,0.25)' },
+  opportunity: { color: '#A78BFA', bg: 'rgba(167,139,250,0.08)', border: 'rgba(167,139,250,0.25)' },
   tip:         { color: '#8B5CF6', bg: 'rgba(139,92,246,0.08)', border: 'rgba(139,92,246,0.25)' },
 }
 
 function InsightCard({ insight, index }: { insight: Insight; index: number }) {
   const tr = useTr()
   const cfg = TYPE_COLORS[insight.type] ?? TYPE_COLORS.tip
-  const labelMap = { urgent: tr.insight_urgent, warning: tr.insight_warning, opportunity: tr.insight_opportunity, tip: tr.insight_tip }
+  const labelMap: Record<string, string> = {
+    kill: '⏹ PARAR',
+    scale: '↑ ESCALAR',
+    creative: '🎨 CRIATIVO',
+    urgent: tr.insight_urgent,
+    warning: tr.insight_warning,
+    opportunity: tr.insight_opportunity,
+    tip: tr.insight_tip,
+  }
   return (
     <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: index * 0.08 }}
       style={{ background: cfg.bg, border: `1px solid ${cfg.border}`, borderRadius: 10, padding: '14px 16px' }}>

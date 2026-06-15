@@ -10,10 +10,10 @@ export async function POST(req: NextRequest) {
   if (mode === 'insights') {
     try {
       const msg = await anthropic.messages.create({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 4096,
+        model: 'claude-opus-4-8',
+        max_tokens: 6000,
         system: systemPrompt,
-        messages: [{ role: 'user', content: 'Analise os dados e retorne os insights no formato JSON especificado.' }],
+        messages: [{ role: 'user', content: 'Analise todos os dados desta conta de Meta Ads e gere os 8 insights no formato JSON especificado. Aplique os benchmarks e frameworks do contexto especialista a cada métrica disponível.' }],
       })
       const text = msg.content[0].type === 'text' ? msg.content[0].text : ''
       const match = text.match(/\[[\s\S]*\]/)
@@ -29,7 +29,7 @@ export async function POST(req: NextRequest) {
   // Chat mode: streaming
   const stream = anthropic.messages.stream({
     model: 'claude-sonnet-4-6',
-    max_tokens: 1000,
+    max_tokens: 2000,
     system: systemPrompt,
     messages,
   })

@@ -137,17 +137,27 @@ export default async function Dashboard({ searchParams }: Props) {
 
 
   const beRoas = profit.configured ? profit.breakEvenRoas : 1.5
-  const creativesText = creatives.slice(0, 10).map((c, i) => {
-    const spend = Number(c.spend), roas = Number(c.roas), score = Number(c.score)
-    let verdict = ''
-    if (spend >= 15) {
-      if (score < 0 || roas < 1)                              verdict = ' ⏹DESLIGAR'
-      else if (roas < beRoas && spend >= 30)                   verdict = ' ⚠REVISAR'
-      else if (score > 0 && roas >= beRoas * 1.5 && spend >= 30) verdict = ' ↑ESCALAR'
-    } else if (spend < 15) {
-      verdict = ' (dados insuficientes)'
-    }
-    return `  ${i + 1}. ${c.name}${verdict} | Gasto: $${spend.toFixed(2)} | Receita: $${Number(c.revenue).toFixed(2)} | ROAS: ${roas.toFixed(2)}x | Score: ${score.toFixed(0)} | CTR: ${Number(c.ctr).toFixed(2)}% | Compras: ${c.purchases}`
+
+  // Rich creative data: signal diagnosis + video funnel per ad
+  const creativesVideoText = creatives.slice(0, 8).map((c, i) => {
+    const spend    = Number(c.spend)
+    const roas     = Number(c.roas)
+    const freq     = Number(c.frequency)
+    const ctr      = Number(c.ctr)
+    const hookRate = c.hook_rate != null ? Number(c.hook_rate) : null
+    const isVideo  = (c.video_plays ?? 0) > 0
+
+    let signal: string
+    if (spend >= 50 && roas < beRoas * 0.8)                         signal = '⏹ KILL'
+    else if (roas >= beRoas * 1.4 && spend >= 30)                    signal = '↑ SCALE'
+    else if (freq > 3.5 || (hookRate !== null && hookRate < 25))     signal = '⚠ REFRESH'
+    else                                                              signal = '✓ OK'
+
+    const vf = isVideo && hookRate !== null
+      ? ` | Hook:${hookRate.toFixed(1)}% P25:${c.hold_rate_25 != null ? Number(c.hold_rate_25).toFixed(1) : '?'}% P50:${c.hold_rate_50 != null ? Number(c.hold_rate_50).toFixed(1) : '?'}% P100:${c.hold_rate_100 != null ? Number(c.hold_rate_100).toFixed(1) : '?'}%`
+      : hookRate != null ? ` | Hook:${hookRate.toFixed(1)}%` : ''
+
+    return `  ${signal} "${c.name.slice(0, 52)}" | $${spend.toFixed(0)} gasto | ROAS ${roas.toFixed(2)}x (BE ${beRoas.toFixed(2)}x) | CTR ${ctr.toFixed(2)}% | Freq ${freq.toFixed(1)}x${vf}`
   }).join('\n')
 
   const countriesText = countries.slice(0, 8).map((c, i) =>
@@ -181,6 +191,31 @@ Custos: COGS $${profit.totalCogs.toFixed(2)} | Frete $${profit.totalShipping.toF
       ).join('\n')
     : 'Sem dados de breakdown (disponível após próxima coleta)'
 
+  // FB ad breakdowns (device, placement, age_gender) — sorted best→worst by ROAS
+  const bdText = (() => {
+    const parts: string[] = []
+    if (bdDevice.length > 0) {
+      const sorted = [...bdDevice].sort((a, b) => Number(b.roas) - Number(a.roas))
+      parts.push('Device: ' + sorted.slice(0, 4).map(r => `${r.label}(${Number(r.roas).toFixed(2)}x/$${Number(r.spend).toFixed(0)})`).join(' | '))
+    }
+    if (bdPlacement.length > 0) {
+      const sorted = [...bdPlacement].sort((a, b) => Number(b.roas) - Number(a.roas))
+      parts.push('Placement: ' + sorted.slice(0, 5).map(r => `${r.label}(${Number(r.roas).toFixed(2)}x/$${Number(r.spend).toFixed(0)})`).join(' | '))
+    }
+    if (bdAgeGender.length > 0) {
+      const sorted = [...bdAgeGender].sort((a, b) => Number(b.roas) - Number(a.roas))
+      const top  = sorted.slice(0, 3).map(r => `${r.label} ${Number(r.roas).toFixed(2)}x`).join(', ')
+      const bot  = sorted.slice(-2).map(r => `${r.label} ${Number(r.roas).toFixed(2)}x/$${Number(r.spend).toFixed(0)}`).join(', ')
+      parts.push(`Idade/Gênero — TOP: ${top} | PIORES: ${bot}`)
+    }
+    return parts.join('\n') || 'Sem dados de breakdown por segmento ainda'
+  })()
+
+  // LTV segments
+  const ltvPromptText = ltvData.length > 0
+    ? ltvData.map(d => `  ${d.segment}: ${d.customers}cls(${Number(d.pct).toFixed(0)}%) LTV=$${Number(d.avg_ltv).toFixed(0)} AOV=$${Number(d.avg_aov).toFixed(0)} ~${Number(d.avg_orders).toFixed(1)} pedidos`).join('\n')
+    : '  Sem dados LTV ainda'
+
   const funnelText = funnelHasData
     ? `Impressões: ${f.impressions.toLocaleString()} | CTR: ${impToClick}% | CPM: $${Number(f.cpm).toFixed(2)} | CPC: $${Number(f.cpc).toFixed(3)}
 Cliques: ${f.link_clicks.toLocaleString()} → Carrinho: ${f.add_to_cart.toLocaleString()} (${clickToCart}% dos cliques | custo/ATC: $${Number(f.cost_per_atc).toFixed(2)}) → Checkout: ${f.initiate_checkout.toLocaleString()} (${cartToCheck}% do carrinho | custo/checkout: $${Number(f.cost_per_checkout).toFixed(2)}) → Compras FB atribuídas: ${f.purchases.toLocaleString()} (${checkToBuy}% do checkout)
@@ -191,93 +226,172 @@ Taxa clique→compra FB: ${clickToBuy}% | Shopify: ${f.shopify_orders} pedidos r
     ? (Number(metrics.spend) / Number(metrics.orders)).toFixed(2)
     : '0'
 
-  // Language-specific prompt instructions
+  // ── Expert knowledge encoded from top Meta Ads practitioners (2026) ────────
+  // Sources: Andrew Foxwell (Foxwell Founders, $500M/mês), Barry Hott,
+  // Sam Tomlinson (Andromeda #137), Taylor Holiday (CTC), Jon Loomer, Depesh Mandalia
+  const expertContext = `=== META ADS 2026 — ANDROMEDA + ELITE FRAMEWORKS ===
+ALGORITMO ANDROMEDA (out.2025): O CRIATIVO determina o PÚBLICO — não o targeting. 30 variações do mesmo conceito = 1 ad para o algoritmo (Sam Tomlinson). Broad targeting bate interesse em 2026 (Jon Loomer). ASC+ = 70-80% do budget. Consolidação: 1 campanha a $500/dia > 5 a $100/dia. Learning phase = 50 conv em 7 dias (CPAs 2-3x altos são normais nessa fase).
+ESCALA: +20% budget a cada 48-72h máx. Nunca edite budget, creative ou targeting durante learning phase.
+
+BENCHMARKS ECOMMERCE META 2026 (WebFX, Triple Whale, 27five, Sovran, AdStellar):
+Hook Rate (plays/impressões): <20%=CRÍTICO | 20-25%=RUIM | 25-30%=FRACO | 30-40%=BOM | >40%=EXCELENTE
+Hold Rate P25 (viewers que continuam): <40%=FRACO | 40-50%=MÉDIO | >50%=FORTE
+CTR (link clicks): <1%=CRÍTICO | 1-1.5%=FRACO | 1.5-2%=MÉDIO | >2%=BOM | >3%=EXCELENTE
+Frequência (prospecção): <2.5=SAUDÁVEL | 2.5-3.5=ATENÇÃO | >3.5=FADIGA | >4=CRÍTICO
+CPM: <$12=ÓTIMO | $12-17=MÉDIO | >$20=ALTO | >$25=PICO SAZONAL
+ROAS vs break-even: <0.8x=ELIMINAR | 0.8-1x=REVISAR | 1-1.3x=MONITORAR | 1.5x+=CANDIDATO A ESCALAR
+
+FRAMEWORK DE DECISÃO (aplicar a todos os dados):
+⏹ KILL: ROAS < break-even E spend >$50 E 10+ dias ativos | OU frequência >4 com CTR caindo
+↑ SCALE: ROAS 20%+ acima meta por 3 dias consecutivos → +20% budget (regra 48-72h)
+⚠ REFRESH criativo: frequência >3.5 | OU hook rate <25% por 3 dias | OU CTR caiu 20%+ em 2 semanas
+🔍 LP ISSUE: CTR >2% + ROAS fraco = problema de landing page, NÃO de criativo
+🎯 DIAGNÓSTICO VÍDEO: Hook<25%=abertura/thumbnail ruim | P25<40%=conteúdo cai após hook | P100>30%=muito engajador, teste versão mais longa
+📊 CREATIVE FATIGUE: ads com 3+ semanas sem refresh costumam ter CPM 29% mais alto e CTR 35% menor (Meta benchmarks)
+💰 CAC REAL = gasto FB ÷ pedidos Shopify (não usar CPP do funil FB como CPA real)`
+
+  // Language-specific labels (data section)
   const promptLang = {
     pt: {
-      intro: `Você é o analista de e-commerce pessoal. Ticket médio real ~$${Number(metrics.aov).toFixed(0)}, margem ${profit.configured ? profit.margin.toFixed(1)+'%' : 'não configurada'}.`,
-      dataHeader: `DADOS — ${dateFrom} a ${dateTo} (${days} dias):`,
-      revenueLabel: 'Receita', ordersLabel: 'Pedidos Shopify reais', ticketLabel: 'Ticket médio',
-      spendLabel: 'Gasto FB', roasLabel: 'ROAS Real',
-      cacNote: '(= gasto FB ÷ pedidos Shopify — use ESTE para análises de custo de aquisição)',
-      newLabel: 'Novos clientes', returningLabel: 'Recorrentes', abandonLabel: 'valor recuperável', abandonRate: 'taxa',
-      profitHeader: 'LUCRATIVIDADE:', funnelHeader: 'FUNIL FB ADS (mesmo período):',
-      countrySpendHeader: 'GASTO FB POR PAÍS:', countriesHeader: 'TOP PAÍSES (receita Shopify):',
-      creativesHeader: 'TOP CRIATIVOS:', recentHeader: 'ÚLTIMOS 7 DIAS:', noData: 'Sem dados',
-      rules: `REGRAS OBRIGATÓRIAS — violar qualquer uma invalida a resposta:
-1. NUNCA diga apenas "ROAS está baixo" ou "margem está baixa" como conclusão — isso é sintoma, não causa. Sempre identifique a causa raiz específica nos dados.
-2. Para cada problema: cite o número exato fora do padrão e o ideal.
-3. Nunca sugira "otimize seus anúncios" sem especificar qual criativo, país, métrica.
-4. A diferença FB purchases vs Shopify orders é NORMAL (atribuição multi-touch). Nunca trate como bug.
-5. O ROAS do FB é sempre maior que o ROAS Real — esperado. Use ROAS Real para decisões.
-6. CRÍTICO — Use sempre o CAC Real (gasto FB ÷ pedidos Shopify) para análise de aquisição. Nunca cite CPP do funil como CPA real.
-7. CRÍTICO — Lucro/Pedido e Lucro Líquido JÁ INCLUEM gasto FB. Nunca compare CPP/CAC contra lucro como custos separados.
-8. CRÍTICO — Números reais de vendas/carrinhos vêm SEMPRE da Shopify. Dados do funil FB são apenas para comparação de rastreamento ou métricas exclusivas do FB (CTR, CPM, CPC).
-9. Responda sempre em português brasileiro direto, com números reais dos dados.`,
-      formatNote: `FORMATO DE RESPOSTA (retorne APENAS o JSON, sem texto antes ou depois):
-[{"type":"urgent"|"warning"|"opportunity"|"tip","title":"título curto (máx 5 palavras)","detail":"2 frases: problema com número exato + causa raiz nos dados","action":"1 frase com número e criativo/país específico"}]
-Gere exatamente 6 insights: (1) budget desperdiçado, (2) gargalo de funil, (3) criativo pausar/escalar, (4) país ROAS alto subinvestido, (5) retenção, (6) oportunidade rápida. PROIBIDO: frases genéricas.
-Para o CHAT, responda em português de forma natural, sem JSON.`,
+      intro: `Você é um analista-chefe de Meta Ads de elite. Ticket médio real ~$${Number(metrics.aov).toFixed(0)}, margem ${profit.configured ? profit.margin.toFixed(1)+'%' : 'não configurada'}, break-even ROAS ${beRoas.toFixed(2)}x.`,
+      dataHeader: `DADOS DA CONTA — ${dateFrom} a ${dateTo} (${days} dias):`,
+      revenueLabel: 'Receita Shopify', ordersLabel: 'Pedidos reais', ticketLabel: 'AOV',
+      spendLabel: 'Gasto FB', roasLabel: 'ROAS Real (receita Shopify ÷ gasto FB)',
+      newLabel: 'Novos clientes', returningLabel: 'Recorrentes',
+      profitHeader: 'LUCRATIVIDADE:', funnelHeader: 'FUNIL FB (mesmo período):',
+      countrySpendHeader: 'GASTO FB POR PAÍS:', countriesHeader: 'TOP PAÍSES (Shopify):',
+      creativesHeader: 'TOP CRIATIVOS + DIAGNÓSTICO (⏹KILL ↑SCALE ⚠REFRESH ✓OK):', recentHeader: 'ÚLTIMOS 7 DIAS:', noData: 'Sem dados',
+      breakdownHeader: 'BREAKDOWNS FB (últimos 14 dias — device/placement/idade-gênero):',
+      ltvHeader: 'LTV / RETENÇÃO DE CLIENTES:',
+      rules: `REGRAS INVIOLÁVEIS:
+1. NUNCA conclua "ROAS baixo" ou "margem baixa" sem identificar a causa raiz específica nos dados.
+2. SEMPRE cite o número exato fora do benchmark e o benchmark de referência (ex: "Hook 14% vs benchmark mínimo 25%").
+3. NUNCA sugira "otimize anúncios" — especifique QUAL criativo, placement ou segmento com qual ação.
+4. Diferença FB purchases vs Shopify orders = NORMAL (atribuição multi-touch). Nunca trate como bug.
+5. ROAS FB sempre maior que ROAS Real — esperado. Use ROAS Real para todas as decisões de budget.
+6. CAC Real = gasto FB ÷ pedidos Shopify. Nunca use CPP do funil como CPA real.
+7. Lucro Líquido e Lucro/Pedido JÁ incluem gasto FB. Nunca compare CPP/CAC contra lucro como custo separado.
+8. Dados reais de vendas/carrinhos = sempre Shopify. Funil FB = apenas CTR/CPM/CPC e comparação de atribuição.
+9. SEMPRE aplique os benchmarks do framework Andromeda 2026: hook<25%=CRÍTICO, freq>3.5=FADIGA, etc.
+10. Para criativos com sinais ⏹ e ↑ nos dados: mencione o nome exato do ad e o número que justifica.
+11. Responda sempre em português brasileiro, direto, com os números reais dos dados.`,
+      formatNote: `FORMATO DE RESPOSTA — INSIGHTS (retorne APENAS o array JSON, sem texto antes ou depois):
+[{"type":"kill"|"scale"|"creative"|"warning"|"opportunity"|"tip","title":"máx 5 palavras","detail":"nome EXATO do criativo/segmento + métrica real VS benchmark + causa raiz (2 frases)","action":"verbo + nome exato + número + prazo"}]
+
+TIPOS DE INSIGHT:
+"kill" = budget sendo desperdiçado agora (ROAS < break-even com spend relevante e 10+ dias)
+"scale" = winner comprovado pronto para escalar (ROAS 20%+ acima da meta, 3+ dias)
+"creative" = sinal de fadiga (freq>3.5), hook fraco (<25%), ou funil de vídeo problemático
+"warning" = tendência negativa real com número exato (CPM subindo, CTR caindo, etc.)
+"opportunity" = alto ROAS subinvestido (país, placement, segmento) ou LP opportunity
+"tip" = estrutura de campanha, consolidação ASC+, ou teste estratégico com ação específica
+
+GERE EXATAMENTE 8 INSIGHTS nesta ordem de prioridade:
+1. kill — maior desperdício de budget ativo (nome do ad, ROAS vs break-even, spend total)
+2. scale — melhor performer pronto para escalar (nome do ad, ROAS, dias acima da meta)
+3. creative — sinal de fadiga mais crítico (nome do ad, freq ou hook rate exatos)
+4. creative — análise de funil de vídeo se dados disponíveis (hook→P25→P100 waterfall)
+5. warning — breakdown problemático (device/placement/segmento com ROAS abaixo do break-even)
+6. opportunity — país ou segmento com ROAS alto e budget subinvestido
+7. opportunity — LTV/retenção: segmento mais valioso e oportunidade de recompra
+8. tip — estrutura de campanha, consolidação, ou teste estratégico com ação específica
+
+PROIBIDO: números inventados, "considere", "pode ser", "possível", insights sem nome específico de ad/segmento/país.
+Para o CHAT, responda em português de forma natural e analítica, sem JSON.`,
     },
     en: {
-      intro: `You are a personal e-commerce analyst. Real avg order value ~$${Number(metrics.aov).toFixed(0)}, margin ${profit.configured ? profit.margin.toFixed(1)+'%' : 'not configured'}.`,
-      dataHeader: `DATA — ${dateFrom} to ${dateTo} (${days} days):`,
-      revenueLabel: 'Revenue', ordersLabel: 'Real Shopify orders', ticketLabel: 'Avg order value',
-      spendLabel: 'FB Spend', roasLabel: 'Real ROAS',
-      cacNote: '(= FB spend ÷ Shopify orders — use THIS for acquisition cost analysis)',
-      newLabel: 'New customers', returningLabel: 'Returning', abandonLabel: 'recoverable value', abandonRate: 'rate',
-      profitHeader: 'PROFITABILITY:', funnelHeader: 'FB ADS FUNNEL (same period):',
-      countrySpendHeader: 'FB SPEND BY COUNTRY:', countriesHeader: 'TOP COUNTRIES (Shopify revenue):',
-      creativesHeader: 'TOP CREATIVES:', recentHeader: 'LAST 7 DAYS:', noData: 'No data',
-      rules: `MANDATORY RULES — violating any one invalidates the response:
-1. NEVER say just "ROAS is low" or "margin is low" as a conclusion — that's a symptom, not a cause. Always identify the specific root cause in the data.
-2. For each problem: cite the exact number out of range and what it should be.
-3. Never suggest "optimize your ads" without specifying which creative, country, metric.
-4. The difference between FB purchases and Shopify orders is NORMAL (multi-touch attribution). Never treat as a bug.
-5. FB ROAS is always higher than Real ROAS — expected. Use Real ROAS for decisions.
-6. CRITICAL — Always use Real CAC (FB spend ÷ Shopify orders) for acquisition analysis. Never cite funnel CPP as the real CPA.
-7. CRITICAL — Profit/Order and Net Profit ALREADY INCLUDE FB spend as a deducted cost. Never compare CPP/CAC against profit as separate costs.
-8. CRITICAL — Real sales/cart numbers ALWAYS come from Shopify. FB funnel data is only for tracking comparison or FB-exclusive metrics (CTR, CPM, CPC).
-9. Always respond in English, directly, with real numbers from the data.`,
-      formatNote: `RESPONSE FORMAT (return ONLY the JSON, no text before or after):
-[{"type":"urgent"|"warning"|"opportunity"|"tip","title":"short title (max 5 words)","detail":"2 sentences: problem with exact number + specific root cause in data","action":"1 sentence with specific number and creative/country"}]
-Generate exactly 6 insights prioritizing: (1) budget being wasted now, (2) funnel bottleneck with exact %, (3) creative to pause/scale, (4) high-ROAS underinvested country, (5) retention, (6) quick win. FORBIDDEN: generic phrases.
-For CHAT, respond in English naturally, without JSON.`,
+      intro: `You are an elite Meta Ads chief analyst. Real AOV ~$${Number(metrics.aov).toFixed(0)}, margin ${profit.configured ? profit.margin.toFixed(1)+'%' : 'not configured'}, break-even ROAS ${beRoas.toFixed(2)}x.`,
+      dataHeader: `ACCOUNT DATA — ${dateFrom} to ${dateTo} (${days} days):`,
+      revenueLabel: 'Shopify Revenue', ordersLabel: 'Real orders', ticketLabel: 'AOV',
+      spendLabel: 'FB Spend', roasLabel: 'Real ROAS (Shopify revenue ÷ FB spend)',
+      newLabel: 'New customers', returningLabel: 'Returning',
+      profitHeader: 'PROFITABILITY:', funnelHeader: 'FB FUNNEL (same period):',
+      countrySpendHeader: 'FB SPEND BY COUNTRY:', countriesHeader: 'TOP COUNTRIES (Shopify):',
+      creativesHeader: 'TOP CREATIVES + DIAGNOSIS (⏹KILL ↑SCALE ⚠REFRESH ✓OK):', recentHeader: 'LAST 7 DAYS:', noData: 'No data',
+      breakdownHeader: 'FB BREAKDOWNS (last 14 days — device/placement/age-gender):',
+      ltvHeader: 'CUSTOMER LTV / RETENTION:',
+      rules: `INVIOLABLE RULES:
+1. NEVER conclude "ROAS is low" without identifying the specific root cause in the data.
+2. ALWAYS cite the exact number vs the benchmark (e.g., "Hook 14% vs minimum benchmark 25%").
+3. NEVER suggest "optimize ads" — specify WHICH creative, placement, or segment and what action.
+4. FB purchases vs Shopify orders difference = NORMAL (multi-touch attribution). Never treat as bug.
+5. FB ROAS always higher than Real ROAS — expected. Use Real ROAS for all budget decisions.
+6. Real CAC = FB spend ÷ Shopify orders. Never use funnel CPP as real CPA.
+7. Net Profit and Profit/Order ALREADY include FB spend. Never compare CPP/CAC against profit as separate costs.
+8. Real sales/cart data = always Shopify. FB funnel = only CTR/CPM/CPC and attribution comparison.
+9. ALWAYS apply Andromeda 2026 benchmarks: hook<25%=CRITICAL, freq>3.5=FATIGUE, etc.
+10. For creatives with ⏹ and ↑ signals: mention exact ad name and the justifying number.
+11. Always respond in English, directly, with real numbers from data.`,
+      formatNote: `RESPONSE FORMAT — INSIGHTS (return ONLY the JSON array, no text before or after):
+[{"type":"kill"|"scale"|"creative"|"warning"|"opportunity"|"tip","title":"max 5 words","detail":"EXACT creative/segment name + real metric VS benchmark + root cause (2 sentences)","action":"verb + exact name + number + timeline"}]
+
+TYPES: kill=budget burning now | scale=proven winner ready to scale | creative=fatigue/hook/video signal | warning=real negative trend | opportunity=underinvested high-ROAS | tip=structure/strategy
+
+GENERATE EXACTLY 8 INSIGHTS in this priority order:
+1. kill — largest active budget waste (ad name, ROAS vs break-even, total spend)
+2. scale — best performer ready to scale (ad name, ROAS, days above target)
+3. creative — most critical fatigue signal (ad name, exact freq or hook rate)
+4. creative — video funnel analysis if data available (hook→P25→P100 waterfall)
+5. warning — problematic breakdown (device/placement/segment with ROAS below break-even)
+6. opportunity — country or segment with high ROAS and underinvested budget
+7. opportunity — LTV/retention: most valuable segment and repurchase opportunity
+8. tip — campaign structure, ASC+ consolidation, or strategic test with specific action
+
+FORBIDDEN: invented numbers, "consider", "might", "possibly", insights without specific ad/segment/country name.
+For CHAT, respond in English analytically and naturally, without JSON.`,
     },
     es: {
-      intro: `Eres el analista de e-commerce personal. Ticket promedio real ~$${Number(metrics.aov).toFixed(0)}, margen ${profit.configured ? profit.margin.toFixed(1)+'%' : 'no configurado'}.`,
-      dataHeader: `DATOS — ${dateFrom} a ${dateTo} (${days} días):`,
-      revenueLabel: 'Ingresos', ordersLabel: 'Pedidos reales Shopify', ticketLabel: 'Ticket promedio',
-      spendLabel: 'Gasto FB', roasLabel: 'ROAS Real',
-      cacNote: '(= gasto FB ÷ pedidos Shopify — usa ESTE para análisis de costo de adquisición)',
-      newLabel: 'Nuevos clientes', returningLabel: 'Recurrentes', abandonLabel: 'valor recuperable', abandonRate: 'tasa',
-      profitHeader: 'RENTABILIDAD:', funnelHeader: 'EMBUDO FB ADS (mismo período):',
-      countrySpendHeader: 'GASTO FB POR PAÍS:', countriesHeader: 'PRINCIPALES PAÍSES (ingresos Shopify):',
-      creativesHeader: 'PRINCIPALES CREATIVOS:', recentHeader: 'ÚLTIMOS 7 DÍAS:', noData: 'Sin datos',
-      rules: `REGLAS OBLIGATORIAS — violar cualquiera invalida la respuesta:
-1. NUNCA digas solo "el ROAS está bajo" o "el margen está bajo" como conclusión — eso es síntoma, no causa. Siempre identifica la causa raíz específica en los datos.
-2. Para cada problema: cita el número exacto fuera de rango y cuál debería ser.
-3. Nunca sugieras "optimiza tus anuncios" sin especificar qué creativo, país, métrica.
-4. La diferencia entre compras FB y pedidos Shopify es NORMAL (atribución multi-touch). Nunca tratar como bug.
-5. El ROAS de FB siempre es mayor que el ROAS Real — esperado. Usa ROAS Real para decisiones.
-6. CRÍTICO — Usa siempre el CAC Real (gasto FB ÷ pedidos Shopify) para análisis de adquisición. Nunca cites el CPP del embudo como CPA real.
-7. CRÍTICO — Beneficio/Pedido y Beneficio Neto YA INCLUYEN el gasto FB como costo deducido. Nunca compares CPP/CAC contra beneficio como costos separados.
-8. CRÍTICO — Los números reales de ventas/carritos SIEMPRE vienen de Shopify. Los datos del embudo FB son solo para comparación de seguimiento o métricas exclusivas de FB (CTR, CPM, CPC).
-9. Responde siempre en español directo, con números reales de los datos.`,
-      formatNote: `FORMATO DE RESPUESTA (devuelve SOLO el JSON, sin texto antes ni después):
-[{"type":"urgent"|"warning"|"opportunity"|"tip","title":"título corto (máx 5 palabras)","detail":"2 frases: problema con número exacto + causa raíz específica en datos","action":"1 frase con número y creativo/país específico"}]
-Genera exactamente 6 insights priorizando: (1) presupuesto desperdiciado ahora, (2) embudo con % exacto, (3) creativo pausar/escalar, (4) país ROAS alto con poco presupuesto, (5) retención, (6) oportunidad rápida. PROHIBIDO: frases genéricas.
-Para el CHAT, responde en español de forma natural, sin JSON.`,
+      intro: `Eres un analista jefe de Meta Ads de élite. AOV real ~$${Number(metrics.aov).toFixed(0)}, margen ${profit.configured ? profit.margin.toFixed(1)+'%' : 'no configurado'}, break-even ROAS ${beRoas.toFixed(2)}x.`,
+      dataHeader: `DATOS DE LA CUENTA — ${dateFrom} a ${dateTo} (${days} días):`,
+      revenueLabel: 'Ingresos Shopify', ordersLabel: 'Pedidos reales', ticketLabel: 'AOV',
+      spendLabel: 'Gasto FB', roasLabel: 'ROAS Real (Shopify ÷ gasto FB)',
+      newLabel: 'Nuevos clientes', returningLabel: 'Recurrentes',
+      profitHeader: 'RENTABILIDAD:', funnelHeader: 'EMBUDO FB (mismo período):',
+      countrySpendHeader: 'GASTO FB POR PAÍS:', countriesHeader: 'PRINCIPALES PAÍSES (Shopify):',
+      creativesHeader: 'PRINCIPALES CREATIVOS + DIAGNÓSTICO (⏹KILL ↑SCALE ⚠REFRESH ✓OK):', recentHeader: 'ÚLTIMOS 7 DÍAS:', noData: 'Sin datos',
+      breakdownHeader: 'BREAKDOWNS FB (últimos 14 días — device/placement/edad-género):',
+      ltvHeader: 'LTV / RETENCIÓN DE CLIENTES:',
+      rules: `REGLAS INVIOLABLES:
+1. NUNCA concluyas "ROAS bajo" sin identificar la causa raíz específica en los datos.
+2. SIEMPRE cita el número exacto fuera de benchmark y el benchmark de referencia.
+3. NUNCA sugieras "optimiza anuncios" — especifica QUÉ creativo, placement o segmento y qué acción.
+4. Diferencia FB compras vs pedidos Shopify = NORMAL (atribución multi-touch). Nunca tratar como bug.
+5. ROAS FB siempre mayor que ROAS Real — esperado. Usa ROAS Real para todas las decisiones.
+6. CAC Real = gasto FB ÷ pedidos Shopify. Nunca uses CPP del embudo como CPA real.
+7. Beneficio Neto y Beneficio/Pedido YA incluyen gasto FB. Nunca compares CPP/CAC contra beneficio.
+8. Datos reales = siempre Shopify. Embudo FB = solo CTR/CPM/CPC y comparación de atribución.
+9. SIEMPRE aplica benchmarks Andromeda 2026: hook<25%=CRÍTICO, freq>3.5=FATIGA, etc.
+10. Para creativos con señales ⏹ y ↑: menciona el nombre exacto del ad y el número que lo justifica.
+11. Responde siempre en español, directo, con los números reales de los datos.`,
+      formatNote: `FORMATO DE RESPUESTA — INSIGHTS (devuelve SOLO el array JSON, sin texto antes ni después):
+[{"type":"kill"|"scale"|"creative"|"warning"|"opportunity"|"tip","title":"máx 5 palabras","detail":"nombre EXACTO del creativo/segmento + métrica real VS benchmark + causa raíz (2 frases)","action":"verbo + nombre exacto + número + plazo"}]
+
+TIPOS: kill=budget quemándose ahora | scale=winner listo para escalar | creative=fatiga/hook/video | warning=tendencia negativa real | opportunity=alto ROAS subinvertido | tip=estructura/estrategia
+
+GENERA EXACTAMENTE 8 INSIGHTS en este orden de prioridad:
+1. kill — mayor desperdicio de budget activo (nombre del ad, ROAS vs break-even, spend total)
+2. scale — mejor performer listo para escalar (nombre del ad, ROAS, días sobre la meta)
+3. creative — señal de fatiga más crítica (nombre del ad, freq o hook rate exactos)
+4. creative — análisis de embudo de video si hay datos (hook→P25→P100 waterfall)
+5. warning — breakdown problemático (device/placement/segmento con ROAS bajo el break-even)
+6. opportunity — país o segmento con alto ROAS y budget subinvertido
+7. opportunity — LTV/retención: segmento más valioso y oportunidad de recompra
+8. tip — estructura de campaña, consolidación ASC+, o prueba estratégica con acción específica
+
+PROHIBIDO: números inventados, "considera", "podría", "posiblemente", insights sin nombre específico de ad/segmento/país.
+Para el CHAT, responde en español de forma natural y analítica, sin JSON.`,
     },
   }[lang] ?? (() => { throw new Error('unreachable') })()
 
-  const systemPrompt = `${promptLang.intro}
+  const systemPrompt = `${expertContext}
+
+${promptLang.intro}
 
 ${promptLang.dataHeader}
 ${promptLang.revenueLabel}: $${Number(metrics.revenue).toLocaleString('en-US', {minimumFractionDigits: 2})} | ${promptLang.ordersLabel}: ${metrics.orders} | ${promptLang.ticketLabel}: $${Number(metrics.aov).toFixed(2)}
-${promptLang.spendLabel}: $${Number(metrics.spend).toLocaleString('en-US', {minimumFractionDigits: 2})} | ${promptLang.roasLabel}: ${Number(metrics.blended_roas).toFixed(2)}x
-Real CAC: $${realCac} ${promptLang.cacNote}
+${promptLang.spendLabel}: $${Number(metrics.spend).toLocaleString('en-US', {minimumFractionDigits: 2})} | ${promptLang.roasLabel}: ${Number(metrics.blended_roas).toFixed(2)}x | CAC Real: $${realCac}
 ${promptLang.newLabel}: ${metrics.new_customers} | ${promptLang.returningLabel}: ${metrics.returning_customers}
-Abandoned: $${safeAbandonedValue.toFixed(2)} ${promptLang.abandonLabel} (${abandonRate}% ${promptLang.abandonRate})
+Carrinho abandonado: $${safeAbandonedValue.toFixed(2)} (${abandonRate}% taxa)
 
 ${promptLang.profitHeader}
 ${profitLine}
@@ -292,7 +406,13 @@ ${promptLang.countriesHeader}
 ${countriesText || promptLang.noData}
 
 ${promptLang.creativesHeader}
-${creativesText || promptLang.noData}
+${creativesVideoText || promptLang.noData}
+
+${promptLang.breakdownHeader}
+${bdText}
+
+${promptLang.ltvHeader}
+${ltvPromptText}
 
 ${promptLang.recentHeader}
 ${recentRevenue}
