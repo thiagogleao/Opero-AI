@@ -77,8 +77,10 @@ class ShopifyCollector(BaseCollector):
         store_url: Optional[str] = None,
         access_token: Optional[str] = None,
         api_version: Optional[str] = None,
+        timezone: Optional[str] = None,
     ):
         super().__init__(session, tenant_id)
+        self._store_tz_name = timezone  # IANA timezone string, e.g. "America/Sao_Paulo"
         url   = store_url   or settings.shopify_store_url
         token = access_token or settings.shopify_access_token
         ver   = api_version  or settings.shopify_api_version
@@ -136,6 +138,25 @@ class ShopifyCollector(BaseCollector):
         except Exception as e:
             logger.warning("[shopify] Could not fetch shop timezone: %s", e)
 
+    def _tz_bounds(self, d: date) -> tuple[str, str]:
+        """Return (start, end) ISO 8601 strings for a date with the store's timezone offset.
+
+        Shopify treats timestamps without a timezone offset as UTC. Passing the
+        store's offset (e.g. '2026-06-14T00:00:00-03:00') ensures that the query
+        window matches the store's business day, not UTC midnight-to-midnight.
+        Falls back to bare T00:00:00 / T23:59:59 when no timezone is configured.
+        """
+        if self._store_tz_name:
+            try:
+                from zoneinfo import ZoneInfo
+                tz = ZoneInfo(self._store_tz_name)
+                start = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=tz)
+                end   = datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=tz)
+                return start.isoformat(), end.isoformat()
+            except Exception:
+                pass
+        return f"{d}T00:00:00", f"{d}T23:59:59"
+
     def _fetch_all_orders(self, date_from: date, date_to: date) -> list:
         """Return all orders in the date range.
 
@@ -145,11 +166,13 @@ class ShopifyCollector(BaseCollector):
         from datetime import timedelta
 
         # Ask API for total count first — useful for diagnosing discrepancies
+        _, count_max = self._tz_bounds(date_to)
+        count_min, _ = self._tz_bounds(date_from)
         try:
             api_count = shopify.Order.count(
                 status="any",
-                created_at_min=f"{date_from}T00:00:00",
-                created_at_max=f"{date_to}T23:59:59",
+                created_at_min=count_min,
+                created_at_max=count_max,
             )
             logger.info("[shopify] API reports %d orders for %s → %s", api_count, date_from, date_to)
         except Exception as e:
@@ -163,11 +186,13 @@ class ShopifyCollector(BaseCollector):
 
         while chunk_start <= date_to:
             chunk_end = min(chunk_start + timedelta(days=6), date_to)
+            chunk_min, _ = self._tz_bounds(chunk_start)
+            _, chunk_max = self._tz_bounds(chunk_end)
             params = dict(
                 status="any",
                 limit=250,
-                created_at_min=f"{chunk_start}T00:00:00",
-                created_at_max=f"{chunk_end}T23:59:59",
+                created_at_min=chunk_min,
+                created_at_max=chunk_max,
                 # updated_at_min is required to bypass Shopify's 60-day order limit.
                 # Without it, orders older than 60 days are silently excluded.
                 updated_at_min="2020-01-01T00:00:00",
@@ -200,11 +225,13 @@ class ShopifyCollector(BaseCollector):
 
     def _fetch_all_abandoned_checkouts(self, date_from: date, date_to: date) -> list:
         all_checkouts = []
+        checkout_min, _ = self._tz_bounds(date_from)
+        _, checkout_max = self._tz_bounds(date_to)
         params = dict(
             status="open",
             limit=250,
-            created_at_min=f"{date_from}T00:00:00",  # abandoned checkouts don't have processed_at
-            created_at_max=f"{date_to}T23:59:59",
+            created_at_min=checkout_min,  # abandoned checkouts don't have processed_at
+            created_at_max=checkout_max,
         )
         try:
             page = shopify.Checkout.find(**params)

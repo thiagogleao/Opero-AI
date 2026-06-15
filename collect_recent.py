@@ -103,12 +103,12 @@ def run_facebook(date_from: date, date_to: date, session, tenant_id=None, creds=
     print(f"  [facebook] {n} records collected")
 
 
-def run_shopify(date_from: date, date_to: date, session, tenant_id=None, creds=None):
+def run_shopify(date_from: date, date_to: date, session, tenant_id=None, creds=None, store_tz_name: str = "UTC"):
     if creds and (not creds.get("shopify_domain") or not creds.get("shopify_access_token")):
         print("  [shopify]  skipped — no credentials configured")
         return
     from app.collectors.shopify import ShopifyCollector
-    kwargs = {"tenant_id": tenant_id}
+    kwargs = {"tenant_id": tenant_id, "timezone": store_tz_name}
     if creds:
         kwargs["store_url"]    = creds["shopify_domain"]
         kwargs["access_token"] = creds["shopify_access_token"]
@@ -177,7 +177,7 @@ def main():
 
         if args.source in ("shopify", "both"):
             try:
-                run_shopify(date_from, date_to, session, args.tenant_id, creds)
+                run_shopify(date_from, date_to, session, args.tenant_id, creds, store_tz_name)
             except Exception as e:
                 logger.exception("Shopify collection failed")
                 errors.append(f"Shopify: {e}")

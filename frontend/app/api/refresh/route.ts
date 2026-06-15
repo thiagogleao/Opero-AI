@@ -72,7 +72,11 @@ export async function POST(req: Request) {
       if (lastFinished) {
         const lastSyncLocalDate = new Date(lastFinished)
           .toLocaleDateString('en-CA', { timeZone: storeTimezone })
-        dateFrom = lastSyncLocalDate
+        // Go back 1 day: Facebook Insights for a given day are only fully
+        // available the following morning. Re-fetching the day before the
+        // last sync ensures we capture data that was incomplete at sync time.
+        const [y, m, day] = lastSyncLocalDate.split('-').map(Number)
+        dateFrom = new Date(Date.UTC(y, m - 1, day - 1)).toISOString().slice(0, 10)
       } else {
         const d = new Date()
         const thirtyDaysAgo = new Date(d.getTime() - 29 * 86400000)
