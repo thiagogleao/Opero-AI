@@ -3,12 +3,13 @@ import { useState, useRef, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { useTr } from '@/lib/translations'
 
-type ButtonStatus = 'idle' | 'loading' | 'done' | 'error'
+type ButtonStatus = 'idle' | 'loading' | 'done' | 'partial' | 'error'
 type RunStatus    = 'waiting' | 'running' | 'success' | 'error'
 
 interface SourceRun {
   status: RunStatus
   records: number
+  errorMessage: string | null
 }
 interface SyncProgress {
   shopify:  SourceRun
@@ -24,15 +25,19 @@ function daysAgo(n: number) {
 }
 
 /** Classify the most recent sync_run for a source relative to the trigger time. */
-function classifyRun(run: { status: string; startedAt: string | null; recordsCollected: number } | null, triggerMs: number): SourceRun {
-  if (!run || !run.startedAt) return { status: 'waiting', records: 0 }
+function classifyRun(
+  run: { status: string; startedAt: string | null; recordsCollected: number; errorMessage?: string | null } | null,
+  triggerMs: number,
+): SourceRun {
+  if (!run || !run.startedAt) return { status: 'waiting', records: 0, errorMessage: null }
   const startedMs = new Date(run.startedAt).getTime()
-  // Ignore runs that predate the button click (10 s tolerance for server latency)
-  if (startedMs < triggerMs - 10_000) return { status: 'waiting', records: 0 }
+  // 5 s tolerance for server spawn latency. Runs older than this are from a
+  // previous auto-sync and should not be counted as belonging to this click.
+  if (startedMs < triggerMs - 5_000) return { status: 'waiting', records: 0, errorMessage: null }
   const s = run.status === 'running' ? 'running'
            : run.status === 'success' ? 'success'
            : 'error'
-  return { status: s, records: run.recordsCollected ?? 0 }
+  return { status: s, records: run.recordsCollected ?? 0, errorMessage: run.errorMessage ?? null }
 }
 
 // ── Sub-components ──────────────────────────────────────────────────────────
@@ -78,6 +83,11 @@ function SourceRow({ label, run, color, recordLabel }: {
     run.status === 'success' ? '#10B981' :
     run.status === 'error'   ? '#F43F5E' : '#71717A'
 
+  // Truncate long error messages to keep the panel compact
+  const errMsg = run.errorMessage
+    ? (run.errorMessage.length > 80 ? run.errorMessage.slice(0, 80) + '…' : run.errorMessage)
+    : null
+
   return (
     <div style={{ marginBottom: 10 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
@@ -85,6 +95,11 @@ function SourceRow({ label, run, color, recordLabel }: {
         <span style={{ fontSize: 11, color: statusColor, transition: 'color 0.2s' }}>{statusText}</span>
       </div>
       <ProgressBar runStatus={run.status} color={color} />
+      {run.status === 'error' && errMsg && (
+        <div style={{ marginTop: 4, fontSize: 10, color: '#71717A', lineHeight: 1.4, wordBreak: 'break-word' }}>
+          {errMsg}
+        </div>
+      )}
     </div>
   )
 }
@@ -122,15 +137,16 @@ export default function RefreshButton() {
     if (fallbackRef.current) { clearTimeout(fallbackRef.current); fallbackRef.current = null }
   }
 
-  function finishSync() {
+  function finishSync(hasError: boolean) {
     stopPolling()
-    setBtnStatus('done')
+    setBtnStatus(hasError ? 'partial' : 'done')
     router.refresh()
+    // Keep panel open longer when there's an error so the user can read it
     setTimeout(() => {
       setBtnStatus('idle')
       setShowProgress(false)
       setProgress(null)
-    }, 3500)
+    }, hasError ? 8_000 : 3_500)
   }
 
   function startPolling() {
@@ -150,12 +166,15 @@ export default function RefreshButton() {
           (shopifyRun.status  === 'success' || shopifyRun.status  === 'error') &&
           (facebookRun.status === 'success' || facebookRun.status === 'error')
 
-        if (bothSettled) finishSync()
+        if (bothSettled) {
+          const hasError = shopifyRun.status === 'error' || facebookRun.status === 'error'
+          finishSync(hasError)
+        }
       } catch { /* keep polling on transient errors */ }
     }, 3_000)
 
     // Safety valve: give up after 3 minutes
-    fallbackRef.current = setTimeout(finishSync, 180_000)
+    fallbackRef.current = setTimeout(() => finishSync(false), 180_000)
   }
 
   async function triggerRefresh(body: object) {
@@ -193,14 +212,16 @@ export default function RefreshButton() {
   // ── Styles ─────────────────────────────────────────────────────────────────
   const isLoading = btnStatus === 'loading'
   const isDone    = btnStatus === 'done'
+  const isPartial = btnStatus === 'partial'
   const isError   = btnStatus === 'error'
   const isIdle    = btnStatus === 'idle'
 
   const accent =
-    isLoading ? { bg: 'rgba(139,92,246,0.1)', border: 'rgba(139,92,246,0.4)', color: '#A78BFA' } :
-    isDone    ? { bg: 'rgba(16,185,129,0.1)',  border: 'rgba(16,185,129,0.4)',  color: '#10B981' } :
-    isError   ? { bg: 'rgba(244,63,94,0.1)',   border: 'rgba(244,63,94,0.4)',   color: '#F43F5E' } :
-                { bg: 'var(--bg-surface)',      border: 'var(--border)',          color: 'var(--text-dim)' }
+    isLoading  ? { bg: 'rgba(139,92,246,0.1)', border: 'rgba(139,92,246,0.4)', color: '#A78BFA' } :
+    isDone     ? { bg: 'rgba(16,185,129,0.1)',  border: 'rgba(16,185,129,0.4)',  color: '#10B981' } :
+    isPartial  ? { bg: 'rgba(245,158,11,0.1)',  border: 'rgba(245,158,11,0.4)',  color: '#F59E0B' } :
+    isError    ? { bg: 'rgba(244,63,94,0.1)',   border: 'rgba(244,63,94,0.4)',   color: '#F43F5E' } :
+                 { bg: 'var(--bg-surface)',      border: 'var(--border)',          color: 'var(--text-dim)' }
 
   const quickOptions = [
     { label: '7 dias',  date: daysAgo(7)  },
@@ -228,10 +249,11 @@ export default function RefreshButton() {
             transition: 'all 0.2s', whiteSpace: 'nowrap',
           }}
         >
-          {isLoading ? <><Spinner />{tr.refresh_loading}</> :
-           isDone    ? <>✓ Dados atualizados!</> :
-           isError   ? <>✗ {tr.refresh_error_conn}</> :
-                       <><RefreshIcon />{tr.refresh_idle}</>}
+          {isLoading  ? <><Spinner />{tr.refresh_loading}</> :
+           isDone     ? <>✓ Dados atualizados!</> :
+           isPartial  ? <>⚠ Atualizado com erros</> :
+           isError    ? <>✗ {tr.refresh_error_conn}</> :
+                        <><RefreshIcon />{tr.refresh_idle}</>}
         </button>
 
         {/* Dropdown toggle — only when idle */}

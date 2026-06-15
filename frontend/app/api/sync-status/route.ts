@@ -14,6 +14,7 @@ export async function GET() {
       startedAt: string | null
       finishedAt: string | null
       recordsCollected: number
+      errorMessage: string | null
     }> = {}
 
     for (const run of runs) {
@@ -22,6 +23,7 @@ export async function GET() {
         startedAt: run.started_at,
         finishedAt: run.finished_at,
         recordsCollected: run.records_collected,
+        errorMessage: run.error_message ?? null,
       }
     }
 

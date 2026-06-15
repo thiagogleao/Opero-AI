@@ -341,6 +341,7 @@ export type SourceSyncRun = {
   source: string
   status: string
   records_collected: number
+  error_message: string | null
   finished_at: string | null
   started_at: string | null
 }
@@ -350,7 +351,7 @@ export type SourceSyncRun = {
 export async function getCurrentSyncStatus(tenantId: string): Promise<SourceSyncRun[]> {
   return query<SourceSyncRun>(`
     SELECT DISTINCT ON (source)
-      source, status, records_collected,
+      source, status, records_collected, error_message,
       to_char(finished_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS finished_at,
       to_char(started_at,  'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS started_at
     FROM sync_runs
