@@ -10,6 +10,8 @@ export const pool =
     max: 5,
     connectionTimeoutMillis: 5000,
     idleTimeoutMillis: 10000,
+    // Prevent hung queries from blocking the page indefinitely
+    options: '-c statement_timeout=30000',
   })
 
 if (process.env.NODE_ENV !== 'production') globalForPg.pool = pool
