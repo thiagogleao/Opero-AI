@@ -25,8 +25,10 @@ export async function GET(req: NextRequest) {
   const cfg = cfgRows[0]?.value
 
   const productCogsMap = new Map<string, number>()
+  const titleCogsMap   = new Map<string, number>()
   for (const p of (cfg?.cogs?.products ?? [])) {
     if (p.product_id && p.cost_usd > 0) productCogsMap.set(p.product_id, p.cost_usd)
+    if (p.name      && p.cost_usd > 0) titleCogsMap.set(p.name, p.cost_usd)
   }
   const defaultCogs     = cfg?.cogs?.default_cost_usd ?? 0
   const packagingCost   = cfg?.cogs?.packaging_cost_usd ?? 0
@@ -83,8 +85,8 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // Per-product COGS or default, plus packaging per order
-    const cogsPerUnit = productCogsMap.get(pid) ?? defaultCogs
+    // Per-product COGS: try by ID, then by title (handles archived/replaced product IDs), then default
+    const cogsPerUnit = productCogsMap.get(pid) ?? titleCogsMap.get(p.title) ?? defaultCogs
     const totalCogs   = cogsPerUnit * units + packagingCost * orders
     const fees        = revenue * txFeePct + orders * paymentFixed
     const shipping    = orders * defaultShipping

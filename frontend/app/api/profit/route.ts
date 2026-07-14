@@ -72,10 +72,12 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
     total_price: string
     country_code: string | null
     product_id: string | null
+    product_title: string | null
     product_units: string
   }>(`
     SELECT o.order_id, o.total_price::text, o.country_code,
            oi.product_id,
+           oi.product_title,
            COALESCE(oi.quantity, 1)::text AS product_units
     FROM shopify_orders o
     JOIN tenants t ON t.id = o.tenant_id
@@ -86,19 +88,21 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
   `, [tenantId, dateFrom, dateTo])
 
   // Group rows into orders
-  const orderMap = new Map<string, { total_price: string; country_code: string | null; items: { product_id: string | null; units: number }[] }>()
+  const orderMap = new Map<string, { total_price: string; country_code: string | null; items: { product_id: string | null; product_title: string | null; units: number }[] }>()
   for (const row of rows) {
     if (!orderMap.has(row.order_id)) {
       orderMap.set(row.order_id, { total_price: row.total_price, country_code: row.country_code, items: [] })
     }
-    orderMap.get(row.order_id)!.items.push({ product_id: row.product_id, units: Number(row.product_units) })
+    orderMap.get(row.order_id)!.items.push({ product_id: row.product_id, product_title: row.product_title, units: Number(row.product_units) })
   }
   const orders = Array.from(orderMap.values())
 
-  // Build per-product COGS lookup
+  // Build per-product COGS lookup (by ID) and title-based fallback (handles archived/replaced product IDs)
   const productCogs = new Map<string, number>()
+  const titleCogs = new Map<string, number>()
   for (const p of (cfg.cogs.products ?? [])) {
     if (p.product_id && p.cost_usd > 0) productCogs.set(p.product_id, p.cost_usd)
+    if (p.name && p.cost_usd > 0) titleCogs.set(p.name, p.cost_usd)
   }
   const hasProductCogs = productCogs.size > 0
 
@@ -146,7 +150,9 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
       for (const item of order.items) {
         const perUnitCost = item.product_id && productCogs.has(item.product_id)
           ? productCogs.get(item.product_id)!
-          : cfg.cogs.default_cost_usd
+          : item.product_title && titleCogs.has(item.product_title)
+            ? titleCogs.get(item.product_title)!
+            : cfg.cogs.default_cost_usd
         totalCogs += perUnitCost * item.units
       }
     } else {

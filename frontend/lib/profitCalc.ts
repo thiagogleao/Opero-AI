@@ -102,13 +102,20 @@ export async function getProfitSummary(
   }
   const hasProductCogs = productCogs.size > 0
 
+  // Build title-based fallback lookup (handles archived/replaced product IDs)
+  const titleCogs = new Map<string, number>()
+  for (const p of (cfg.cogs.products ?? [])) {
+    if (p.name && p.cost_usd > 0) titleCogs.set(p.name, p.cost_usd)
+  }
+
   const orders = await query<{
     order_id: string; total_price: string; country_code: string | null
-    total_units: string; product_id: string | null; product_units: string
+    total_units: string; product_id: string | null; product_title: string | null; product_units: string
   }>(`
     SELECT o.order_id, o.total_price::text, o.country_code,
            COALESCE(SUM(oi.quantity), 1)::text AS total_units,
            oi.product_id,
+           oi.product_title,
            COALESCE(oi.quantity, 1)::text AS product_units
     FROM shopify_orders o
     JOIN tenants t ON t.id = o.tenant_id
@@ -116,16 +123,16 @@ export async function getProfitSummary(
     WHERE o.tenant_id = $1
       AND (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date BETWEEN $2::date AND $3::date
       AND o.financial_status NOT IN ('refunded', 'voided')
-    GROUP BY o.order_id, o.total_price, o.country_code, oi.product_id, oi.quantity
+    GROUP BY o.order_id, o.total_price, o.country_code, oi.product_id, oi.product_title, oi.quantity
   `, [tenantId, dateFrom, dateTo])
 
   // Group by order_id so we can compute per-order totals
-  const orderMap = new Map<string, { total_price: string; country_code: string | null; items: { product_id: string | null; units: number }[] }>()
+  const orderMap = new Map<string, { total_price: string; country_code: string | null; items: { product_id: string | null; product_title: string | null; units: number }[] }>()
   for (const row of orders) {
     if (!orderMap.has(row.order_id)) {
       orderMap.set(row.order_id, { total_price: row.total_price, country_code: row.country_code, items: [] })
     }
-    orderMap.get(row.order_id)!.items.push({ product_id: row.product_id, units: Number(row.product_units) })
+    orderMap.get(row.order_id)!.items.push({ product_id: row.product_id, product_title: row.product_title, units: Number(row.product_units) })
   }
   const groupedOrders = Array.from(orderMap.values())
 
@@ -161,7 +168,9 @@ export async function getProfitSummary(
       for (const item of order.items) {
         const perUnitCost = item.product_id && productCogs.has(item.product_id)
           ? productCogs.get(item.product_id)!
-          : cfg.cogs.default_cost_usd
+          : item.product_title && titleCogs.has(item.product_title)
+            ? titleCogs.get(item.product_title)!
+            : cfg.cogs.default_cost_usd
         totalCogs += perUnitCost * item.units
       }
     } else {
