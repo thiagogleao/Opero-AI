@@ -79,7 +79,7 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
            COALESCE(oi.quantity, 1)::text AS product_units
     FROM shopify_orders o
     JOIN tenants t ON t.id = o.tenant_id
-    LEFT JOIN shopify_order_items oi ON oi.order_id = o.order_id AND oi.tenant_id = o.tenant_id
+    LEFT JOIN shopify_order_items oi ON oi.order_id = o.order_id AND (oi.tenant_id IS NULL OR oi.tenant_id = o.tenant_id)
     WHERE o.tenant_id = $1
       AND (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date BETWEEN $2::date AND $3::date
       AND o.financial_status NOT IN ('refunded', 'voided')

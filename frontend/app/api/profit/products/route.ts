@@ -47,7 +47,7 @@ export async function GET(req: NextRequest) {
       ROUND(SUM(oi.quantity * oi.price)::numeric, 2)::text AS revenue,
       p.image_url
     FROM shopify_order_items oi
-    JOIN shopify_orders o ON oi.order_id = o.order_id AND oi.tenant_id = o.tenant_id
+    JOIN shopify_orders o ON oi.order_id = o.order_id AND (oi.tenant_id IS NULL OR oi.tenant_id = o.tenant_id)
     JOIN tenants t ON t.id = o.tenant_id
     LEFT JOIN shopify_products p ON oi.product_id = p.product_id AND p.tenant_id = o.tenant_id
     WHERE o.tenant_id = $1

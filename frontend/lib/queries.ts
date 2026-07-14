@@ -533,7 +533,7 @@ export async function getProductMetrics(tenantId: string, dateFrom: string, date
         THEN SUM(oi.quantity * oi.price) / COUNT(DISTINCT o.order_id) ELSE 0
         END::numeric, 2)                             AS aov
     FROM shopify_order_items oi
-    JOIN shopify_orders o ON oi.order_id = o.order_id AND oi.tenant_id = o.tenant_id
+    JOIN shopify_orders o ON oi.order_id = o.order_id AND (oi.tenant_id IS NULL OR oi.tenant_id = o.tenant_id)
     JOIN tenants t ON t.id = o.tenant_id
     LEFT JOIN shopify_products p ON oi.product_id = p.product_id AND p.tenant_id = o.tenant_id
     WHERE o.tenant_id = $1
