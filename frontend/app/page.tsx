@@ -17,6 +17,7 @@ import RefreshButton from '@/components/RefreshButton'
 import AutoSync from '@/components/AutoSync'
 import DashboardLayout from '@/components/DashboardLayout'
 import Sidebar from '@/components/Sidebar'
+import PartnerSplitToggle from '@/components/PartnerSplitToggle'
 import { getTranslations } from '@/lib/translations'
 import type { Language } from '@/contexts/SettingsContext'
 
@@ -55,6 +56,7 @@ export default async function Dashboard({ searchParams }: Props) {
 
   const sp = await searchParams
   const cookieStore = await cookies()
+  const isSplit = cookieStore.get('split_50')?.value === 'true'
   const lang = (cookieStore.get('opero_lang')?.value ?? 'pt') as Language
   const tr = getTranslations(lang)
   const now = new Date()
@@ -152,7 +154,28 @@ export default async function Dashboard({ searchParams }: Props) {
   } catch {
     redirect('/onboarding')
   }
-  const [metrics, revenue, roas, creatives, countries, customers, syncs, profit, funnel, countrySpend, countryProfit, dailyProfit, bdDevice, bdPlacement, bdAgeGender, ltvData] = queryResult
+  const [metrics, revenue, roas, creatives, countries, customers, syncs, profitRaw, funnel, countrySpend, countryProfitRaw, dailyProfitRaw, bdDevice, bdPlacement, bdAgeGender, ltvData] = queryResult
+
+  const splitFactor = isSplit ? 0.5 : 1
+  const profit = {
+    ...profitRaw,
+    netProfit:          profitRaw.netProfit          * splitFactor,
+    avgProfitPerOrder:  profitRaw.avgProfitPerOrder  * splitFactor,
+    margin:             profitRaw.margin             * splitFactor,
+  }
+  const dailyProfit = {
+    ...dailyProfitRaw,
+    dailyData: dailyProfitRaw.dailyData.map(d => ({
+      ...d,
+      profit: d.profit * splitFactor,
+      margin: d.margin != null ? d.margin * splitFactor : null,
+    })),
+  }
+  const countryProfit = countryProfitRaw.map(c => ({
+    ...c,
+    netProfit: c.netProfit * splitFactor,
+    margin:    c.margin    * splitFactor,
+  }))
 
   const lastSyncIso = syncs[0]?.finished_at ?? null
   const lastSync = lastSyncIso
@@ -487,6 +510,7 @@ ${promptLang.formatNote}`
           </div>
 
           <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+            <PartnerSplitToggle isSplit={isSplit} />
             <AutoSync lastSyncIso={lastSyncIso} />
             <RefreshButton />
             <Suspense>
