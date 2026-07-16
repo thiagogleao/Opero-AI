@@ -62,7 +62,14 @@ export async function GET(req: NextRequest) {
       return r
     }
 
-    if (accounts.length === 0) return clearCookies(fail('no_accounts'))
+    if (accounts.length === 0) {
+      // /me/adaccounts returned empty — common with Business Manager setups.
+      // Store the token and redirect to a manual account ID entry form.
+      const pending = Buffer.from(JSON.stringify({ tenantId, token: longToken })).toString('base64')
+      const res = NextResponse.redirect(new URL('/facebook/extra-accounts?manual=true', appUrl))
+      res.cookies.set('fb_extra_pending', pending, { httpOnly: true, maxAge: 300, path: '/', sameSite: 'lax' })
+      return clearCookies(res)
+    }
 
     if (accounts.length === 1) {
       // Single account — insert directly
