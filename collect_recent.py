@@ -83,7 +83,7 @@ def load_tenant_creds(tenant_id: str, session) -> dict:
     return dict(row)
 
 
-def run_facebook(date_from: date, date_to: date, session, tenant_id=None, creds=None, mode="full"):
+def run_facebook(date_from: date, date_to: date, session, tenant_id=None, creds=None, mode="full", fb_ad_account_id_tag=None):
     if creds and (not creds.get("fb_access_token") or not creds.get("fb_ad_account_id")):
         print("  [facebook] skipped — no credentials configured")
         return
@@ -98,9 +98,12 @@ def run_facebook(date_from: date, date_to: date, session, tenant_id=None, creds=
             kwargs["app_id"] = creds["facebook_app_id"]
         if creds.get("facebook_app_secret"):
             kwargs["app_secret"] = creds["facebook_app_secret"]
+    if fb_ad_account_id_tag:
+        kwargs["fb_ad_account_id_tag"] = fb_ad_account_id_tag
     collector = FacebookCollector(session, **kwargs)
     n = collector.collect(date_from, date_to)
-    print(f"  [facebook] {n} records collected")
+    label = f"facebook/{fb_ad_account_id_tag}" if fb_ad_account_id_tag else "facebook"
+    print(f"  [{label}] {n} records collected")
 
 
 def run_shopify(date_from: date, date_to: date, session, tenant_id=None, creds=None, store_tz_name: str = "UTC"):
@@ -174,6 +177,32 @@ def main():
             except Exception as e:
                 logger.exception("Facebook collection failed")
                 errors.append(f"Facebook: {e}")
+
+            # Collect extra FB accounts (only when running with a specific tenant)
+            if args.tenant_id:
+                try:
+                    from sqlalchemy import text as sa_text
+                    extra_rows = session.execute(
+                        sa_text("SELECT fb_ad_account_id, fb_access_token FROM tenant_fb_accounts WHERE tenant_id = :tid AND is_active = true"),
+                        {"tid": args.tenant_id}
+                    ).fetchall()
+                    for extra in extra_rows:
+                        print(f"  [facebook-extra] Collecting account {extra.fb_ad_account_id}...")
+                        try:
+                            extra_creds = {
+                                "fb_access_token": extra.fb_access_token,
+                                "fb_ad_account_id": extra.fb_ad_account_id,
+                            }
+                            run_facebook(
+                                date_from, date_to, session,
+                                args.tenant_id, extra_creds, mode=args.mode,
+                                fb_ad_account_id_tag=extra.fb_ad_account_id,
+                            )
+                        except Exception as e:
+                            logger.exception("Extra FB account %s collection failed", extra.fb_ad_account_id)
+                            errors.append(f"Facebook (extra {extra.fb_ad_account_id}): {e}")
+                except Exception as e:
+                    logger.warning("Could not query extra FB accounts (table may not exist yet): %s", e)
 
         if args.source in ("shopify", "both"):
             try:

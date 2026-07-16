@@ -117,6 +117,8 @@ function StatusBadge({ connected }: { connected: boolean }) {
   )
 }
 
+type ExtraAccount = { id: number; fb_ad_account_id: string; nickname: string | null; is_active: boolean }
+
 function SettingsContent() {
   const s = useSettings()
   const tr = getTranslations(s.language)
@@ -124,6 +126,7 @@ function SettingsContent() {
   const [fbConnected, setFbConnected]     = useState<boolean | null>(null)
   const [fbAccountId, setFbAccountId]     = useState<string | null>(null)
   const [shopifyDomain, setShopifyDomain] = useState<string | null>(null)
+  const [extraAccounts, setExtraAccounts] = useState<ExtraAccount[]>([])
   const searchParams = useSearchParams()
 
   useEffect(() => {
@@ -136,7 +139,26 @@ function SettingsContent() {
         if (d.tenant?.timezone) s.setTimezone(d.tenant.timezone)
       })
       .catch(() => setFbConnected(false))
+
+    fetch('/api/facebook/extra-accounts')
+      .then(r => r.json())
+      .then(d => setExtraAccounts(d.accounts || []))
+      .catch(() => {})
   }, [])
+
+  async function toggleExtraAccount(id: number, is_active: boolean) {
+    setExtraAccounts(prev => prev.map(a => a.id === id ? { ...a, is_active } : a))
+    await fetch(`/api/facebook/extra-accounts/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_active }),
+    })
+  }
+
+  async function removeExtraAccount(id: number) {
+    setExtraAccounts(prev => prev.filter(a => a.id !== id))
+    await fetch(`/api/facebook/extra-accounts/${id}`, { method: 'DELETE' })
+  }
 
   function handleTimezoneChange(tz: string) {
     s.setTimezone(tz)
@@ -148,8 +170,9 @@ function SettingsContent() {
   }
 
   // Show banner if just connected via OAuth
-  const justConnected = searchParams.get('fb_connected') === 'true'
-  const fbError       = searchParams.get('fb_error')
+  const justConnected      = searchParams.get('fb_connected') === 'true'
+  const justExtraConnected = searchParams.get('fb_extra_connected') === 'true'
+  const fbError            = searchParams.get('fb_error')
 
   const attrOptions: { value: AttributionWindow; label: string }[] = [
     { value: '1d',  label: tr.settings_attr_1d  },
@@ -341,13 +364,15 @@ function SettingsContent() {
         </Section>
 
         {/* ── Integrations ── */}
-        {(justConnected || fbError) && (
+        {(justConnected || justExtraConnected || fbError) && (
           <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }}
             style={{ padding: '12px 16px', borderRadius: 10, marginBottom: 16, fontSize: 13, fontWeight: 500,
-              background: justConnected ? 'rgba(16,185,129,0.1)' : 'rgba(244,63,94,0.1)',
-              border: `1px solid ${justConnected ? 'rgba(16,185,129,0.3)' : 'rgba(244,63,94,0.3)'}`,
-              color: justConnected ? '#10B981' : '#F43F5E' }}>
-            {justConnected ? '✓ Facebook Ads conectado com sucesso!' : `✗ Erro ao conectar Facebook: ${fbError}`}
+              background: (justConnected || justExtraConnected) ? 'rgba(16,185,129,0.1)' : 'rgba(244,63,94,0.1)',
+              border: `1px solid ${(justConnected || justExtraConnected) ? 'rgba(16,185,129,0.3)' : 'rgba(244,63,94,0.3)'}`,
+              color: (justConnected || justExtraConnected) ? '#10B981' : '#F43F5E' }}>
+            {justExtraConnected ? '✓ Conta extra do Facebook Ads adicionada com sucesso!'
+              : justConnected  ? '✓ Facebook Ads conectado com sucesso!'
+              : `✗ Erro ao conectar Facebook: ${fbError}`}
           </motion.div>
         )}
         <Section title={tr.settings_integrations} delay={0.22}>
@@ -374,6 +399,54 @@ function SettingsContent() {
               </a>
             </div>
           </Row>
+        </Section>
+
+        {/* ── Extra Facebook Accounts ── */}
+        <Section title="Contas Extras do Facebook Ads" delay={0.24}>
+          {extraAccounts.length === 0 ? (
+            <p style={{ fontSize: 13, color: 'var(--text-faint)', marginBottom: 16 }}>
+              Nenhuma conta extra adicionada ainda.
+            </p>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+              {extraAccounts.map((acc, idx) => (
+                <div key={acc.id} style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  padding: '12px 0', gap: 12,
+                  borderBottom: idx < extraAccounts.length - 1 ? '1px solid var(--border)' : 'none',
+                }}>
+                  <div style={{ minWidth: 0 }}>
+                    <p style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-primary)', marginBottom: 2 }}>
+                      {acc.nickname || acc.fb_ad_account_id}
+                    </p>
+                    {acc.nickname && (
+                      <p style={{ fontSize: 11, color: 'var(--text-faint)' }}>{acc.fb_ad_account_id}</p>
+                    )}
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
+                    <span style={{ fontSize: 11, color: acc.is_active ? '#10B981' : 'var(--text-faint)' }}>
+                      {acc.is_active ? 'Ativa' : 'Pausada'}
+                    </span>
+                    <Toggle enabled={acc.is_active} onChange={v => toggleExtraAccount(acc.id, v)} />
+                    <button onClick={() => removeExtraAccount(acc.id)} style={{
+                      padding: '4px 10px', fontSize: 11, fontWeight: 600, borderRadius: 6, cursor: 'pointer',
+                      border: '1px solid rgba(244,63,94,0.35)', background: 'rgba(244,63,94,0.08)', color: '#F43F5E',
+                    }}>
+                      Remover
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ marginTop: extraAccounts.length > 0 ? 16 : 0 }}>
+            <a href="/api/facebook/auth?mode=add_extra"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '7px 14px', fontSize: 12, fontWeight: 600,
+                borderRadius: 8, border: '1px solid #8B5CF6', background: 'rgba(139,92,246,0.12)', color: '#A78BFA',
+                textDecoration: 'none', cursor: 'pointer' }}>
+              + Adicionar conta extra
+            </a>
+          </div>
         </Section>
 
         {/* ── Danger Zone ── */}

@@ -216,6 +216,7 @@ class FacebookCollector(BaseCollector):
         app_id: Optional[str] = None,
         app_secret: Optional[str] = None,
         mode: str = "full",
+        fb_ad_account_id_tag: Optional[str] = None,
     ):
         super().__init__(session, tenant_id)
         # mode controls what this run collects:
@@ -223,6 +224,10 @@ class FacebookCollector(BaseCollector):
         #   "structure" — only account structure + breakdowns. Background second-pass.
         #   "full"      — everything (default, used for manual / scheduled runs).
         self._mode = mode
+        # When set, each daily insight row is tagged with this account ID in
+        # fb_ad_daily_metrics.fb_ad_account_id so spend from extra accounts can be
+        # toggled on/off in analysis without touching the primary account's rows.
+        self._fb_ad_account_id_tag = fb_ad_account_id_tag
         _app_id = app_id or settings.facebook_app_id
         # When using a tenant-supplied token we can only trust the app_secret if it
         # was also explicitly supplied by that tenant. Falling back to the env-var
@@ -510,6 +515,8 @@ class FacebookCollector(BaseCollector):
         for insight in self._paginate(cursor):
             row = self._parse_daily_insight(insight)
             if row:
+                if self._fb_ad_account_id_tag:
+                    row["fb_ad_account_id"] = self._fb_ad_account_id_tag
                 rows.append(row)
 
             # Batch upserts every 500 rows to avoid huge transactions

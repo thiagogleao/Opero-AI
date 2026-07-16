@@ -68,6 +68,20 @@ function calcCogs(units: number, cfg: ProfitConfig): number {
     : baseUnit * (1 - val / 100) * units
 }
 
+// ─── Extra account helpers ────────────────────────────────────────────────────
+
+async function getInactiveExtraAccountIds(tenantId: string): Promise<string[]> {
+  try {
+    const rows = await query<{ fb_ad_account_id: string }>(
+      `SELECT fb_ad_account_id FROM tenant_fb_accounts WHERE tenant_id = $1 AND is_active = false`,
+      [tenantId]
+    )
+    return rows.map(r => r.fb_ad_account_id)
+  } catch {
+    return [] // table doesn't exist yet — safe default
+  }
+}
+
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 export async function getProfitSummary(
@@ -136,12 +150,14 @@ export async function getProfitSummary(
   }
   const groupedOrders = Array.from(orderMap.values())
 
+  const inactiveIds = await getInactiveExtraAccountIds(tenantId)
   const [fbRow] = await query<{ spend: string }>(`
     SELECT COALESCE(SUM(spend), 0)::text AS spend
     FROM fb_ad_daily_metrics
     WHERE tenant_id = $1
       AND date BETWEEN $2::date AND $3::date
-  `, [tenantId, dateFrom, dateTo])
+      AND (fb_ad_account_id IS NULL OR fb_ad_account_id != ALL($4::text[]))
+  `, [tenantId, dateFrom, dateTo, inactiveIds])
   const fbSpend = Number(fbRow.spend)
 
   const perOrderExtras = (cfg.extra_costs ?? [])
@@ -231,6 +247,7 @@ export async function getDailyProfitData(
 
   const nonFbCostRatio = (summary.totalCosts - summary.fbSpend) / summary.totalRevenue
 
+  const inactiveIds = await getInactiveExtraAccountIds(tenantId)
   const dailyRows = await query<{ date: string; revenue: string; spend: string }>(`
     SELECT
       dates.d::text AS date,
@@ -251,10 +268,11 @@ export async function getDailyProfitData(
       SELECT date, SUM(spend) AS spend
       FROM fb_ad_daily_metrics
       WHERE tenant_id = $1
+        AND (fb_ad_account_id IS NULL OR fb_ad_account_id != ALL($4::text[]))
       GROUP BY date
     ) f ON f.date = dates.d
     ORDER BY dates.d
-  `, [tenantId, dateFrom, dateTo])
+  `, [tenantId, dateFrom, dateTo, inactiveIds])
 
   const dailyData: DailyProfitPoint[] = dailyRows
     .filter(r => Number(r.revenue) > 0 || Number(r.spend) > 0)
@@ -317,12 +335,14 @@ export async function getCountryProfit(
   `, [tenantId, dateFrom, dateTo])
 
   // True total FB spend from daily metrics (authoritative)
+  const inactiveIds = await getInactiveExtraAccountIds(tenantId)
   const [fbTotalRow] = await query<{ spend: string }>(`
     SELECT COALESCE(SUM(spend), 0)::text AS spend
     FROM fb_ad_daily_metrics
     WHERE tenant_id = $1
       AND date BETWEEN $2::date AND $3::date
-  `, [tenantId, dateFrom, dateTo])
+      AND (fb_ad_account_id IS NULL OR fb_ad_account_id != ALL($4::text[]))
+  `, [tenantId, dateFrom, dateTo, inactiveIds])
   const totalFbSpend = Number(fbTotalRow.spend)
 
   // Total revenue across shown countries (for proportional FB allocation)

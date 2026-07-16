@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { upsertTenant } from '@/lib/tenant'
+import { query } from '@/lib/db'
 
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl
@@ -47,6 +48,42 @@ export async function GET(req: NextRequest) {
   )
   const accountsData = await accountsRes.json()
   const accounts: { id: string; name: string; account_status: number }[] = accountsData.data || []
+
+  // ── Extra-account flow ────────────────────────────────────────────────────────
+  // Triggered when the user adds a second FB account from Settings.
+  // Saves to tenant_fb_accounts instead of tenants — does NOT touch existing data.
+  const oauthMode = req.cookies.get('fb_oauth_mode')?.value
+  if (oauthMode?.startsWith('add_extra:')) {
+    const tenantId = oauthMode.slice('add_extra:'.length)
+
+    const clearCookies = (r: NextResponse) => {
+      r.cookies.delete('fb_oauth_state')
+      r.cookies.delete('fb_oauth_mode')
+      return r
+    }
+
+    if (accounts.length === 0) return clearCookies(fail('no_accounts'))
+
+    if (accounts.length === 1) {
+      // Single account — insert directly
+      await query(`
+        INSERT INTO tenant_fb_accounts (tenant_id, fb_ad_account_id, fb_access_token, is_active)
+        VALUES ($1, $2, $3, true)
+        ON CONFLICT (tenant_id, fb_ad_account_id) DO UPDATE SET
+          fb_access_token = EXCLUDED.fb_access_token,
+          is_active       = true
+      `, [tenantId, accounts[0].id, longToken])
+      return clearCookies(NextResponse.redirect(new URL('/settings?fb_extra_connected=true', appUrl)))
+    }
+
+    // Multiple accounts — store pending data in a short-lived httpOnly cookie
+    // so the picker page can retrieve and save the chosen account.
+    const pending = Buffer.from(JSON.stringify({ tenantId, token: longToken })).toString('base64')
+    const res = NextResponse.redirect(new URL('/facebook/extra-accounts', appUrl))
+    res.cookies.set('fb_extra_pending', pending, { httpOnly: true, maxAge: 300, path: '/', sameSite: 'lax' })
+    return clearCookies(res)
+  }
+  // ─────────────────────────────────────────────────────────────────────────────
 
   // Save token; update account ID only if we found accounts
   const update: Record<string, string> = { fb_access_token: longToken }

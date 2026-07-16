@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@clerk/nextjs/server'
+import { getActiveTenantId } from '@/lib/activeStore'
 import crypto from 'crypto'
 
 export async function GET(req: NextRequest) {
@@ -20,5 +21,13 @@ export async function GET(req: NextRequest) {
 
   const res = NextResponse.redirect(authUrl.toString())
   res.cookies.set('fb_oauth_state', state, { httpOnly: true, maxAge: 600, path: '/', sameSite: 'lax' })
+
+  // If mode=add_extra, store the active tenant ID in a separate cookie so
+  // the callback knows to save the new account to tenant_fb_accounts instead.
+  if (req.nextUrl.searchParams.get('mode') === 'add_extra') {
+    const tenantId = await getActiveTenantId(userId)
+    res.cookies.set('fb_oauth_mode', `add_extra:${tenantId}`, { httpOnly: true, maxAge: 600, path: '/', sameSite: 'lax' })
+  }
+
   return res
 }
