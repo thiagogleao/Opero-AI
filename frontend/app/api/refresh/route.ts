@@ -63,8 +63,8 @@ async function computeDateFrom(tenantId: string, tz: string, explicitDateFrom?: 
     const [y, m, day] = lastSyncLocalDate.split('-').map(Number)
     return new Date(Date.UTC(y, m - 1, day - 1)).toISOString().slice(0, 10)
   }
-  const thirtyDaysAgo = new Date(Date.now() - 29 * 86400000)
-  return thirtyDaysAgo.toLocaleDateString('en-CA', { timeZone: tz })
+  const ninetyDaysAgo = new Date(Date.now() - 89 * 86400000)
+  return ninetyDaysAgo.toLocaleDateString('en-CA', { timeZone: tz })
 }
 
 export async function POST(req: Request) {
