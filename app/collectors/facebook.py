@@ -345,7 +345,7 @@ class FacebookCollector(BaseCollector):
     # ------------------------------------------------------------------
 
     def _sync_account(self):
-        info = self._account.api_get(fields=["name", "currency", "account_status"])
+        info = self._with_retry(lambda: self._account.api_get(fields=["name", "currency", "account_status"]))
         rows = [{
             "account_id": self._account_id,
             "name": info.get("name"),
@@ -356,12 +356,12 @@ class FacebookCollector(BaseCollector):
         self._upsert_raw("fb_ad_accounts", rows, ["account_id"])
 
     def _sync_campaigns(self):
-        campaigns = self._paginate(
+        campaigns = self._with_retry(lambda: list(self._paginate(
             self._account.get_campaigns(
                 fields=["id", "name", "status", "objective"],
                 params={"limit": 200},
             )
-        )
+        )))
         rows = [
             {
                 "campaign_id": c["id"],
@@ -376,12 +376,12 @@ class FacebookCollector(BaseCollector):
         self._upsert_raw("fb_campaigns", rows, ["campaign_id"])
 
     def _sync_adsets(self):
-        adsets = self._paginate(
+        adsets = self._with_retry(lambda: list(self._paginate(
             self._account.get_ad_sets(
                 fields=["id", "name", "status", "campaign_id"],
                 params={"limit": 200},
             )
-        )
+        )))
         rows = [
             {
                 "adset_id": a["id"],
@@ -439,12 +439,12 @@ class FacebookCollector(BaseCollector):
         return creative_map
 
     def _sync_ads(self) -> list[str]:
-        ads = list(self._paginate(
+        ads = self._with_retry(lambda: list(self._paginate(
             self._account.get_ads(
                 fields=["id", "name", "status", "adset_id", "campaign_id", "creative"],
                 params={"limit": 200},
             )
-        ))
+        )))
 
         # Only fetch creatives for ads that don't already have creative data cached.
         # Re-fetching all creatives on every sync is the single biggest time sink.
@@ -695,6 +695,22 @@ class FacebookCollector(BaseCollector):
     # ------------------------------------------------------------------
     # Pagination helper
     # ------------------------------------------------------------------
+
+    def _with_retry(self, fn, max_retries: int = 3):
+        """Run fn(), retrying on Facebook rate limit (code 17) with exponential backoff."""
+        for attempt in range(max_retries):
+            try:
+                return fn()
+            except FacebookRequestError as exc:
+                if exc.api_error_code() == 17 and attempt < max_retries - 1:
+                    wait_sec = 90 * (2 ** attempt)  # 90s then 180s
+                    logger.warning(
+                        "[facebook] Rate limit (code 17) — waiting %ds (attempt %d/%d)",
+                        wait_sec, attempt + 1, max_retries - 1,
+                    )
+                    time.sleep(wait_sec)
+                else:
+                    raise
 
     @staticmethod
     def _paginate(cursor, sleep_between_pages: float = 0.2):

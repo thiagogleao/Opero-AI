@@ -15,9 +15,10 @@ function todayInTz(tz: string): string {
   return new Date().toLocaleDateString('en-CA', { timeZone: tz })
 }
 
-function spawnSource(source: string, dateFrom: string, dateTo: string, tenantId: string): ChildProcess | null {
+function spawnSource(source: string, dateFrom: string, dateTo: string, tenantId: string, mode?: string): ChildProcess | null {
   try {
     const args = [SCRIPT, '--source', source, '--date-from', dateFrom, '--date-to', dateTo, '--tenant', tenantId]
+    if (mode) args.push('--mode', mode)
     const proc = spawn(PYTHON, args, {
       cwd: PROJECT_ROOT,
       env: { ...process.env, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' },
@@ -100,7 +101,10 @@ export async function POST(req: Request) {
             const tenantToday = todayInTz(tz)
             const tenantDateFrom = await computeDateFrom(tenant.id, tz)
             spawnSource('shopify',  tenantDateFrom, tenantToday, tenant.id)
-            spawnSource('facebook', tenantDateFrom, tenantToday, tenant.id)
+            // 'quick' mode: only daily insights (spend/purchases), skip structure
+            // re-sync (campaigns/adsets/ads). Reduces API calls to avoid FB rate limits
+            // when multiple stores share the same ad account.
+            spawnSource('facebook', tenantDateFrom, tenantToday, tenant.id, 'quick')
           } catch (err) {
             console.error(`[refresh] failed to queue background tenant ${tenant.id}:`, err)
           }
