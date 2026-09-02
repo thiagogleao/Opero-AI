@@ -50,10 +50,10 @@ function spawnSource(source: string, dateFrom: string, dateTo: string, tenantId:
   }
 }
 
-/** Compute dateFrom for a tenant based on its last sync time. */
-async function computeDateFrom(tenantId: string, tz: string, explicitDateFrom?: string): Promise<string> {
+/** Compute dateFrom for a tenant+source based on its last sync time. */
+async function computeDateFrom(tenantId: string, tz: string, explicitDateFrom?: string, source?: string): Promise<string> {
   if (explicitDateFrom) return explicitDateFrom
-  const syncs = await getLastSyncTime(tenantId)
+  const syncs = await getLastSyncTime(tenantId, source)
   const lastFinished = syncs[0]?.finished_at ?? null
   if (lastFinished) {
     const lastSyncLocalDate = new Date(lastFinished)
@@ -80,10 +80,13 @@ export async function POST(req: Request) {
     const storeTimezone = await getTenantTimezone(tenantId)
     const today = todayInTz(storeTimezone)
     const dateTo: string = body.dateTo ?? today
-    const dateFrom = await computeDateFrom(tenantId, storeTimezone, body.dateFrom)
+    // Each source uses its own last sync date so a fresh Shopify sync
+    // doesn't prevent Facebook from going back 90 days on first run.
+    const shopifyDateFrom  = await computeDateFrom(tenantId, storeTimezone, body.dateFrom, 'shopify')
+    const facebookDateFrom = await computeDateFrom(tenantId, storeTimezone, body.dateFrom, 'facebook')
 
-    spawnSource('shopify',  dateFrom, dateTo, tenantId)
-    spawnSource('facebook', dateFrom, dateTo, tenantId)
+    spawnSource('shopify',  shopifyDateFrom,  dateTo, tenantId)
+    spawnSource('facebook', facebookDateFrom, dateTo, tenantId)
 
     // --- Other stores: queue in background with staggered delay ---
     // Only when this is a smart incremental refresh (no explicit date range),
@@ -99,12 +102,12 @@ export async function POST(req: Request) {
           try {
             const tz = await getTenantTimezone(tenant.id)
             const tenantToday = todayInTz(tz)
-            const tenantDateFrom = await computeDateFrom(tenant.id, tz)
-            spawnSource('shopify',  tenantDateFrom, tenantToday, tenant.id)
-            // 'quick' mode: only daily insights (spend/purchases), skip structure
-            // re-sync (campaigns/adsets/ads). Reduces API calls to avoid FB rate limits
-            // when multiple stores share the same ad account.
-            spawnSource('facebook', tenantDateFrom, tenantToday, tenant.id, 'quick')
+            const tenantShopifyFrom  = await computeDateFrom(tenant.id, tz, undefined, 'shopify')
+            const tenantFacebookFrom = await computeDateFrom(tenant.id, tz, undefined, 'facebook')
+            spawnSource('shopify',  tenantShopifyFrom,  tenantToday, tenant.id)
+            // 'quick' mode: only daily insights, skip structure re-sync to avoid
+            // FB rate limits when multiple stores share the same ad account.
+            spawnSource('facebook', tenantFacebookFrom, tenantToday, tenant.id, 'quick')
           } catch (err) {
             console.error(`[refresh] failed to queue background tenant ${tenant.id}:`, err)
           }
@@ -112,12 +115,12 @@ export async function POST(req: Request) {
       })
 
       return Response.json({
-        started: true, dateFrom, dateTo, storeTimezone,
+        started: true, shopifyDateFrom, facebookDateFrom, dateTo, storeTimezone,
         otherStoresCount: otherTenants.length,
       })
     }
 
-    return Response.json({ started: true, dateFrom, dateTo, storeTimezone, otherStoresCount: 0 })
+    return Response.json({ started: true, shopifyDateFrom, facebookDateFrom, dateTo, storeTimezone, otherStoresCount: 0 })
   } catch (err) {
     console.error('[refresh] error:', err)
     return Response.json({ error: String(err) }, { status: 500 })

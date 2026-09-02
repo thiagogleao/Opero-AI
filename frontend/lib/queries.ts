@@ -556,15 +556,16 @@ export async function getAllProducts(tenantId: string) {
   `, [tenantId])
 }
 
-export async function getLastSyncTime(tenantId: string) {
+export async function getLastSyncTime(tenantId: string, source?: string) {
   const rows = await query<{ finished_at: string; source: string }>(`
     SELECT source, finished_at::text
     FROM sync_runs
     WHERE tenant_id = $1
       AND status = 'success'
+      ${source ? "AND source = $2" : ""}
     ORDER BY finished_at DESC
     LIMIT 2
-  `, [tenantId])
+  `, source ? [tenantId, source] : [tenantId])
   return rows
 }
 
