@@ -19,13 +19,14 @@ export async function GET(req: NextRequest) {
   authUrl.searchParams.set('state', state)
   authUrl.searchParams.set('response_type', 'code')
 
+  // Always store the active tenant ID so the callback saves to the right store
+  const tenantId = await getActiveTenantId(userId)
+
   const res = NextResponse.redirect(authUrl.toString())
   res.cookies.set('fb_oauth_state', state, { httpOnly: true, maxAge: 600, path: '/', sameSite: 'lax' })
+  res.cookies.set('fb_oauth_tenant', tenantId, { httpOnly: true, maxAge: 600, path: '/', sameSite: 'lax' })
 
-  // If mode=add_extra, store the active tenant ID in a separate cookie so
-  // the callback knows to save the new account to tenant_fb_accounts instead.
   if (req.nextUrl.searchParams.get('mode') === 'add_extra') {
-    const tenantId = await getActiveTenantId(userId)
     res.cookies.set('fb_oauth_mode', `add_extra:${tenantId}`, { httpOnly: true, maxAge: 600, path: '/', sameSite: 'lax' })
   }
 

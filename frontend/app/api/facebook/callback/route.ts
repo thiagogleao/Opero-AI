@@ -92,21 +92,31 @@ export async function GET(req: NextRequest) {
   }
   // ─────────────────────────────────────────────────────────────────────────────
 
-  // Save token; update account ID only if we found accounts
+  // Use the active tenant stored during auth (falls back to userId for primary store)
+  const activeTenantId = req.cookies.get('fb_oauth_tenant')?.value || userId
+
+  // Save token; update account ID only if we found exactly one account
   const update: Record<string, string> = { fb_access_token: longToken }
   if (accounts.length === 1) update.fb_ad_account_id = accounts[0].id
-  await upsertTenant(userId, update)
+  await upsertTenant(activeTenantId, update)
+
+  const clearCookies = (r: NextResponse) => {
+    r.cookies.delete('fb_oauth_state')
+    r.cookies.delete('fb_oauth_tenant')
+    return r
+  }
 
   if (accounts.length > 1) {
     // Multiple accounts: redirect to picker
     const pickerUrl = new URL('/facebook/accounts', appUrl)
-    const res = NextResponse.redirect(pickerUrl.toString())
-    res.cookies.delete('fb_oauth_state')
-    return res
+    return clearCookies(NextResponse.redirect(pickerUrl.toString()))
   }
 
-  // Zero or one account: token saved, redirect to success
-  const res = NextResponse.redirect(new URL('/settings?fb_connected=true', appUrl))
-  res.cookies.delete('fb_oauth_state')
-  return res
+  if (accounts.length === 0) {
+    // No accounts returned (Business Manager setup) — ask user to enter manually
+    return clearCookies(NextResponse.redirect(new URL('/settings?fb_connected=true&no_account=true', appUrl)))
+  }
+
+  // One account auto-selected: redirect to success
+  return clearCookies(NextResponse.redirect(new URL('/settings?fb_connected=true', appUrl)))
 }
