@@ -2,9 +2,18 @@
 import { useState, useEffect, Suspense } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { motion } from 'framer-motion'
+import { useUser } from '@clerk/nextjs'
 import { useSettings, type Theme, type Language, type Currency, type DateFormat, type AttributionWindow } from '@/contexts/SettingsContext'
 import { getTranslations } from '@/lib/translations'
 import Sidebar from '@/components/Sidebar'
+
+type StoreRow = {
+  id: string
+  shopify_domain: string | null
+  shopify_access_token: string | null
+  fb_access_token: string | null
+  fb_ad_account_id: string | null
+}
 
 const LANGUAGES: { value: Language; label: string; flag: string }[] = [
   { value: 'pt', label: 'Português (BR)', flag: '🇧🇷' },
@@ -122,11 +131,16 @@ type ExtraAccount = { id: number; fb_ad_account_id: string; nickname: string | n
 function SettingsContent() {
   const s = useSettings()
   const tr = getTranslations(s.language)
-  const [resetConfirm, setResetConfirm] = useState(false)
-  const [fbConnected, setFbConnected]     = useState<boolean | null>(null)
-  const [fbAccountId, setFbAccountId]     = useState<string | null>(null)
-  const [shopifyDomain, setShopifyDomain] = useState<string | null>(null)
-  const [extraAccounts, setExtraAccounts] = useState<ExtraAccount[]>([])
+  const { user } = useUser()
+  const userId = user?.id
+  const [resetConfirm, setResetConfirm]       = useState(false)
+  const [fbConnected, setFbConnected]         = useState<boolean | null>(null)
+  const [fbAccountId, setFbAccountId]         = useState<string | null>(null)
+  const [shopifyDomain, setShopifyDomain]     = useState<string | null>(null)
+  const [extraAccounts, setExtraAccounts]     = useState<ExtraAccount[]>([])
+  const [stores, setStores]                   = useState<StoreRow[]>([])
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const [deletingId, setDeletingId]           = useState<string | null>(null)
   const searchParams = useSearchParams()
 
   useEffect(() => {
@@ -144,7 +158,21 @@ function SettingsContent() {
       .then(r => r.json())
       .then(d => setExtraAccounts(d.accounts || []))
       .catch(() => {})
+
+    fetch('/api/stores')
+      .then(r => r.json())
+      .then(d => setStores(d.stores || []))
+      .catch(() => {})
   }, [])
+
+  async function handleDeleteStore(id: string) {
+    if (confirmDeleteId !== id) { setConfirmDeleteId(id); return }
+    setDeletingId(id)
+    setConfirmDeleteId(null)
+    await fetch(`/api/stores/${id}`, { method: 'DELETE' })
+    setStores(prev => prev.filter(s => s.id !== id))
+    setDeletingId(null)
+  }
 
   async function toggleExtraAccount(id: number, is_active: boolean) {
     setExtraAccounts(prev => prev.map(a => a.id === id ? { ...a, is_active } : a))
@@ -198,6 +226,92 @@ function SettingsContent() {
           <h1 style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-primary)', letterSpacing: '-0.4px' }}>{tr.settings_title}</h1>
           <p style={{ color: 'var(--text-faint)', fontSize: 13, marginTop: 4 }}>{tr.settings_subtitle}</p>
         </motion.div>
+
+        {/* ── Minhas Lojas ── */}
+        <Section title="Minhas Lojas" delay={0.02}>
+          {stores.length === 0 ? (
+            <p style={{ fontSize: 13, color: 'var(--text-faint)', marginBottom: 16 }}>Carregando lojas...</p>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+              {stores.map((store, idx) => {
+                const isPrimary = store.id === userId
+                const isDeleting = deletingId === store.id
+                const isConfirming = confirmDeleteId === store.id
+                return (
+                  <div key={store.id} style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    padding: '14px 0', gap: 16,
+                    borderBottom: idx < stores.length - 1 ? '1px solid var(--border)' : 'none',
+                  }}>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                        <p style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>
+                          {store.shopify_domain || store.id}
+                        </p>
+                        {isPrimary && (
+                          <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20,
+                            background: 'rgba(139,92,246,0.12)', color: '#A78BFA', border: '1px solid rgba(139,92,246,0.25)' }}>
+                            Principal
+                          </span>
+                        )}
+                      </div>
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 20,
+                          background: store.shopify_access_token ? 'rgba(16,185,129,0.1)' : 'rgba(244,63,94,0.08)',
+                          color: store.shopify_access_token ? '#10B981' : '#F43F5E',
+                          border: `1px solid ${store.shopify_access_token ? 'rgba(16,185,129,0.25)' : 'rgba(244,63,94,0.2)'}` }}>
+                          Shopify {store.shopify_access_token ? '✓' : '✗'}
+                        </span>
+                        <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 20,
+                          background: store.fb_access_token ? 'rgba(16,185,129,0.1)' : 'rgba(244,63,94,0.08)',
+                          color: store.fb_access_token ? '#10B981' : '#F43F5E',
+                          border: `1px solid ${store.fb_access_token ? 'rgba(16,185,129,0.25)' : 'rgba(244,63,94,0.2)'}` }}>
+                          Facebook {store.fb_access_token ? '✓' : '✗'}
+                        </span>
+                        {store.fb_ad_account_id && (
+                          <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>
+                            Conta: {store.fb_ad_account_id}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                      {store.shopify_domain && (
+                        <a href={`/api/shopify/auth?shop=${store.shopify_domain}&reconnect=1`}
+                          style={{ padding: '5px 10px', fontSize: 11, fontWeight: 600, borderRadius: 7,
+                            border: '1px solid var(--border-strong)', background: 'var(--bg-input)',
+                            color: 'var(--text-muted)', textDecoration: 'none', whiteSpace: 'nowrap' }}>
+                          Shopify ↻
+                        </a>
+                      )}
+                      {!isPrimary && (
+                        <button
+                          disabled={isDeleting}
+                          onClick={() => handleDeleteStore(store.id)}
+                          style={{
+                            padding: '5px 12px', fontSize: 11, fontWeight: 600, borderRadius: 7, cursor: isDeleting ? 'default' : 'pointer',
+                            border: `1px solid ${isConfirming ? '#F43F5E' : 'rgba(244,63,94,0.35)'}`,
+                            background: isConfirming ? 'rgba(244,63,94,0.15)' : 'rgba(244,63,94,0.06)',
+                            color: '#F43F5E', whiteSpace: 'nowrap', opacity: isDeleting ? 0.5 : 1,
+                          }}>
+                          {isDeleting ? 'Removendo...' : isConfirming ? 'Confirmar?' : 'Remover'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+          <div style={{ marginTop: stores.length > 0 ? 16 : 0, borderTop: stores.length > 0 ? '1px solid var(--border)' : 'none', paddingTop: stores.length > 0 ? 16 : 0 }}>
+            <a href="/onboarding?addStore=true"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '8px 16px', fontSize: 12, fontWeight: 600,
+                borderRadius: 8, border: '1px solid #8B5CF6', background: 'rgba(139,92,246,0.12)', color: '#A78BFA',
+                textDecoration: 'none', cursor: 'pointer' }}>
+              + Adicionar nova loja
+            </a>
+          </div>
+        </Section>
 
         {/* ── Store Information ── */}
         <Section title={tr.settings_store} delay={0.04}>
