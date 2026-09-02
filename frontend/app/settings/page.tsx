@@ -136,6 +136,8 @@ function SettingsContent() {
   const [resetConfirm, setResetConfirm]       = useState(false)
   const [fbConnected, setFbConnected]         = useState<boolean | null>(null)
   const [fbAccountId, setFbAccountId]         = useState<string | null>(null)
+  const [fbAccountIdDraft, setFbAccountIdDraft] = useState('')
+  const [fbAccountIdSaving, setFbAccountIdSaving] = useState(false)
   const [shopifyDomain, setShopifyDomain]     = useState<string | null>(null)
   const [extraAccounts, setExtraAccounts]     = useState<ExtraAccount[]>([])
   const [stores, setStores]                   = useState<StoreRow[]>([])
@@ -149,6 +151,7 @@ function SettingsContent() {
       .then(d => {
         setFbConnected(!!d.tenant?.fb_access_token)
         setFbAccountId(d.tenant?.fb_ad_account_id || null)
+        setFbAccountIdDraft(d.tenant?.fb_ad_account_id || '')
         setShopifyDomain(d.tenant?.shopify_domain || null)
         if (d.tenant?.timezone) s.setTimezone(d.tenant.timezone)
       })
@@ -164,6 +167,21 @@ function SettingsContent() {
       .then(d => setStores(d.stores || []))
       .catch(() => {})
   }, [])
+
+  async function saveFbAccountId() {
+    if (!fbAccountIdDraft.trim()) return
+    setFbAccountIdSaving(true)
+    const id = fbAccountIdDraft.trim().replace(/^act_/, '')
+    const normalized = `act_${id}`
+    await fetch('/api/tenant', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fb_ad_account_id: normalized }),
+    })
+    setFbAccountId(normalized)
+    setFbAccountIdDraft(normalized)
+    setFbAccountIdSaving(false)
+  }
 
   async function handleDeleteStore(id: string) {
     if (confirmDeleteId !== id) { setConfirmDeleteId(id); return }
@@ -502,17 +520,41 @@ function SettingsContent() {
               )}
             </div>
           </Row>
-          <Row label={tr.settings_int_facebook} desc={fbAccountId ? `Conta: ${fbAccountId}` : 'Marketing API v20'} last>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <StatusBadge connected={fbConnected === true} />
-              <a href="/api/facebook/auth"
-                style={{ padding: '5px 12px', fontSize: 11, fontWeight: 600, borderRadius: 7, border: '1px solid #8B5CF6',
-                  background: 'rgba(139,92,246,0.12)', color: '#A78BFA', textDecoration: 'none', whiteSpace: 'nowrap',
-                  cursor: 'pointer' }}>
-                {fbConnected ? 'Reconectar' : 'Conectar'}
-              </a>
+          <div style={{ padding: '12px 0', borderBottom: 'none' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: fbConnected ? 10 : 0 }}>
+              <div>
+                <p style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-primary)' }}>{tr.settings_int_facebook}</p>
+                <p style={{ fontSize: 11, color: 'var(--text-faint)', marginTop: 2 }}>Marketing API v20</p>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <StatusBadge connected={fbConnected === true} />
+                <a href="/api/facebook/auth"
+                  style={{ padding: '5px 12px', fontSize: 11, fontWeight: 600, borderRadius: 7, border: '1px solid #8B5CF6',
+                    background: 'rgba(139,92,246,0.12)', color: '#A78BFA', textDecoration: 'none', whiteSpace: 'nowrap' }}>
+                  {fbConnected ? 'Reconectar' : 'Conectar'}
+                </a>
+              </div>
             </div>
-          </Row>
+            {fbConnected && (
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <div style={{ position: 'relative', flex: 1, maxWidth: 280 }}>
+                  <input
+                    value={fbAccountIdDraft}
+                    onChange={e => setFbAccountIdDraft(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && saveFbAccountId()}
+                    placeholder="act_123456789 (ID da conta de anúncios)"
+                    style={{ width: '100%', background: 'var(--bg-input)', border: '1px solid var(--border-strong)', borderRadius: 7, padding: '6px 10px', fontSize: 12, color: 'var(--text-primary)', outline: 'none', boxSizing: 'border-box' }}
+                  />
+                </div>
+                <button
+                  onClick={saveFbAccountId}
+                  disabled={fbAccountIdSaving || !fbAccountIdDraft.trim()}
+                  style={{ padding: '6px 14px', fontSize: 11, fontWeight: 600, borderRadius: 7, border: '1px solid #8B5CF6', background: 'rgba(139,92,246,0.12)', color: '#A78BFA', cursor: 'pointer', whiteSpace: 'nowrap', opacity: fbAccountIdSaving ? 0.5 : 1 }}>
+                  {fbAccountIdSaving ? 'Salvando...' : fbAccountId === fbAccountIdDraft ? '✓ Salvo' : 'Salvar'}
+                </button>
+              </div>
+            )}
+          </div>
         </Section>
 
         {/* ── Extra Facebook Accounts ── */}
