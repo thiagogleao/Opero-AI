@@ -229,13 +229,14 @@ class FacebookCollector(BaseCollector):
         # toggled on/off in analysis without touching the primary account's rows.
         self._fb_ad_account_id_tag = fb_ad_account_id_tag
         _app_id = app_id or settings.facebook_app_id
-        # When using a tenant-supplied token we can only trust the app_secret if it
-        # was also explicitly supplied by that tenant. Falling back to the env-var
-        # secret for a different tenant's token generates a wrong appsecret_proof
-        # (HMAC of token with wrong secret), which Facebook rejects with error 100.
-        # Passing app_secret=None tells the SDK to skip the proof header entirely.
-        if access_token:
-            _app_secret = app_secret or None  # don't mix tenant token with env-var secret
+        # appsecret_proof = HMAC(token, app_secret) using the app that issued the token.
+        # All tenant tokens go through our own Facebook App (FACEBOOK_APP_ID), so our
+        # app_secret is always the correct one to use.
+        # The only exception: if a tenant explicitly passes a different app_id, they're
+        # using a separate Facebook App — in that case, skip the proof rather than use
+        # the wrong secret (Facebook would reject it with error 100).
+        if access_token and app_id and app_id != settings.facebook_app_id:
+            _app_secret = app_secret or None
         else:
             _app_secret = app_secret or settings.facebook_app_secret
         _token      = access_token or _refresh_token_if_needed()
