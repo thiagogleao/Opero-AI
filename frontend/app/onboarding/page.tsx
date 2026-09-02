@@ -185,12 +185,12 @@ function OnboardingInner() {
 
   const manualSteps = [
     'No admin da loja, vá em <strong style="color:#A1A1AA">Settings → Apps and sales channels</strong>.',
-    'Clique em <strong style="color:#A1A1AA">Develop apps</strong>. Se pedir, clique em <strong style="color:#A1A1AA">Allow custom app development</strong>.',
+    'Clique em <strong style="color:#A1A1AA">Develop apps</strong>. Se pedir permissão, clique em <strong style="color:#A1A1AA">Allow custom app development</strong>.',
     'Clique em <strong style="color:#A1A1AA">Create an app</strong>, dê um nome (ex: "Opero Finance") e confirme.',
-    'Na aba <strong style="color:#A1A1AA">Configuration → Admin API integration</strong>, ative esses escopos: <code style="background:rgba(139,92,246,0.15);padding:2px 6px;borderRadius:4px;fontSize:11px">read_orders, read_products, read_customers, read_analytics, read_inventory, read_locations, read_checkouts, read_price_rules</code>. Clique em <strong style="color:#A1A1AA">Save</strong>.',
-    'Clique em <strong style="color:#A1A1AA">Install app</strong> e confirme. Não precisa configurar nenhuma URL de redirect.',
-    'Na aba <strong style="color:#A1A1AA">API credentials</strong>, copie o <strong style="color:#A1A1AA">Admin API access token</strong> (começa com <code style="background:rgba(139,92,246,0.15);padding:2px 4px;borderRadius:4px;fontSize:11px">shpat_</code>). <strong style="color:#F59E0B">Aparece só uma vez — copie agora!</strong>',
-    'Cole o domínio e o token abaixo e clique em <strong style="color:#A1A1AA">Salvar e continuar →</strong>',
+    'Na aba <strong style="color:#A1A1AA">Configuration</strong>, preencha:<br/>• <strong style="color:#A1A1AA">App URL:</strong> <code style="background:rgba(139,92,246,0.15);padding:2px 6px;borderRadius:4px;fontSize:11px">https://opero-ai-production.up.railway.app</code><br/>• <strong style="color:#A1A1AA">Allowed redirection URL(s):</strong> <code style="background:rgba(139,92,246,0.15);padding:2px 6px;borderRadius:4px;fontSize:11px">https://opero-ai-production.up.railway.app/api/shopify/callback</code><br/>Clique em <strong style="color:#A1A1AA">Save</strong>.',
+    'Ainda em <strong style="color:#A1A1AA">Configuration → Admin API integration</strong>, ative os escopos: <code style="background:rgba(139,92,246,0.15);padding:2px 6px;borderRadius:4px;fontSize:11px">read_orders, read_products, read_customers, read_analytics, read_inventory, read_locations, read_checkouts, read_price_rules</code>. Clique em <strong style="color:#A1A1AA">Save</strong>.',
+    'Copie o <strong style="color:#A1A1AA">Client ID</strong> e o <strong style="color:#A1A1AA">Client Secret</strong> (começa com <code style="background:rgba(139,92,246,0.15);padding:2px 4px;borderRadius:4px;fontSize:11px">shpss_</code>) que aparecem na página.',
+    'Cole o domínio, Client ID e Client Secret abaixo e clique em <strong style="color:#A1A1AA">Conectar →</strong>. Você será redirecionado para o Shopify para instalar — clique em <strong style="color:#A1A1AA">Install</strong>.',
   ]
 
   const fbSteps = [
@@ -301,11 +301,11 @@ function OnboardingInner() {
                   ))}
                 </div>
 
-                {/* Manual / direct token flow */}
+                {/* Manual / custom app OAuth flow */}
                 {manualMode ? (
                   <>
                     <Tutorial
-                      title="Como gerar o Admin API access token (passo a passo)"
+                      title="Como criar o custom app e obter as credenciais"
                       steps={manualSteps}
                       open={tutorialOpen}
                       onToggle={() => setTutorialOpen(o => !o)}
@@ -315,18 +315,23 @@ function OnboardingInner() {
                       <input value={shopifyDomain} onChange={e => setShopifyDomain(e.target.value)} placeholder="minhaloja.myshopify.com" style={inputStyle} />
                       <p style={hintStyle}>Sem https://, apenas o domínio.</p>
                     </div>
+                    <div style={{ marginBottom: 16 }}>
+                      <label style={labelStyle}>Client ID</label>
+                      <input value={customClientId} onChange={e => setCustomClientId(e.target.value)} placeholder="2da05587a6046cd..." style={inputStyle} />
+                      <p style={hintStyle}>Encontrado na aba Configuration do app.</p>
+                    </div>
                     <div style={{ marginBottom: 20 }}>
-                      <label style={labelStyle}>Admin API access token</label>
-                      <input value={manualToken} onChange={e => setManualToken(e.target.value)} placeholder="shpat_..." type="password" style={inputStyle} />
-                      <p style={hintStyle}>Começa com <strong>shpat_</strong>. Gerado em Apps → Develop apps → API credentials.</p>
+                      <label style={labelStyle}>Client Secret</label>
+                      <input value={customClientSecret} onChange={e => setCustomClientSecret(e.target.value)} placeholder="shpss_..." type="password" style={inputStyle} />
+                      <p style={hintStyle}>Começa com <strong>shpss_</strong>. Encontrado na mesma aba.</p>
                     </div>
                     {error && <p style={{ fontSize: 12, color: '#F43F5E', marginBottom: 12 }}>{error}</p>}
                     <button
-                      onClick={saveManualToken}
-                      disabled={!shopifyDomain || !manualToken || loading}
-                      style={{ background: 'linear-gradient(135deg,#8B5CF6,#6D28D9)', border: 'none', borderRadius: 8, padding: '11px 0', fontSize: 14, fontWeight: 600, color: '#fff', cursor: (!shopifyDomain || !manualToken || loading) ? 'not-allowed' : 'pointer', opacity: (!shopifyDomain || !manualToken || loading) ? 0.4 : 1, width: '100%' }}
+                      onClick={connectManual}
+                      disabled={!shopifyDomain || !customClientId || !customClientSecret}
+                      style={{ background: 'linear-gradient(135deg,#8B5CF6,#6D28D9)', border: 'none', borderRadius: 8, padding: '11px 0', fontSize: 14, fontWeight: 600, color: '#fff', cursor: (!shopifyDomain || !customClientId || !customClientSecret) ? 'not-allowed' : 'pointer', opacity: (!shopifyDomain || !customClientId || !customClientSecret) ? 0.4 : 1, width: '100%' }}
                     >
-                      {loading ? 'Salvando...' : 'Salvar e continuar →'}
+                      Conectar →
                     </button>
                   </>
                 ) : (
