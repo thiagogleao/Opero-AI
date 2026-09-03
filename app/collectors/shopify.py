@@ -121,22 +121,32 @@ class ShopifyCollector(BaseCollector):
     # ------------------------------------------------------------------
 
     def _save_shop_timezone(self) -> None:
-        """Fetch IANA timezone from Shopify shop and persist to tenants table."""
+        """Fetch IANA timezone and store name from Shopify shop and persist to tenants table."""
         if not self.tenant_id:
             return
         try:
             shop = shopify.Shop.current()
             tz = getattr(shop, "iana_timezone", None) or getattr(shop, "timezone", None)
+            name = getattr(shop, "name", None)
+            updates = {}
             if tz:
+                updates["tz"] = tz
+            if name:
+                updates["name"] = name
+            if updates:
                 from sqlalchemy import text
+                set_clause = ", ".join(
+                    (["timezone = :tz"] if "tz" in updates else []) +
+                    (["shop_name = :name"] if "name" in updates else [])
+                )
                 self.session.execute(
-                    text("UPDATE tenants SET timezone = :tz WHERE id = :tid"),
-                    {"tz": tz, "tid": self.tenant_id},
+                    text(f"UPDATE tenants SET {set_clause} WHERE id = :tid"),
+                    {**updates, "tid": self.tenant_id},
                 )
                 self.session.commit()
-                logger.info("[shopify] Store timezone saved: %s", tz)
+                logger.info("[shopify] Store info saved: tz=%s name=%s", tz, name)
         except Exception as e:
-            logger.warning("[shopify] Could not fetch shop timezone: %s", e)
+            logger.warning("[shopify] Could not fetch shop info: %s", e)
 
     def _tz_bounds(self, d: date) -> tuple[str, str]:
         """Return (start, end) ISO 8601 strings for a date with the store's timezone offset.

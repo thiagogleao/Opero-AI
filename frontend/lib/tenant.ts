@@ -5,6 +5,7 @@ export interface Tenant {
   user_id: string     // Clerk user ID (owner of this store)
   email: string | null
   shopify_domain: string | null
+  shop_name: string | null
   shopify_access_token: string | null
   fb_ad_account_id: string | null
   fb_access_token: string | null

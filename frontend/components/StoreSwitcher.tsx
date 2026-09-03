@@ -5,11 +5,18 @@ import { useRouter } from 'next/navigation'
 interface Store {
   id: string
   shopify_domain: string | null
+  shop_name: string | null
 }
 
 interface Props {
   stores: Store[]
   activeStoreId: string
+}
+
+function storeLabel(store: Store): string {
+  if (store.shop_name) return store.shop_name
+  // Fallback: strip .myshopify.com suffix so at least it's shorter
+  return store.shopify_domain?.replace('.myshopify.com', '') ?? 'Loja conectada'
 }
 
 export default function StoreSwitcher({ stores, activeStoreId }: Props) {
@@ -60,7 +67,7 @@ export default function StoreSwitcher({ stores, activeStoreId }: Props) {
         }}
       >
         <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#10B981', display: 'inline-block' }} />
-        {loading ? 'Trocando...' : (active?.shopify_domain ?? 'Loja conectada')}
+        {loading ? 'Trocando...' : (active ? storeLabel(active) : 'Loja conectada')}
         <span style={{ fontSize: 9, opacity: 0.6, marginLeft: 2 }}>▾</span>
       </button>
 
@@ -94,7 +101,14 @@ export default function StoreSwitcher({ stores, activeStoreId }: Props) {
               }}>
                 {store.id === activeStoreId ? '✓' : ''}
               </span>
-              {store.shopify_domain ?? 'Loja sem domínio'}
+              <span style={{ flex: 1 }}>
+                {storeLabel(store)}
+                {store.shop_name && store.shopify_domain && (
+                  <span style={{ display: 'block', fontSize: 10, opacity: 0.5, fontWeight: 400 }}>
+                    {store.shopify_domain.replace('.myshopify.com', '')}
+                  </span>
+                )}
+              </span>
             </button>
           ))}
           <div style={{ borderTop: '1px solid var(--border)', marginTop: 4, paddingTop: 4 }}>

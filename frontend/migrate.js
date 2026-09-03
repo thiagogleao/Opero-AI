@@ -276,6 +276,8 @@ const sql = `
   );
 
   -- Add missing columns to existing tables (safe, idempotent)
+  ALTER TABLE tenants ADD COLUMN IF NOT EXISTS shop_name TEXT;
+
   ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS date_from              TEXT;
   ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS date_to                TEXT;
   ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS records_collected      INT DEFAULT 0;
