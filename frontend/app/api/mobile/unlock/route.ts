@@ -5,6 +5,27 @@ export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 /**
+ * Public origin of the app.
+ *
+ * Behind Railway's proxy `req.nextUrl.origin` is the container's own address
+ * (https://localhost:8080), so redirecting to it dead-ends the user's browser.
+ * The configured public URL is preferred because, unlike the forwarded host
+ * header, it cannot be set by the caller — which keeps this off the list of
+ * open-redirect footguns.
+ */
+function appOrigin(req: NextRequest): string {
+  const configured = process.env.NEXT_PUBLIC_APP_URL
+  if (configured) return configured.replace(/\/+$/, '')
+
+  const host = req.headers.get('x-forwarded-host') ?? req.headers.get('host')
+  if (host) {
+    const proto = req.headers.get('x-forwarded-proto')?.split(',')[0].trim() ?? 'https'
+    return `${proto}://${host}`
+  }
+  return req.nextUrl.origin
+}
+
+/**
  * Magic-link unlock: /api/mobile/unlock?k=<token>
  *
  * Exchanges the token for an HttpOnly session cookie and redirects to /m so
@@ -28,7 +49,7 @@ export async function GET(req: NextRequest) {
   const value = makeSessionCookie()
   if (!value) return new NextResponse('Not configured', { status: 500 })
 
-  const res = NextResponse.redirect(new URL('/m', req.nextUrl.origin))
+  const res = NextResponse.redirect(new URL('/m', appOrigin(req)))
   res.cookies.set(MOBILE_COOKIE, value, {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
