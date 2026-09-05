@@ -50,6 +50,9 @@ export async function GET(req: NextRequest) {
   if (!value) return new NextResponse('Not configured', { status: 500 })
 
   const res = NextResponse.redirect(new URL('/m', appOrigin(req)))
+  // Safari will happily reuse a remembered redirect target, which strands the
+  // user if this URL's destination ever changes. Never let it be cached.
+  res.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate')
   res.cookies.set(MOBILE_COOKIE, value, {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
