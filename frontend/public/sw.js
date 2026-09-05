@@ -35,7 +35,16 @@ self.addEventListener('push', event => {
     timestamp: Date.now(),
   }
 
-  event.waitUntil(self.registration.showNotification(title, options))
+  event.waitUntil(Promise.all([
+    self.registration.showNotification(title, options),
+    // Tell any open tab a sale landed, so it can chime and refresh right away
+    // instead of waiting up to a full poll interval to notice.
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(clients => {
+      for (const client of clients) {
+        client.postMessage({ type: 'sale', payload: payload.data || {} })
+      }
+    }),
+  ]))
 })
 
 self.addEventListener('notificationclick', event => {

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import Chart, { type Series } from './Chart'
+import { unlockAudio, playChaChing } from './sound'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -89,7 +90,14 @@ export default function Dashboard() {
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
   const [syncing, setSyncing] = useState(false)
+  const [sound, setSound] = useState(false)
   const first = useRef(true)
+  // Order ids already seen, so the chime fires once per genuinely new sale
+  // rather than on every poll that returns the same feed.
+  const seen = useRef<Set<string> | null>(null)
+  // Set when the service worker already chimed for this sale, so the refresh it
+  // triggers does not chime a second time for the same order.
+  const chimed = useRef(false)
 
   const qs = useCallback(() => {
     const p = new URLSearchParams({ period, store })
@@ -105,18 +113,67 @@ export default function Dashboard() {
     try {
       const res = await fetch(`/api/mobile?${qs()}`)
       if (!res.ok) throw new Error(String(res.status))
-      setData(await res.json()); setErr('')
+      const payload: Payload = await res.json()
+
+      const ids = new Set(payload.recentOrders.map(o => `${o.store}|${o.orderId}`))
+      // The first response seeds the baseline — otherwise opening the app would
+      // chime for every sale already in the feed.
+      if (seen.current) {
+        const fresh = [...ids].filter(id => !seen.current!.has(id)).length
+        if (fresh > 0 && !chimed.current) playChaChing()
+      }
+      chimed.current = false
+      seen.current = ids
+
+      setData(payload); setErr('')
     } catch { setErr('Falha ao carregar') }
     finally { setBusy(false); first.current = false }
   }, [qs, period, custom])
 
   useEffect(() => { load() }, [load])
 
+  // Restore the sound preference. iOS starts every AudioContext suspended and
+  // only a gesture can resume it, so when sound is already on we arm a one-shot
+  // listener and unlock on whatever the user touches first.
+  useEffect(() => {
+    let on = false
+    try { on = localStorage.getItem('opero_sound') === '1' } catch { /* private mode */ }
+    if (!on) return
+    setSound(true)
+    const arm = () => { unlockAudio(); window.removeEventListener('pointerdown', arm) }
+    window.addEventListener('pointerdown', arm, { once: true })
+    return () => window.removeEventListener('pointerdown', arm)
+  }, [])
+
+  function toggleSound() {
+    const next = !sound
+    setSound(next)
+    try { localStorage.setItem('opero_sound', next ? '1' : '0') } catch { /* private mode */ }
+    if (next && unlockAudio()) {
+      // Confirm audibly, and prove the context really resumed.
+      setTimeout(playChaChing, 60)
+    }
+  }
+
   useEffect(() => {
     const tick = () => { if (document.visibilityState === 'visible') load() }
     const id = setInterval(tick, 45_000)
     document.addEventListener('visibilitychange', tick)
     return () => { clearInterval(id); document.removeEventListener('visibilitychange', tick) }
+  }, [load])
+
+  // The service worker relays the push the moment it arrives, so an open app
+  // chimes together with the notification instead of on the next poll.
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return
+    const onMessage = (e: MessageEvent) => {
+      if (e.data?.type !== 'sale') return
+      chimed.current = true
+      playChaChing()
+      load()
+    }
+    navigator.serviceWorker.addEventListener('message', onMessage)
+    return () => navigator.serviceWorker.removeEventListener('message', onMessage)
   }, [load])
 
   /** Force a sync, then poll a few times while the collectors catch up. */
@@ -133,7 +190,7 @@ export default function Dashboard() {
   }
 
   if (!data && first.current) {
-    return <><Header syncing={false} onRefresh={() => {}} lastSyncAt={null} /><p style={{ color: 'var(--ink-3)', fontSize: 13 }}>Carregando…</p></>
+    return <><Header syncing={false} onRefresh={() => {}} lastSyncAt={null} sound={sound} onSound={toggleSound} /><p style={{ color: 'var(--ink-3)', fontSize: 13 }}>Carregando…</p></>
   }
 
   const t = data?.totals ?? { revenue: 0, profit: 0, orders: 0, adSpend: 0, cogs: 0, shipping: 0, fees: 0 }
@@ -144,7 +201,10 @@ export default function Dashboard() {
 
   return (
     <>
-      <Header syncing={syncing} onRefresh={refresh} lastSyncAt={data?.lastSyncAt ?? null} />
+      <Header
+        syncing={syncing} onRefresh={refresh} lastSyncAt={data?.lastSyncAt ?? null}
+        sound={sound} onSound={toggleSound}
+      />
 
       <StoreChips
         stores={data?.allStores ?? []} value={store} onChange={setStore}
@@ -226,8 +286,9 @@ export default function Dashboard() {
 
 // ─── Chrome ───────────────────────────────────────────────────────────────────
 
-function Header({ syncing, onRefresh, lastSyncAt }: {
+function Header({ syncing, onRefresh, lastSyncAt, sound, onSound }: {
   syncing: boolean; onRefresh: () => void; lastSyncAt: string | null
+  sound: boolean; onSound: () => void
 }) {
   return (
     <header style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 14 }}>
@@ -237,6 +298,20 @@ function Header({ syncing, onRefresh, lastSyncAt }: {
         <span style={{ fontSize: 10, color: 'var(--ink-3)' }}>· {timeAgo(lastSyncAt)}</span>
       )}
       <div style={{ flex: 1 }} />
+      <button
+        onClick={onSound}
+        aria-label={sound ? 'Desligar som de venda' : 'Ligar som de venda'}
+        aria-pressed={sound}
+        title="Toca um cha-ching quando entra venda com o app aberto"
+        style={{
+          background: sound ? 'rgba(16,185,129,0.14)' : 'transparent',
+          border: `1px solid ${sound ? 'rgba(16,185,129,0.3)' : 'var(--hairline)'}`,
+          borderRadius: 8, padding: '6px 8px', fontSize: 13,
+          lineHeight: 1, cursor: 'pointer',
+        }}
+      >
+        <span aria-hidden="true">{sound ? '🔊' : '🔇'}</span>
+      </button>
       <button
         onClick={onRefresh} disabled={syncing} aria-label="Atualizar dados"
         style={{
