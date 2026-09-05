@@ -3,6 +3,14 @@ const { Pool } = require('pg')
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://postgres:kcCpIhXXITFEtjGYpMkenUzkhdugnOpx@junction.proxy.rlwy.net:15981/railway',
   ssl: { rejectUnauthorized: false },
+  // start.sh runs this before Next.js, so a blocked migration blocks the whole
+  // boot and the platform healthcheck times out on a perfectly good build.
+  // DDL here takes locks on tables the Python collectors write to continuously
+  // (tenants, shopify_orders), so bound the wait instead of hanging forever:
+  // failing fast is safe because every statement is idempotent and the next
+  // deploy retries it.
+  connectionTimeoutMillis: 10_000,
+  options: '-c lock_timeout=8000 -c statement_timeout=30000',
 })
 
 const sql = `
