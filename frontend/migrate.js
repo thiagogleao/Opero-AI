@@ -275,6 +275,37 @@ const sql = `
     settings  JSONB NOT NULL DEFAULT '{}'
   );
 
+  -- ══════════════════════════════════════════════════════════════
+  -- Mobile PWA: web-push subscriptions + realtime order feed
+  -- ══════════════════════════════════════════════════════════════
+  CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id          BIGSERIAL PRIMARY KEY,
+    endpoint    TEXT UNIQUE NOT NULL,
+    p256dh      TEXT NOT NULL,
+    auth        TEXT NOT NULL,
+    user_agent  TEXT,
+    created_at  TIMESTAMPTZ DEFAULT NOW(),
+    last_used_at TIMESTAMPTZ
+  );
+
+  -- Orders delivered by the Shopify webhook. Separate from shopify_orders so a
+  -- webhook failure can never corrupt the analytics tables the dashboard reads.
+  CREATE TABLE IF NOT EXISTS live_orders (
+    id            BIGSERIAL PRIMARY KEY,
+    tenant_id     TEXT REFERENCES tenants(id),
+    order_id      TEXT NOT NULL,
+    order_number  TEXT,
+    total_price   NUMERIC,
+    currency      TEXT,
+    country_code  TEXT,
+    customer_name TEXT,
+    line_items    JSONB,
+    created_at    TIMESTAMPTZ,
+    received_at   TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (tenant_id, order_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_live_orders_received ON live_orders (received_at DESC);
+
   -- Add missing columns to existing tables (safe, idempotent)
   ALTER TABLE tenants ADD COLUMN IF NOT EXISTS shop_name TEXT;
 
