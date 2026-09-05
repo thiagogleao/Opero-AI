@@ -1,6 +1,7 @@
 import crypto from 'crypto'
 import { query } from '@/lib/db'
 import { sendPushToAll } from '@/lib/push'
+import { getProfitSummary } from '@/lib/profitCalc'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -49,6 +50,37 @@ const money = (v: number, currency: string) => {
   }
 }
 
+/** Compact USD for the notification body: $966 / $12.9K. */
+const compactUsd = (v: number) => {
+  const sign = v < 0 ? '-' : ''
+  const a = Math.abs(v)
+  if (a >= 10_000) return `${sign}$${(a / 1_000).toFixed(1)}K`
+  return `${sign}$${Math.round(a).toLocaleString('en-US')}`
+}
+
+/**
+ * This store's profit so far today, for the notification body.
+ *
+ * Shopify drops the delivery and retries if we take too long, so this is
+ * bounded and best-effort: a slow or failing profit query costs the extra
+ * line, never the notification itself. The newly inserted order is already
+ * in shopify_orders only after the next sync, so this reflects profit as of
+ * the last sync plus whatever else landed today.
+ */
+async function todayProfit(tenantId: string, tz: string): Promise<number | null> {
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: tz })
+  try {
+    const summary = await Promise.race([
+      getProfitSummary(tenantId, today, today),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 2000)),
+    ])
+    return summary.configured ? summary.netProfit : null
+  } catch (err) {
+    console.warn('[webhook] profit lookup skipped:', (err as Error).message)
+    return null
+  }
+}
+
 export async function POST(req: Request) {
   // Raw body is required for HMAC — read as text before parsing.
   const rawBody = await req.text()
@@ -70,8 +102,11 @@ export async function POST(req: Request) {
 
   // Resolve the store. Unknown domains are acknowledged (200) so Shopify
   // doesn't retry forever on a store we no longer track.
-  const tenants = await query<{ id: string; shop_name: string | null; shopify_domain: string }>(
-    `SELECT id, shop_name, shopify_domain FROM tenants WHERE shopify_domain = $1 LIMIT 1`,
+  const tenants = await query<{
+    id: string; shop_name: string | null; shopify_domain: string; timezone: string | null
+  }>(
+    `SELECT id, shop_name, shopify_domain, COALESCE(timezone, 'UTC') AS timezone
+     FROM tenants WHERE shopify_domain = $1 LIMIT 1`,
     [shopDomain]
   )
   const tenant = tenants[0]
@@ -122,13 +157,24 @@ export async function POST(req: Request) {
     ? `${units}× ${String(firstItem.title ?? 'item')}${lineItems.length > 1 ? ` +${lineItems.length - 1}` : ''}`
     : `${units} item(s)`
 
+  // Shopify's order name already carries the "#": fall back to building one.
+  const orderLabel = order.name
+    ? String(order.name)
+    : `#${order.order_number ?? orderId}`
+
+  const profit = await todayProfit(tenant.id, tenant.timezone ?? 'UTC')
+
   try {
     await sendPushToAll({
-      title: `💰 ${money(total, currency)} — ${storeName}`,
-      body: [itemLabel, country].filter(Boolean).join(' · '),
+      title: `💰 ${money(total, currency)} · ${orderLabel} — ${storeName}`,
+      body: [
+        profit !== null ? `Lucro hoje: ${compactUsd(profit)}` : null,
+        itemLabel,
+        country,
+      ].filter(Boolean).join(' · '),
       url: '/m',
       tag: `order-${tenant.id}-${orderId}`,
-      data: { tenantId: tenant.id, orderId, total, currency },
+      data: { tenantId: tenant.id, orderId, total, currency, profitToday: profit },
     })
   } catch (err) {
     // Never fail the webhook because a push failed — Shopify would retry and

@@ -524,7 +524,11 @@ export async function getProductMetrics(tenantId: string, dateFrom: string, date
   }>(`
     SELECT
       p.product_id,
-      COALESCE(p.title, oi.product_title, oi.title)  AS title,
+      -- oi.title is the last-resort name and is deliberately NOT grouped by:
+      -- adding it would split one product into a row per line-item variation.
+      -- MIN() makes the fallback a legal aggregate while keeping the grouping
+      -- exactly as it was. Without this the whole query errors out.
+      COALESCE(p.title, oi.product_title, MIN(oi.title)) AS title,
       p.image_url,
       COALESCE(SUM(oi.quantity), 0)                  AS units,
       COUNT(DISTINCT o.order_id)                     AS orders,
