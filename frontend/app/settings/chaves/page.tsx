@@ -38,8 +38,8 @@ function explainToken(raw: string): string | null {
   const t = raw.trim()
   if (!t) return null
 
-  if (t.startsWith('shpss_'))
-    return 'Essa é a API secret key do app — ela assina o OAuth e nunca abre a API sozinha. O que você precisa é o token de acesso da loja, que começa com shpat_ e aparece em API credentials depois de instalar o app.'
+  // shpss_ is handled separately — it drives the OAuth flow instead.
+  if (t.startsWith('shpss_')) return null
 
   if (t.startsWith('shpsa_') || t.startsWith('shppa_'))
     return 'Essa é uma chave do app, não o token de acesso da loja. Procure o campo Admin API access token, que começa com shpat_.'
@@ -81,8 +81,26 @@ export default function KeysPage() {
   const [stores,   setStores]   = useState<StoreHealth[] | null>(null)
   const [checking, setChecking] = useState(false)
   const [drafts,   setDrafts]   = useState<Record<string, string>>({})
+  const [apiKeys,  setApiKeys]  = useState<Record<string, string>>({})
   const [saving,   setSaving]   = useState<string | null>(null)
   const [result,   setResult]   = useState<Record<string, { ok: boolean; msg: string }>>({})
+
+  /** A shpss_ secret can't authenticate a request, but it is exactly what the
+   *  OAuth exchange needs to be signed with. Hand it to /api/shopify/auth,
+   *  which carries the pair through to the callback in a cookie, and let
+   *  Shopify mint a real access token at the end. */
+  function connectViaOAuth(store: StoreHealth) {
+    const secret = (drafts[store.id] ?? '').trim()
+    const key    = (apiKeys[store.id] ?? '').trim()
+    if (!store.domain || !secret || !key) return
+
+    const url = new URL('/api/shopify/auth', window.location.origin)
+    url.searchParams.set('shop', store.domain)
+    url.searchParams.set('reconnect', '1')
+    url.searchParams.set('clientId', key)
+    url.searchParams.set('clientSecret', secret)
+    window.location.href = url.toString()
+  }
 
   const check = useCallback(async () => {
     setChecking(true)
@@ -191,9 +209,11 @@ export default function KeysPage() {
               {stores.map(store => {
                 const needs = store.status === 'invalid' || store.status === 'missing'
                 const res   = result[store.id]
-                const draft = (drafts[store.id] ?? '').trim()
-                const hint  = explainToken(draft)
-                const ready = draft.length > 0 && !hint
+                const draft    = (drafts[store.id] ?? '').trim()
+                const isSecret = draft.startsWith('shpss_')
+                const hint     = explainToken(draft)
+                const ready    = draft.length > 0 && !hint && !isSecret
+                const keyDraft = (apiKeys[store.id] ?? '').trim()
                 return (
                   <div key={store.id}
                     style={{
@@ -259,6 +279,52 @@ export default function KeysPage() {
                       <p style={{ fontSize: 12, margin: '8px 0 0', color: '#F59E0B', lineHeight: 1.55 }}>
                         {hint}
                       </p>
+                    )}
+
+                    {/* shpss_ path — sign the OAuth exchange with the app secret */}
+                    {isSecret && store.domain && (
+                      <div style={{
+                        marginTop: 10, padding: 14, borderRadius: 8,
+                        background: 'rgba(139,92,246,0.06)', border: '1px solid rgba(139,92,246,0.22)',
+                      }}>
+                        <p style={{ fontSize: 12.5, color: 'var(--text-muted)', margin: 0, lineHeight: 1.6 }}>
+                          Essa é a <strong style={{ color: 'var(--text-primary)' }}>secret do app</strong>. Ela não
+                          autentica chamadas sozinha, mas assina a autorização — informe a API key do mesmo
+                          app e a Shopify emite o token de acesso no fim.
+                        </p>
+                        <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+                          <input
+                            id={`apikey-${store.id}`}
+                            type="text"
+                            autoComplete="off"
+                            spellCheck={false}
+                            placeholder="API key do app"
+                            value={apiKeys[store.id] ?? ''}
+                            onChange={e => setApiKeys(k => ({ ...k, [store.id]: e.target.value }))}
+                            onKeyDown={e => { if (e.key === 'Enter' && keyDraft) connectViaOAuth(store) }}
+                            style={{
+                              flex: '1 1 200px', minWidth: 0, background: 'var(--bg-input)',
+                              border: '1px solid var(--border-strong)', borderRadius: 7,
+                              padding: '7px 10px', fontSize: 12.5, color: 'var(--text-primary)',
+                              outline: 'none', fontFamily: 'ui-monospace, monospace',
+                            }} />
+                          <button
+                            onClick={() => connectViaOAuth(store)}
+                            disabled={!keyDraft}
+                            style={{
+                              padding: '7px 15px', fontSize: 12, fontWeight: 600, borderRadius: 7, border: 'none',
+                              background: keyDraft ? 'rgba(139,92,246,0.18)' : 'var(--bg-input)',
+                              color: keyDraft ? '#A78BFA' : 'var(--text-faint)',
+                              cursor: keyDraft ? 'pointer' : 'not-allowed', whiteSpace: 'nowrap',
+                            }}>
+                            Autorizar na Shopify
+                          </button>
+                        </div>
+                        <p style={{ fontSize: 11.5, color: 'var(--text-faint)', margin: '9px 0 0', lineHeight: 1.55 }}>
+                          A API key fica ao lado da secret, em API credentials, e não começa com <code style={{ fontFamily: 'ui-monospace, monospace' }}>shpss_</code>.
+                          Você vai para a Shopify autorizar e volta com a loja reconectada.
+                        </p>
+                      </div>
                     )}
 
                     {res?.msg && (
