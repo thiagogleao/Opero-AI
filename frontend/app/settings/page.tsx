@@ -511,6 +511,11 @@ function SettingsContent() {
           <Row label={tr.settings_int_shopify} desc={shopifyDomain || 'REST Admin API'}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <StatusBadge connected={!!shopifyDomain} />
+              <a href="/settings/chaves"
+                style={{ padding: '5px 12px', fontSize: 11, fontWeight: 600, borderRadius: 7, border: '1px solid var(--border-strong)',
+                  background: 'var(--bg-input)', color: 'var(--text-muted)', textDecoration: 'none', whiteSpace: 'nowrap' }}>
+                Atualizar chaves
+              </a>
               {shopifyDomain && (
                 <a href={`/api/shopify/auth?shop=${shopifyDomain}&reconnect=1`}
                   style={{ padding: '5px 12px', fontSize: 11, fontWeight: 600, borderRadius: 7, border: '1px solid #8B5CF6',
