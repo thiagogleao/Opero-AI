@@ -31,6 +31,28 @@ const STATUS_COLOR: Record<TokenStatus, { fg: string; bg: string; border: string
   unreachable: { fg: '#F59E0B', bg: 'rgba(245,158,11,0.10)', border: 'rgba(245,158,11,0.28)' },
 }
 
+/** Shopify hands out several key shapes and only one of them opens the Admin
+ *  API. Catching the common mix-ups here saves a round trip that would come
+ *  back as a bare "token inválido" and explain nothing. */
+function explainToken(raw: string): string | null {
+  const t = raw.trim()
+  if (!t) return null
+
+  if (t.startsWith('shpss_'))
+    return 'Essa é a API secret key do app — ela assina o OAuth e nunca abre a API sozinha. O que você precisa é o token de acesso da loja, que começa com shpat_ e aparece em API credentials depois de instalar o app.'
+
+  if (t.startsWith('shpsa_') || t.startsWith('shppa_'))
+    return 'Essa é uma chave do app, não o token de acesso da loja. Procure o campo Admin API access token, que começa com shpat_.'
+
+  if (/^[0-9a-f]{32}$/i.test(t))
+    return 'Isso parece a API key do app — 32 caracteres hexadecimais. O token de acesso é outro campo e começa com shpat_.'
+
+  if (!t.startsWith('shpat_') && !t.startsWith('shpca_'))
+    return 'O token de acesso da Shopify começa com shpat_. Confira se copiou o campo Admin API access token.'
+
+  return null
+}
+
 function Section({ title, delay = 0, children }: { title: string; delay?: number; children: React.ReactNode }) {
   return (
     <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay }}
@@ -169,6 +191,9 @@ export default function KeysPage() {
               {stores.map(store => {
                 const needs = store.status === 'invalid' || store.status === 'missing'
                 const res   = result[store.id]
+                const draft = (drafts[store.id] ?? '').trim()
+                const hint  = explainToken(draft)
+                const ready = draft.length > 0 && !hint
                 return (
                   <div key={store.id}
                     style={{
@@ -207,26 +232,33 @@ export default function KeysPage() {
                           placeholder="shpat_…"
                           value={drafts[store.id] ?? ''}
                           onChange={e => setDrafts(d => ({ ...d, [store.id]: e.target.value }))}
-                          onKeyDown={e => { if (e.key === 'Enter') save(store) }}
+                          onKeyDown={e => { if (e.key === 'Enter' && ready) save(store) }}
                           style={{
                             flex: '1 1 220px', minWidth: 0, background: 'var(--bg-input)',
-                            border: '1px solid var(--border-strong)', borderRadius: 7,
+                            border: `1px solid ${hint ? 'rgba(245,158,11,0.45)' : 'var(--border-strong)'}`,
+                            borderRadius: 7,
                             padding: '7px 10px', fontSize: 12.5, color: 'var(--text-primary)',
                             outline: 'none', fontFamily: 'ui-monospace, monospace',
                           }} />
                         <button
                           onClick={() => save(store)}
-                          disabled={saving === store.id || !(drafts[store.id] ?? '').trim()}
+                          disabled={saving === store.id || !ready}
                           style={{
                             padding: '7px 15px', fontSize: 12, fontWeight: 600, borderRadius: 7, border: 'none',
-                            background: (drafts[store.id] ?? '').trim() ? 'rgba(16,185,129,0.15)' : 'var(--bg-input)',
-                            color: (drafts[store.id] ?? '').trim() ? '#10B981' : 'var(--text-faint)',
-                            cursor: saving === store.id ? 'wait' : (drafts[store.id] ?? '').trim() ? 'pointer' : 'not-allowed',
+                            background: ready ? 'rgba(16,185,129,0.15)' : 'var(--bg-input)',
+                            color: ready ? '#10B981' : 'var(--text-faint)',
+                            cursor: saving === store.id ? 'wait' : ready ? 'pointer' : 'not-allowed',
                             whiteSpace: 'nowrap',
                           }}>
                           {saving === store.id ? 'Validando…' : 'Salvar chave'}
                         </button>
                       </div>
+                    )}
+
+                    {hint && (
+                      <p style={{ fontSize: 12, margin: '8px 0 0', color: '#F59E0B', lineHeight: 1.55 }}>
+                        {hint}
+                      </p>
                     )}
 
                     {res?.msg && (
@@ -245,14 +277,20 @@ export default function KeysPage() {
         <Section title="Onde gerar a chave" delay={0.06}>
           <ol style={{ margin: 0, paddingLeft: 20, fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.85 }}>
             <li>No admin da loja: <strong style={{ color: 'var(--text-primary)' }}>Settings → Apps and sales channels → Develop apps</strong></li>
-            <li>Abra o app usado pelo Opero</li>
-            <li>Aba <strong style={{ color: 'var(--text-primary)' }}>API credentials</strong> → <strong style={{ color: 'var(--text-primary)' }}>Admin API access token</strong> → <em>Reveal token once</em></li>
+            <li>Abra o app do Opero, ou <strong style={{ color: 'var(--text-primary)' }}>Create an app</strong> se ainda não existir nessa loja</li>
+            <li>Em <strong style={{ color: 'var(--text-primary)' }}>Configure Admin API scopes</strong>, marque ao menos <code style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11.5 }}>read_orders</code>, <code style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11.5 }}>read_products</code>, <code style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11.5 }}>read_customers</code>, <code style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11.5 }}>read_analytics</code>, <code style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11.5 }}>read_reports</code>, <code style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11.5 }}>read_fulfillments</code> → <strong style={{ color: 'var(--text-primary)' }}>Save</strong></li>
+            <li><strong style={{ color: 'var(--text-primary)' }}>Install app</strong></li>
+            <li>Aba <strong style={{ color: 'var(--text-primary)' }}>API credentials</strong> → <strong style={{ color: 'var(--text-primary)' }}>Admin API access token</strong> → <em>Reveal token once</em> → começa com <code style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11.5 }}>shpat_</code></li>
             <li>Cole aqui, na loja correspondente</li>
           </ol>
           <p style={{ fontSize: 12.5, color: 'var(--text-faint)', margin: '14px 0 0', lineHeight: 1.6 }}>
-            A chave só aparece <strong>uma vez</strong>. Se já foi revelada e ninguém copiou, é preciso
-            rotacionar de novo para gerar outra. A chave é validada na Shopify antes de ser gravada —
-            se estiver errada, nada é salvo.
+            O token só aparece <strong>uma vez</strong>. Se já foi revelado e ninguém copiou, desinstale e
+            instale o app de novo para gerar outro. Ele é validado na Shopify antes de ser gravado — se
+            estiver errado, nada é salvo.
+          </p>
+          <p style={{ fontSize: 12.5, color: 'var(--text-faint)', margin: '10px 0 0', lineHeight: 1.6 }}>
+            Um app por loja mantém as credenciais isoladas: rotacionar ou reinstalar numa loja não
+            derruba as outras.
           </p>
         </Section>
 
