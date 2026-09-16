@@ -16,6 +16,18 @@ export interface Tenant {
   created_at: string
 }
 
+/** The only store fields the UI needs. Tenants carry access tokens, which must
+ *  never cross into a client component's props. */
+export interface StoreOption {
+  id: string
+  shop_name: string | null
+  shopify_domain: string | null
+}
+
+export function toStoreOptions(tenants: Tenant[]): StoreOption[] {
+  return tenants.map(t => ({ id: t.id, shop_name: t.shop_name, shopify_domain: t.shopify_domain }))
+}
+
 /** Get a single store/tenant by its store ID. */
 export async function getTenant(storeId: string): Promise<Tenant | null> {
   const rows = await query<Tenant>(

@@ -11,6 +11,10 @@ interface Store {
 interface Props {
   stores: Store[]
   activeStoreId: string
+  /** Offer the account-wide dashboard — only meaningful with 2+ stores. */
+  showOverview?: boolean
+  /** We are on the account-wide dashboard right now. */
+  overviewActive?: boolean
 }
 
 function storeLabel(store: Store): string {
@@ -19,7 +23,7 @@ function storeLabel(store: Store): string {
   return store.shopify_domain?.replace('.myshopify.com', '') ?? 'Loja conectada'
 }
 
-export default function StoreSwitcher({ stores, activeStoreId }: Props) {
+export default function StoreSwitcher({ stores, activeStoreId, showOverview, overviewActive }: Props) {
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -36,7 +40,7 @@ export default function StoreSwitcher({ stores, activeStoreId }: Props) {
   }, [])
 
   async function switchStore(storeId: string) {
-    if (storeId === activeStoreId) { setOpen(false); return }
+    if (storeId === activeStoreId && !overviewActive) { setOpen(false); return }
     setLoading(true)
     setOpen(false)
     await fetch('/api/active-store', {
@@ -44,7 +48,17 @@ export default function StoreSwitcher({ stores, activeStoreId }: Props) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ storeId }),
     })
-    router.refresh()
+    // Coming from the account view there is no single-store page to refresh yet.
+    if (overviewActive) router.push('/')
+    else router.refresh()
+    setLoading(false)
+  }
+
+  function openOverview() {
+    if (overviewActive) { setOpen(false); return }
+    setLoading(true)
+    setOpen(false)
+    router.push('/overview')
     setLoading(false)
   }
 
@@ -66,8 +80,10 @@ export default function StoreSwitcher({ stores, activeStoreId }: Props) {
           transition: 'border-color 0.15s',
         }}
       >
-        <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#10B981', display: 'inline-block' }} />
-        {loading ? 'Trocando...' : (active ? storeLabel(active) : 'Loja conectada')}
+        <span style={{ width: 7, height: 7, borderRadius: '50%', background: overviewActive ? '#8B5CF6' : '#10B981', display: 'inline-block' }} />
+        {loading ? 'Trocando...'
+          : overviewActive ? 'Todas as lojas'
+          : (active ? storeLabel(active) : 'Loja conectada')}
         <span style={{ fontSize: 9, opacity: 0.6, marginLeft: 2 }}>▾</span>
       </button>
 
@@ -78,28 +94,62 @@ export default function StoreSwitcher({ stores, activeStoreId }: Props) {
           borderRadius: 10, padding: 6, minWidth: 220,
           boxShadow: '0 8px 24px rgba(0,0,0,0.3)',
         }}>
+          {showOverview && stores.length > 1 && (
+            <>
+              <p style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-faint)', letterSpacing: '0.08em', textTransform: 'uppercase', padding: '4px 8px 6px' }}>
+                Conta inteira
+              </p>
+              <button
+                onClick={openOverview}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8, width: '100%',
+                  background: overviewActive ? 'rgba(139,92,246,0.1)' : 'transparent',
+                  border: 'none', borderRadius: 6, padding: '8px 10px', cursor: 'pointer',
+                  color: overviewActive ? '#A78BFA' : 'var(--text-primary)',
+                  fontSize: 12, fontWeight: overviewActive ? 600 : 400, textAlign: 'left',
+                }}
+              >
+                <span style={{
+                  width: 16, height: 16, borderRadius: 4, background: 'rgba(139,92,246,0.2)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, flexShrink: 0,
+                }}>
+                  {overviewActive ? '✓' : '∑'}
+                </span>
+                <span style={{ flex: 1 }}>
+                  Todas as lojas
+                  <span style={{ display: 'block', fontSize: 10, opacity: 0.5, fontWeight: 400 }}>
+                    Lucro somado das {stores.length} lojas
+                  </span>
+                </span>
+              </button>
+              <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0' }} />
+            </>
+          )}
           {stores.length > 0 && (
             <p style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-faint)', letterSpacing: '0.08em', textTransform: 'uppercase', padding: '4px 8px 6px' }}>
               Suas lojas
             </p>
           )}
-          {stores.map(store => (
+          {stores.map(store => {
+            // On the account view no single store is the one being shown.
+            const current = store.id === activeStoreId && !overviewActive
+            return (
             <button
               key={store.id}
               onClick={() => switchStore(store.id)}
               style={{
                 display: 'flex', alignItems: 'center', gap: 8, width: '100%',
-                background: store.id === activeStoreId ? 'rgba(139,92,246,0.1)' : 'transparent',
+                background: current ? 'rgba(139,92,246,0.1)' : 'transparent',
                 border: 'none', borderRadius: 6, padding: '8px 10px', cursor: 'pointer',
-                color: store.id === activeStoreId ? '#A78BFA' : 'var(--text-primary)',
-                fontSize: 12, fontWeight: store.id === activeStoreId ? 600 : 400, textAlign: 'left',
+                color: current ? '#A78BFA' : 'var(--text-primary)',
+                fontSize: 12, fontWeight: current ? 600 : 400, textAlign: 'left',
               }}
             >
               <span style={{
                 width: 16, height: 16, borderRadius: 4, background: 'rgba(139,92,246,0.2)',
                 display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, flexShrink: 0,
               }}>
-                {store.id === activeStoreId ? '✓' : ''}
+                {current ? '✓' : ''}
               </span>
               <span style={{ flex: 1 }}>
                 {storeLabel(store)}
@@ -110,7 +160,8 @@ export default function StoreSwitcher({ stores, activeStoreId }: Props) {
                 )}
               </span>
             </button>
-          ))}
+            )
+          })}
           <div style={{ borderTop: '1px solid var(--border)', marginTop: 4, paddingTop: 4 }}>
             <a
               href="/onboarding?addStore=true"

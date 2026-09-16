@@ -2,8 +2,9 @@ import { Suspense } from 'react'
 import { cookies } from 'next/headers'
 import { auth } from '@clerk/nextjs/server'
 import { redirect } from 'next/navigation'
-import { getTenant, getTenantsByUserId } from '@/lib/tenant'
+import { getTenant, getTenantsByUserId, toStoreOptions } from '@/lib/tenant'
 import { getActiveTenantId } from '@/lib/activeStore'
+import { accountStores } from '@/lib/accountOverview'
 import StoreSwitcher from '@/components/StoreSwitcher'
 import {
   getOverviewMetrics, getDailyRevenue, getDailyRoas,
@@ -53,6 +54,9 @@ export default async function Dashboard({ searchParams }: Props) {
     stores = await getTenantsByUserId(userId!)
     storeTimezone = await getTenantTimezone(tid)
   } catch { /* use defaults */ }
+
+  // The account-wide view is only offered to users running more than one store.
+  const multiStore = accountStores(stores).length > 1
 
   const sp = await searchParams
   const cookieStore = await cookies()
@@ -516,7 +520,7 @@ ${promptLang.formatNote}`
             <Suspense>
               <TimeframeSelector from={dateFrom} to={dateTo} />
             </Suspense>
-            <StoreSwitcher stores={stores} activeStoreId={tid} />
+            <StoreSwitcher stores={toStoreOptions(stores)} activeStoreId={tid} showOverview={multiStore} />
           </div>
         </div>
 
