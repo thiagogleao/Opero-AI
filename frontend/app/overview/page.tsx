@@ -9,6 +9,8 @@ import AccountOverview from '@/components/AccountOverview'
 import StoreSwitcher from '@/components/StoreSwitcher'
 import TimeframeSelector from '@/components/TimeframeSelector'
 import Sidebar from '@/components/Sidebar'
+import RefreshButton from '@/components/RefreshButton'
+import AutoSync from '@/components/AutoSync'
 
 export const revalidate = 0
 
@@ -86,6 +88,8 @@ export default async function AccountOverviewPage({ searchParams }: Props) {
           </div>
 
           <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+            <AutoSync lastSyncIso={data.lastSyncIso} />
+            <RefreshButton />
             <Suspense>
               <TimeframeSelector from={dateFrom} to={dateTo} />
             </Suspense>
