@@ -45,7 +45,7 @@ function explainToken(raw: string): string | null {
     return 'Essa é uma chave do app, não o token de acesso da loja. Procure o campo Admin API access token, que começa com shpat_.'
 
   if (/^[0-9a-f]{32}$/i.test(t))
-    return 'Isso parece a API key do app — 32 caracteres hexadecimais. O token de acesso é outro campo e começa com shpat_.'
+    return 'Isso parece o Client ID do app. Cole a Client secret (shpss_) aqui e o Client ID no campo que vai aparecer.'
 
   if (!t.startsWith('shpat_') && !t.startsWith('shpca_'))
     return 'O token de acesso da Shopify começa com shpat_. Confira se copiou o campo Admin API access token.'
@@ -249,7 +249,7 @@ export default function KeysPage() {
                           type="password"
                           autoComplete="off"
                           spellCheck={false}
-                          placeholder="shpat_…"
+                          placeholder="shpss_… ou shpat_…"
                           value={drafts[store.id] ?? ''}
                           onChange={e => setDrafts(d => ({ ...d, [store.id]: e.target.value }))}
                           onKeyDown={e => { if (e.key === 'Enter' && ready) save(store) }}
@@ -288,9 +288,9 @@ export default function KeysPage() {
                         background: 'rgba(139,92,246,0.06)', border: '1px solid rgba(139,92,246,0.22)',
                       }}>
                         <p style={{ fontSize: 12.5, color: 'var(--text-muted)', margin: 0, lineHeight: 1.6 }}>
-                          Essa é a <strong style={{ color: 'var(--text-primary)' }}>secret do app</strong>. Ela não
-                          autentica chamadas sozinha, mas assina a autorização — informe a API key do mesmo
-                          app e a Shopify emite o token de acesso no fim.
+                          Essa é a <strong style={{ color: 'var(--text-primary)' }}>Client secret</strong> do app. Ela não
+                          autentica chamadas sozinha, mas assina a autorização — informe o <strong style={{ color: 'var(--text-primary)' }}>Client ID</strong> do
+                          mesmo app e a Shopify emite o token de acesso no fim.
                         </p>
                         <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
                           <input
@@ -298,7 +298,7 @@ export default function KeysPage() {
                             type="text"
                             autoComplete="off"
                             spellCheck={false}
-                            placeholder="API key do app"
+                            placeholder="Client ID"
                             value={apiKeys[store.id] ?? ''}
                             onChange={e => setApiKeys(k => ({ ...k, [store.id]: e.target.value }))}
                             onKeyDown={e => { if (e.key === 'Enter' && keyDraft) connectViaOAuth(store) }}
@@ -321,8 +321,8 @@ export default function KeysPage() {
                           </button>
                         </div>
                         <p style={{ fontSize: 11.5, color: 'var(--text-faint)', margin: '9px 0 0', lineHeight: 1.55 }}>
-                          A API key fica ao lado da secret, em API credentials, e não começa com <code style={{ fontFamily: 'ui-monospace, monospace' }}>shpss_</code>.
-                          Você vai para a Shopify autorizar e volta com a loja reconectada.
+                          O Client ID fica logo acima da Client secret, na mesma tela do app. Você vai para
+                          a Shopify autorizar e volta com a loja reconectada.
                         </p>
                       </div>
                     )}
@@ -346,14 +346,22 @@ export default function KeysPage() {
             <li>Abra o app do Opero, ou <strong style={{ color: 'var(--text-primary)' }}>Create an app</strong> se ainda não existir nessa loja</li>
             <li>Em <strong style={{ color: 'var(--text-primary)' }}>Configure Admin API scopes</strong>, marque ao menos <code style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11.5 }}>read_orders</code>, <code style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11.5 }}>read_products</code>, <code style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11.5 }}>read_customers</code>, <code style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11.5 }}>read_analytics</code>, <code style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11.5 }}>read_reports</code>, <code style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11.5 }}>read_fulfillments</code> → <strong style={{ color: 'var(--text-primary)' }}>Save</strong></li>
             <li><strong style={{ color: 'var(--text-primary)' }}>Install app</strong></li>
-            <li>Aba <strong style={{ color: 'var(--text-primary)' }}>API credentials</strong> → <strong style={{ color: 'var(--text-primary)' }}>Admin API access token</strong> → <em>Reveal token once</em> → começa com <code style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11.5 }}>shpat_</code></li>
+            <li>Aba <strong style={{ color: 'var(--text-primary)' }}>API credentials</strong> e copie o que estiver lá</li>
             <li>Cole aqui, na loja correspondente</li>
           </ol>
           <p style={{ fontSize: 12.5, color: 'var(--text-faint)', margin: '14px 0 0', lineHeight: 1.6 }}>
-            O token só aparece <strong>uma vez</strong>. Se já foi revelado e ninguém copiou, desinstale e
-            instale o app de novo para gerar outro. Ele é validado na Shopify antes de ser gravado — se
-            estiver errado, nada é salvo.
+            Você vai encontrar uma de duas coisas, e a página aceita as duas:
           </p>
+          <ul style={{ margin: '8px 0 0', paddingLeft: 20, fontSize: 12.5, color: 'var(--text-faint)', lineHeight: 1.7 }}>
+            <li>
+              <strong style={{ color: 'var(--text-muted)' }}>Admin API access token</strong> (<code style={{ fontFamily: 'ui-monospace, monospace' }}>shpat_</code>) —
+              é gravado direto. Só aparece uma vez; se já foi revelado e ninguém copiou, reinstale o app.
+            </li>
+            <li>
+              <strong style={{ color: 'var(--text-muted)' }}>Client ID e Client secret</strong> (<code style={{ fontFamily: 'ui-monospace, monospace' }}>shpss_</code>) —
+              cole a secret e a página pede o Client ID, depois a Shopify emite o token pra você.
+            </li>
+          </ul>
           <p style={{ fontSize: 12.5, color: 'var(--text-faint)', margin: '10px 0 0', lineHeight: 1.6 }}>
             Um app por loja mantém as credenciais isoladas: rotacionar ou reinstalar numa loja não
             derruba as outras.
