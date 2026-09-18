@@ -141,20 +141,26 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
   let totalPackaging = 0
   let totalPerOrderExtras = 0
   let totalAdditionalUnitSavings = 0
+  // Order-driven costs totalled per day, so the chart can price each day from
+  // its own orders instead of smearing the period average across all of them.
+  const costByDay = new Map<string, number>()
 
   for (const order of orders) {
     const revenue = Number(order.total_price)
     const totalUnits = order.items.reduce((s, i) => s + i.units, 0)
+    const shopifyFee = revenue * (cfg.shopify.transaction_fee_pct / 100)
+    const paymentFee = revenue * (cfg.shopify.payment_processing_pct / 100)
+                     + cfg.shopify.payment_processing_fixed
 
     totalRevenue       += revenue
-    totalShopifyFees   += revenue * (cfg.shopify.transaction_fee_pct / 100)
-    totalPaymentFees   += revenue * (cfg.shopify.payment_processing_pct / 100)
-                        + cfg.shopify.payment_processing_fixed
+    totalShopifyFees   += shopifyFee
+    totalPaymentFees   += paymentFee
     // A rate card in force on this order's date prices the whole order, so it
     // replaces both the per-unit cost and the additional-unit discount.
     const tier = tierForDate(cfg, order.order_date)
+    let orderCogs = 0
     if (tier) {
-      totalCogs += tierOrderCost(totalUnits, tier)
+      orderCogs = tierOrderCost(totalUnits, tier)
     } else if (hasProductCogs) {
       for (const item of order.items) {
         const perUnitCost = item.product_id && productCogs.has(item.product_id)
@@ -162,17 +168,25 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
           : item.product_title && titleCogs.has(item.product_title)
             ? titleCogs.get(item.product_title)!
             : cfg.cogs.default_cost_usd
-        totalCogs += perUnitCost * item.units
+        orderCogs += perUnitCost * item.units
       }
     } else {
-      totalCogs += calcCogs(totalUnits, cfg)
+      orderCogs = calcCogs(totalUnits, cfg)
     }
+    const shipping = getShippingCost(order.country_code, cfg)
+    const saving = (!tier && totalUnits > 1 && addlUnitDiscount > 0)
+      ? (totalUnits - 1) * addlUnitDiscount
+      : 0
+
+    totalCogs          += orderCogs
     totalPackaging     += cfg.cogs.packaging_cost_usd
-    totalShipping      += getShippingCost(order.country_code, cfg)
+    totalShipping      += shipping
     totalPerOrderExtras += perOrderExtras
-    if (!tier && totalUnits > 1 && addlUnitDiscount > 0) {
-      totalAdditionalUnitSavings += (totalUnits - 1) * addlUnitDiscount
-    }
+    totalAdditionalUnitSavings += saving
+
+    const orderCost = shopifyFee + paymentFee + orderCogs
+                    + cfg.cogs.packaging_cost_usd + shipping + perOrderExtras - saving
+    costByDay.set(order.order_date, (costByDay.get(order.order_date) ?? 0) + orderCost)
   }
 
   const orderCount      = orders.length
@@ -202,15 +216,22 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
   const fbByDate: Record<string, number> = {}
   for (const r of dailyFbRows) fbByDate[r.date] = Number(r.spend)
 
+  // Monthly and annual costs belong to no single day, so they stay spread.
+  // Everything an order drives is charged to the day that order landed on.
+  const fixedPerDay = proratedExtras / days
+
   const dailyData = dailyRevRows.map(r => {
     const rev = Number(r.revenue)
     const fb  = fbByDate[r.date] ?? 0
-    const allocatedNonFb = totalRevenue > 0 ? (rev / totalRevenue) * nonFbCosts : 0
-    const profit = rev - allocatedNonFb - fb
+    const own = costByDay.get(r.date.slice(0, 10))
+    const nonFb = own !== undefined
+      ? own + fixedPerDay
+      : (totalRevenue > 0 ? (rev / totalRevenue) * nonFbCosts : 0)
+    const profit = rev - nonFb - fb
     return {
       date:    r.date,
       revenue: Math.round(rev * 100) / 100,
-      costs:   Math.round((allocatedNonFb + fb) * 100) / 100,
+      costs:   Math.round((nonFb + fb) * 100) / 100,
       profit:  Math.round(profit * 100) / 100,
     }
   })
