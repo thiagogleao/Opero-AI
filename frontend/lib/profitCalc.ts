@@ -208,7 +208,9 @@ export async function getProfitSummary(
     WHERE o.tenant_id = $1
       AND (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date BETWEEN $2::date AND $3::date
       AND o.financial_status NOT IN ('refunded', 'voided')
-    GROUP BY o.order_id, o.total_price, o.country_code, order_date, oi.product_id, oi.product_title, oi.quantity
+    -- oi.id keeps two identical lines of the same product apart. Without it the
+    -- GROUP BY collapses them into one and the order silently loses a unit.
+    GROUP BY o.order_id, o.total_price, o.country_code, order_date, oi.id, oi.product_id, oi.product_title, oi.quantity
   `, [tenantId, dateFrom, dateTo])
 
   // Group by order_id so we can compute per-order totals
@@ -324,7 +326,24 @@ export async function getDailyProfitData(
     return { configured: summary.configured, dailyData: [] }
   }
 
+  // Kept as the fallback for days whose orders we cannot price individually.
   const nonFbCostRatio = (summary.totalCosts - summary.fbSpend) / summary.totalRevenue
+
+  const cfgRows = await query<{ value: ProfitConfig }>(
+    `SELECT settings AS value FROM profit_settings WHERE tenant_id = $1`,
+    [tenantId]
+  )
+  const cfg = cfgRows[0]?.value
+  if (!cfg) return { configured: false, dailyData: [] }
+
+  const windowDays = Math.max(1, Math.round(
+    (new Date(dateTo).getTime() - new Date(dateFrom).getTime()) / 86400000
+  ) + 1)
+  const monthlyExtras = (cfg.extra_costs ?? [])
+    .filter(e => e.frequency === 'monthly').reduce((s, e) => s + e.amount_usd, 0)
+  const annualExtras = (cfg.extra_costs ?? [])
+    .filter(e => e.frequency === 'annual').reduce((s, e) => s + e.amount_usd, 0)
+  const fixedPerDay = (monthlyExtras * (windowDays / 30) + annualExtras * (windowDays / 365)) / windowDays
 
   const colExists = await hasFbAccountColumn()
   const inactiveIds = colExists ? await getInactiveExtraAccountIds(tenantId) : []
@@ -355,12 +374,26 @@ export async function getDailyProfitData(
     colExists ? [tenantId, dateFrom, dateTo, inactiveIds] : [tenantId, dateFrom, dateTo]
   )
 
+  // Real per-day COGS. Spreading the period's average cost ratio over every day
+  // assumes each day has the same product mix and the same supplier prices,
+  // and neither holds: a day full of 12-unit orders is cheaper per dollar than
+  // a day of singles, and a rate card that changes mid-window makes the average
+  // wrong on both sides of the change. Pricing each day's own orders is the
+  // only way the chart agrees with the same day viewed on its own.
+  const dayCosts = await perDayOrderCosts(tenantId, dateFrom, dateTo, cfg)
+
   const dailyData: DailyProfitPoint[] = dailyRows
     .filter(r => Number(r.revenue) > 0 || Number(r.spend) > 0)
     .map(r => {
       const rev = Number(r.revenue)
       const fb = Number(r.spend)
-      const profit = rev - rev * nonFbCostRatio - fb
+      // dailyRows dates come from generate_series and carry a time part
+      // ("2026-09-17 00:00:00+00"); the cost map is keyed by plain date.
+      const own = dayCosts.get(r.date.slice(0, 10))
+      // Fixed monthly/annual costs still have to be spread — they belong to no
+      // single day — but everything driven by orders is now that day's own.
+      const nonFb = own !== undefined ? own + fixedPerDay : rev * nonFbCostRatio
+      const profit = rev - nonFb - fb
       const margin = rev > 0 ? Math.round((profit / rev) * 1000) / 10 : null
       return {
         date: r.date,
@@ -372,6 +405,87 @@ export async function getDailyProfitData(
     })
 
   return { configured: true, dailyData }
+}
+
+/** Order-driven costs — fees, COGS, packaging, shipping, per-order extras —
+ *  totalled for each day in the window, priced with the rate card in force on
+ *  that day. Days with no orders are simply absent from the map. */
+async function perDayOrderCosts(
+  tenantId: string,
+  dateFrom: string,
+  dateTo: string,
+  cfg: ProfitConfig
+): Promise<Map<string, number>> {
+  const rows = await query<{
+    order_id: string; total_price: string; country_code: string | null; order_date: string
+    product_id: string | null; product_title: string | null; product_units: string
+  }>(`
+    SELECT o.order_id, o.total_price::text, o.country_code,
+           (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date::text AS order_date,
+           oi.product_id, oi.product_title,
+           COALESCE(oi.quantity, 1)::text AS product_units
+    FROM shopify_orders o
+    JOIN tenants t ON t.id = o.tenant_id
+    LEFT JOIN shopify_order_items oi ON oi.order_id = o.order_id AND (oi.tenant_id IS NULL OR oi.tenant_id = o.tenant_id)
+    WHERE o.tenant_id = $1
+      AND (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date BETWEEN $2::date AND $3::date
+      AND o.financial_status NOT IN ('refunded', 'voided')
+  `, [tenantId, dateFrom, dateTo])
+
+  const productCogs = new Map<string, number>()
+  const titleCogs = new Map<string, number>()
+  for (const p of (cfg.cogs.products ?? [])) {
+    if (p.product_id && p.cost_usd > 0) productCogs.set(p.product_id, p.cost_usd)
+    if (p.name && p.cost_usd > 0) titleCogs.set(p.name, p.cost_usd)
+  }
+  const hasProductCogs = productCogs.size > 0
+
+  const perOrderExtras = (cfg.extra_costs ?? [])
+    .filter(e => e.frequency === 'per_order').reduce((s, e) => s + e.amount_usd, 0)
+  const addlDiscount = cfg.cogs.additional_unit_discount_usd ?? 0
+
+  type Ord = { total_price: string; country_code: string | null; order_date: string; items: { product_id: string | null; product_title: string | null; units: number }[] }
+  const orderMap = new Map<string, Ord>()
+  for (const row of rows) {
+    if (!orderMap.has(row.order_id)) {
+      orderMap.set(row.order_id, { total_price: row.total_price, country_code: row.country_code, order_date: row.order_date, items: [] })
+    }
+    orderMap.get(row.order_id)!.items.push({ product_id: row.product_id, product_title: row.product_title, units: Number(row.product_units) })
+  }
+
+  const byDay = new Map<string, number>()
+  for (const order of orderMap.values()) {
+    const revenue = Number(order.total_price)
+    const units = order.items.reduce((s, i) => s + i.units, 0)
+
+    let cost = revenue * (cfg.shopify.transaction_fee_pct / 100)
+             + revenue * (cfg.shopify.payment_processing_pct / 100)
+             + cfg.shopify.payment_processing_fixed
+             + cfg.cogs.packaging_cost_usd
+             + getShippingCost(order.country_code, cfg)
+             + perOrderExtras
+
+    const tier = tierForDate(cfg, order.order_date)
+    if (tier) {
+      cost += tierOrderCost(units, tier)
+    } else if (hasProductCogs) {
+      for (const item of order.items) {
+        const perUnit = item.product_id && productCogs.has(item.product_id)
+          ? productCogs.get(item.product_id)!
+          : item.product_title && titleCogs.has(item.product_title)
+            ? titleCogs.get(item.product_title)!
+            : cfg.cogs.default_cost_usd
+        cost += perUnit * item.units
+      }
+      if (units > 1 && addlDiscount > 0) cost -= (units - 1) * addlDiscount
+    } else {
+      cost += calcCogs(units, cfg)
+      if (units > 1 && addlDiscount > 0) cost -= (units - 1) * addlDiscount
+    }
+
+    byDay.set(order.order_date, (byDay.get(order.order_date) ?? 0) + cost)
+  }
+  return byDay
 }
 
 export async function getCountryProfit(
