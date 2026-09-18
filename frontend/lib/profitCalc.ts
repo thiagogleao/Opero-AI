@@ -2,6 +2,22 @@ import { query } from './db'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+/** A supplier price list that takes over on `effective_from` and stays in force
+ *  until a later one starts. Prices are quoted per *order*, keyed by unit
+ *  count — not per unit — because consolidated shipping is what makes the
+ *  marginal unit cheap, and that curve is not a flat discount per extra item.
+ *  Orders before the earliest tier keep using default_cost_usd and the
+ *  additional-unit discount, so history is never rewritten. */
+export interface CogsPriceTier {
+  /** YYYY-MM-DD, inclusive. Compared against the order date in store time. */
+  effective_from: string
+  label?: string
+  /** Unit count → total cost of an order with exactly that many units. */
+  order_prices: Record<string, number>
+  /** Cost of each unit past the largest listed step. */
+  extra_unit_usd: number
+}
+
 export interface ProfitConfig {
   shopify: {
     transaction_fee_pct: number
@@ -18,6 +34,7 @@ export interface ProfitConfig {
       discount_value: number
     }[]
     products: { product_id: string; name: string; cost_usd: number }[]
+    price_tiers?: CogsPriceTier[]
   }
   shipping: {
     default_rate_usd: number
@@ -49,6 +66,41 @@ function getShippingCost(countryCode: string | null, cfg: ProfitConfig): number 
   if (!countryCode) return cfg.shipping.default_rate_usd
   return cfg.shipping.rates.find(r => r.country_code === countryCode)?.cost_usd
     ?? cfg.shipping.default_rate_usd
+}
+
+/** The tier in force on `orderDate`, or null when the order predates every
+ *  tier. Dates are plain YYYY-MM-DD strings, so string comparison is date
+ *  comparison. */
+function tierForDate(cfg: ProfitConfig, orderDate: string): CogsPriceTier | null {
+  let best: CogsPriceTier | null = null
+  for (const t of cfg.cogs.price_tiers ?? []) {
+    if (!t?.effective_from || orderDate < t.effective_from) continue
+    if (!best || t.effective_from > best.effective_from) best = t
+  }
+  return best
+}
+
+/** Total supplier cost of one order under a tier. Unlisted counts above the
+ *  largest step extend at extra_unit_usd; below the smallest step we fall back
+ *  to it rather than inventing a cheaper price. */
+function tierOrderCost(units: number, tier: CogsPriceTier): number {
+  const steps = Object.keys(tier.order_prices)
+    .map(Number)
+    .filter(n => Number.isFinite(n) && n > 0)
+    .sort((a, b) => a - b)
+  if (steps.length === 0) return 0
+
+  const exact = tier.order_prices[String(units)]
+  if (exact !== undefined) return exact
+
+  const top = steps[steps.length - 1]
+  if (units > top) {
+    return tier.order_prices[String(top)] + (units - top) * (tier.extra_unit_usd ?? 0)
+  }
+  // Between listed steps, or below the smallest one: charge the next step up,
+  // which is what the supplier's rate card does.
+  const next = steps.find(s => s > units) ?? steps[0]
+  return tier.order_prices[String(next)]
 }
 
 function calcCogs(units: number, cfg: ProfitConfig): number {
@@ -141,10 +193,11 @@ export async function getProfitSummary(
   }
 
   const orders = await query<{
-    order_id: string; total_price: string; country_code: string | null
+    order_id: string; total_price: string; country_code: string | null; order_date: string
     total_units: string; product_id: string | null; product_title: string | null; product_units: string
   }>(`
     SELECT o.order_id, o.total_price::text, o.country_code,
+           (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date::text AS order_date,
            COALESCE(SUM(oi.quantity), 1)::text AS total_units,
            oi.product_id,
            oi.product_title,
@@ -155,14 +208,14 @@ export async function getProfitSummary(
     WHERE o.tenant_id = $1
       AND (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date BETWEEN $2::date AND $3::date
       AND o.financial_status NOT IN ('refunded', 'voided')
-    GROUP BY o.order_id, o.total_price, o.country_code, oi.product_id, oi.product_title, oi.quantity
+    GROUP BY o.order_id, o.total_price, o.country_code, order_date, oi.product_id, oi.product_title, oi.quantity
   `, [tenantId, dateFrom, dateTo])
 
   // Group by order_id so we can compute per-order totals
-  const orderMap = new Map<string, { total_price: string; country_code: string | null; items: { product_id: string | null; product_title: string | null; units: number }[] }>()
+  const orderMap = new Map<string, { total_price: string; country_code: string | null; order_date: string; items: { product_id: string | null; product_title: string | null; units: number }[] }>()
   for (const row of orders) {
     if (!orderMap.has(row.order_id)) {
-      orderMap.set(row.order_id, { total_price: row.total_price, country_code: row.country_code, items: [] })
+      orderMap.set(row.order_id, { total_price: row.total_price, country_code: row.country_code, order_date: row.order_date, items: [] })
     }
     orderMap.get(row.order_id)!.items.push({ product_id: row.product_id, product_title: row.product_title, units: Number(row.product_units) })
   }
@@ -199,8 +252,14 @@ export async function getProfitSummary(
     totalRevenue       += revenue
     totalShopifyFees   += revenue * (cfg.shopify.transaction_fee_pct / 100)
     totalPaymentFees   += revenue * (cfg.shopify.payment_processing_pct / 100) + cfg.shopify.payment_processing_fixed
-    // Per-product COGS if configured, otherwise fall back to default volume-discount calc
-    if (hasProductCogs) {
+    // A price tier in force on this order's date is the supplier's own rate
+    // card and already prices the whole order, so it replaces both the
+    // per-unit cost and the additional-unit discount rather than stacking.
+    const tier = tierForDate(cfg, order.order_date)
+    if (tier) {
+      totalCogs += tierOrderCost(totalUnits, tier)
+    } else if (hasProductCogs) {
+      // Per-product COGS if configured, otherwise fall back to default volume-discount calc
       for (const item of order.items) {
         const perUnitCost = item.product_id && productCogs.has(item.product_id)
           ? productCogs.get(item.product_id)!
@@ -215,7 +274,7 @@ export async function getProfitSummary(
     totalPackaging     += cfg.cogs.packaging_cost_usd
     totalShipping      += getShippingCost(order.country_code, cfg)
     totalPerOrderExtras += perOrderExtras
-    if (totalUnits > 1 && addlDiscount > 0)
+    if (!tier && totalUnits > 1 && addlDiscount > 0)
       totalAdditionalUnitSavings += (totalUnits - 1) * addlDiscount
   }
 
@@ -404,7 +463,13 @@ export async function getCountryProfit(
     const fees     = revenue * ((cfg.shopify.transaction_fee_pct + cfg.shopify.payment_processing_pct) / 100)
                    + orders * cfg.shopify.payment_processing_fixed
     // Apply COGS per average order size (not aggregate) to avoid triggering volume discounts incorrectly
-    const cogsPerOrder = calcCogs(avgUnits, cfg) + cfg.cogs.packaging_cost_usd
+    // This breakdown works from each country's average order, not from single
+    // orders, so it can only pick one tier: the one in force at the end of the
+    // window. Across a period that straddles a price change it lands between
+    // the two, which is the same approximation avgUnits already makes.
+    const periodTier = tierForDate(cfg, dateTo)
+    const cogsPerOrder = (periodTier ? tierOrderCost(Math.max(1, Math.round(avgUnits)), periodTier) : calcCogs(avgUnits, cfg))
+      + cfg.cogs.packaging_cost_usd
     const cogs     = cogsPerOrder * orders
     const shipping = orders * getShippingCost(country, cfg)
     // Per-order extras + prorated fixed costs allocated by order share
