@@ -71,7 +71,7 @@ function getShippingCost(countryCode: string | null, cfg: ProfitConfig): number 
 /** The tier in force on `orderDate`, or null when the order predates every
  *  tier. Dates are plain YYYY-MM-DD strings, so string comparison is date
  *  comparison. */
-function tierForDate(cfg: ProfitConfig, orderDate: string): CogsPriceTier | null {
+export function tierForDate(cfg: ProfitConfig, orderDate: string): CogsPriceTier | null {
   let best: CogsPriceTier | null = null
   for (const t of cfg.cogs.price_tiers ?? []) {
     if (!t?.effective_from || orderDate < t.effective_from) continue
@@ -83,7 +83,7 @@ function tierForDate(cfg: ProfitConfig, orderDate: string): CogsPriceTier | null
 /** Total supplier cost of one order under a tier. Unlisted counts above the
  *  largest step extend at extra_unit_usd; below the smallest step we fall back
  *  to it rather than inventing a cheaper price. */
-function tierOrderCost(units: number, tier: CogsPriceTier): number {
+export function tierOrderCost(units: number, tier: CogsPriceTier): number {
   const steps = Object.keys(tier.order_prices)
     .map(Number)
     .filter(n => Number.isFinite(n) && n > 0)

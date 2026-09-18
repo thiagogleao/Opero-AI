@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server'
 import { auth } from '@clerk/nextjs/server'
 import { query } from '@/lib/db'
 import { getActiveTenantId } from '@/lib/activeStore'
+import { tierForDate, tierOrderCost, type CogsPriceTier } from '@/lib/profitCalc'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -22,6 +23,7 @@ export interface ProfitConfig {
       discount_value: number
     }[]
     products: { product_id: string; name: string; cost_usd: number }[]
+    price_tiers?: CogsPriceTier[]
   }
   shipping: {
     default_rate_usd: number
@@ -71,11 +73,13 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
     order_id: string
     total_price: string
     country_code: string | null
+    order_date: string
     product_id: string | null
     product_title: string | null
     product_units: string
   }>(`
     SELECT o.order_id, o.total_price::text, o.country_code,
+           (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date::text AS order_date,
            oi.product_id,
            oi.product_title,
            COALESCE(oi.quantity, 1)::text AS product_units
@@ -88,10 +92,10 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
   `, [tenantId, dateFrom, dateTo])
 
   // Group rows into orders
-  const orderMap = new Map<string, { total_price: string; country_code: string | null; items: { product_id: string | null; product_title: string | null; units: number }[] }>()
+  const orderMap = new Map<string, { total_price: string; country_code: string | null; order_date: string; items: { product_id: string | null; product_title: string | null; units: number }[] }>()
   for (const row of rows) {
     if (!orderMap.has(row.order_id)) {
-      orderMap.set(row.order_id, { total_price: row.total_price, country_code: row.country_code, items: [] })
+      orderMap.set(row.order_id, { total_price: row.total_price, country_code: row.country_code, order_date: row.order_date, items: [] })
     }
     orderMap.get(row.order_id)!.items.push({ product_id: row.product_id, product_title: row.product_title, units: Number(row.product_units) })
   }
@@ -146,7 +150,12 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
     totalShopifyFees   += revenue * (cfg.shopify.transaction_fee_pct / 100)
     totalPaymentFees   += revenue * (cfg.shopify.payment_processing_pct / 100)
                         + cfg.shopify.payment_processing_fixed
-    if (hasProductCogs) {
+    // A rate card in force on this order's date prices the whole order, so it
+    // replaces both the per-unit cost and the additional-unit discount.
+    const tier = tierForDate(cfg, order.order_date)
+    if (tier) {
+      totalCogs += tierOrderCost(totalUnits, tier)
+    } else if (hasProductCogs) {
       for (const item of order.items) {
         const perUnitCost = item.product_id && productCogs.has(item.product_id)
           ? productCogs.get(item.product_id)!
@@ -161,7 +170,7 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
     totalPackaging     += cfg.cogs.packaging_cost_usd
     totalShipping      += getShippingCost(order.country_code, cfg)
     totalPerOrderExtras += perOrderExtras
-    if (totalUnits > 1 && addlUnitDiscount > 0) {
+    if (!tier && totalUnits > 1 && addlUnitDiscount > 0) {
       totalAdditionalUnitSavings += (totalUnits - 1) * addlUnitDiscount
     }
   }

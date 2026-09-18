@@ -21,10 +21,32 @@ interface VolumeDiscount {
 interface ShippingRate { country_code: string; name: string; cost_usd: number }
 interface ExtraCost    { name: string; amount_usd: number; frequency: 'monthly' | 'per_order' | 'annual' }
 interface ProductCogs  { product_id: string; name: string; cost_usd: number }
+interface PriceTier    { effective_from: string; label?: string; order_prices: Record<string, number>; extra_unit_usd: number }
+
+/** Turn "3 = 19" lines into { "3": 19 }. Accepts =, :, tab or spaces as the
+ *  separator so a list pasted from the supplier's message usually just works. */
+function parseTierText(text: string): Record<string, number> {
+  const out: Record<string, number> = {}
+  for (const line of text.split('\n')) {
+    const m = line.trim().match(/^(\d+)\s*[-=:\t ]\s*\$?\s*([\d.,]+)/)
+    if (!m) continue
+    const units = parseInt(m[1], 10)
+    const price = parseFloat(m[2].replace(',', '.'))
+    if (units > 0 && Number.isFinite(price)) out[String(units)] = price
+  }
+  return out
+}
+
+function tierToText(prices: Record<string, number>): string {
+  return Object.keys(prices)
+    .map(Number).filter(n => n > 0).sort((a, b) => a - b)
+    .map(n => `${n} = ${prices[String(n)]}`)
+    .join('\n')
+}
 
 interface ProfitConfig {
   shopify: { transaction_fee_pct: number; payment_processing_pct: number; payment_processing_fixed: number }
-  cogs: { default_cost_usd: number; packaging_cost_usd: number; additional_unit_discount_usd: number; volume_discounts: VolumeDiscount[]; products: ProductCogs[] }
+  cogs: { default_cost_usd: number; packaging_cost_usd: number; additional_unit_discount_usd: number; volume_discounts: VolumeDiscount[]; products: ProductCogs[]; price_tiers?: PriceTier[] }
   shipping: { default_rate_usd: number; rates: ShippingRate[] }
   extra_costs: ExtraCost[]
 }
@@ -319,6 +341,90 @@ function ProfitModuleInner() {
                 )}
               </div>
             </Field>
+
+            {/* Supplier rate card, effective from a date */}
+            <div style={{ marginBottom: 16, paddingBottom: 14, borderBottom: '1px solid #1E2028' }}>
+              <label style={{ fontSize: 11, color: '#71717A', fontWeight: 500 }}>
+                Tabela do fornecedor <span style={{ color: '#3F3F46' }}>— preço do pedido inteiro por quantidade, a partir de uma data</span>
+              </label>
+              <p style={{ fontSize: 10.5, color: '#52525B', margin: '5px 0 10px', lineHeight: 1.5 }}>
+                Substitui o custo por produto e o desconto por unidade adicional, mas só nos pedidos
+                feitos a partir da data de vigência. Pedidos anteriores continuam como estão.
+              </p>
+
+              {(config.cogs.price_tiers ?? []).map((tier, i) => (
+                <div key={i} style={{ border: '1px solid #2A2D38', borderRadius: 8, padding: 12, marginBottom: 8, background: '#0B0D0F' }}>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: 10 }}>
+                    <div>
+                      <span style={{ display: 'block', fontSize: 10, color: '#52525B', marginBottom: 3 }}>Vigente a partir de</span>
+                      <input type="date" value={tier.effective_from}
+                        onChange={e => {
+                          const n = [...(config.cogs.price_tiers ?? [])]
+                          n[i] = { ...n[i], effective_from: e.target.value }
+                          upd('cogs.price_tiers', n)
+                        }}
+                        style={{ background: '#0B0D0F', border: '1px solid #2A2D38', borderRadius: 6, padding: '5px 8px', color: '#E4E4E7', fontSize: 12, outline: 'none' }} />
+                    </div>
+                    <div>
+                      <span style={{ display: 'block', fontSize: 10, color: '#52525B', marginBottom: 3 }}>Unidade extra</span>
+                      <input type="number" step={0.01} value={tier.extra_unit_usd}
+                        onChange={e => {
+                          const n = [...(config.cogs.price_tiers ?? [])]
+                          n[i] = { ...n[i], extra_unit_usd: parseFloat(e.target.value) || 0 }
+                          upd('cogs.price_tiers', n)
+                        }}
+                        style={{ width: 80, background: '#0B0D0F', border: '1px solid #2A2D38', borderRadius: 6, padding: '5px 8px', color: '#E4E4E7', fontSize: 12, outline: 'none' }} />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <span style={{ display: 'block', fontSize: 10, color: '#52525B', marginBottom: 3 }}>Nome</span>
+                      <input type="text" value={tier.label ?? ''} placeholder="ex: Yunsu consolidado"
+                        onChange={e => {
+                          const n = [...(config.cogs.price_tiers ?? [])]
+                          n[i] = { ...n[i], label: e.target.value }
+                          upd('cogs.price_tiers', n)
+                        }}
+                        style={{ width: '100%', minWidth: 120, background: '#0B0D0F', border: '1px solid #2A2D38', borderRadius: 6, padding: '5px 8px', color: '#E4E4E7', fontSize: 12, outline: 'none' }} />
+                    </div>
+                    <button onClick={() => upd('cogs.price_tiers', (config.cogs.price_tiers ?? []).filter((_, j) => j !== i))}
+                      style={{ background: 'none', border: 'none', color: '#52525B', cursor: 'pointer', fontSize: 14, padding: '5px 4px' }}>✕</button>
+                  </div>
+
+                  <span style={{ display: 'block', fontSize: 10, color: '#52525B', marginBottom: 3 }}>
+                    Preços — uma linha por quantidade, no formato <code>3 = 19</code>
+                  </span>
+                  <textarea
+                    rows={6}
+                    defaultValue={tierToText(tier.order_prices ?? {})}
+                    onBlur={e => {
+                      const n = [...(config.cogs.price_tiers ?? [])]
+                      n[i] = { ...n[i], order_prices: parseTierText(e.target.value) }
+                      upd('cogs.price_tiers', n)
+                    }}
+                    style={{
+                      width: '100%', boxSizing: 'border-box', background: '#0B0D0F',
+                      border: '1px solid #2A2D38', borderRadius: 6, padding: '7px 9px',
+                      color: '#E4E4E7', fontSize: 12, outline: 'none', resize: 'vertical',
+                      fontFamily: 'ui-monospace, monospace', lineHeight: 1.6,
+                    }} />
+                  <p style={{ fontSize: 10.5, color: '#52525B', margin: '6px 0 0' }}>
+                    {Object.keys(tier.order_prices ?? {}).length} faixas ·
+                    acima da maior, cada unidade extra custa ${(tier.extra_unit_usd ?? 0).toFixed(2)}
+                  </p>
+                </div>
+              ))}
+
+              <button
+                onClick={() => upd('cogs.price_tiers', [
+                  ...(config.cogs.price_tiers ?? []),
+                  { effective_from: new Date().toISOString().slice(0, 10), label: '', order_prices: {}, extra_unit_usd: 0 },
+                ])}
+                style={{
+                  padding: '5px 11px', fontSize: 11, fontWeight: 600, borderRadius: 6,
+                  border: '1px solid #2A2D38', background: '#0B0D0F', color: '#A1A1AA', cursor: 'pointer',
+                }}>
+                + Tabela de preços
+              </button>
+            </div>
 
             {/* Volume discounts */}
             <div style={{ marginBottom: 8 }}>
