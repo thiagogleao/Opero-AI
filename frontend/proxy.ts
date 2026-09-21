@@ -16,6 +16,9 @@ const isPublicRoute = createRouteMatcher([
   '/m(.*)',
   '/api/mobile(.*)',
   '/api/push(.*)',
+  // Same deal for the Opero Finance desktop app: it spans every store, so it
+  // cannot use a partner-shared Clerk account. It reuses MOBILE_ACCESS_TOKEN.
+  '/api/desktop(.*)',
 ])
 
 export default clerkMiddleware(async (auth, request) => {

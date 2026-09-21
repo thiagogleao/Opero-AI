@@ -13,3 +13,9 @@ frontend/.env.local
 # Misc
 .DS_Store
 *.log
+
+# Opero Finance (Electron)
+desktop-app/node_modules/
+desktop-app/out/
+desktop-app/dist-installer/
+desktop-app/*.tsbuildinfo
