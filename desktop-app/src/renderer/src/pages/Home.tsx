@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react'
+import { useCallback, useEffect, useState, useMemo } from 'react'
 import {
   AreaChart, Area, BarChart, Bar, ComposedChart, Line,
   XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine, Cell
@@ -511,42 +511,61 @@ export default function Home() {
   const [period, setPeriod]   = useState<PeriodKey>('7d')
   const [split, setSplit]     = useState(false)
 
-  useEffect(() => {
-    window.api.getState().then(s => { if (s.split50) setSplit(true) }).catch(() => null)
-    if (hit) return
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshErr, setRefreshErr] = useState<string | null>(null)
+
+  const load = useCallback(async (isRefresh = false) => {
+    // This page keeps its own five-minute copy on top of the main process
+    // cache, so a refresh has to drop both or the button does nothing.
+    if (isRefresh) {
+      _cache = null
+      setRefreshing(true)
+      await window.api.refreshCache().catch(() => null)
+    } else {
+      setLoading(true)
+    }
 
     const periodEntries = PERIODS.map(k => [k, periodDates(k)] as [PeriodKey, ReturnType<typeof periodDates>])
-    ;(async () => {
-      try {
-        const tenants = await window.api.getTenants()
-        const results = await Promise.all([
-          window.api.getAlerts(),
-          ...tenants.map(t => window.api.getDailyData(t.id, 90)),
-          ...periodEntries.flatMap(([, d]) => [
-            window.api.getAllStoresStats(d.cFrom, d.cTo),
-            window.api.getAllStoresStats(d.pFrom, d.pTo),
-          ]),
-        ])
+    try {
+      const tenants = await window.api.getTenants()
+      const results = await Promise.all([
+        window.api.getAlerts(),
+        ...tenants.map(t => window.api.getDailyData(t.id, 90)),
+        ...periodEntries.flatMap(([, d]) => [
+          window.api.getAllStoresStats(d.cFrom, d.cTo),
+          window.api.getAllStoresStats(d.pFrom, d.pTo),
+        ]),
+      ])
 
-        const alerts = results[0] as Alert[]
-        const daily: Record<string, DailyPoint[]> = {}
-        tenants.forEach((t, i) => { daily[t.id] = results[1 + i] as DailyPoint[] })
+      const alerts = results[0] as Alert[]
+      const daily: Record<string, DailyPoint[]> = {}
+      tenants.forEach((t, i) => { daily[t.id] = results[1 + i] as DailyPoint[] })
 
-        const statsFlat = results.slice(1 + tenants.length) as StoreStats[][]
-        const stats: Record<PeriodKey, PeriodStats> = {} as any
-        periodEntries.forEach(([k], i) => {
-          stats[k] = { curr: statsFlat[i * 2] ?? [], prev: statsFlat[i * 2 + 1] ?? [] }
-        })
+      const statsFlat = results.slice(1 + tenants.length) as StoreStats[][]
+      const stats: Record<PeriodKey, PeriodStats> = {} as any
+      periodEntries.forEach(([k], i) => {
+        stats[k] = { curr: statsFlat[i * 2] ?? [], prev: statsFlat[i * 2 + 1] ?? [] }
+      })
 
-        const c: HomeCache = { tenants, alerts, daily, stats, ts: Date.now() }
-        _cache = c
-        setData(c)
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Erro ao carregar dados')
-      } finally {
-        setLoading(false)
-      }
-    })()
+      const c: HomeCache = { tenants, alerts, daily, stats, ts: Date.now() }
+      _cache = c
+      setData(c)
+      setRefreshErr(null)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erro ao carregar dados'
+      // A failed refresh must not throw away numbers already on screen — it
+      // just marks the button, so you can see the figures are the old ones.
+      if (isRefresh) setRefreshErr(msg)
+      else setError(msg)
+    } finally {
+      setLoading(false)
+      setRefreshing(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    window.api.getState().then(s => { if (s.split50) setSplit(true) }).catch(() => null)
+    if (!hit) load()
   }, [])
 
   function toggleSplit() {
@@ -562,7 +581,7 @@ export default function Home() {
           <>
             <span style={{ color: '#ef4444', fontSize: 14 }}>Erro ao conectar ao banco de dados</span>
             <span style={{ color: '#555', fontSize: 12 }}>{error}</span>
-            <button onClick={() => { _cache = null; setError(null); setLoading(true); window.location.reload() }}
+            <button onClick={() => { _cache = null; setError(null); load() }}
               style={{ marginTop: 8, padding: '6px 16px', borderRadius: 6, background: '#1e1e2a', color: '#aaa', fontSize: 12, cursor: 'pointer', border: '1px solid #2a2a3a' }}>
               Tentar novamente
             </button>
@@ -609,6 +628,25 @@ export default function Home() {
           <div style={{ fontSize: 12, color: '#555', marginTop: 2 }}>{todayStr}</div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <button onClick={() => load(true)} disabled={refreshing}
+            title={refreshErr
+              ? `Falha ao atualizar: ${refreshErr}`
+              : `Dados de ${new Date(data.ts).toLocaleTimeString('pt-BR')}`}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6, padding: '5px 11px',
+              borderRadius: 8, fontSize: 12, fontWeight: 600,
+              border: `1px solid ${refreshErr ? '#ef4444' : '#1e1e2a'}`,
+              background: '#0e0e16',
+              color: refreshErr ? '#ef4444' : '#555',
+              cursor: refreshing ? 'default' : 'pointer', whiteSpace: 'nowrap',
+              opacity: refreshing ? 0.6 : 1,
+            }}>
+            <span style={{
+              fontSize: 13, lineHeight: 1,
+              animation: refreshing ? 'spin 0.7s linear infinite' : undefined,
+            }}>⟳</span>
+            {refreshing ? 'Atualizando...' : 'Atualizar'}
+          </button>
           <button onClick={toggleSplit} title={split ? 'Ver lucro total' : 'Ver apenas sua parte (50%)'} style={{
             display: 'flex', alignItems: 'center', gap: 6, padding: '5px 11px',
             borderRadius: 8, fontSize: 12, fontWeight: 600,
