@@ -189,9 +189,18 @@ def main():
                     for extra in extra_rows:
                         print(f"  [facebook-extra] Collecting account {extra.fb_ad_account_id}...")
                         try:
+                            # Carry the tenant's Meta app credentials over. Without
+                            # them the collector falls back to the default app's
+                            # secret and signs the call with the wrong key, which
+                            # Facebook rejects: "Invalid appsecret_proof" (code
+                            # 100). A tenant on a separate Meta app has no secret
+                            # here, and the collector then skips the proof — which
+                            # is exactly what a token from another app needs.
                             extra_creds = {
                                 "fb_access_token": extra.fb_access_token,
                                 "fb_ad_account_id": extra.fb_ad_account_id,
+                                "facebook_app_id": (creds or {}).get("facebook_app_id"),
+                                "facebook_app_secret": (creds or {}).get("facebook_app_secret"),
                             }
                             run_facebook(
                                 date_from, date_to, session,
