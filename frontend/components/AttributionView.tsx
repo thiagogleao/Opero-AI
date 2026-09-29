@@ -3,7 +3,11 @@ import { useState } from 'react'
 import Link from 'next/link'
 import { makeFmt } from '@/lib/format'
 import { useSettings } from '@/contexts/SettingsContext'
-import { MODELS, type Model, type CreativeAttribution, type SourceRow, type JourneyOrder, type Coverage } from '@/lib/attributionModels'
+import {
+  MODELS, JOURNEY_FILTERS,
+  type Model, type JourneyFilter, type CreativeAttribution,
+  type SourceRow, type JourneyOrder, type Coverage,
+} from '@/lib/attributionModels'
 
 interface Props {
   coverage: Coverage
@@ -11,12 +15,13 @@ interface Props {
   sources: SourceRow[]
   journeys: JourneyOrder[]
   model: Model
+  journeyTotal: number
   dateFrom: string
   dateTo: string
 }
 
 export default function AttributionView({
-  coverage, creatives, sources, journeys, model, dateFrom, dateTo,
+  coverage, creatives, sources, journeys, model, journeyTotal, dateFrom, dateTo,
 }: Props) {
   const { currency } = useSettings()
   const fmt = makeFmt(currency)
@@ -91,9 +96,13 @@ export default function AttributionView({
         <CreativeTable creatives={creatives} fmt={fmt} />
       </Section>
 
-      <Section title="Jornadas recentes" hint="Clique num pedido para ver o caminho completo">
-        <JourneyList journeys={journeys} fmt={fmt} />
-      </Section>
+      <JourneyReader
+        initial={journeys}
+        total={journeyTotal}
+        dateFrom={dateFrom}
+        dateTo={dateTo}
+        fmt={fmt}
+      />
     </>
   )
 }
@@ -277,9 +286,115 @@ function CreativeTable({ creatives, fmt }: { creatives: CreativeAttribution[]; f
 
 // ─── Journeys ─────────────────────────────────────────────────────────────────
 
+/**
+ * The order reader: every order in the period, searchable and filterable,
+ * each one expanding into the path that led to it.
+ *
+ * The first page arrives with the server render so the section is useful
+ * immediately; anything beyond that is fetched as asked for, because these
+ * stores take thousands of orders a month and none of them belong in the
+ * initial payload.
+ */
+function JourneyReader({ initial, total, dateFrom, dateTo, fmt }: {
+  initial: JourneyOrder[]
+  total: number
+  dateFrom: string
+  dateTo: string
+  fmt: (n: number) => string
+}) {
+  const [orders, setOrders] = useState(initial)
+  const [count, setCount] = useState(total)
+  const [filter, setFilter] = useState<JourneyFilter>('all')
+  const [search, setSearch] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [hasMore, setHasMore] = useState(initial.length < total)
+
+  async function load(opts: { filter: JourneyFilter; search: string; offset: number }) {
+    setLoading(true)
+    try {
+      const qs = new URLSearchParams({
+        from: dateFrom, to: dateTo, filter: opts.filter,
+        search: opts.search, offset: String(opts.offset), limit: '30',
+      })
+      const page = await fetch(`/api/journeys/orders?${qs}`).then(r => r.json())
+      setOrders(opts.offset === 0 ? page.orders : [...orders, ...page.orders])
+      setCount(page.total)
+      setHasMore(page.hasMore)
+    } catch { /* the list simply does not grow */ }
+    finally { setLoading(false) }
+  }
+
+  function apply(next: { filter?: JourneyFilter; search?: string }) {
+    const f = next.filter ?? filter
+    const s = next.search ?? search
+    setFilter(f); setSearch(s)
+    load({ filter: f, search: s, offset: 0 })
+  }
+
+  return (
+    <Section
+      title="Pedidos e seus caminhos"
+      hint={`${count.toLocaleString('pt-BR')} pedidos no período · clique num deles para ver o caminho`}
+      right={
+        <form
+          onSubmit={e => { e.preventDefault(); apply({}) }}
+          style={{ display: 'flex', gap: 6 }}
+        >
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="nº do pedido"
+            inputMode="numeric"
+            style={{
+              width: 120, background: 'var(--bg-input)', border: '1px solid var(--border)',
+              borderRadius: 8, padding: '6px 10px', fontSize: 12, color: 'var(--text-primary)',
+            }}
+          />
+          <button type="submit" style={{
+            background: 'var(--bg-input)', border: '1px solid var(--border)', borderRadius: 8,
+            padding: '6px 12px', fontSize: 12, color: 'var(--text-muted)', cursor: 'pointer',
+          }}>Buscar</button>
+        </form>
+      }
+    >
+      <div style={{ display: 'flex', gap: 5, marginBottom: 12, flexWrap: 'wrap' }}>
+        {JOURNEY_FILTERS.map(f => (
+          <button
+            key={f.key}
+            onClick={() => apply({ filter: f.key })}
+            style={{
+              padding: '5px 11px', borderRadius: 999, fontSize: 12, cursor: 'pointer',
+              fontWeight: filter === f.key ? 600 : 400,
+              background: filter === f.key ? 'rgba(139,92,246,0.14)' : 'transparent',
+              color: filter === f.key ? '#A78BFA' : 'var(--text-dim)',
+              border: `1px solid ${filter === f.key ? 'rgba(139,92,246,0.3)' : 'var(--border)'}`,
+            }}
+          >{f.label}</button>
+        ))}
+      </div>
+
+      <JourneyList journeys={orders} fmt={fmt} />
+
+      {(hasMore || loading) && (
+        <button
+          onClick={() => load({ filter, search, offset: orders.length })}
+          disabled={loading}
+          style={{
+            width: '100%', marginTop: 12, padding: '9px 0', borderRadius: 8,
+            background: 'transparent', border: '1px solid var(--border)',
+            color: 'var(--text-muted)', fontSize: 12, cursor: loading ? 'wait' : 'pointer',
+          }}
+        >
+          {loading ? 'Carregando…' : `Carregar mais (${orders.length} de ${count.toLocaleString('pt-BR')})`}
+        </button>
+      )}
+    </Section>
+  )
+}
+
 function JourneyList({ journeys, fmt }: { journeys: JourneyOrder[]; fmt: (n: number) => string }) {
   const [open, setOpen] = useState<string | null>(null)
-  if (!journeys.length) return <Empty>Sem pedidos no período.</Empty>
+  if (!journeys.length) return <Empty>Nenhum pedido com esses filtros.</Empty>
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column' }}>

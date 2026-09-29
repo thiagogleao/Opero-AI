@@ -6,7 +6,7 @@ import { getActiveTenantId } from '@/lib/activeStore'
 import { getTenantTimezone } from '@/lib/queries'
 import { accountStores } from '@/lib/accountOverview'
 import {
-  getCoverage, getCreativeAttribution, getSourceBreakdown, getRecentJourneys,
+  getCoverage, getCreativeAttribution, getSourceBreakdown, getJourneyPage,
   type Model,
 } from '@/lib/attribution'
 import AttributionView from '@/components/AttributionView'
@@ -51,15 +51,15 @@ export default async function AttributionPage({ searchParams }: Props) {
   // One section failing should cost that section, not the page. Before this,
   // any single query throwing took the whole screen down with it.
   const fallbackCoverage = { orders: 0, withJourney: 0, withAd: 0, pct: 0, attributablePct: 0 }
-  const [coverage, creatives, sources, journeys] = await Promise.all([
+  const [coverage, creatives, sources, journeyPage] = await Promise.all([
     getCoverage(tenantId, dateFrom, dateTo)
       .catch(e => { console.error('[attribution] coverage', e); return fallbackCoverage }),
     getCreativeAttribution(tenantId, dateFrom, dateTo, model)
       .catch(e => { console.error('[attribution] creatives', e); return [] }),
     getSourceBreakdown(tenantId, dateFrom, dateTo)
       .catch(e => { console.error('[attribution] sources', e); return [] }),
-    getRecentJourneys(tenantId, dateFrom, dateTo, 30)
-      .catch(e => { console.error('[attribution] journeys', e); return [] }),
+    getJourneyPage(tenantId, dateFrom, dateTo, { limit: 30 })
+      .catch(e => { console.error('[attribution] journeys', e); return { orders: [], total: 0, hasMore: false } }),
   ])
 
   return (
@@ -94,7 +94,8 @@ export default async function AttributionPage({ searchParams }: Props) {
           coverage={coverage}
           creatives={creatives}
           sources={sources}
-          journeys={journeys}
+          journeys={journeyPage.orders}
+          journeyTotal={journeyPage.total}
           model={model}
           dateFrom={dateFrom}
           dateTo={dateTo}

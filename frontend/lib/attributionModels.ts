@@ -63,3 +63,18 @@ export interface JourneyOrder {
     landingPage: string | null
   }[]
 }
+
+export type JourneyFilter = 'all' | 'paid' | 'unattributed' | 'multi'
+
+export const JOURNEY_FILTERS: { key: JourneyFilter; label: string }[] = [
+  { key: 'all',          label: 'Todos' },
+  { key: 'paid',         label: 'Com anúncio' },
+  { key: 'unattributed', label: 'Sem anúncio' },
+  { key: 'multi',        label: 'Vários toques' },
+]
+
+export interface JourneyPage {
+  orders: JourneyOrder[]
+  total: number
+  hasMore: boolean
+}

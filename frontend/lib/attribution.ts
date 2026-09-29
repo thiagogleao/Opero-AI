@@ -3,10 +3,11 @@ import { query } from './db'
 // this module — and its database pool — into the browser bundle.
 import type {
   Model, CreativeAttribution, Coverage, SourceRow, JourneyOrder,
+  JourneyFilter, JourneyPage,
 } from './attributionModels'
 
-export type { Model, CreativeAttribution, Coverage, SourceRow, JourneyOrder }
-export { MODELS } from './attributionModels'
+export type { Model, CreativeAttribution, Coverage, SourceRow, JourneyOrder, JourneyFilter, JourneyPage }
+export { MODELS, JOURNEY_FILTERS } from './attributionModels'
 
 /**
  * Reading the collected journeys.
@@ -197,10 +198,54 @@ export async function getSourceBreakdown(
   }))
 }
 
-/** Recent orders with their full path, newest first. */
-export async function getRecentJourneys(
-  tenantId: string, dateFrom: string, dateTo: string, limit = 40
-): Promise<JourneyOrder[]> {
+/** SQL condition for each filter, kept beside the type so they cannot drift. */
+function filterClause(filter: JourneyFilter): string {
+  switch (filter) {
+    case 'paid':         return 'AND j.first_ad_id IS NOT NULL'
+    case 'unattributed': return 'AND j.first_ad_id IS NULL'
+    case 'multi':        return 'AND COALESCE(j.moments_count, 0) > 1'
+    default:             return ''
+  }
+}
+
+/**
+ * A page of orders with their paths, newest first.
+ *
+ * Paged and searchable because these stores have thousands of orders a month:
+ * a fixed list of the most recent thirty answers "what just happened" but not
+ * "what happened with order 4132".
+ */
+export async function getJourneyPage(
+  tenantId: string, dateFrom: string, dateTo: string,
+  opts: { limit?: number; offset?: number; search?: string; filter?: JourneyFilter } = {}
+): Promise<JourneyPage> {
+  const limit = Math.min(Math.max(opts.limit ?? 30, 1), 100)
+  const offset = Math.max(opts.offset ?? 0, 0)
+  const filter = opts.filter ?? 'all'
+  // Digits only: the search is for an order number, and letting anything else
+  // through would just scan the whole table for nothing.
+  const search = (opts.search ?? '').replace(/\D/g, '')
+
+  const where = `
+    WHERE o.tenant_id = $1
+      AND (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date BETWEEN $2::date AND $3::date
+      AND o.financial_status NOT IN ('refunded', 'voided')
+      ${filterClause(filter)}
+      ${search ? "AND o.order_number::text LIKE $4" : ''}`
+
+  const params: unknown[] = [tenantId, dateFrom, dateTo]
+  if (search) params.push(`%${search}%`)
+
+  const [countRow] = await query<{ n: string }>(
+    `SELECT count(*)::text AS n
+     FROM shopify_orders o
+     JOIN tenants t ON t.id = o.tenant_id
+     LEFT JOIN order_journeys j ON j.tenant_id = o.tenant_id AND j.order_id = o.order_id
+     ${where}`,
+    params
+  )
+  const total = Number(countRow?.n ?? 0)
+
   const orders = await query<{
     order_id: string; order_number: number | null; total_price: string
     created_at: string; moments_count: number | null; days_to_conversion: number | null
@@ -210,12 +255,29 @@ export async function getRecentJourneys(
     FROM shopify_orders o
     JOIN tenants t ON t.id = o.tenant_id
     LEFT JOIN order_journeys j ON j.tenant_id = o.tenant_id AND j.order_id = o.order_id
-    WHERE o.tenant_id = $1
-      AND (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date BETWEEN $2::date AND $3::date
-      AND o.financial_status NOT IN ('refunded', 'voided')
+    ${where}
     ORDER BY o.created_at DESC
-    LIMIT $4
-  `, [tenantId, dateFrom, dateTo, limit])
+    LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+  `, [...params, limit, offset])
+
+  const withTouches = await attachTouches(tenantId, orders)
+  return { orders: withTouches, total, hasMore: offset + orders.length < total }
+}
+
+/** Recent orders with their full path, newest first. */
+export async function getRecentJourneys(
+  tenantId: string, dateFrom: string, dateTo: string, limit = 40
+): Promise<JourneyOrder[]> {
+  return (await getJourneyPage(tenantId, dateFrom, dateTo, { limit })).orders
+}
+
+async function attachTouches(
+  tenantId: string,
+  orders: {
+    order_id: string; order_number: number | null; total_price: string
+    created_at: string; moments_count: number | null; days_to_conversion: number | null
+  }[]
+): Promise<JourneyOrder[]> {
 
   if (orders.length === 0) return []
 
