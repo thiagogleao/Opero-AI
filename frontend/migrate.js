@@ -342,6 +342,64 @@ const sql = `
   );
   CREATE INDEX IF NOT EXISTS idx_alert_events_day ON alert_events (day DESC);
 
+  -- ══════════════════════════════════════════════════════════════
+  -- Attribution: the visits Shopify recorded before each order
+  -- ══════════════════════════════════════════════════════════════
+  -- Shopify tracks the full path to a purchase first-party and exposes it as
+  -- customerJourneySummary. These tables are that record, kept locally so it
+  -- can be joined against ad spend without an API call per question.
+  CREATE TABLE IF NOT EXISTS order_journeys (
+    tenant_id          TEXT NOT NULL REFERENCES tenants(id),
+    order_id           TEXT NOT NULL,
+    -- Shopify computes the journey asynchronously; false means "ask again".
+    ready              BOOLEAN DEFAULT FALSE,
+    moments_count      INT,
+    -- EXACT, or AT_LEAST when Shopify truncated the list.
+    moments_precision  TEXT,
+    days_to_conversion INT,
+    customer_order_index INT,
+    first_ad_id        TEXT,
+    last_ad_id         TEXT,
+    order_created_at   TIMESTAMPTZ,
+    synced_at          TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, order_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_order_journeys_ready ON order_journeys (tenant_id, ready);
+  CREATE INDEX IF NOT EXISTS idx_order_journeys_created ON order_journeys (order_created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS order_touchpoints (
+    tenant_id     TEXT NOT NULL REFERENCES tenants(id),
+    order_id      TEXT NOT NULL,
+    seq           INT  NOT NULL,
+    occurred_at   TIMESTAMPTZ,
+    source        TEXT,
+    source_type   TEXT,
+    referrer_url  TEXT,
+    landing_page  TEXT,
+    utm_source    TEXT,
+    utm_medium    TEXT,
+    utm_campaign  TEXT,
+    utm_content   TEXT,
+    utm_term      TEXT,
+    -- Parsed from the utm fields when they carry Meta's numeric ids, which is
+    -- what makes a touch joinable to fb_ads / fb_adsets / fb_campaigns.
+    ad_id         TEXT,
+    adset_id      TEXT,
+    campaign_id   TEXT,
+    PRIMARY KEY (tenant_id, order_id, seq)
+  );
+  CREATE INDEX IF NOT EXISTS idx_touchpoints_ad ON order_touchpoints (ad_id) WHERE ad_id IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS idx_touchpoints_occurred ON order_touchpoints (occurred_at DESC);
+
+  -- Where the backfill has reached, per store.
+  CREATE TABLE IF NOT EXISTS journey_sync_state (
+    tenant_id       TEXT PRIMARY KEY REFERENCES tenants(id),
+    backfill_cursor TEXT,
+    backfill_done   BOOLEAN DEFAULT FALSE,
+    last_run_at     TIMESTAMPTZ,
+    orders_synced   INT DEFAULT 0
+  );
+
   -- Add missing columns to existing tables (safe, idempotent)
   ALTER TABLE tenants ADD COLUMN IF NOT EXISTS shop_name TEXT;
 

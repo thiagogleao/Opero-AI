@@ -2,6 +2,7 @@ import { spawn } from 'child_process'
 import path from 'path'
 import { query } from './db'
 import { getAlertConfig, hourInTz, runAlertChecks, sendDailySummary } from './alerts'
+import { journeyStores, syncJourneys, refreshPendingJourneys } from './journey'
 
 /**
  * Server-side sync scheduler.
@@ -26,6 +27,10 @@ const FACEBOOK_EVERY_MIN = Number(process.env.AUTO_SYNC_FACEBOOK_MIN ?? 30)
 // often enough to catch the summary hour, cheap because every send is claimed
 // once per day in alert_events.
 const ALERTS_EVERY_MIN   = Number(process.env.ALERTS_EVERY_MIN ?? 15)
+// Journeys are collected on their own slow cadence: the Shopify query is
+// expensive, and attribution is read in hindsight, not watched live.
+const JOURNEY_EVERY_MIN  = Number(process.env.JOURNEY_EVERY_MIN ?? 20)
+const JOURNEY_BACKFILL_PER_RUN = Number(process.env.JOURNEY_BACKFILL_PER_RUN ?? 60)
 const STAGGER_MS         = Number(process.env.AUTO_SYNC_STAGGER_MS   ?? 8_000)
 const SYNC_TIMEOUT_MS    = 10 * 60 * 1000
 
@@ -81,6 +86,42 @@ async function runCycle(source: 'shopify' | 'facebook') {
 }
 
 /**
+ * Collect the attribution journeys Shopify recorded.
+ *
+ * Three jobs share one pass, in order of what a reader needs soonest:
+ * new orders first, then the ones Shopify had not finished computing, then a
+ * slice of history. Each is bounded, because the journey query is expensive
+ * and this runs beside the ordinary syncs.
+ */
+async function runJourneyCycle() {
+  const stores = await journeyStores()
+
+  for (const store of stores) {
+    try {
+      // Newest orders. Stops as soon as it meets a run of orders it already
+      // has, so a caught-up store costs one page.
+      const recent = await syncJourneys(store, { maxOrders: 60, stopAfterKnown: 15 })
+
+      // Journeys Shopify answered as not ready when we first asked.
+      const refreshed = await refreshPendingJourneys(store, { maxOrders: 25 })
+
+      // A slice of history, continuing from where the last run stopped.
+      const back = await syncJourneys(store, { maxOrders: JOURNEY_BACKFILL_PER_RUN, resume: true })
+
+      if (recent.saved || refreshed.nowReady || back.saved) {
+        console.log(
+          `[journey] ${store.shopify_domain}: novos ${recent.saved}, ` +
+          `prontos agora ${refreshed.nowReady}, histórico ${back.saved}` +
+          `${back.reachedEnd ? ' (histórico completo)' : ''}`
+        )
+      }
+    } catch (err) {
+      console.error('[journey] cycle failed for', store.id, err)
+    }
+  }
+}
+
+/**
  * Evaluate the alert rules, and push the daily summary once the configured
  * hour has passed. Running late still sends: a summary that missed its slot
  * because the server was redeploying is worth more than no summary.
@@ -127,4 +168,16 @@ export function startAutoSync() {
   setTimeout(alertGuard, 240_000)
   setInterval(alertGuard, ALERTS_EVERY_MIN * 60_000)
   console.log(`[alerts] scheduling checks every ${ALERTS_EVERY_MIN}min`)
+
+  if (process.env.JOURNEY_SYNC_ENABLED === 'false') {
+    console.log('[journey] disabled via JOURNEY_SYNC_ENABLED=false')
+    return
+  }
+  const journeyGuard = () => {
+    runJourneyCycle().catch(err => console.error('[journey] cycle failed:', err))
+  }
+  // Last of the four to start: it is the least urgent and the most expensive.
+  setTimeout(journeyGuard, 330_000)
+  setInterval(journeyGuard, JOURNEY_EVERY_MIN * 60_000)
+  console.log(`[journey] scheduling collection every ${JOURNEY_EVERY_MIN}min, ${JOURNEY_BACKFILL_PER_RUN} historical orders per run`)
 }
