@@ -96,6 +96,8 @@ export default async function AttributionPage({ searchParams }: Props) {
           sources={sources}
           journeys={journeys}
           model={model}
+          dateFrom={dateFrom}
+          dateTo={dateTo}
         />
       </main>
     </div>

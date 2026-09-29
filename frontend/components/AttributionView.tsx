@@ -1,6 +1,6 @@
 'use client'
 import { useState } from 'react'
-import { useRouter, useSearchParams } from 'next/navigation'
+import Link from 'next/link'
 import { makeFmt } from '@/lib/format'
 import { useSettings } from '@/contexts/SettingsContext'
 import { MODELS, type Model, type CreativeAttribution, type SourceRow, type JourneyOrder, type Coverage } from '@/lib/attributionModels'
@@ -11,19 +11,21 @@ interface Props {
   sources: SourceRow[]
   journeys: JourneyOrder[]
   model: Model
+  dateFrom: string
+  dateTo: string
 }
 
-export default function AttributionView({ coverage, creatives, sources, journeys, model }: Props) {
+export default function AttributionView({
+  coverage, creatives, sources, journeys, model, dateFrom, dateTo,
+}: Props) {
   const { currency } = useSettings()
   const fmt = makeFmt(currency)
-  const router = useRouter()
-  const params = useSearchParams()
 
-  function setModel(next: Model) {
-    const p = new URLSearchParams(params.toString())
-    p.set('model', next)
-    router.push(`?${p.toString()}`)
-  }
+  // The model switch is a link, not a hook. Reading the current query string on
+  // the client would need useSearchParams, which every component in this app
+  // that uses it has to sit inside a Suspense boundary — a rule easy to forget
+  // and whose breakage shows up as a page that will not load, not as a warning.
+  const href = (next: Model) => `/attribution?from=${dateFrom}&to=${dateTo}&model=${next}`
 
   const totals = creatives.reduce((a, c) => ({
     orders: a.orders + c.orders,
@@ -71,17 +73,17 @@ export default function AttributionView({ coverage, creatives, sources, journeys
         right={
           <div style={{ display: 'flex', gap: 4, background: 'var(--bg-sidebar)', border: '1px solid var(--border)', borderRadius: 8, padding: 3 }}>
             {MODELS.map(m => (
-              <button
+              <Link
                 key={m.key}
-                onClick={() => setModel(m.key)}
+                href={href(m.key)}
                 title={m.hint}
                 style={{
-                  padding: '5px 11px', borderRadius: 6, border: 'none', fontSize: 12,
-                  fontWeight: 600, cursor: 'pointer',
+                  padding: '5px 11px', borderRadius: 6, fontSize: 12,
+                  fontWeight: 600, textDecoration: 'none',
                   background: model === m.key ? 'linear-gradient(135deg,#8B5CF6,#6D28D9)' : 'transparent',
                   color: model === m.key ? '#fff' : 'var(--text-dim)',
                 }}
-              >{m.label}</button>
+              >{m.label}</Link>
             ))}
           </div>
         }
