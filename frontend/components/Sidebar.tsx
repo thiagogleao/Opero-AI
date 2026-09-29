@@ -2,7 +2,7 @@
 import Link from 'next/link'
 import { UserButton } from '@clerk/nextjs'
 
-type ActivePath = '/' | '/profit' | '/settings' | '/products' | '/campaigns'
+type ActivePath = '/' | '/profit' | '/settings' | '/products' | '/campaigns' | '/attribution'
 
 interface Props {
   active: ActivePath
@@ -12,6 +12,7 @@ const NAV = [
   { icon: '📊', href: '/',          title: 'Dashboard'  },
   { icon: '📦', href: '/products',  title: 'Produtos'   },
   { icon: '📣', href: '/campaigns', title: 'Campanhas'  },
+  { icon: '🧭', href: '/attribution', title: 'Atribuição' },
   { icon: '💰', href: '/profit',    title: 'Lucro'      },
   { icon: '⚙️', href: '/settings',  title: 'Config'     },
 ] as const

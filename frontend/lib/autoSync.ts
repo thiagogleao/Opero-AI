@@ -3,6 +3,7 @@ import path from 'path'
 import { query } from './db'
 import { getAlertConfig, hourInTz, runAlertChecks, sendDailySummary } from './alerts'
 import { journeyStores, syncJourneys, refreshPendingJourneys } from './journey'
+import { runBulkBackfill, storesNeedingBackfill } from './journeyBulk'
 
 /**
  * Server-side sync scheduler.
@@ -30,7 +31,6 @@ const ALERTS_EVERY_MIN   = Number(process.env.ALERTS_EVERY_MIN ?? 15)
 // Journeys are collected on their own slow cadence: the Shopify query is
 // expensive, and attribution is read in hindsight, not watched live.
 const JOURNEY_EVERY_MIN  = Number(process.env.JOURNEY_EVERY_MIN ?? 20)
-const JOURNEY_BACKFILL_PER_RUN = Number(process.env.JOURNEY_BACKFILL_PER_RUN ?? 60)
 const STAGGER_MS         = Number(process.env.AUTO_SYNC_STAGGER_MS   ?? 8_000)
 const SYNC_TIMEOUT_MS    = 10 * 60 * 1000
 
@@ -105,19 +105,26 @@ async function runJourneyCycle() {
       // Journeys Shopify answered as not ready when we first asked.
       const refreshed = await refreshPendingJourneys(store, { maxOrders: 25 })
 
-      // A slice of history, continuing from where the last run stopped.
-      const back = await syncJourneys(store, { maxOrders: JOURNEY_BACKFILL_PER_RUN, resume: true })
-
-      if (recent.saved || refreshed.nowReady || back.saved) {
-        console.log(
-          `[journey] ${store.shopify_domain}: novos ${recent.saved}, ` +
-          `prontos agora ${refreshed.nowReady}, histórico ${back.saved}` +
-          `${back.reachedEnd ? ' (histórico completo)' : ''}`
-        )
+      if (recent.saved || refreshed.nowReady) {
+        console.log(`[journey] ${store.shopify_domain}: novos ${recent.saved}, prontos agora ${refreshed.nowReady}`)
       }
     } catch (err) {
       console.error('[journey] cycle failed for', store.id, err)
     }
+  }
+
+  // History is pulled through a bulk operation instead of page by page: the
+  // paged route costs about a second per order, which for these stores was the
+  // difference between minutes and two days. One store per cycle, because a
+  // shop may only have one bulk operation in flight.
+  const pending = await storesNeedingBackfill(stores)
+  if (pending.length > 0) {
+    const r = await runBulkBackfill(pending[0])
+    console.log(
+      `[journey] histórico ${pending[0].shopify_domain}: ${r.orders} pedidos, ` +
+      `${r.touches} toques em ${r.seconds}s${r.error ? ` · ERRO ${r.error}` : ''} ` +
+      `(faltam ${pending.length - 1} lojas)`
+    )
   }
 }
 
@@ -179,5 +186,5 @@ export function startAutoSync() {
   // Last of the four to start: it is the least urgent and the most expensive.
   setTimeout(journeyGuard, 330_000)
   setInterval(journeyGuard, JOURNEY_EVERY_MIN * 60_000)
-  console.log(`[journey] scheduling collection every ${JOURNEY_EVERY_MIN}min, ${JOURNEY_BACKFILL_PER_RUN} historical orders per run`)
+  console.log(`[journey] scheduling collection every ${JOURNEY_EVERY_MIN}min`)
 }
