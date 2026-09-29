@@ -1,6 +1,7 @@
 import { spawn } from 'child_process'
 import path from 'path'
 import { query } from './db'
+import { getAlertConfig, hourInTz, runAlertChecks, sendDailySummary } from './alerts'
 
 /**
  * Server-side sync scheduler.
@@ -21,6 +22,10 @@ const SCRIPT = path.join(PROJECT_ROOT, 'collect_recent.py')
 
 const SHOPIFY_EVERY_MIN  = Number(process.env.AUTO_SYNC_SHOPIFY_MIN  ?? 10)
 const FACEBOOK_EVERY_MIN = Number(process.env.AUTO_SYNC_FACEBOOK_MIN ?? 30)
+// Alerts read what the syncs just wrote, so they run on their own short cadence:
+// often enough to catch the summary hour, cheap because every send is claimed
+// once per day in alert_events.
+const ALERTS_EVERY_MIN   = Number(process.env.ALERTS_EVERY_MIN ?? 15)
 const STAGGER_MS         = Number(process.env.AUTO_SYNC_STAGGER_MS   ?? 8_000)
 const SYNC_TIMEOUT_MS    = 10 * 60 * 1000
 
@@ -75,6 +80,19 @@ async function runCycle(source: 'shopify' | 'facebook') {
   })
 }
 
+/**
+ * Evaluate the alert rules, and push the daily summary once the configured
+ * hour has passed. Running late still sends: a summary that missed its slot
+ * because the server was redeploying is worth more than no summary.
+ */
+async function runAlertCycle() {
+  const cfg = await getAlertConfig()
+  await runAlertChecks()
+  if (cfg.dailySummary.enabled && hourInTz() >= cfg.dailySummary.hour) {
+    await sendDailySummary()
+  }
+}
+
 /** Start the scheduler. Safe to call more than once. */
 export function startAutoSync() {
   if (started) return
@@ -97,4 +115,16 @@ export function startAutoSync() {
 
   setInterval(guard('shopify'),  SHOPIFY_EVERY_MIN  * 60_000)
   setInterval(guard('facebook'), FACEBOOK_EVERY_MIN * 60_000)
+
+  if (process.env.ALERTS_ENABLED === 'false') {
+    console.log('[alerts] disabled via ALERTS_ENABLED=false')
+    return
+  }
+  const alertGuard = () => {
+    runAlertCycle().catch(err => console.error('[alerts] cycle failed:', err))
+  }
+  // First pass after the opening syncs, so it judges fresh numbers.
+  setTimeout(alertGuard, 240_000)
+  setInterval(alertGuard, ALERTS_EVERY_MIN * 60_000)
+  console.log(`[alerts] scheduling checks every ${ALERTS_EVERY_MIN}min`)
 }

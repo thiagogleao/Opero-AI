@@ -1,6 +1,7 @@
 import { query } from '@/lib/db'
-import { getCountryProfit } from '@/lib/profitCalc'
-import { getProductMetrics, getCustomerSplit } from '@/lib/queries'
+import { getCountryProfit, getProfitSummary } from '@/lib/profitCalc'
+import { getProductMetrics, getCustomerSplit, getTopCreatives } from '@/lib/queries'
+import { creativeSignal, SIGNAL_RANK, FALLBACK_BREAK_EVEN } from '@/lib/creativeSignal'
 import { mobileAuthOk, unauthorized } from '@/lib/mobileAuth'
 import { resolveRange, REFERENCE_TZ, type Period } from '@/lib/mobileRange'
 
@@ -83,6 +84,60 @@ export async function GET(req: Request) {
       .sort((a, b) => b.revenue - a.revenue)
       .slice(0, 40)
     return Response.json({ section, from, to, countries })
+  }
+
+  if (section === 'creatives') {
+    // Break-even ROAS is what decides whether an ad is winning, and it differs
+    // per store because each has its own costs. Ads are keyed per tenant in the
+    // metrics table (no ad_id spans two stores), so each one is judged against
+    // its own store's break-even and the list is merged afterwards.
+    const perStore = await Promise.all(ids.map(async id => {
+      try {
+        const [ads, summary] = await Promise.all([
+          getTopCreatives(id, from, to),
+          getProfitSummary(id, from, to).catch(() => null),
+        ])
+        const be = summary?.configured && summary.breakEvenRoas > 0
+          ? summary.breakEvenRoas
+          : FALLBACK_BREAK_EVEN
+        return ads.map(a => {
+          const spend    = Number(a.spend)
+          const roas     = Number(a.roas)
+          const freq     = Number(a.frequency)
+          const hookRate = a.hook_rate != null ? Number(a.hook_rate) : null
+          const signal   = creativeSignal({ spend, roas, frequency: freq, hookRate, breakEven: be })
+
+          return {
+            adId: a.ad_id,
+            name: a.name,
+            thumbnail: a.thumbnail_url,
+            spend, roas, ctr: Number(a.ctr), frequency: freq,
+            purchases: Number(a.purchases ?? 0),
+            revenue: Number(a.revenue),
+            hookRate,
+            holdRate100: a.hold_rate_100 != null ? Number(a.hold_rate_100) : null,
+            isVideo: Number(a.video_plays ?? 0) > 0,
+            breakEven: Math.round(be * 100) / 100,
+            signal,
+          }
+        })
+      } catch (err) {
+        console.error('[mobile/detail] creatives', id, err)
+        return []
+      }
+    }))
+
+
+    const creatives = perStore.flat()
+      // Problems first, then winners, and within each the biggest spend —
+      // money burning now is what deserves the top of a phone screen.
+      .sort((a, b) =>
+        SIGNAL_RANK[a.signal] - SIGNAL_RANK[b.signal]
+        || b.spend - a.spend
+      )
+      .slice(0, 30)
+
+    return Response.json({ section, from, to, creatives })
   }
 
   if (section === 'customers') {

@@ -1,7 +1,7 @@
 import { query } from '@/lib/db'
 import { getProfitSummary, getDailyProfitData } from '@/lib/profitCalc'
 import { mobileAuthOk, unauthorized } from '@/lib/mobileAuth'
-import { resolveRange, REFERENCE_TZ, type Period } from '@/lib/mobileRange'
+import { resolveRange, previousRange, REFERENCE_TZ, type Period } from '@/lib/mobileRange'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -53,7 +53,8 @@ export async function GET(req: Request) {
   // Summary and daily run as one wave instead of two sequential ones; the two
   // do not depend on each other and this roughly halves wall time.
   const byDate = new Map<string, DailyPoint>()
-  const [stores] = await Promise.all([
+  const prev = previousRange(from, to)
+  const [stores, previousTotals] = await Promise.all([
     // One store failing (bad credentials, sync gap) must not blank the whole
     // dashboard, so failures are reported per row.
     Promise.all(selected.map(async t => {
@@ -76,6 +77,24 @@ export async function GET(req: Request) {
                  cogs: 0, shipping: 0, fees: 0, aov: 0, error: true }
       }
     })),
+
+    // The same window one length earlier, so every headline figure can say
+    // whether it is better or worse than the run-up to it. Only the four
+    // totals are needed, so this skips the daily series entirely.
+    Promise.all(selected.map(async t => {
+      try {
+        const s = await getProfitSummary(t.id, prev.from, prev.to)
+        return { revenue: s.totalRevenue, profit: s.netProfit, orders: s.orderCount, adSpend: s.fbSpend }
+      } catch (err) {
+        console.error('[mobile] previous period failed for', t.id, err)
+        return { revenue: 0, profit: 0, orders: 0, adSpend: 0 }
+      }
+    })).then(rows => rows.reduce((a, r) => ({
+      revenue: a.revenue + r.revenue,
+      profit:  a.profit  + r.profit,
+      orders:  a.orders  + r.orders,
+      adSpend: a.adSpend + r.adSpend,
+    }), { revenue: 0, profit: 0, orders: 0, adSpend: 0 })),
 
     // Daily series, summed across the selected stores by calendar date.
     wantDaily ? Promise.all(selected.map(async t => {
@@ -132,6 +151,7 @@ export async function GET(req: Request) {
   return Response.json({
     period, from, to,
     storeId: storeId ?? 'all',
+    previous: { ...previousTotals, from: prev.from, to: prev.to },
     totals,
     stores,
     daily,

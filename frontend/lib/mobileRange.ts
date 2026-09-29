@@ -67,5 +67,20 @@ export function resolveRange(
   }
 }
 
+/**
+ * The window of the same length ending the day before `from`.
+ *
+ * One rule for every preset, including the calendar ones: "this month" compares
+ * against the equally long stretch that came before it, not against the whole
+ * of last month, so a comparison made on the 3rd is not measured against 31
+ * days of sales.
+ */
+export function previousRange(from: string, to: string): { from: string; to: string } {
+  const days = Math.round(
+    (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000
+  ) + 1
+  return { from: shiftDate(from, -days), to: shiftDate(from, -1) }
+}
+
 /** Timezone the ranges are anchored to when aggregating across stores. */
 export const REFERENCE_TZ = 'America/Sao_Paulo'

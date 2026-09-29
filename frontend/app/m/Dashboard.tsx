@@ -30,9 +30,12 @@ interface LiveOrder {
   orderId: string; orderNumber: string | null; total: number; currency: string
   country: string | null; items: LineItem[] | null; receivedAt: string; store: string
 }
+interface Totals { revenue: number; profit: number; orders: number; adSpend: number; cogs: number; shipping: number; fees: number }
+interface Previous { revenue: number; profit: number; orders: number; adSpend: number; from: string; to: string }
 interface Payload {
   period: Period; from: string; to: string; storeId: string
-  totals: { revenue: number; profit: number; orders: number; adSpend: number; cogs: number; shipping: number; fees: number }
+  totals: Totals
+  previous?: Previous
   stores: Store[]
   daily: DailyPoint[]
   allStores: { id: string; name: string }[]
@@ -40,7 +43,15 @@ interface Payload {
   recentOrders: LiveOrder[]
 }
 
-type Tab = 'products' | 'countries' | 'customers'
+type Tab = 'creatives' | 'products' | 'countries' | 'customers'
+type Signal = 'kill' | 'scale' | 'refresh' | 'ok'
+interface Creative {
+  adId: string; name: string; thumbnail: string | null
+  spend: number; roas: number; ctr: number; frequency: number
+  purchases: number; revenue: number
+  hookRate: number | null; holdRate100: number | null; isVideo: boolean
+  breakEven: number; signal: Signal
+}
 interface Product { title: string; units: number; orders: number; revenue: number; aov: number }
 interface Country { country_code: string; revenue: number; orders: number; fbSpend: number; netProfit: number; margin: number; roas: number | null }
 interface Customers { newCustomers: number; returningCustomers: number; newRevenue: number; returningRevenue: number }
@@ -62,6 +73,11 @@ function money(v: number, compact = true): string {
 function moneyExact(v: number, currency: string): string {
   try { return new Intl.NumberFormat('en-US', { style: 'currency', currency, maximumFractionDigits: 2 }).format(v) }
   catch { return `${currency} ${v.toFixed(2)}` }
+}
+/** Percentage change, or null when there is no baseline to divide by. */
+function pctDelta(now: number, before: number): number | null {
+  if (!before) return null
+  return ((now - before) / Math.abs(before)) * 100
 }
 function timeAgo(iso: string): string {
   const ms = new Date(/[Zz]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso.replace(' ', 'T') + 'Z').getTime()
@@ -91,6 +107,7 @@ export default function Dashboard() {
   const [busy, setBusy] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [sound, setSound] = useState(false)
+  const [alertsOpen, setAlertsOpen] = useState(false)
   const first = useRef(true)
   // Order ids already seen, so the chime fires once per genuinely new sale
   // rather than on every poll that returns the same feed.
@@ -190,7 +207,7 @@ export default function Dashboard() {
   }
 
   if (!data && first.current) {
-    return <><Header syncing={false} onRefresh={() => {}} lastSyncAt={null} sound={sound} onSound={toggleSound} /><p style={{ color: 'var(--ink-3)', fontSize: 13 }}>Carregando…</p></>
+    return <><Header syncing={false} onRefresh={() => {}} lastSyncAt={null} sound={sound} onSound={toggleSound} onAlerts={() => setAlertsOpen(true)} /><p style={{ color: 'var(--ink-3)', fontSize: 13 }}>Carregando…</p></>
   }
 
   const t = data?.totals ?? { revenue: 0, profit: 0, orders: 0, adSpend: 0, cogs: 0, shipping: 0, fees: 0 }
@@ -198,13 +215,20 @@ export default function Dashboard() {
   const roas = t.adSpend > 0 ? t.revenue / t.adSpend : null
   const aov = t.orders > 0 ? t.revenue / t.orders : 0
   const multiDay = daily.length > 1
+  const prev = data?.previous
+  const profitDelta = prev ? pctDelta(t.profit, prev.profit) : null
+  const periodLabel = period === 'today' ? 'vs ontem'
+    : period === 'yesterday' ? 'vs anteontem'
+    : 'vs período anterior'
 
   return (
     <>
       <Header
         syncing={syncing} onRefresh={refresh} lastSyncAt={data?.lastSyncAt ?? null}
-        sound={sound} onSound={toggleSound}
+        sound={sound} onSound={toggleSound} onAlerts={() => setAlertsOpen(true)}
       />
+
+      {alertsOpen && <AlertsSheet onClose={() => setAlertsOpen(false)} />}
 
       <StoreChips
         stores={data?.allStores ?? []} value={store} onChange={setStore}
@@ -234,11 +258,17 @@ export default function Dashboard() {
           {roas !== null && <> · ROAS {roas.toFixed(2)}×</>}
           {(busy || syncing) && <> · {syncing ? 'sincronizando…' : 'atualizando…'}</>}
         </p>
+        {profitDelta != null && (
+          <p style={{ margin: '4px 0 0' }}>
+            <Delta pct={profitDelta} suffix={periodLabel} />
+            <span style={{ fontSize: 11.5, color: 'var(--ink-3)' }}> · antes {money(prev!.profit)}</span>
+          </p>
+        )}
       </section>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 7, marginBottom: 22 }}>
-        <Tile label="Receita"  value={money(t.revenue)} />
-        <Tile label="Anúncios" value={money(t.adSpend)} />
+        <Tile label="Receita"  value={money(t.revenue)} delta={prev ? pctDelta(t.revenue, prev.revenue) : null} />
+        <Tile label="Anúncios" value={money(t.adSpend)} delta={prev ? pctDelta(t.adSpend, prev.adSpend) : null} neutral />
         <Tile label="Margem"   value={t.revenue > 0 ? `${((t.profit / t.revenue) * 100).toFixed(0)}%` : '—'} />
         <Tile label="Ticket"   value={aov > 0 ? money(aov) : '—'} />
       </div>
@@ -286,9 +316,9 @@ export default function Dashboard() {
 
 // ─── Chrome ───────────────────────────────────────────────────────────────────
 
-function Header({ syncing, onRefresh, lastSyncAt, sound, onSound }: {
+function Header({ syncing, onRefresh, lastSyncAt, sound, onSound, onAlerts }: {
   syncing: boolean; onRefresh: () => void; lastSyncAt: string | null
-  sound: boolean; onSound: () => void
+  sound: boolean; onSound: () => void; onAlerts: () => void
 }) {
   return (
     <header style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 14 }}>
@@ -298,6 +328,17 @@ function Header({ syncing, onRefresh, lastSyncAt, sound, onSound }: {
         <span style={{ fontSize: 10, color: 'var(--ink-3)' }}>· {timeAgo(lastSyncAt)}</span>
       )}
       <div style={{ flex: 1 }} />
+      <button
+        onClick={onAlerts}
+        aria-label="Configurar alertas"
+        title="Alertas e resumo do dia"
+        style={{
+          background: 'transparent', border: '1px solid var(--hairline)',
+          borderRadius: 8, padding: '6px 8px', fontSize: 13, lineHeight: 1, cursor: 'pointer',
+        }}
+      >
+        <span aria-hidden="true">⚙️</span>
+      </button>
       <button
         onClick={onSound}
         aria-label={sound ? 'Desligar som de venda' : 'Ligar som de venda'}
@@ -353,12 +394,35 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
-function Tile({ label, value }: { label: string; value: string }) {
+function Tile({ label, value, delta, neutral }: {
+  label: string; value: string; delta?: number | null; neutral?: boolean
+}) {
   return (
     <div style={{ background: 'var(--card)', border: '1px solid var(--hairline)', borderRadius: 11, padding: '9px 9px' }}>
       <p style={{ fontSize: 10, color: 'var(--ink-3)', margin: '0 0 3px' }}>{label}</p>
       <p style={{ fontSize: 16, fontWeight: 640, margin: 0, letterSpacing: '-0.02em' }}>{value}</p>
+      {delta != null && <Delta pct={delta} neutral={neutral} size={10} />}
     </div>
+  )
+}
+
+/**
+ * Change against the previous window of the same length.
+ *
+ * Ad spend is shown without a verdict colour: spending more is only bad if the
+ * return did not follow, and that judgement belongs to profit, not to this row.
+ */
+function Delta({ pct, neutral, size = 11.5, suffix }: {
+  pct: number; neutral?: boolean; size?: number; suffix?: string
+}) {
+  const up = pct >= 0
+  const color = neutral ? 'var(--ink-3)' : up ? 'var(--good)' : 'var(--bad)'
+  // A jump from near-zero is arithmetically true and practically meaningless.
+  const shown = Math.abs(pct) >= 999 ? '999+' : Math.abs(pct).toFixed(0)
+  return (
+    <span style={{ fontSize: size, color, margin: 0, display: 'inline-block', marginTop: 2 }}>
+      {up ? '↑' : '↓'} {shown}%{suffix ? ` ${suffix}` : ''}
+    </span>
   )
 }
 
@@ -543,8 +607,11 @@ function DetailTabs({ qs }: { qs: string }) {
     return () => { alive = false }
   }, [cacheKey, tab, qs, cache])
 
-  const d = cache[cacheKey] as { products?: Product[]; countries?: Country[]; customers?: Customers } | undefined
+  const d = cache[cacheKey] as {
+    products?: Product[]; countries?: Country[]; customers?: Customers; creatives?: Creative[]
+  } | undefined
   const tabs: { key: Tab; label: string }[] = [
+    { key: 'creatives', label: 'Criativos' },
     { key: 'products',  label: 'Produtos' },
     { key: 'countries', label: 'Países' },
     { key: 'customers', label: 'Clientes' },
@@ -573,10 +640,73 @@ function DetailTabs({ qs }: { qs: string }) {
 
       {loading && !d && <p style={{ fontSize: 12, color: 'var(--ink-3)' }}>Carregando…</p>}
 
+      {tab === 'creatives' && d?.creatives && <CreativeList creatives={d.creatives} />}
       {tab === 'products'  && d?.products  && <ProductList products={d.products} />}
       {tab === 'countries' && d?.countries && <CountryList countries={d.countries} />}
       {tab === 'customers' && d?.customers && <CustomerSplit c={d.customers} />}
     </section>
+  )
+}
+
+const SIGNAL: Record<Signal, { label: string; color: string; bg: string }> = {
+  kill:    { label: 'CORTAR',   color: '#ff6b6b', bg: 'rgba(208,59,59,0.16)' },
+  scale:   { label: 'ESCALAR',  color: '#34d399', bg: 'rgba(5,150,105,0.18)' },
+  refresh: { label: 'TROCAR',   color: '#fbbf24', bg: 'rgba(245,158,11,0.16)' },
+  ok:      { label: 'OK',       color: 'var(--ink-3)', bg: 'rgba(255,255,255,0.05)' },
+}
+
+/**
+ * Ads ranked by what needs a decision, not by what performed best. The verdict
+ * is the same one the web dashboard computes, against each store's own
+ * break-even ROAS.
+ */
+function CreativeList({ creatives }: { creatives: Creative[] }) {
+  if (!creatives.length) return <Empty>Sem anúncios com gasto no período.</Empty>
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {creatives.map(c => {
+        const sig = SIGNAL[c.signal] ?? SIGNAL.ok
+        const beating = c.roas >= c.breakEven
+        return (
+          <div key={c.adId} style={{
+            background: 'var(--card)', border: '1px solid var(--hairline)',
+            borderRadius: 11, padding: '10px 11px',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 9 }}>
+              {c.thumbnail && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={c.thumbnail} alt="" width={38} height={38}
+                  style={{ borderRadius: 7, objectFit: 'cover', flexShrink: 0, background: 'rgba(255,255,255,0.05)' }} />
+              )}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+                  <span style={{
+                    fontSize: 9, fontWeight: 700, letterSpacing: '0.04em',
+                    color: sig.color, background: sig.bg, borderRadius: 4, padding: '2px 5px', flexShrink: 0,
+                  }}>{sig.label}</span>
+                  <span style={{
+                    fontSize: 12, color: 'var(--ink)', overflow: 'hidden',
+                    textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}>{c.name}</span>
+                </div>
+                <p style={{ fontSize: 11, color: 'var(--ink-3)', margin: 0, fontVariantNumeric: 'tabular-nums' }}>
+                  {money(c.spend)} gasto ·{' '}
+                  <span style={{ color: beating ? 'var(--good)' : 'var(--bad)', fontWeight: 600 }}>
+                    {c.roas.toFixed(2)}×
+                  </span>
+                  {' '}(break-even {c.breakEven.toFixed(2)}×) · {c.purchases} compras
+                </p>
+                <p style={{ fontSize: 11, color: 'var(--ink-3)', margin: '2px 0 0', fontVariantNumeric: 'tabular-nums' }}>
+                  CTR {c.ctr.toFixed(2)}% · Freq {c.frequency.toFixed(1)}×
+                  {c.hookRate != null && <> · Hook {c.hookRate.toFixed(0)}%</>}
+                  {c.isVideo && c.holdRate100 != null && <> · Até o fim {c.holdRate100.toFixed(0)}%</>}
+                </p>
+              </div>
+            </div>
+          </div>
+        )
+      })}
+    </div>
   )
 }
 
@@ -697,6 +827,213 @@ function SalesFeed({ orders }: { orders: LiveOrder[] }) {
         </ul>
       )}
     </Section>
+  )
+}
+
+// ─── Alerts ───────────────────────────────────────────────────────────────────
+
+interface Rule { enabled: boolean; threshold: number }
+interface AlertConfig {
+  roasDrop: Rule; spendSpike: Rule; marginDrop: Rule
+  dailySummary: { enabled: boolean; hour: number }
+  minSpend: number; fromHour: number
+}
+
+/**
+ * Thresholds for the push alerts. They are saved on the server, not in this
+ * browser: what evaluates them is a scheduler that runs whether or not any
+ * phone is awake.
+ */
+function AlertsSheet({ onClose }: { onClose: () => void }) {
+  const [cfg, setCfg] = useState<AlertConfig | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [note, setNote] = useState('')
+
+  useEffect(() => {
+    fetch('/api/mobile/alerts')
+      .then(r => r.json())
+      .then(d => setCfg(d.config))
+      .catch(() => setNote('Não foi possível carregar'))
+  }, [])
+
+  async function save(next: AlertConfig) {
+    setCfg(next)
+    setSaving(true)
+    try {
+      await fetch('/api/mobile/alerts', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config: next }),
+      })
+      setNote('Salvo')
+    } catch { setNote('Falha ao salvar') }
+    finally { setSaving(false); setTimeout(() => setNote(''), 2000) }
+  }
+
+  async function test() {
+    setNote('Enviando…')
+    try {
+      const r = await fetch('/api/mobile/alerts', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'test' }),
+      }).then(x => x.json())
+      setNote(`Enviado: ${r.fired} alerta(s) + resumo`)
+    } catch { setNote('Falha no teste') }
+    setTimeout(() => setNote(''), 4000)
+  }
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 300, background: 'rgba(0,0,0,0.6)',
+        display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          background: 'var(--surface)', border: '1px solid var(--hairline)',
+          borderRadius: '16px 16px 0 0', padding: '16px 16px calc(env(safe-area-inset-bottom) + 20px)',
+          width: '100%', maxWidth: 640, maxHeight: '88dvh', overflowY: 'auto',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 14 }}>
+          <h2 style={{ fontSize: 15, fontWeight: 680, margin: 0, flex: 1 }}>Alertas</h2>
+          {note && <span style={{ fontSize: 11, color: 'var(--ink-3)', marginRight: 10 }}>{note}</span>}
+          <button onClick={onClose} style={{
+            background: 'transparent', border: '1px solid var(--hairline)', borderRadius: 8,
+            padding: '5px 11px', fontSize: 12, color: 'var(--ink-2)', cursor: 'pointer',
+          }}>Fechar</button>
+        </div>
+
+        {!cfg ? <Empty>Carregando…</Empty> : (
+          <>
+            <RuleRow
+              label="ROAS abaixo de" unit="×" step={0.1}
+              rule={cfg.roasDrop}
+              onChange={r => save({ ...cfg, roasDrop: r })}
+            />
+            <RuleRow
+              label="Margem abaixo de" unit="%" step={1}
+              rule={cfg.marginDrop}
+              onChange={r => save({ ...cfg, marginDrop: r })}
+            />
+            <RuleRow
+              label="Gasto acima de" unit="% da média de 7d" step={10}
+              rule={cfg.spendSpike}
+              onChange={r => save({ ...cfg, spendSpike: r })}
+            />
+
+            <div style={rowStyle}>
+              <div style={{ flex: 1 }}>
+                <p style={{ fontSize: 12.5, margin: 0 }}>Resumo do dia</p>
+                <p style={{ fontSize: 10.5, color: 'var(--ink-3)', margin: '2px 0 0' }}>
+                  Um push com o resultado da conta
+                </p>
+              </div>
+              <input
+                type="number" min={0} max={23} value={cfg.dailySummary.hour}
+                onChange={e => save({ ...cfg, dailySummary: { ...cfg.dailySummary, hour: Number(e.target.value) } })}
+                style={numStyle}
+              />
+              <span style={{ fontSize: 11, color: 'var(--ink-3)', width: 16 }}>h</span>
+              <Switch
+                on={cfg.dailySummary.enabled}
+                onChange={v => save({ ...cfg, dailySummary: { ...cfg.dailySummary, enabled: v } })}
+              />
+            </div>
+
+            <div style={rowStyle}>
+              <div style={{ flex: 1 }}>
+                <p style={{ fontSize: 12.5, margin: 0 }}>Gasto mínimo para avaliar</p>
+                <p style={{ fontSize: 10.5, color: 'var(--ink-3)', margin: '2px 0 0' }}>
+                  Loja que gastou menos que isso hoje não dispara alerta
+                </p>
+              </div>
+              <span style={{ fontSize: 11, color: 'var(--ink-3)' }}>$</span>
+              <input
+                type="number" min={0} step={10} value={cfg.minSpend}
+                onChange={e => save({ ...cfg, minSpend: Number(e.target.value) })}
+                style={numStyle}
+              />
+            </div>
+
+            <div style={{ ...rowStyle, borderBottom: 'none' }}>
+              <div style={{ flex: 1 }}>
+                <p style={{ fontSize: 12.5, margin: 0 }}>Não alertar antes das</p>
+                <p style={{ fontSize: 10.5, color: 'var(--ink-3)', margin: '2px 0 0' }}>
+                  De manhã o gasto já entrou e as vendas ainda não
+                </p>
+              </div>
+              <input
+                type="number" min={0} max={23} value={cfg.fromHour}
+                onChange={e => save({ ...cfg, fromHour: Number(e.target.value) })}
+                style={numStyle}
+              />
+              <span style={{ fontSize: 11, color: 'var(--ink-3)', width: 16 }}>h</span>
+            </div>
+
+            <button
+              onClick={test} disabled={saving}
+              style={{
+                width: '100%', marginTop: 14, padding: '11px 0', borderRadius: 10,
+                background: 'rgba(16,185,129,0.14)', border: '1px solid rgba(16,185,129,0.3)',
+                color: 'var(--accent)', fontSize: 13, fontWeight: 620, cursor: 'pointer',
+              }}
+            >
+              Testar agora
+            </button>
+            <p style={{ fontSize: 10.5, color: 'var(--ink-3)', margin: '8px 0 0', textAlign: 'center' }}>
+              O teste avalia as lojas e envia o que estiver fora do limite, ignorando o envio único do dia.
+            </p>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+const rowStyle: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 8,
+  padding: '11px 0', borderBottom: '1px solid var(--hairline)',
+}
+const numStyle: React.CSSProperties = {
+  width: 62, background: 'var(--card)', border: '1px solid var(--hairline)',
+  borderRadius: 8, padding: '7px 8px', fontSize: 13, color: 'var(--ink)',
+  textAlign: 'right', colorScheme: 'dark',
+}
+
+function RuleRow({ label, unit, step, rule, onChange }: {
+  label: string; unit: string; step: number
+  rule: Rule; onChange: (r: Rule) => void
+}) {
+  return (
+    <div style={rowStyle}>
+      <p style={{ fontSize: 12.5, margin: 0, flex: 1 }}>{label}</p>
+      <input
+        type="number" step={step} min={0} value={rule.threshold}
+        onChange={e => onChange({ ...rule, threshold: Number(e.target.value) })}
+        style={numStyle}
+      />
+      <span style={{ fontSize: 10.5, color: 'var(--ink-3)', width: 80 }}>{unit}</span>
+      <Switch on={rule.enabled} onChange={v => onChange({ ...rule, enabled: v })} />
+    </div>
+  )
+}
+
+function Switch({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button
+      onClick={() => onChange(!on)} role="switch" aria-checked={on}
+      style={{
+        width: 40, height: 23, borderRadius: 999, flexShrink: 0, cursor: 'pointer',
+        background: on ? 'var(--good)' : 'rgba(255,255,255,0.12)',
+        border: 'none', padding: 2, display: 'flex',
+        justifyContent: on ? 'flex-end' : 'flex-start', transition: 'background 0.15s',
+      }}
+    >
+      <span style={{ width: 19, height: 19, borderRadius: '50%', background: '#fff', display: 'block' }} />
+    </button>
   )
 }
 

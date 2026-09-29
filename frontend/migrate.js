@@ -314,6 +314,34 @@ const sql = `
   );
   CREATE INDEX IF NOT EXISTS idx_live_orders_received ON live_orders (received_at DESC);
 
+  -- ══════════════════════════════════════════════════════════════
+  -- Alerts: owner-level thresholds + a log that makes sending idempotent
+  -- ══════════════════════════════════════════════════════════════
+  -- One row, id = 'owner'. The mobile app spans every store and lives outside
+  -- Clerk, so its alert config cannot hang off a per-user settings blob.
+  CREATE TABLE IF NOT EXISTS alert_settings (
+    id         TEXT PRIMARY KEY,
+    settings   JSONB NOT NULL DEFAULT '{}',
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+  );
+
+  -- The scheduler runs every few minutes; this table is what stops it from
+  -- sending the same alert on every pass. The UNIQUE constraint is the lock:
+  -- an insert that conflicts means "already sent today".
+  -- tenant_id is '*' for account-wide events, never NULL: Postgres treats NULLs
+  -- as distinct in a UNIQUE index, so a nullable column would let the daily
+  -- summary slip past the conflict check and send on every pass.
+  CREATE TABLE IF NOT EXISTS alert_events (
+    id        BIGSERIAL PRIMARY KEY,
+    kind      TEXT NOT NULL,
+    tenant_id TEXT NOT NULL DEFAULT '*',
+    day       DATE NOT NULL,
+    payload   JSONB,
+    sent_at   TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (kind, tenant_id, day)
+  );
+  CREATE INDEX IF NOT EXISTS idx_alert_events_day ON alert_events (day DESC);
+
   -- Add missing columns to existing tables (safe, idempotent)
   ALTER TABLE tenants ADD COLUMN IF NOT EXISTS shop_name TEXT;
 

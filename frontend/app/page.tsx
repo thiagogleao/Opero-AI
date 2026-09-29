@@ -5,6 +5,7 @@ import { redirect } from 'next/navigation'
 import { getTenant, getTenantsByUserId, toStoreOptions } from '@/lib/tenant'
 import { getActiveTenantId } from '@/lib/activeStore'
 import { accountStores } from '@/lib/accountOverview'
+import { creativeSignal } from '@/lib/creativeSignal'
 import StoreSwitcher from '@/components/StoreSwitcher'
 import {
   getOverviewMetrics, getDailyRevenue, getDailyRoas,
@@ -207,11 +208,9 @@ export default async function Dashboard({ searchParams }: Props) {
     const hookRate = c.hook_rate != null ? Number(c.hook_rate) : null
     const isVideo  = (c.video_plays ?? 0) > 0
 
-    let signal: string
-    if (spend >= 50 && roas < beRoas * 0.8)                         signal = '⏹ KILL'
-    else if (roas >= beRoas * 1.4 && spend >= 30)                    signal = '↑ SCALE'
-    else if (freq > 3.5 || (hookRate !== null && hookRate < 25))     signal = '⚠ REFRESH'
-    else                                                              signal = '✓ OK'
+    const signal = {
+      kill: '⏹ KILL', scale: '↑ SCALE', refresh: '⚠ REFRESH', ok: '✓ OK',
+    }[creativeSignal({ spend, roas, frequency: freq, hookRate, breakEven: beRoas })]
 
     const vf = isVideo && hookRate !== null
       ? ` | Hook:${hookRate.toFixed(1)}% P25:${c.hold_rate_25 != null ? Number(c.hold_rate_25).toFixed(1) : '?'}% P50:${c.hold_rate_50 != null ? Number(c.hold_rate_50).toFixed(1) : '?'}% P100:${c.hold_rate_100 != null ? Number(c.hold_rate_100).toFixed(1) : '?'}%`
