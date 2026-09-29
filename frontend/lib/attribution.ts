@@ -1,4 +1,12 @@
 import { query } from './db'
+// Types and labels live apart so the client can import them without pulling
+// this module — and its database pool — into the browser bundle.
+import type {
+  Model, CreativeAttribution, Coverage, SourceRow, JourneyOrder,
+} from './attributionModels'
+
+export type { Model, CreativeAttribution, Coverage, SourceRow, JourneyOrder }
+export { MODELS } from './attributionModels'
 
 /**
  * Reading the collected journeys.
@@ -8,38 +16,6 @@ import { query } from './db'
  * kept separate from what Meta reports about itself: the whole point is to be
  * able to put the two side by side.
  */
-
-export type Model = 'first' | 'last' | 'linear'
-
-export const MODELS: { key: Model; label: string; hint: string }[] = [
-  { key: 'first',  label: 'Primeiro clique', hint: 'Crédito para o anúncio que trouxe a pessoa pela primeira vez' },
-  { key: 'last',   label: 'Último clique',   hint: 'Crédito para o último anúncio antes da compra' },
-  { key: 'linear', label: 'Dividido',        hint: 'Crédito repartido entre todos os anúncios da jornada' },
-]
-
-export interface CreativeAttribution {
-  adId: string
-  name: string | null
-  campaignName: string | null
-  thumbnail: string | null
-  /** Orders the journey credits to this ad. Fractional under the linear model. */
-  orders: number
-  revenue: number
-  spend: number
-  /** What Meta reports for itself over the same window. */
-  metaPurchases: number
-  metaRevenue: number
-  roasJourney: number | null
-  roasMeta: number | null
-}
-
-export interface Coverage {
-  orders: number
-  withJourney: number
-  withAd: number
-  pct: number
-  attributablePct: number
-}
 
 /**
  * How much of the period is actually measured.
@@ -177,12 +153,6 @@ export async function getCreativeAttribution(
   })
 }
 
-export interface SourceRow {
-  source: string
-  orders: number
-  revenue: number
-}
-
 /** Where sales come from when there is no ad to name — direct, search, social. */
 export async function getSourceBreakdown(
   tenantId: string, dateFrom: string, dateTo: string
@@ -225,24 +195,6 @@ export async function getSourceBreakdown(
     orders: Number(r.orders),
     revenue: Number(r.revenue),
   }))
-}
-
-export interface JourneyOrder {
-  orderId: string
-  orderNumber: number | null
-  total: number
-  createdAt: string
-  momentsCount: number | null
-  daysToConversion: number | null
-  touches: {
-    seq: number
-    occurredAt: string | null
-    source: string | null
-    utmMedium: string | null
-    adId: string | null
-    adName: string | null
-    landingPage: string | null
-  }[]
 }
 
 /** Recent orders with their full path, newest first. */

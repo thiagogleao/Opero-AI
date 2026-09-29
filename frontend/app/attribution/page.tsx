@@ -48,11 +48,18 @@ export default async function AttributionPage({ searchParams }: Props) {
   const model: Model =
     sp.model === 'last' || sp.model === 'linear' || sp.model === 'first' ? sp.model : 'first'
 
+  // One section failing should cost that section, not the page. Before this,
+  // any single query throwing took the whole screen down with it.
+  const fallbackCoverage = { orders: 0, withJourney: 0, withAd: 0, pct: 0, attributablePct: 0 }
   const [coverage, creatives, sources, journeys] = await Promise.all([
-    getCoverage(tenantId, dateFrom, dateTo),
-    getCreativeAttribution(tenantId, dateFrom, dateTo, model),
-    getSourceBreakdown(tenantId, dateFrom, dateTo),
-    getRecentJourneys(tenantId, dateFrom, dateTo, 30),
+    getCoverage(tenantId, dateFrom, dateTo)
+      .catch(e => { console.error('[attribution] coverage', e); return fallbackCoverage }),
+    getCreativeAttribution(tenantId, dateFrom, dateTo, model)
+      .catch(e => { console.error('[attribution] creatives', e); return [] }),
+    getSourceBreakdown(tenantId, dateFrom, dateTo)
+      .catch(e => { console.error('[attribution] sources', e); return [] }),
+    getRecentJourneys(tenantId, dateFrom, dateTo, 30)
+      .catch(e => { console.error('[attribution] journeys', e); return [] }),
   ])
 
   return (

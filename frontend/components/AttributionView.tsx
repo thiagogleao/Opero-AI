@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { makeFmt } from '@/lib/format'
 import { useSettings } from '@/contexts/SettingsContext'
-import { MODELS, type Model, type CreativeAttribution, type SourceRow, type JourneyOrder, type Coverage } from '@/lib/attribution'
+import { MODELS, type Model, type CreativeAttribution, type SourceRow, type JourneyOrder, type Coverage } from '@/lib/attributionModels'
 
 interface Props {
   coverage: Coverage
