@@ -40,7 +40,12 @@ interface LiveOrder {
   country: string | null; items: LineItem[] | null; receivedAt: string; store: string
 }
 interface Totals { revenue: number; profit: number; orders: number; adSpend: number; cogs: number; shipping: number; fees: number }
-interface Previous { revenue: number; profit: number; orders: number; adSpend: number; from: string; to: string }
+interface Previous {
+  revenue: number; profit: number; orders: number; adSpend: number
+  from: string; to: string
+  /** Set when the older window was cut at this hour to match a day in progress. */
+  throughHour: number | null
+}
 interface Payload {
   period: Period; from: string; to: string; storeId: string
   totals: Totals
@@ -227,9 +232,12 @@ export default function Dashboard() {
   const multiDay = daily.length > 1
   const prev = data?.previous
   const profitDelta = prev ? pctDelta(t.profit, prev.profit) : null
-  const periodLabel = period === 'today' ? 'vs ontem'
+  // When today is only half over, the comparison window was cut at the same
+  // hour — say so, otherwise the number looks like a full-day comparison.
+  const upTo = prev?.throughHour != null ? ` até ${String(prev.throughHour).padStart(2, '0')}h` : ''
+  const periodLabel = period === 'today' ? `vs ontem${upTo}`
     : period === 'yesterday' ? 'vs anteontem'
-    : 'vs período anterior'
+    : `vs período anterior${upTo}`
 
   return (
     <>

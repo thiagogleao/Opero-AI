@@ -1,6 +1,6 @@
 import { query } from './db'
 import { getProfitSummary } from './profitCalc'
-import { REFERENCE_TZ, todayInTz } from './mobileRange'
+import { REFERENCE_TZ, todayInTz, shiftDate } from './mobileRange'
 
 /**
  * Profit accumulating through a single day.
@@ -86,6 +86,108 @@ async function loadStoreDay(tenantId: string, day: string): Promise<StoreDay> {
     : 0
 
   return { hourly, nonAdRatio, adSpend: summary.fbSpend, configured: summary.configured }
+}
+
+/** Totals for one day counted only up to the end of `throughHour` (0-23). */
+export interface PartialDay {
+  revenue: number
+  orders: number
+  adSpend: number
+  profit: number
+}
+
+/**
+ * What a day looked like at this hour.
+ *
+ * Comparing a day in progress against a finished one is the easiest way to make
+ * a good day look terrible: at 2pm today has fourteen hours of sales and
+ * yesterday has twenty-four. This cuts the older day at the same hour so the
+ * two are the same length.
+ *
+ * Orders are cut exactly, by their timestamp. Ad spend can only be prorated —
+ * Meta reports it daily — so a finished day contributes (hour+1)/24 of its
+ * spend, the same even-burn assumption the intraday curve makes.
+ */
+export async function getDayThroughHour(
+  tenantIds: string[],
+  day: string,
+  throughHour: number,
+  tz: string = REFERENCE_TZ,
+): Promise<PartialDay> {
+  const covered = hoursCovered(day, tz)
+  const lastHour = Math.min(throughHour, covered - 1)
+
+  const days = await Promise.all(tenantIds.map(async id => {
+    try {
+      return await loadStoreDay(id, day)
+    } catch (err) {
+      console.error('[intraday] partial day failed', id, err)
+      return null
+    }
+  }))
+  const loaded = days.filter((d): d is StoreDay => d !== null)
+
+  const out: PartialDay = { revenue: 0, orders: 0, adSpend: 0, profit: 0 }
+
+  for (const d of loaded) {
+    const share = (lastHour + 1) / covered
+    const spend = d.adSpend * share
+    out.adSpend += spend
+    out.profit  -= spend
+
+    for (let hour = 0; hour <= lastHour; hour++) {
+      const cell = d.hourly.get(hour)
+      if (!cell) continue
+      out.revenue += cell.revenue
+      out.orders  += cell.orders
+      out.profit  += cell.revenue - cell.revenue * d.nonAdRatio
+    }
+  }
+
+  return out
+}
+
+/**
+ * Totals for a window, with its final day optionally cut at an hour.
+ *
+ * `throughHour` is null when the window is entirely in the past and every day
+ * of it is complete; pass an hour to make the window match one that is still
+ * running.
+ */
+export async function getComparableTotals(
+  tenantIds: string[],
+  from: string,
+  to: string,
+  throughHour: number | null,
+): Promise<PartialDay> {
+  const total: PartialDay = { revenue: 0, orders: 0, adSpend: 0, profit: 0 }
+
+  // Whole days: everything before the final one, or all of it when the window
+  // has already closed.
+  const fullTo = throughHour === null ? to : shiftDate(to, -1)
+  if (fullTo >= from) {
+    const rows = await Promise.all(tenantIds.map(async id => {
+      try {
+        const s = await getProfitSummary(id, from, fullTo)
+        return { revenue: s.totalRevenue, orders: s.orderCount, adSpend: s.fbSpend, profit: s.netProfit }
+      } catch (err) {
+        console.error('[intraday] comparable window failed', id, err)
+        return { revenue: 0, orders: 0, adSpend: 0, profit: 0 }
+      }
+    }))
+    for (const r of rows) {
+      total.revenue += r.revenue; total.orders += r.orders
+      total.adSpend += r.adSpend; total.profit += r.profit
+    }
+  }
+
+  if (throughHour !== null) {
+    const partial = await getDayThroughHour(tenantIds, to, throughHour)
+    total.revenue += partial.revenue; total.orders += partial.orders
+    total.adSpend += partial.adSpend; total.profit += partial.profit
+  }
+
+  return total
 }
 
 /** Cumulative profit by hour, summed across the given stores. */

@@ -1,6 +1,7 @@
 import { query } from './db'
 import { sendPushToAll } from './push'
 import { getAccountOverview, type StoreOverviewRow } from './accountOverview'
+import { getDayThroughHour } from './intradayProfit'
 import { REFERENCE_TZ, todayInTz, shiftDate } from './mobileRange'
 import type { Tenant } from './tenant'
 
@@ -237,15 +238,17 @@ export async function sendDailySummary(opts: { force?: boolean } = {}): Promise<
   const stores = await allStores()
   if (stores.length === 0) return false
 
+  // Yesterday is cut at the hour this summary is being sent, so a 9pm report
+  // is not comparing twenty-one hours against twenty-four.
+  const hour = hourInTz()
   const [today, yesterday] = await Promise.all([
     getAccountOverview(stores, day, day),
-    getAccountOverview(stores, prev, prev),
+    getDayThroughHour(stores.map(s => s.id), prev, hour),
   ])
 
   const t = today.totals
-  const y = yesterday.totals
-  const delta = y.profit !== 0
-    ? ` (${t.profit >= y.profit ? '+' : ''}${(((t.profit - y.profit) / Math.abs(y.profit)) * 100).toFixed(0)}% vs ontem)`
+  const delta = yesterday.profit !== 0
+    ? ` (${t.profit >= yesterday.profit ? '+' : ''}${(((t.profit - yesterday.profit) / Math.abs(yesterday.profit)) * 100).toFixed(0)}% vs ontem nesta hora)`
     : ''
 
   const ranked = today.stores.filter(s => !s.failed)
