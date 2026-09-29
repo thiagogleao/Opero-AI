@@ -2,6 +2,7 @@ import { query } from '@/lib/db'
 import { getProfitSummary, getDailyProfitData } from '@/lib/profitCalc'
 import { mobileAuthOk, unauthorized } from '@/lib/mobileAuth'
 import { resolveRange, previousRange, REFERENCE_TZ, type Period } from '@/lib/mobileRange'
+import { getIntradayProfit } from '@/lib/intradayProfit'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -48,6 +49,7 @@ export async function GET(req: Request) {
   // A single-day range renders no chart, and getDailyProfitData recomputes the
   // whole summary internally — so skip it entirely rather than pay for a series
   // the UI will not draw. This is the common case ("Hoje") and the slowest one.
+  // That day gets the hour-by-hour curve instead.
   const wantDaily = from !== to
 
   // Summary and daily run as one wave instead of two sequential ones; the two
@@ -119,6 +121,12 @@ export async function GET(req: Request) {
     .map(p => ({ ...p, margin: p.revenue > 0 ? Math.round((p.profit / p.revenue) * 1000) / 10 : null }))
 
   const ids = selected.map(t => t.id)
+
+  // Only a one-day view has an inside to look at.
+  const intraday = wantDaily ? null : await getIntradayProfit(ids, from).catch(err => {
+    console.error('[mobile] intraday failed', err)
+    return null
+  })
   const recent = ids.length ? await query<{
     order_id: string; order_number: string | null; total_price: string; currency: string
     country_code: string | null; line_items: unknown; received_at: string
@@ -155,6 +163,7 @@ export async function GET(req: Request) {
     totals,
     stores,
     daily,
+    intraday,
     allStores: allTenants.map(t => ({ id: t.id, name: nameOf(t) })),
     lastSyncAt: lastSync[0]?.finished_at ?? null,
     recentOrders: recent.map(r => ({

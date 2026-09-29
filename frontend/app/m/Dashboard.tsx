@@ -25,6 +25,15 @@ interface Store {
   margin: number; cogs: number; shipping: number; fees: number; aov: number; error: boolean
 }
 interface DailyPoint { date: string; revenue: number; profit: number; fbSpend: number; margin: number | null }
+interface IntradayPoint {
+  hour: number; label: string; revenue: number; orders: number
+  cumRevenue: number; cumProfit: number
+}
+interface Intraday {
+  day: string; points: IntradayPoint[]
+  peak: { hour: number; profit: number } | null
+  closing: number; configured: boolean
+}
 interface LineItem { title?: string; quantity?: number; price?: string }
 interface LiveOrder {
   orderId: string; orderNumber: string | null; total: number; currency: string
@@ -38,6 +47,7 @@ interface Payload {
   previous?: Previous
   stores: Store[]
   daily: DailyPoint[]
+  intraday?: Intraday | null
   allStores: { id: string; name: string }[]
   lastSyncAt: string | null
   recentOrders: LiveOrder[]
@@ -272,6 +282,8 @@ export default function Dashboard() {
         <Tile label="Margem"   value={t.revenue > 0 ? `${((t.profit / t.revenue) * 100).toFixed(0)}%` : '—'} />
         <Tile label="Ticket"   value={aov > 0 ? money(aov) : '—'} />
       </div>
+
+      {!multiDay && data?.intraday && <IntradayChart data={data.intraday} />}
 
       {multiDay && (
         <>
@@ -509,6 +521,50 @@ const dateInput: React.CSSProperties = {
   flex: 1, minWidth: 0, background: 'var(--card)', border: '1px solid var(--hairline)',
   borderRadius: 9, padding: '9px 10px', fontSize: 13, color: 'var(--ink)',
   colorScheme: 'dark',
+}
+
+// ─── Intraday curve ───────────────────────────────────────────────────────────
+
+/**
+ * Profit accumulating hour by hour, so a day that was ahead at noon and gave it
+ * back reads differently from a day that was never ahead. The line crossing
+ * zero is the hour the day started paying for itself.
+ */
+function IntradayChart({ data }: { data: Intraday }) {
+  const pts = data.points
+  if (pts.length < 2) return null
+
+  const peak = data.peak
+  // Only worth pointing out when the day actually came off its high, and by
+  // enough that it is not just the next hour's flat share of ad spend.
+  const gaveBack = peak && peak.profit > 0 && peak.profit - data.closing > Math.abs(peak.profit) * 0.1
+    ? peak.profit - data.closing
+    : null
+  const turned = pts.find(p => p.cumProfit >= 0)
+
+  return (
+    <Section title="Lucro acumulado no dia">
+      <Chart
+        labels={pts.map(p => p.label)}
+        formatLabel={l => l}
+        format={v => money(v)}
+        height={148}
+        zeroLine
+        series={[
+          { key: 'rev', label: 'Receita acumulada', color: C_REVENUE, area: true, values: pts.map(p => p.cumRevenue) },
+          { key: 'pro', label: 'Lucro acumulado',   color: C_PROFIT,               values: pts.map(p => p.cumProfit) },
+        ] as Series[]}
+      />
+      <p style={{ fontSize: 11, color: 'var(--ink-3)', margin: '8px 0 0', lineHeight: 1.5 }}>
+        {gaveBack
+          ? <>Pico de <b style={{ color: 'var(--ink-2)' }}>{money(peak!.profit)}</b> às {String(peak!.hour).padStart(2, '0')}h, {money(gaveBack)} devolvidos desde então.</>
+          : turned
+            ? <>No azul desde as {String(turned.hour).padStart(2, '0')}h.</>
+            : <>Ainda não cobriu o gasto do dia.</>}
+        {' '}O gasto com anúncios é diário e foi distribuído por igual entre as horas; a receita é exata.
+      </p>
+    </Section>
+  )
 }
 
 // ─── Cost breakdown ───────────────────────────────────────────────────────────

@@ -19,6 +19,15 @@ interface Props {
   format: (v: number) => string
   /** Draw a zero baseline — for measures that can go negative. */
   zeroLine?: boolean
+  /** Formats the x label in the tap readout. Defaults to reading it as a date. */
+  formatLabel?: (label: string) => string
+}
+
+/** "2026-09-29" → "29/09". Anything else is left alone. */
+function defaultLabel(label: string): string {
+  return /^\d{4}-\d{2}-\d{2}/.test(label)
+    ? label.slice(5, 10).split('-').reverse().join('/')
+    : label
 }
 
 /**
@@ -51,7 +60,7 @@ function niceStep(range: number, targetTicks = 3): number {
 
 const PAD = { top: 10, right: 8, bottom: 16, left: 44 }
 
-export default function Chart({ labels, series, height = 132, format, zeroLine }: Props) {
+export default function Chart({ labels, series, height = 132, format, zeroLine, formatLabel = defaultLabel }: Props) {
   const [ref, width] = useWidth<HTMLDivElement>()
   const [active, setActive] = useState<number | null>(null)
 
@@ -116,7 +125,7 @@ export default function Chart({ labels, series, height = 132, format, zeroLine }
         {showReadout && (
           <>
             <span style={{ fontSize: 11, color: 'var(--ink-3)', fontVariantNumeric: 'tabular-nums' }}>
-              {labels[readout]?.slice(5).split('-').reverse().join('/')}
+              {formatLabel(labels[readout] ?? '')}
             </span>
             {series.map(s => (
               <span key={s.key} style={{ fontSize: 11, color: 'var(--ink-2)', display: 'flex', alignItems: 'center', gap: 4 }}>
