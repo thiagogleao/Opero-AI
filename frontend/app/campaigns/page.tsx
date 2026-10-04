@@ -3,6 +3,9 @@ import { redirect } from 'next/navigation'
 import { getActiveTenantId } from '@/lib/activeStore'
 import { getCampaignMetrics, getTenantTimezone } from '@/lib/queries'
 import Sidebar from '@/components/Sidebar'
+import ScalePanel from '@/components/ScalePanel'
+import { getCampaignSignals, DEFAULT_SCALE_CONFIG } from '@/lib/scaleSignals'
+import { getAlertConfig } from '@/lib/alerts'
 import Link from 'next/link'
 
 export const revalidate = 0
@@ -43,6 +46,13 @@ export default async function CampaignsPage({ searchParams }: Props) {
   const dateFrom = sp.from ?? dateInTz(new Date(now.getTime() - 29 * 86400000), tz)
 
   const campaigns = await getCampaignMetrics(tenantId, dateFrom, dateTo)
+
+  // The verdict panel judges its own fixed window of complete days, so it does
+  // not follow the date picker above it.
+  const alertCfg = await getAlertConfig().catch(() => null)
+  const minMargin = alertCfg?.scaleAlerts.threshold ?? DEFAULT_SCALE_CONFIG.minMargin
+  const signals = await getCampaignSignals(tenantId, { ...DEFAULT_SCALE_CONFIG, minMargin })
+    .catch(e => { console.error("[campaigns] scale signals", e); return [] })
   const totalSpend = campaigns.reduce((s, c) => s + Number(c.spend), 0)
 
   return (
@@ -60,6 +70,16 @@ export default async function CampaignsPage({ searchParams }: Props) {
             {dateFrom} → {dateTo} · {campaigns.length} campanhas · ${totalSpend.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} total
           </p>
         </div>
+
+        <section style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 12, marginBottom: 22, overflow: 'hidden' }}>
+          <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--border)' }}>
+            <h2 style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>Onde há folga para escalar</h2>
+            <p style={{ fontSize: 11, color: 'var(--text-faint)', margin: '2px 0 0' }}>Margem real por campanha nos últimos 7 dias fechados</p>
+          </div>
+          <div style={{ padding: 18 }}>
+            <ScalePanel signals={signals} minMargin={minMargin} />
+          </div>
+        </section>
 
         {campaigns.length === 0 ? (
           <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 12, padding: '60px 0', textAlign: 'center' }}>

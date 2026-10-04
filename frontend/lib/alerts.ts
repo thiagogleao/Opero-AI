@@ -2,6 +2,7 @@ import { query } from './db'
 import { sendPushToAll } from './push'
 import { getAccountOverview, type StoreOverviewRow } from './accountOverview'
 import { getDayThroughHour } from './intradayProfit'
+import { getCampaignSignals, DEFAULT_SCALE_CONFIG } from './scaleSignals'
 import { REFERENCE_TZ, todayInTz, shiftDate } from './mobileRange'
 import type { Tenant } from './tenant'
 
@@ -25,6 +26,8 @@ export interface AlertConfig {
   spendSpike: Rule
   /** Margin for the day below this percentage. */
   marginDrop: Rule
+  /** Campaigns that earned more budget, or are burning it. */
+  scaleAlerts: Rule
   /** Push a summary of the day at `hour`, local to the reference timezone. */
   dailySummary: { enabled: boolean; hour: number }
   /** A store below this ad spend today is too early to judge. */
@@ -37,6 +40,7 @@ export const DEFAULT_CONFIG: AlertConfig = {
   roasDrop:     { enabled: true,  threshold: 1.5 },
   spendSpike:   { enabled: false, threshold: 200 },
   marginDrop:   { enabled: true,  threshold: 10 },
+  scaleAlerts:  { enabled: true,  threshold: 20 },
   dailySummary: { enabled: true,  hour: 21 },
   minSpend: 50,
   fromHour: 12,
@@ -51,6 +55,7 @@ function merge(raw: Partial<AlertConfig> | null | undefined): AlertConfig {
     roasDrop:     { ...DEFAULT_CONFIG.roasDrop,     ...(raw.roasDrop     ?? {}) },
     spendSpike:   { ...DEFAULT_CONFIG.spendSpike,   ...(raw.spendSpike   ?? {}) },
     marginDrop:   { ...DEFAULT_CONFIG.marginDrop,   ...(raw.marginDrop   ?? {}) },
+    scaleAlerts:  { ...DEFAULT_CONFIG.scaleAlerts,  ...(raw.scaleAlerts  ?? {}) },
     dailySummary: { ...DEFAULT_CONFIG.dailySummary, ...(raw.dailySummary ?? {}) },
     minSpend: raw.minSpend ?? DEFAULT_CONFIG.minSpend,
     fromHour: raw.fromHour ?? DEFAULT_CONFIG.fromHour,
@@ -221,6 +226,84 @@ async function maybeSend(
     data: { kind: alert.kind, tenantId: store.id },
   })
   return true
+}
+
+// ─── Scale opportunities ──────────────────────────────────────────────────────
+
+/**
+ * Tell the owner which campaigns have earned more budget, and which are
+ * burning it. Once per campaign per day.
+ *
+ * Campaign level because that is the level that can actually be funded in this
+ * account's structure, and judged on the margin of the sales the campaign can
+ * be shown to have started — ad spend in full against credited revenue only.
+ * That is deliberately the strict reading: the organic and repeat revenue that
+ * rides on top of a campaign is not counted toward it.
+ */
+export async function runScaleChecks(
+  opts: { force?: boolean; dryRun?: boolean } = {}
+): Promise<FiredAlert[]> {
+  const cfg = await getAlertConfig()
+  if (!cfg.scaleAlerts.enabled && !opts.force && !opts.dryRun) return []
+
+  const day = todayInTz(REFERENCE_TZ)
+  const stores = await allStores()
+  const fired: FiredAlert[] = []
+
+  for (const store of stores) {
+    let signals
+    try {
+      signals = await getCampaignSignals(store.id, {
+        ...DEFAULT_SCALE_CONFIG,
+        minMargin: cfg.scaleAlerts.threshold,
+      })
+    } catch (err) {
+      console.error('[alerts] scale check failed for', store.id, err)
+      continue
+    }
+
+    const label = store.shop_name ?? store.shopify_domain?.replace('.myshopify.com', '') ?? 'Loja'
+
+    for (const c of signals) {
+      if (c.verdict !== 'scale' && c.verdict !== 'cut') continue
+      // A paused campaign cannot be given more budget, and telling anyone to
+      // cut one they already stopped is noise. Most campaigns here are paused.
+      if (c.status !== 'ACTIVE') continue
+
+      const scaling = c.verdict === 'scale'
+      const alert: FiredAlert = {
+        kind: scaling ? 'scale_up' : 'scale_cut',
+        store: label,
+        title: scaling
+          ? `🚀 ${c.name.slice(0, 40)} — dá para escalar`
+          : `🛑 ${c.name.slice(0, 40)} — queimando dinheiro`,
+        body: [
+          c.reasons[0],
+          c.reasons[1],
+          `${label}: $${c.spend.toFixed(0)} gastos, ${c.orders} pedidos nos últimos 7 dias fechados.`,
+        ].filter(Boolean).join(' · '),
+      }
+
+      if (opts.dryRun) { fired.push(alert); continue }
+      // One per campaign per day, claimed through the same unique index the
+      // other alerts use.
+      if (!opts.force && !(await claim(alert.kind, `${store.id}:${c.campaignId}`, day, { margin: c.margin }))) continue
+      await sendPushToAll({
+        title: alert.title,
+        body: alert.body,
+        url: '/campaigns',
+        tag: `${alert.kind}-${c.campaignId}-${day}`,
+        data: { kind: alert.kind, tenantId: store.id, campaignId: c.campaignId },
+      })
+      fired.push(alert)
+    }
+  }
+
+  if (fired.length) {
+    const verb = opts.dryRun ? 'would fire' : 'sent'
+    console.log(`[alerts] scale ${verb} ${fired.length}: ${fired.map(f => f.kind).join(', ')}`)
+  }
+  return fired
 }
 
 // ─── Daily summary ────────────────────────────────────────────────────────────

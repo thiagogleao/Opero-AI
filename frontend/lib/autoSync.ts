@@ -1,7 +1,7 @@
 import { spawn } from 'child_process'
 import path from 'path'
 import { query } from './db'
-import { getAlertConfig, hourInTz, runAlertChecks, sendDailySummary } from './alerts'
+import { getAlertConfig, hourInTz, runAlertChecks, runScaleChecks, sendDailySummary } from './alerts'
 import { journeyStores, syncJourneys, refreshPendingJourneys } from './journey'
 import { runBulkBackfill, storesNeedingBackfill } from './journeyBulk'
 
@@ -136,6 +136,9 @@ async function runJourneyCycle() {
 async function runAlertCycle() {
   const cfg = await getAlertConfig()
   await runAlertChecks()
+  // Scale verdicts judge complete days only, so they are worth asking for once
+  // the day has turned rather than on every pass through the morning.
+  if (hourInTz() >= cfg.fromHour) await runScaleChecks()
   if (cfg.dailySummary.enabled && hourInTz() >= cfg.dailySummary.hour) {
     await sendDailySummary()
   }
