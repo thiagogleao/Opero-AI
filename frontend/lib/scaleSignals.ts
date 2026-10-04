@@ -203,8 +203,17 @@ export async function getCampaignSignals(
 
   for (const [campaignId, c] of byCampaign) {
     const days = c.days.sort((a, b) => a.date.localeCompare(b.date))
-    const window = days.slice(-config.windowDays).filter(judgeable)
-    const previous = days.slice(-config.windowDays * 2, -config.windowDays).filter(judgeable)
+
+    // Calendar days, not rows. Taking the last N entries instead meant a
+    // campaign that stopped running two weeks ago had its old days read as the
+    // current week — which is how campaigns on a restricted account were being
+    // recommended for more budget.
+    const windowStart = shiftDate(to, -(config.windowDays - 1))
+    const priorStart  = shiftDate(to, -(config.windowDays * 2 - 1))
+    const priorEnd    = shiftDate(windowStart, -1)
+
+    const window   = days.filter(d => d.date >= windowStart && judgeable(d))
+    const previous = days.filter(d => d.date >= priorStart && d.date <= priorEnd && judgeable(d))
 
     const spend   = window.reduce((a, d) => a + d.spend, 0)
     const orders  = window.reduce((a, d) => a + d.orders, 0)
@@ -212,13 +221,14 @@ export async function getCampaignSignals(
     const profit  = revenue * (1 - nonAdRatio) - spend
     const margin  = revenue > 0 ? (profit / revenue) * 100 : spend > 0 ? -100 : 0
 
-    // Most recent consecutive days clearing the streak bar.
+    // Consecutive calendar days back from the last complete one. A missing day
+    // ends the run: a campaign that did not spend yesterday is not on a streak.
+    const byDate = new Map(days.map(d => [d.date, d]))
     let streak = 0
-    for (let i = days.length - 1; i >= 0; i--) {
-      const d = days[i]
-      if (!judgeable(d)) break
-      if (d.margin !== null && d.margin >= config.streakMargin) streak++
-      else break
+    for (let i = 0; i < config.windowDays * 2; i++) {
+      const d = byDate.get(shiftDate(to, -i))
+      if (!d || !judgeable(d) || d.margin === null || d.margin < config.streakMargin) break
+      streak++
     }
 
     const recent3 = window.slice(-3)
