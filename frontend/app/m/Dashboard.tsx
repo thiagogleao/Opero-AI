@@ -51,9 +51,16 @@ interface Adjustments {
   chargebackHit: number; chargebackFees: number; chargebackCount: number
   total: number; alreadyCounted: number; blindToChargebacks: boolean
 }
+interface ChargebackHealth {
+  count: number; orders: number; rate: number; amount: number; fees: number
+  open: number; lost: number; won: number
+  dueSoon: { externalId: string; amount: number; currency: string; reason: string; dueBy: string | null }[]
+  hasData: boolean
+}
 interface Payload {
   period: Period; from: string; to: string; storeId: string
   adjustments?: Adjustments
+  chargebackHealth?: ChargebackHealth | null
   totals: Totals
   previous?: Previous
   stores: Store[]
@@ -101,7 +108,16 @@ function pctDelta(now: number, before: number): number | null {
   return ((now - before) / Math.abs(before)) * 100
 }
 function timeAgo(iso: string): string {
-  const ms = new Date(/[Zz]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso.replace(' ', 'T') + 'Z').getTime()
+  // Postgres writes the offset as two digits ("+00"), which JavaScript will not
+  // parse and the old four-digit test did not recognise — so a 'Z' was appended
+  // to a stamp that already carried an offset and the header read "NaNd".
+  // Normalise to something Date accepts, then fall back rather than show NaN.
+  const t = iso.replace(' ', 'T')
+  const normalised = /[Zz]$|[+-]\d{2}:\d{2}$|[+-]\d{4}$/.test(t)
+    ? t
+    : /[+-]\d{2}$/.test(t) ? `${t}:00` : `${t}Z`
+  const ms = new Date(normalised).getTime()
+  if (!Number.isFinite(ms)) return '—'
   const s = Math.max(0, (Date.now() - ms) / 1000)
   if (s < 60) return 'agora'
   if (s < 3600) return `${Math.floor(s / 60)}min`
@@ -238,6 +254,7 @@ export default function Dashboard() {
   const multiDay = daily.length > 1
   const prev = data?.previous
   const adj = data?.adjustments
+  const cb = data?.chargebackHealth
   const profitDelta = prev ? pctDelta(t.profit, prev.profit) : null
   // When today is only half over, the comparison window was cut at the same
   // hour — say so, otherwise the number looks like a full-day comparison.
@@ -356,6 +373,8 @@ export default function Dashboard() {
           </Section>
         </>
       )}
+
+      {cb?.hasData && <ChargebackCard h={cb} />}
 
       <CostBreakdown totals={t} />
 
@@ -605,6 +624,70 @@ function IntradayChart({ data }: { data: Intraday }) {
             : <>Ainda não cobriu o gasto do dia.</>}
         {' '}O gasto com anúncios é diário e foi distribuído por igual entre as horas; a receita é exata.
       </p>
+    </Section>
+  )
+}
+
+// ─── Chargeback health ────────────────────────────────────────────────────────
+
+/**
+ * The ninety-day dispute rate, which does not belong to the chosen period: it
+ * is the number a payment processor acts on, and past 1.5% it can cost the
+ * store Shopify Payments altogether. Shown by count, not by value, because
+ * that is how the threshold itself is measured.
+ */
+function ChargebackCard({ h }: { h: ChargebackHealth }) {
+  const LIMIT = 1.5
+  const level = h.rate >= LIMIT ? 'bad' : h.rate >= 1 ? 'warn' : 'ok'
+  const color = level === 'bad' ? 'var(--bad)' : level === 'warn' ? '#fbbf24' : 'var(--good)'
+  // Bar is scaled to twice the limit, so the threshold sits mid-width and
+  // being over it is visible rather than merely stated.
+  const pct = Math.min(100, (h.rate / (LIMIT * 2)) * 100)
+
+  return (
+    <Section title="Chargebacks — últimos 90 dias">
+      <div style={{
+        border: `1px solid ${level === 'ok' ? 'var(--hairline)' : color}`,
+        borderRadius: 11, padding: '11px 13px',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 7 }}>
+          <span style={{ fontSize: 24, fontWeight: 680, color, letterSpacing: '-0.02em' }}>
+            {h.rate.toFixed(2)}%
+          </span>
+          <span style={{ fontSize: 11.5, color: 'var(--ink-3)', flex: 1 }}>
+            {h.count} de {h.orders.toLocaleString('pt-BR')} pedidos
+          </span>
+          {level === 'bad' && <span style={{ fontSize: 11, fontWeight: 640, color }}>acima do limite</span>}
+        </div>
+
+        <div style={{ position: 'relative', height: 6, background: 'rgba(255,255,255,0.06)', borderRadius: 3, marginBottom: 7 }}>
+          <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: 3 }} />
+          {/* The 1.5% line itself, so the bar means something without a legend. */}
+          <div style={{ position: 'absolute', left: '50%', top: -3, bottom: -3, width: 1, background: 'rgba(255,255,255,0.45)' }} />
+        </div>
+
+        <p style={{ fontSize: 11, color: 'var(--ink-3)', margin: 0 }}>
+          Limite do Shopify Payments: {LIMIT}% · {money(h.amount)} disputados + {money(h.fees)} em taxas
+        </p>
+        <p style={{ fontSize: 11, color: 'var(--ink-3)', margin: '3px 0 0' }}>
+          {h.open} em aberto · {h.lost} perdidas · {h.won} ganhas
+          {h.lost + h.won > 0 && ` (${Math.round((h.won / (h.lost + h.won)) * 100)}% de vitória)`}
+        </p>
+
+        {h.dueSoon.length > 0 && (
+          <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--hairline)' }}>
+            <p style={{ fontSize: 11, color: 'var(--ink-2)', margin: '0 0 4px', fontWeight: 560 }}>
+              Ainda dá para responder:
+            </p>
+            {h.dueSoon.slice(0, 3).map(d => (
+              <p key={d.externalId} style={{ fontSize: 10.5, color: 'var(--ink-3)', margin: '2px 0 0' }}>
+                {d.currency} {d.amount.toFixed(0)} · {d.reason}
+                {d.dueBy && ` · até ${d.dueBy.slice(0, 10).split('-').reverse().join('/')}`}
+              </p>
+            ))}
+          </div>
+        )}
+      </div>
     </Section>
   )
 }

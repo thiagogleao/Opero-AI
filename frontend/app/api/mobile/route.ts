@@ -4,7 +4,7 @@ import { mobileAuthOk, unauthorized } from '@/lib/mobileAuth'
 import { hourInTz } from '@/lib/alerts'
 import { resolveRange, previousRange, REFERENCE_TZ, todayInTz, type Period } from '@/lib/mobileRange'
 import { getIntradayProfit, getComparableTotals } from '@/lib/intradayProfit'
-import { getAdjustmentImpact, NO_IMPACT } from '@/lib/adjustments'
+import { getAdjustmentImpact, NO_IMPACT, getCombinedChargebackHealth } from '@/lib/adjustments'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -141,6 +141,10 @@ export async function GET(req: Request) {
     blindToChargebacks: a.blindToChargebacks || i.blindToChargebacks,
   }), { ...NO_IMPACT })
 
+  // Ninety-day dispute rate: not a property of the chosen period, but the
+  // number that decides whether the store keeps Shopify Payments at all.
+  const chargebackHealth = await getCombinedChargebackHealth(ids).catch(() => null)
+
   // Only a one-day view has an inside to look at.
   const intraday = wantDaily ? null : await getIntradayProfit(ids, from).catch(err => {
     console.error('[mobile] intraday failed', err)
@@ -185,6 +189,7 @@ export async function GET(req: Request) {
     intraday,
     allStores: allTenants.map(t => ({ id: t.id, name: nameOf(t) })),
     adjustments,
+    chargebackHealth,
     lastSyncAt: lastSync[0]?.finished_at ?? null,
     recentOrders: recent.map(r => ({
       orderId: r.order_id,

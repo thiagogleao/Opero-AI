@@ -442,6 +442,35 @@ export interface ChargebackHealth {
   hasData: boolean
 }
 
+/**
+ * Chargeback health across several stores at once.
+ *
+ * The rate is recomputed from the summed counts rather than averaged: a store
+ * with four orders and one dispute would otherwise drag the whole number up as
+ * hard as one with four thousand.
+ */
+export async function getCombinedChargebackHealth(tenantIds: string[]): Promise<ChargebackHealth> {
+  const each = await Promise.all(tenantIds.map(id => getChargebackHealth(id)))
+  const sum = each.reduce((a, h) => ({
+    count: a.count + h.count,
+    orders: a.orders + h.orders,
+    amount: a.amount + h.amount,
+    fees: a.fees + h.fees,
+    open: a.open + h.open,
+    lost: a.lost + h.lost,
+    won: a.won + h.won,
+  }), { count: 0, orders: 0, amount: 0, fees: 0, open: 0, lost: 0, won: 0 })
+
+  return {
+    ...sum,
+    rate: sum.orders > 0 ? (sum.count / sum.orders) * 100 : 0,
+    dueSoon: each.flatMap(h => h.dueSoon)
+      .sort((a, b) => (a.dueBy ?? '9999').localeCompare(b.dueBy ?? '9999'))
+      .slice(0, 5),
+    hasData: each.some(h => h.hasData),
+  }
+}
+
 /** The number that decides whether Shopify Payments stays switched on. */
 export async function getChargebackHealth(tenantId: string): Promise<ChargebackHealth> {
   const empty: ChargebackHealth = {
