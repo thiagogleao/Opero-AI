@@ -270,6 +270,16 @@ export default function KeysPage() {
                         >
                           Reautorizar esta loja
                         </a>
+                        {/* The Opero app only installs on stores in the same
+                            Partners organisation. Everywhere else Shopify
+                            answers "This installation link can't be used",
+                            which explains nothing and offers no way forward. */}
+                        <p style={{ fontSize: 10.5, color: 'var(--text-faint)', margin: '6px 0 0', lineHeight: 1.5 }}>
+                          Se o Shopify responder <i>&quot;This installation link can&apos;t be used&quot;</i>, esta loja
+                          usa um app privado próprio. Nesse caso: Configurações → Apps e canais de venda →
+                          Desenvolver apps → abra o app → Admin API → marque <code>read_shopify_payments_disputes</code> →
+                          reinstale → copie o token novo e cole no campo abaixo.
+                        </p>
                       </div>
                     )}
 
