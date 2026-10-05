@@ -13,6 +13,8 @@ interface StoreHealth {
   masked: string | null
   status: TokenStatus
   httpStatus: number | null
+  missingScopes?: { handle: string; why: string }[]
+  scopeCount?: number
 }
 
 const STATUS_LABEL: Record<TokenStatus, string> = {
@@ -234,6 +236,29 @@ export default function KeysPage() {
                       </div>
                       <StatusPill status={store.status} />
                     </div>
+
+                    {/* A working token can still be blind. Scopes are frozen at
+                        the moment the token was issued, so widening them in the
+                        Shopify admin changes nothing until the app is
+                        reinstalled — which is not obvious from "Conectada". */}
+                    {store.status === 'ok' && (store.missingScopes?.length ?? 0) > 0 && (
+                      <div style={{
+                        marginTop: 8, padding: '8px 12px', borderRadius: 8,
+                        background: 'rgba(245,158,11,0.08)', border: '1px dashed rgba(245,158,11,0.32)',
+                      }}>
+                        <p style={{ fontSize: 12, color: '#F59E0B', margin: 0, fontWeight: 600 }}>
+                          Conectada, mas sem permissão para: {store.missingScopes!.map(s => s.why).join(', ')}
+                        </p>
+                        <p style={{ fontSize: 11, color: 'var(--text-dim)', margin: '4px 0 0', lineHeight: 1.5 }}>
+                          O token carrega as permissões de quando foi criado ({store.scopeCount} escopos).
+                          Marcar a permissão no painel da Shopify não muda este token — é preciso
+                          reinstalar o app privado para gerar um novo e colar aqui.
+                        </p>
+                        <p style={{ fontSize: 10.5, color: 'var(--text-faint)', margin: '4px 0 0', fontFamily: 'monospace' }}>
+                          {store.missingScopes!.map(s => s.handle).join(' · ')}
+                        </p>
+                      </div>
+                    )}
 
                     {store.status === 'error' && store.httpStatus && (
                       <p style={{ fontSize: 11.5, color: '#F59E0B', margin: '8px 0 0' }}>

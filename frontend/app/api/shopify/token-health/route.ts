@@ -14,6 +14,35 @@ export interface StoreTokenHealth {
   masked: string | null
   status: TokenStatus
   httpStatus: number | null
+  /** Permissions this token is missing for features Opero depends on. A token
+   *  can answer every request and still be blind: the scopes are fixed at the
+   *  moment it was issued, so widening them in the Shopify admin changes
+   *  nothing until the app is reinstalled and the token replaced. */
+  missingScopes: { handle: string; why: string }[]
+  scopeCount: number
+}
+
+/** Scopes Opero needs, and what breaks without each one. */
+const REQUIRED_SCOPES: { handle: string; why: string }[] = [
+  { handle: 'read_orders',     why: 'pedidos e receita' },
+  { handle: 'read_products',   why: 'catálogo e custo por produto' },
+  { handle: 'read_shopify_payments_disputes', why: 'chargebacks' },
+  { handle: 'read_shopify_payments_payouts',  why: 'repasses' },
+]
+
+async function readScopes(domain: string, token: string): Promise<string[] | null> {
+  try {
+    const res = await fetch(`https://${domain}/admin/oauth/access_scopes.json`, {
+      headers: { 'X-Shopify-Access-Token': token },
+      signal: AbortSignal.timeout(10_000),
+      cache: 'no-store',
+    })
+    if (!res.ok) return null
+    const json = await res.json() as { access_scopes?: { handle: string }[] }
+    return (json.access_scopes ?? []).map(s => s.handle)
+  } catch {
+    return null
+  }
 }
 
 /** Show the first 9 and last 4 characters so the user can tell whether the
@@ -41,19 +70,26 @@ export async function GET() {
       }
 
       if (!t.shopify_domain || !t.shopify_access_token) {
-        return { ...base, status: 'missing' as const, httpStatus: null }
+        return { ...base, status: 'missing' as const, httpStatus: null, missingScopes: [], scopeCount: 0 }
       }
 
       try {
-        const res = await fetch(`https://${t.shopify_domain}/admin/api/2024-10/shop.json`, {
-          headers: { 'X-Shopify-Access-Token': t.shopify_access_token },
-          signal: AbortSignal.timeout(10_000),
-          cache: 'no-store',
-        })
+        const [res, scopes] = await Promise.all([
+          fetch(`https://${t.shopify_domain}/admin/api/2024-10/shop.json`, {
+            headers: { 'X-Shopify-Access-Token': t.shopify_access_token },
+            signal: AbortSignal.timeout(10_000),
+            cache: 'no-store',
+          }),
+          readScopes(t.shopify_domain, t.shopify_access_token),
+        ])
         const status: TokenStatus = res.ok ? 'ok' : res.status === 401 ? 'invalid' : 'error'
-        return { ...base, status, httpStatus: res.status }
+        return {
+          ...base, status, httpStatus: res.status,
+          missingScopes: scopes ? REQUIRED_SCOPES.filter(r => !scopes.includes(r.handle)) : [],
+          scopeCount: scopes?.length ?? 0,
+        }
       } catch {
-        return { ...base, status: 'unreachable' as const, httpStatus: null }
+        return { ...base, status: 'unreachable' as const, httpStatus: null, missingScopes: [], scopeCount: 0 }
       }
     })
   )
