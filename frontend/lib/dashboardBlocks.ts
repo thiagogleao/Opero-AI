@@ -21,6 +21,13 @@ export const BLOCK_DEFS: BlockDef[] = [
     defaultOrder: 0,
   },
   {
+    id: 'adjustments',
+    label: 'Estornos e Chargebacks',
+    description: 'Dinheiro devolvido no período e o resultado de caixa depois dele',
+    defaultVisible: true,
+    defaultOrder: 1,
+  },
+  {
     id: 'profit-banner',
     label: 'Painel de Lucro',
     description: 'Lucro líquido, margem, lucro por pedido e break-even ROAS',

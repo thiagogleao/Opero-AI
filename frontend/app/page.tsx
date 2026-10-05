@@ -5,6 +5,7 @@ import { redirect } from 'next/navigation'
 import { getTenant, getTenantsByUserId, toStoreOptions } from '@/lib/tenant'
 import { getActiveTenantId } from '@/lib/activeStore'
 import { accountStores } from '@/lib/accountOverview'
+import { getAdjustmentImpact, NO_IMPACT } from '@/lib/adjustments'
 import { creativeSignal } from '@/lib/creativeSignal'
 import StoreSwitcher from '@/components/StoreSwitcher'
 import {
@@ -181,6 +182,15 @@ export default async function Dashboard({ searchParams }: Props) {
     netProfit: c.netProfit * splitFactor,
     margin:    c.margin    * splitFactor,
   }))
+
+  // Refunds and chargebacks that landed in this window. Measured against the
+  // store's own cost ratio, because a refund costs the contribution rather than
+  // the revenue once the product and shipping come back with it.
+  const nonAdRatio = profitRaw.configured && profitRaw.totalRevenue > 0
+    ? (profitRaw.totalCosts - profitRaw.fbSpend) / profitRaw.totalRevenue
+    : 0
+  const adjustments = await getAdjustmentImpact(tid, dateFrom, dateTo, nonAdRatio)
+    .catch(e => { console.error('[dashboard] adjustments', e); return NO_IMPACT })
 
   const lastSyncIso = syncs[0]?.finished_at ?? null
   const lastSync = lastSyncIso
@@ -531,6 +541,7 @@ ${promptLang.formatNote}`
           countries={countries}
           customers={customers}
           profit={profit}
+          adjustments={adjustments}
           funnel={funnel}
           countrySpend={countrySpend}
           countryProfit={countryProfit}

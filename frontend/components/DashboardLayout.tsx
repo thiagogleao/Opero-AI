@@ -30,6 +30,7 @@ import {
 } from '@/lib/dashboardBlocks'
 import { makeFmt } from '@/lib/format'
 import { useSettings } from '@/contexts/SettingsContext'
+import type { AdjustmentImpact } from '@/lib/adjustments'
 import type { ProfitSummary } from '@/lib/profitCalc'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -43,6 +44,7 @@ interface DashboardLayoutProps {
   countries: any[]
   customers: any
   profit: ProfitSummary
+  adjustments?: AdjustmentImpact
   funnel: any
   countrySpend: any[]
   countryProfit: any[]
@@ -291,7 +293,7 @@ function CustomizerPanel({
 
 export default function DashboardLayout(props: DashboardLayoutProps) {
   const {
-    metrics, revenue, roas, creatives, countries, customers, profit,
+    metrics, revenue, roas, creatives, countries, customers, profit, adjustments,
     funnel, countrySpend, countryProfit, dailyProfit,
     bdDevice, bdPlacement, bdAgeGender, ltvData,
     systemPrompt, cacheKey,
@@ -362,6 +364,55 @@ export default function DashboardLayout(props: DashboardLayoutProps) {
             <MetricCard title={tr.metric_abandoned}    value={fmt(safeAbandonedValue)}               sub={`${abandonRate}% ${tr.metric_abandon_rate}`}               icon="⚠️" gradient="linear-gradient(135deg,#F43F5E,#BE123C)" delay={0.35} />
           </div>
         )
+
+      // Money that left after the sale, kept beside the profit figure rather
+      // than inside it: most of it belongs to orders from earlier months, and
+      // folding it into the headline would read as a bad period.
+      case 'adjustments':
+        return adjustments && adjustments.total > 0 ? (
+          <div style={{
+            background: 'var(--bg-surface)', border: '1px solid var(--border)',
+            borderRadius: 12, padding: '14px 18px', marginBottom: 20,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 6 }}>
+              <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)', margin: 0, flex: 1 }}>
+                Estornos e chargebacks no período
+              </h3>
+              <span style={{ fontSize: 19, fontWeight: 700, color: '#F43F5E' }}>
+                −{fmt(adjustments.total)}
+              </span>
+            </div>
+            <p style={{ fontSize: 11.5, color: 'var(--text-muted)', margin: '0 0 8px' }}>
+              {adjustments.refundCount > 0 && (
+                <>{adjustments.refundCount} estorno{adjustments.refundCount === 1 ? '' : 's'} de {fmt(adjustments.refundGross)} · custa {fmt(adjustments.refundHit)} de margem</>
+              )}
+              {adjustments.refundCount > 0 && adjustments.chargebackCount > 0 && ' · '}
+              {adjustments.chargebackCount > 0 && (
+                <>{adjustments.chargebackCount} chargeback{adjustments.chargebackCount === 1 ? '' : 's'} de {fmt(adjustments.chargebackHit)} + {fmt(adjustments.chargebackFees)} em taxas</>
+              )}
+            </p>
+            <div style={{
+              display: 'flex', gap: 20, paddingTop: 8,
+              borderTop: '1px solid var(--border)', fontSize: 12, flexWrap: 'wrap',
+            }}>
+              <span style={{ color: 'var(--text-dim)' }}>
+                Lucro da operação <b style={{ color: 'var(--text-primary)' }}>{fmt(profit.netProfit)}</b>
+              </span>
+              <span style={{ color: 'var(--text-dim)' }}>
+                Resultado de caixa{' '}
+                <b style={{ color: profit.netProfit - adjustments.total >= 0 ? '#10B981' : '#F43F5E' }}>
+                  {fmt(profit.netProfit - adjustments.total)}
+                </b>
+              </span>
+            </div>
+            {adjustments.blindToChargebacks && (
+              <p style={{ fontSize: 11, color: '#F59E0B', margin: '8px 0 0' }}>
+                ⚠️ Esta loja não tem permissão para ler chargebacks — zero aqui significa sem acesso,
+                não sem disputa.
+              </p>
+            )}
+          </div>
+        ) : null
 
       case 'profit-banner':
         return profit.configured ? (
