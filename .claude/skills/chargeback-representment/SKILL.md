@@ -90,6 +90,19 @@ Shopify auto-populates order details, addresses, IP, fulfilment and tracking. Th
 
 `reference/shopify-api.md` has the GraphQL fields, scopes and the known `submitEvidence` pitfall.
 
+## House rules for these stores
+
+These override the general guidance above. They come from the owner and are not optional.
+
+**Never submit a `product_not_received` response without proof of delivery.** Fulfilment is from overseas suppliers and Shopify's tracking usually carries no delivery scan, so the proof has to be pulled from the supplier or carrier by hand. The procedure is:
+
+1. Check the Shopify fulfilment first — `shipment_status` of `delivered` means the scan already exists and nothing needs to be requested.
+2. Otherwise **ask the owner for the proof of delivery and stop.** Do not draft around the gap, do not submit a response built on a tracking number alone, and do not treat the deadline as a reason to send something weaker. The measured difference is +27 points with a delivery scan against +2 without one; a response sent early without it spends the single submission for almost nothing.
+3. Wait for it. The owner supplies it on their own schedule. Keep the deadline visible in the meantime and say how many days are left.
+4. A `shipment_status` of `failure`, or a parcel still `in_transit` months after the order, means the goods probably never arrived. Say so and recommend refunding rather than fighting — a loss costs the fee on top of the amount, and the dispute counts against the ratio either way.
+
+**Use the store inbox when it strengthens the case.** Where customer correspondence exists — a delivery question answered, a replacement offered, a customer confirming receipt — capture it and fill the customer-communication evidence. Correspondence is supporting evidence; it never substitutes for the delivery scan on a not-received claim.
+
 ## When not to fight
 
 Fighting has a cost, and a loss is not neutral — the dispute still counts against the ratio either way.
