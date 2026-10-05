@@ -22,6 +22,8 @@ interface ShippingRate { country_code: string; name: string; cost_usd: number }
 interface ExtraCost    { name: string; amount_usd: number; frequency: 'monthly' | 'per_order' | 'annual' }
 interface ProductCogs  { product_id: string; name: string; cost_usd: number }
 interface PriceTier    { effective_from: string; label?: string; order_prices: Record<string, number>; extra_unit_usd: number }
+interface CountryPrices { product_id: string; name?: string; prices: Record<string, number> }
+interface OrderFee     { country_code: string; name?: string; amount_usd: number; effective_from?: string }
 
 /** Turn "3 = 19" lines into { "3": 19 }. Accepts =, :, tab or spaces as the
  *  separator so a list pasted from the supplier's message usually just works. */
@@ -46,7 +48,7 @@ function tierToText(prices: Record<string, number>): string {
 
 interface ProfitConfig {
   shopify: { transaction_fee_pct: number; payment_processing_pct: number; payment_processing_fixed: number }
-  cogs: { default_cost_usd: number; packaging_cost_usd: number; additional_unit_discount_usd: number; volume_discounts: VolumeDiscount[]; products: ProductCogs[]; price_tiers?: PriceTier[] }
+  cogs: { default_cost_usd: number; packaging_cost_usd: number; additional_unit_discount_usd: number; volume_discounts: VolumeDiscount[]; products: ProductCogs[]; price_tiers?: PriceTier[]; country_prices?: CountryPrices[]; order_fees?: OrderFee[] }
   shipping: { default_rate_usd: number; rates: ShippingRate[] }
   extra_costs: ExtraCost[]
 }
@@ -57,7 +59,7 @@ interface ProfitResult {
   days: number; dateFrom: string; dateTo: string
   orderCount: number; totalRevenue: number
   totalShopifyFees: number; totalPaymentFees: number
-  totalCogs: number; totalPackaging: number; totalShipping: number
+  totalCogs: number; totalOrderFees?: number; totalPackaging: number; totalShipping: number
   fbSpend: number; totalExtraCosts: number; totalAdditionalUnitSavings: number
   netProfit: number; margin: number
   avgRevenuePerOrder: number; avgProfitPerOrder: number; breakEvenRoas: number
@@ -228,11 +230,19 @@ function ProfitModuleInner() {
       if (Array.isArray(products) && products.length > 0) {
         type ProductCost = { product_id: string; name: string; cost_usd: number }
         const existingById = new Map<string, ProductCost>((cfg.cogs.products ?? []).map((p: ProductCost) => [p.product_id, p]))
-        cfg.cogs.products = products.map((p: { product_id: string; title: string }) => ({
+        const fromShopify = products.map((p: { product_id: string; title: string }) => ({
           product_id: p.product_id,
           name: p.title,
           cost_usd: existingById.get(p.product_id)?.cost_usd ?? 0,
         }))
+        // Products the catalogue endpoint no longer returns still have orders in
+        // history and a price we worked out. Dropping them here would silently
+        // reprice that history at the default on the next save.
+        const live = new Set(fromShopify.map((p: ProductCost) => p.product_id))
+        cfg.cogs.products = [
+          ...fromShopify,
+          ...(cfg.cogs.products ?? []).filter((p: ProductCost) => !live.has(p.product_id)),
+        ]
         setShopifyProducts(products)
       }
 
@@ -425,6 +435,52 @@ function ProfitModuleInner() {
                 + Tabela de preços
               </button>
             </div>
+
+            {/* Country rate card — loaded from the supplier cost report */}
+            {((config.cogs.country_prices?.length ?? 0) > 0 || (config.cogs.order_fees?.length ?? 0) > 0) && (
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ fontSize: 11, color: '#71717A', fontWeight: 500 }}>
+                  Tabela do fornecedor por país <span style={{ color: '#3F3F46' }}>— o frete já vem embutido, por isso o preço muda por destino</span>
+                </label>
+
+                {(config.cogs.order_fees?.length ?? 0) > 0 && (() => {
+                  const fees = config.cogs.order_fees ?? []
+                  // One amount covers nearly every country (the EU's handling fee);
+                  // listing 27 identical rows would bury the one that differs.
+                  const counts = new Map<number, string[]>()
+                  for (const f of fees) counts.set(f.amount_usd, [...(counts.get(f.amount_usd) ?? []), f.country_code])
+                  const groups = [...counts].sort((a, b) => b[1].length - a[1].length)
+                  return (
+                    <div style={{ marginTop: 8, padding: '9px 11px', borderRadius: 7, background: '#0B0D0F', border: '1px solid #2A2D38' }}>
+                      {groups.map(([amount, codes]) => (
+                        <div key={amount} style={{ marginBottom: 6 }}>
+                          <div style={{ fontSize: 11.5, color: '#E4E4E7' }}>
+                            <strong style={{ color: amount > 0 ? '#F59E0B' : '#10B981' }}>
+                              {amount > 0 ? '+' : '−'}${Math.abs(amount).toFixed(2)}
+                            </strong>{' '}por pedido
+                            <span style={{ color: '#52525B' }}> — não por unidade</span>
+                            {fees.find(f => f.amount_usd === amount)?.effective_from && (
+                              <span style={{ color: '#52525B' }}> · desde {fees.find(f => f.amount_usd === amount)!.effective_from}</span>
+                            )}
+                          </div>
+                          <div style={{ fontSize: 10.5, color: '#52525B', marginTop: 2, lineHeight: 1.5 }}>
+                            {codes.sort().join(' · ')}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )
+                })()}
+
+                {(config.cogs.country_prices?.length ?? 0) > 0 && (
+                  <p style={{ fontSize: 10.5, color: '#52525B', margin: '7px 0 0' }}>
+                    {new Set((config.cogs.country_prices ?? []).map(c => c.name ?? c.product_id)).size} produtos com preço próprio em{' '}
+                    {new Set((config.cogs.country_prices ?? []).flatMap(c => Object.keys(c.prices ?? {}))).size} países.
+                    Um destino fora da tabela usa o preço base do produto.
+                  </p>
+                )}
+              </div>
+            )}
 
             {/* Volume discounts */}
             <div style={{ marginBottom: 8 }}>
@@ -750,6 +806,9 @@ function ProfitModuleInner() {
                 <WaterfallBar label="Taxa Shopify"     value={-result.totalShopifyFees} total={total} color="#F43F5E" pctOfRevenue={result.totalRevenue > 0 ? (result.totalShopifyFees/result.totalRevenue)*100:0} fmt={$fmt} />
                 <WaterfallBar label="Taxa Pagamento"   value={-result.totalPaymentFees} total={total} color="#F43F5E" pctOfRevenue={result.totalRevenue > 0 ? (result.totalPaymentFees/result.totalRevenue)*100:0} fmt={$fmt} />
                 <WaterfallBar label="COGS (produto)"   value={-result.totalCogs}        total={total} color="#F59E0B" pctOfRevenue={result.totalRevenue > 0 ? (result.totalCogs/result.totalRevenue)*100:0} fmt={$fmt} />
+                {(result.totalOrderFees ?? 0) > 0 && (
+                  <WaterfallBar label="Taxa fixa por pedido" value={-(result.totalOrderFees ?? 0)} total={total} color="#F59E0B" pctOfRevenue={result.totalRevenue > 0 ? ((result.totalOrderFees ?? 0)/result.totalRevenue)*100:0} fmt={$fmt} />
+                )}
                 <WaterfallBar label="Embalagem"        value={-result.totalPackaging}   total={total} color="#F59E0B" pctOfRevenue={result.totalRevenue > 0 ? (result.totalPackaging/result.totalRevenue)*100:0} fmt={$fmt} />
                 <WaterfallBar label="Frete"            value={-result.totalShipping}    total={total} color="#38BDF8" pctOfRevenue={result.totalRevenue > 0 ? (result.totalShipping/result.totalRevenue)*100:0} fmt={$fmt} />
                 <WaterfallBar label="Facebook Ads"     value={-result.fbSpend}          total={total} color="#8B5CF6" pctOfRevenue={result.totalRevenue > 0 ? (result.fbSpend/result.totalRevenue)*100:0} fmt={$fmt} />
@@ -777,7 +836,7 @@ function ProfitModuleInner() {
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
                   {[
                     { label: 'Receita', value: $fmt(result.avgRevenuePerOrder), color: '#10B981' },
-                    { label: 'COGS + Embalagem', value: $fmt(result.orderCount > 0 ? (result.totalCogs + result.totalPackaging) / result.orderCount : 0), color: '#F59E0B' },
+                    { label: 'COGS + Embalagem', value: $fmt(result.orderCount > 0 ? (result.totalCogs + (result.totalOrderFees ?? 0) + result.totalPackaging) / result.orderCount : 0), color: '#F59E0B' },
                     { label: 'Frete', value: $fmt(result.orderCount > 0 ? result.totalShipping / result.orderCount : 0), color: '#38BDF8' },
                     { label: 'Lucro', value: $fmt(result.avgProfitPerOrder), color: result.avgProfitPerOrder >= 0 ? '#10B981' : '#F43F5E' },
                   ].map(item => (

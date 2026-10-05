@@ -18,6 +18,28 @@ export interface CogsPriceTier {
   extra_unit_usd: number
 }
 
+/** The supplier quotes a different unit price per destination because the
+ *  freight is baked into it — the DSers "Shipping Cost" column is $0 on every
+ *  order. A country missing here falls back to the product's base price. */
+export interface CountryPriceList {
+  product_id: string
+  name?: string
+  /** ISO-3166 alpha-2 → unit price in USD. */
+  prices: Record<string, number>
+}
+
+/** A flat charge the supplier adds per *order* for a destination — the EU's
+ *  $3.50 handling fee. Per order, not per unit: a six-box order to Italy pays
+ *  it once. */
+export interface SupplierOrderFee {
+  country_code: string
+  name?: string
+  amount_usd: number
+  /** YYYY-MM-DD the supplier started charging it. Orders before this date are
+   *  left alone rather than having the fee applied retroactively. */
+  effective_from?: string
+}
+
 export interface ProfitConfig {
   shopify: {
     transaction_fee_pct: number
@@ -35,6 +57,8 @@ export interface ProfitConfig {
     }[]
     products: { product_id: string; name: string; cost_usd: number }[]
     price_tiers?: CogsPriceTier[]
+    country_prices?: CountryPriceList[]
+    order_fees?: SupplierOrderFee[]
   }
   shipping: {
     default_rate_usd: number
@@ -58,6 +82,9 @@ export interface ProfitSummary {
   totalFees: number
   totalExtraCosts: number
   totalAdditionalUnitSavings: number
+  /** Per-order destination charges (the EU handling fee). Included in
+   *  totalCogs; broken out so it can be named rather than buried. */
+  totalSupplierOrderFees: number
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -101,6 +128,101 @@ export function tierOrderCost(units: number, tier: CogsPriceTier): number {
   // which is what the supplier's rate card does.
   const next = steps.find(s => s > units) ?? steps[0]
   return tier.order_prices[String(next)]
+}
+
+/** Everything the per-order cost needs, resolved once instead of per order. */
+export interface CogsLookups {
+  byId: Map<string, number>
+  byTitle: Map<string, number>
+  /** product_id → country code → unit price. */
+  byCountry: Map<string, Record<string, number>>
+  hasProductCogs: boolean
+}
+
+export function buildCogsLookups(cfg: ProfitConfig): CogsLookups {
+  const byId = new Map<string, number>()
+  const byTitle = new Map<string, number>()
+  for (const p of cfg.cogs.products ?? []) {
+    if (p.product_id && p.cost_usd > 0) byId.set(p.product_id, p.cost_usd)
+    // Title is the fallback for orders whose product was archived or replaced
+    // and whose id no longer matches anything in the catalogue.
+    if (p.name && p.cost_usd > 0) byTitle.set(p.name, p.cost_usd)
+  }
+  const byCountry = new Map<string, Record<string, number>>()
+  for (const c of cfg.cogs.country_prices ?? []) {
+    if (c.product_id && c.prices) byCountry.set(c.product_id, c.prices)
+  }
+  return { byId, byTitle, byCountry, hasProductCogs: byId.size > 0 }
+}
+
+/** What one unit costs landed, for this product going to this country. The
+ *  country price wins where we have one; otherwise the product's base price,
+ *  which in practice is what the supplier charges to the US. */
+export function unitCost(
+  item: { product_id: string | null; product_title: string | null },
+  countryCode: string | null,
+  l: CogsLookups,
+  cfg: ProfitConfig,
+): number {
+  if (item.product_id && countryCode) {
+    const price = l.byCountry.get(item.product_id)?.[countryCode]
+    if (price !== undefined && price > 0) return price
+  }
+  if (item.product_id && l.byId.has(item.product_id)) return l.byId.get(item.product_id)!
+  if (item.product_title && l.byTitle.has(item.product_title)) return l.byTitle.get(item.product_title)!
+  return cfg.cogs.default_cost_usd
+}
+
+/** The destination's flat per-order charge, or 0. A fee that only started on a
+ *  date does not apply to orders placed before it. */
+export function supplierOrderFee(
+  countryCode: string | null,
+  orderDate: string,
+  cfg: ProfitConfig,
+): number {
+  if (!countryCode) return 0
+  const fee = (cfg.cogs.order_fees ?? []).find(f => f.country_code === countryCode)
+  if (!fee) return 0
+  if (fee.effective_from && orderDate < fee.effective_from) return 0
+  return fee.amount_usd ?? 0
+}
+
+export interface OrderSupplierCost {
+  /** Unit prices summed across the order's items. */
+  cogs: number
+  /** The destination's flat charge, counted once for the order. */
+  orderFee: number
+  /** What the extra-unit discount takes off, 0 under a rate card. */
+  saving: number
+}
+
+/** The supplier's own arithmetic for one order:
+ *    table price x quantity + the country's flat fee - $3 per extra unit.
+ *  A price tier in force on the order's date is the supplier's whole rate card
+ *  and replaces all three, so it is handled first and alone. */
+export function orderSupplierCost(
+  order: {
+    country_code: string | null
+    order_date: string
+    items: { product_id: string | null; product_title: string | null; units: number }[]
+  },
+  l: CogsLookups,
+  cfg: ProfitConfig,
+): OrderSupplierCost {
+  const units = order.items.reduce((s, i) => s + i.units, 0)
+  const tier = tierForDate(cfg, order.order_date)
+  if (tier) return { cogs: tierOrderCost(units, tier), orderFee: 0, saving: 0 }
+
+  const cogs = l.hasProductCogs || l.byCountry.size > 0
+    ? order.items.reduce((s, i) => s + unitCost(i, order.country_code, l, cfg) * i.units, 0)
+    : calcCogs(units, cfg)
+
+  const addl = cfg.cogs.additional_unit_discount_usd ?? 0
+  return {
+    cogs,
+    orderFee: supplierOrderFee(order.country_code, order.order_date, cfg),
+    saving: units > 1 && addl > 0 ? (units - 1) * addl : 0,
+  }
 }
 
 function calcCogs(units: number, cfg: ProfitConfig): number {
@@ -171,7 +293,7 @@ export async function getProfitSummary(
       configured: false, orderCount: 0, totalRevenue: 0, totalCosts: 0,
       netProfit: 0, margin: 0, avgProfitPerOrder: 0, breakEvenRoas: 0,
       fbSpend: 0, totalCogs: 0, totalShipping: 0, totalFees: 0,
-      totalExtraCosts: 0, totalAdditionalUnitSavings: 0,
+      totalExtraCosts: 0, totalAdditionalUnitSavings: 0, totalSupplierOrderFees: 0,
     }
   }
 
@@ -179,18 +301,7 @@ export async function getProfitSummary(
     (new Date(dateTo).getTime() - new Date(dateFrom).getTime()) / 86400000
   ) + 1
 
-  // Build per-product COGS lookup from config
-  const productCogs = new Map<string, number>()
-  for (const p of (cfg.cogs.products ?? [])) {
-    if (p.product_id && p.cost_usd > 0) productCogs.set(p.product_id, p.cost_usd)
-  }
-  const hasProductCogs = productCogs.size > 0
-
-  // Build title-based fallback lookup (handles archived/replaced product IDs)
-  const titleCogs = new Map<string, number>()
-  for (const p of (cfg.cogs.products ?? [])) {
-    if (p.name && p.cost_usd > 0) titleCogs.set(p.name, p.cost_usd)
-  }
+  const lookups = buildCogsLookups(cfg)
 
   const orders = await query<{
     order_id: string; total_price: string; country_code: string | null; order_date: string
@@ -243,46 +354,27 @@ export async function getProfitSummary(
     .filter(e => e.frequency === 'annual').reduce((s, e) => s + e.amount_usd, 0)
   const proratedExtras = monthlyExtras * (days / 30) + annualExtras * (days / 365)
 
-  const addlDiscount = cfg.cogs.additional_unit_discount_usd ?? 0
   let totalRevenue = 0, totalShopifyFees = 0, totalPaymentFees = 0
   let totalCogs = 0, totalShipping = 0, totalPackaging = 0
-  let totalPerOrderExtras = 0, totalAdditionalUnitSavings = 0
+  let totalPerOrderExtras = 0, totalAdditionalUnitSavings = 0, totalOrderFees = 0
 
   for (const order of groupedOrders) {
     const revenue = Number(order.total_price)
-    const totalUnits = order.items.reduce((s, i) => s + i.units, 0)
     totalRevenue       += revenue
     totalShopifyFees   += revenue * (cfg.shopify.transaction_fee_pct / 100)
     totalPaymentFees   += revenue * (cfg.shopify.payment_processing_pct / 100) + cfg.shopify.payment_processing_fixed
-    // A price tier in force on this order's date is the supplier's own rate
-    // card and already prices the whole order, so it replaces both the
-    // per-unit cost and the additional-unit discount rather than stacking.
-    const tier = tierForDate(cfg, order.order_date)
-    if (tier) {
-      totalCogs += tierOrderCost(totalUnits, tier)
-    } else if (hasProductCogs) {
-      // Per-product COGS if configured, otherwise fall back to default volume-discount calc
-      for (const item of order.items) {
-        const perUnitCost = item.product_id && productCogs.has(item.product_id)
-          ? productCogs.get(item.product_id)!
-          : item.product_title && titleCogs.has(item.product_title)
-            ? titleCogs.get(item.product_title)!
-            : cfg.cogs.default_cost_usd
-        totalCogs += perUnitCost * item.units
-      }
-    } else {
-      totalCogs += calcCogs(totalUnits, cfg)
-    }
+    const supplier = orderSupplierCost(order, lookups, cfg)
+    totalCogs          += supplier.cogs
+    totalOrderFees     += supplier.orderFee
+    totalAdditionalUnitSavings += supplier.saving
     totalPackaging     += cfg.cogs.packaging_cost_usd
     totalShipping      += getShippingCost(order.country_code, cfg)
     totalPerOrderExtras += perOrderExtras
-    if (!tier && totalUnits > 1 && addlDiscount > 0)
-      totalAdditionalUnitSavings += (totalUnits - 1) * addlDiscount
   }
 
   const totalFees      = totalShopifyFees + totalPaymentFees
   const totalExtraCosts = totalPerOrderExtras + proratedExtras
-  const totalCosts     = totalFees + totalCogs + totalPackaging + totalShipping + totalExtraCosts + fbSpend - totalAdditionalUnitSavings
+  const totalCosts     = totalFees + totalCogs + totalOrderFees + totalPackaging + totalShipping + totalExtraCosts + fbSpend - totalAdditionalUnitSavings
   const netProfit      = totalRevenue - totalCosts
   const margin         = totalRevenue > 0 ? (netProfit / totalRevenue) * 100 : 0
   const orderCount     = groupedOrders.length
@@ -292,8 +384,9 @@ export async function getProfitSummary(
     orderCount, totalRevenue, totalCosts, netProfit, margin,
     avgProfitPerOrder: orderCount > 0 ? netProfit / orderCount : 0,
     breakEvenRoas: fbSpend > 0 ? totalCosts / fbSpend : 0,
-    fbSpend, totalCogs: totalCogs + totalPackaging, totalShipping,
+    fbSpend, totalCogs: totalCogs + totalOrderFees + totalPackaging, totalShipping,
     totalFees, totalExtraCosts, totalAdditionalUnitSavings,
+    totalSupplierOrderFees: totalOrderFees,
   }
 }
 

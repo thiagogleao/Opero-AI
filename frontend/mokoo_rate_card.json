@@ -1,0 +1,106 @@
+{
+  "source": "MOKOO — Custo por produto e país (DSers x Shopify), pedidos de 07/05/2026 a 05/10/2026",
+  "note": "Preco de tabela por unidade em US$, frete ja embutido (a coluna Shipping Cost do DSers e $0 em 100% dos pedidos). Custo do pedido = tabela x qtd + taxa fixa do pais - $3,00 por unidade adicional.",
+  "order_fees": {
+    "amount_usd": 3.5,
+    "effective_from": "2026-06-22",
+    "note": "Taxa fixa por PEDIDO (nao por unidade) nos paises da Uniao Europeia. HR e LV nao aparecem no PDF por falta de pedidos; entram pela regra declarada (UE), nao por observacao.",
+    "countries": {
+      "AT": "Austria", "BE": "Belgica", "BG": "Bulgaria", "CY": "Chipre",
+      "CZ": "Republica Tcheca", "DE": "Alemanha", "DK": "Dinamarca", "EE": "Estonia",
+      "ES": "Espanha", "FI": "Finlandia", "FR": "Franca", "GR": "Grecia",
+      "HR": "Croacia", "HU": "Hungria", "IE": "Irlanda", "IT": "Italia",
+      "LT": "Lituania", "LU": "Luxemburgo", "LV": "Letonia", "MT": "Malta",
+      "NL": "Holanda", "PL": "Polonia", "PT": "Portugal", "RO": "Romenia",
+      "SE": "Suecia", "SI": "Eslovenia", "SK": "Eslovaquia"
+    },
+    "exceptions": {
+      "DZ": { "amount_usd": -12.6, "note": "Argelia: so pedidos de influenciador, tabela inflada com credito fixo por pedido. O PDF valida ao centavo, mas sao 15 pedidos." }
+    }
+  },
+  "products": [
+    { "name": "CapyCup Limited Edition Blind Box", "product_ids": ["10375746060607"], "prices": {
+      "US": 8.20, "GB": 7.50, "DE": 8.00, "AU": 9.30, "IT": 7.70, "CA": 8.40, "HK": 6.90,
+      "FR": 7.50, "SE": 7.70, "NL": 8.90, "ES": 7.98, "AT": 8.70, "PH": 6.40, "CH": 9.20,
+      "HU": 10.60, "PL": 11.90, "DK": 8.60, "IE": 8.30, "TH": 6.20, "FI": 10.70, "MX": 8.00,
+      "IN": 7.10, "PR": 10.00, "IL": 9.50, "SG": 7.00, "CZ": 8.00, "UA": 6.30, "VN": 7.00,
+      "MY": 6.90, "PT": 7.30, "ID": 8.50, "LT": 8.90, "BR": 11.70, "SI": 8.10, "MT": 9.90,
+      "CY": 9.40, "NZ": 8.00, "KR": 6.90, "BE": 8.20, "JP": 7.20, "HN": 11.00, "CL": 8.30,
+      "NO": 9.00, "RS": 8.30, "TW": 6.80 } },
+
+    { "name": "Happy Capy Halloween Edition", "product_ids": ["10535885177151"], "prices": {
+      "US": 8.20, "GB": 7.10, "DE": 8.00, "AU": 9.30, "IT": 8.20, "CA": 8.40, "HK": 6.90,
+      "FR": 7.80, "SE": 8.10, "DZ": 24.39, "NL": 8.90, "ES": 7.80, "AT": 8.30, "PH": 7.40,
+      "CH": 9.20, "HU": 10.60, "PL": 8.20, "DK": 8.60, "IE": 8.00, "FI": 10.70, "PR": 11.20,
+      "IL": 9.50, "SG": 7.00, "CZ": 8.00, "UA": 7.10, "VN": 7.00, "AE": 7.70, "PT": 7.30,
+      "ID": 8.50, "LT": 8.90, "BG": 8.40, "SI": 8.10, "CY": 9.40, "KR": 6.90, "BE": 8.20,
+      "LU": 9.20, "EE": 7.70, "EG": 8.00, "SK": 8.40, "GR": 7.70, "MA": 13.83, "PY": 11.00,
+      "RO": 8.10, "RU": 8.00 } },
+
+    { "name": "Happy Capy Blind Box", "product_ids": ["10320831217983"], "prices": {
+      "US": 9.00, "GB": 7.90, "DE": 8.60, "AU": 9.65, "IT": 8.50, "CA": 8.50, "HK": 7.10,
+      "FR": 8.80, "SE": 8.50, "DZ": 25.19, "AT": 8.90, "PH": 7.20, "CH": 9.40, "PL": 8.40,
+      "DK": 8.80, "IE": 8.80, "AE": 8.30, "MY": 6.90, "NZ": 8.30, "ZA": 9.50, "GG": 9.70,
+      "MC": 9.30, "TR": 7.80 } },
+
+    { "name": "Mysterious Capy Blind Box", "product_ids": ["10320831283519"], "prices": {
+      "US": 8.50, "GB": 7.90, "DE": 8.30, "AU": 9.30, "IT": 8.50, "CA": 7.30, "SE": 8.30,
+      "AT": 9.00, "CH": 9.40, "PL": 8.50, "TH": 6.50, "MX": 8.30, "IL": 9.80, "CZ": 8.30,
+      "EE": 8.40, "JP": 7.50 } },
+
+    { "name": "Meowgical World Blind Box", "product_ids": ["10361516359999"], "prices": {
+      "US": 10.50, "FR": 9.80, "DZ": 18.90, "PH": 9.30, "DK": 10.80, "TH": 9.30, "IN": 10.40 } },
+
+    { "name": "Sea Friends Blind Box", "product_ids": ["10320831250751"], "prices": {
+      "US": 9.20, "GB": 8.00, "DZ": 16.70, "ES": 9.00 } },
+
+    { "name": "Moo Milk Blind Box", "product_ids": ["10544772120895"], "prices": {
+      "US": 9.30, "AU": 10.40, "FR": 8.40, "DZ": 17.20, "ES": 8.40, "PH": 8.20, "TH": 7.30,
+      "IN": 8.90, "AE": 7.90, "ID": 8.50 } },
+
+    { "name": "Amazonia Friends Blind Box", "product_ids": ["10360902254911"], "prices": {
+      "US": 9.90, "DE": 9.45, "UA": 9.90 } },
+
+    { "name": "Feather Friends Blind Box", "product_ids": ["10320831185215"], "prices": {
+      "US": 9.80, "IT": 9.30, "CA": 9.20 } },
+
+    { "name": "Happy Capy T-Shirt", "note": "Adulto e infantil sao variantes do mesmo produto na Shopify, entao as duas listas do PDF viram uma so; os precos conhecidos coincidem onde se sobrepoem (US 16,70).",
+      "product_ids": ["10359638458687","10359588258111","10359558373695","10359499129151",
+        "10358573269311","10358622126399","10359506338111","10359467147583","10359599759679",
+        "10359559389503","10359611294015","10359512301887","10359636885823","10359617782079",
+        "10359628890431","10359620534591","10359567384895","10359586619711"], "prices": {
+      "US": 16.70, "IT": 12.60, "HK": 11.80, "FR": 12.00, "ES": 13.20, "LU": 13.90,
+      "GB": 11.10, "DK": 13.50, "PR": 16.70 } },
+
+    { "name": "Summer Capy Plush", "product_ids": ["10463276564799"], "prices": { "US": 9.00, "AU": 9.70 } },
+    { "name": "Running Cow Plush", "product_ids": ["10408684814655"], "prices": { "US": 14.50 } },
+    { "name": "Giant Capybara Plush", "product_ids": ["10442996056383"], "prices": { "US": 18.00, "DE": 16.00, "HK": 12.40 } },
+    { "name": "Giant Pink Bear Plush", "product_ids": ["10443463131455"], "prices": { "US": 22.60 } },
+    { "name": "Giant Sloth Plush", "product_ids": ["10443463164223"], "prices": { "US": 16.60, "IT": 15.40 } },
+    { "name": "Giant Red Panda Plush", "product_ids": ["10443462771007"], "prices": { "US": 12.00, "CA": 11.60 } },
+    { "name": "Giant Panda Plush", "product_ids": ["10443463229759"], "prices": { "US": 12.60 } },
+    { "name": "Giant Koala Plush", "product_ids": ["10443463000383"], "prices": { "US": 17.70 } },
+    { "name": "Giant Orange Cat Plush", "product_ids": ["10443462803775"], "prices": { "GB": 13.10 } },
+    { "name": "Giant Dog Plush", "product_ids": ["10443463065919"], "prices": { "US": 19.80 } },
+    { "name": "Giant Highland Cow Plush", "product_ids": ["10443463196991"], "prices": { "US": 17.80 } },
+    { "name": "Giant Brown Bear Plush", "product_ids": ["10443463033151"], "prices": { "US": 17.40 } },
+    { "name": "Giant Turtle Plush", "product_ids": ["10443462869311"], "prices": { "US": 12.60 } },
+    { "name": "Giant Triceratops Plush", "product_ids": ["10443463098687"], "prices": { "US": 16.90 } },
+
+    { "name": "MOKOO Blocks (avulso)", "product_ids": ["10443573854527","10443573297471",
+        "10443573625151","10443573199167","10443573788991","10443573461311"],
+      "prices": { "US": 9.20, "CA": 7.60, "FR": 8.30 } },
+
+    { "name": "MOKOO Blocks - Full Set", "product_ids": ["10452886946111"],
+      "note": "Um unico pedido (#3711, EUA): $9,30 de tabela + $28,50 em Other. Custo real provavel ~$37,80.",
+      "prices": { "US": 37.80 } },
+
+    { "name": "Influencer Card", "product_ids": ["10395385266495"],
+      "note": "Sai de graca (+$0,01 de tabela, -$0,01 de ajuste) e nao conta para o desconto por quantidade.",
+      "prices": { "US": 0.01 } }
+  ],
+  "unpriced": {
+    "note": "Produtos sem preco observado no PDF. Continuam no custo base configurado.",
+    "products": ["Giant Frog Plush", "Giant Giraffe Plush", "Giant Gray Cat Plush", "Mysterious Blind Box"]
+  }
+}

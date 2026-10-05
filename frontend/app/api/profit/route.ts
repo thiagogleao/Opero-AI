@@ -2,35 +2,9 @@ import { NextRequest } from 'next/server'
 import { auth } from '@clerk/nextjs/server'
 import { query } from '@/lib/db'
 import { getActiveTenantId } from '@/lib/activeStore'
-import { tierForDate, tierOrderCost, type CogsPriceTier } from '@/lib/profitCalc'
+import { buildCogsLookups, orderSupplierCost, type ProfitConfig } from '@/lib/profitCalc'
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-export interface ProfitConfig {
-  shopify: {
-    transaction_fee_pct: number
-    payment_processing_pct: number
-    payment_processing_fixed: number
-  }
-  cogs: {
-    default_cost_usd: number
-    packaging_cost_usd: number
-    // Discount applied to the TOTAL cost (product+pkg+shipping) of each unit beyond the 1st
-    additional_unit_discount_usd: number
-    volume_discounts: {
-      min_units: number
-      discount_type: 'pct' | 'abs'
-      discount_value: number
-    }[]
-    products: { product_id: string; name: string; cost_usd: number }[]
-    price_tiers?: CogsPriceTier[]
-  }
-  shipping: {
-    default_rate_usd: number
-    rates: { country_code: string; name: string; cost_usd: number }[]
-  }
-  extra_costs: { name: string; amount_usd: number; frequency: 'monthly' | 'per_order' | 'annual' }[]
-}
+export type { ProfitConfig }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -38,27 +12,6 @@ function getShippingCost(countryCode: string | null, cfg: ProfitConfig): number 
   if (!countryCode) return cfg.shipping.default_rate_usd
   return cfg.shipping.rates.find(r => r.country_code === countryCode)?.cost_usd
     ?? cfg.shipping.default_rate_usd
-}
-
-// Returns total COGS for this order (after volume discount)
-function calcCogs(units: number, cfg: ProfitConfig): number {
-  const discounts = cfg.cogs.volume_discounts ?? []
-  const match = [...discounts]
-    .filter(d => units >= d.min_units)
-    .sort((a, b) => b.min_units - a.min_units)[0]
-
-  const baseUnit = cfg.cogs.default_cost_usd
-  if (!match) return baseUnit * units
-
-  // Support both new (discount_type/discount_value) and old (discount_pct) format
-  const type = match.discount_type ?? 'pct'
-  const val  = match.discount_value ?? (match as { discount_pct?: number }).discount_pct ?? 0
-
-  if (type === 'abs') {
-    return Math.max(0, baseUnit - val) * units
-  } else {
-    return baseUnit * (1 - val / 100) * units
-  }
 }
 
 // ─── Calculation ──────────────────────────────────────────────────────────────
@@ -101,14 +54,7 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
   }
   const orders = Array.from(orderMap.values())
 
-  // Build per-product COGS lookup (by ID) and title-based fallback (handles archived/replaced product IDs)
-  const productCogs = new Map<string, number>()
-  const titleCogs = new Map<string, number>()
-  for (const p of (cfg.cogs.products ?? [])) {
-    if (p.product_id && p.cost_usd > 0) productCogs.set(p.product_id, p.cost_usd)
-    if (p.name && p.cost_usd > 0) titleCogs.set(p.name, p.cost_usd)
-  }
-  const hasProductCogs = productCogs.size > 0
+  const lookups = buildCogsLookups(cfg)
 
   // 2. FB spend
   const [fbRow] = await query<{ spend: string }>(`
@@ -132,7 +78,6 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
   const proratedExtras = monthlyExtras * (days / 30) + annualExtras * (days / 365)
 
   // 4. Aggregate
-  const addlUnitDiscount = cfg.cogs.additional_unit_discount_usd ?? 0
   let totalRevenue = 0
   let totalShopifyFees = 0
   let totalPaymentFees = 0
@@ -141,13 +86,13 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
   let totalPackaging = 0
   let totalPerOrderExtras = 0
   let totalAdditionalUnitSavings = 0
+  let totalOrderFees = 0
   // Order-driven costs totalled per day, so the chart can price each day from
   // its own orders instead of smearing the period average across all of them.
   const costByDay = new Map<string, number>()
 
   for (const order of orders) {
     const revenue = Number(order.total_price)
-    const totalUnits = order.items.reduce((s, i) => s + i.units, 0)
     const shopifyFee = revenue * (cfg.shopify.transaction_fee_pct / 100)
     const paymentFee = revenue * (cfg.shopify.payment_processing_pct / 100)
                      + cfg.shopify.payment_processing_fixed
@@ -155,36 +100,17 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
     totalRevenue       += revenue
     totalShopifyFees   += shopifyFee
     totalPaymentFees   += paymentFee
-    // A rate card in force on this order's date prices the whole order, so it
-    // replaces both the per-unit cost and the additional-unit discount.
-    const tier = tierForDate(cfg, order.order_date)
-    let orderCogs = 0
-    if (tier) {
-      orderCogs = tierOrderCost(totalUnits, tier)
-    } else if (hasProductCogs) {
-      for (const item of order.items) {
-        const perUnitCost = item.product_id && productCogs.has(item.product_id)
-          ? productCogs.get(item.product_id)!
-          : item.product_title && titleCogs.has(item.product_title)
-            ? titleCogs.get(item.product_title)!
-            : cfg.cogs.default_cost_usd
-        orderCogs += perUnitCost * item.units
-      }
-    } else {
-      orderCogs = calcCogs(totalUnits, cfg)
-    }
+    const { cogs: orderCogs, orderFee, saving } = orderSupplierCost(order, lookups, cfg)
     const shipping = getShippingCost(order.country_code, cfg)
-    const saving = (!tier && totalUnits > 1 && addlUnitDiscount > 0)
-      ? (totalUnits - 1) * addlUnitDiscount
-      : 0
 
     totalCogs          += orderCogs
+    totalOrderFees     += orderFee
     totalPackaging     += cfg.cogs.packaging_cost_usd
     totalShipping      += shipping
     totalPerOrderExtras += perOrderExtras
     totalAdditionalUnitSavings += saving
 
-    const orderCost = shopifyFee + paymentFee + orderCogs
+    const orderCost = shopifyFee + paymentFee + orderCogs + orderFee
                     + cfg.cogs.packaging_cost_usd + shipping + perOrderExtras - saving
     costByDay.set(order.order_date, (costByDay.get(order.order_date) ?? 0) + orderCost)
   }
@@ -192,7 +118,7 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
   const orderCount      = orders.length
   const totalExtraCosts = totalPerOrderExtras + proratedExtras
   // nonFbCosts is gross costs before the additional-unit saving
-  const nonFbCosts      = totalShopifyFees + totalPaymentFees + totalCogs + totalPackaging + totalShipping + totalExtraCosts - totalAdditionalUnitSavings
+  const nonFbCosts      = totalShopifyFees + totalPaymentFees + totalCogs + totalOrderFees + totalPackaging + totalShipping + totalExtraCosts - totalAdditionalUnitSavings
   const netProfit       = totalRevenue - nonFbCosts - fbSpend
   const margin          = totalRevenue > 0 ? (netProfit / totalRevenue) * 100 : 0
 
@@ -239,7 +165,7 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
   return {
     days, dateFrom, dateTo, orderCount,
     totalRevenue, totalShopifyFees, totalPaymentFees,
-    totalCogs, totalPackaging, totalShipping,
+    totalCogs, totalOrderFees, totalPackaging, totalShipping,
     fbSpend, totalExtraCosts, totalAdditionalUnitSavings, netProfit, margin,
     avgRevenuePerOrder: orderCount > 0 ? totalRevenue / orderCount : 0,
     avgProfitPerOrder:  orderCount > 0 ? netProfit / orderCount : 0,
