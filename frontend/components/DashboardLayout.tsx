@@ -30,7 +30,7 @@ import {
 } from '@/lib/dashboardBlocks'
 import { makeFmt } from '@/lib/format'
 import { useSettings } from '@/contexts/SettingsContext'
-import type { AdjustmentImpact } from '@/lib/adjustments'
+import type { AdjustmentImpact, ChargebackHealth } from '@/lib/adjustments'
 import type { ProfitSummary } from '@/lib/profitCalc'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -45,6 +45,7 @@ interface DashboardLayoutProps {
   customers: any
   profit: ProfitSummary
   adjustments?: AdjustmentImpact
+  chargebackHealth?: ChargebackHealth | null
   funnel: any
   countrySpend: any[]
   countryProfit: any[]
@@ -293,7 +294,7 @@ function CustomizerPanel({
 
 export default function DashboardLayout(props: DashboardLayoutProps) {
   const {
-    metrics, revenue, roas, creatives, countries, customers, profit, adjustments,
+    metrics, revenue, roas, creatives, countries, customers, profit, adjustments, chargebackHealth,
     funnel, countrySpend, countryProfit, dailyProfit,
     bdDevice, bdPlacement, bdAgeGender, ltvData,
     systemPrompt, cacheKey,
@@ -382,15 +383,58 @@ export default function DashboardLayout(props: DashboardLayoutProps) {
                 −{fmt(adjustments.total)}
               </span>
             </div>
-            <p style={{ fontSize: 11.5, color: 'var(--text-muted)', margin: '0 0 8px' }}>
+            {/* Each kind on its own row: a refund costs the contribution, a
+                chargeback costs the whole sale plus a fee, and running them
+                together as one sentence hides that difference. */}
+            <div style={{ marginBottom: 8 }}>
               {adjustments.refundCount > 0 && (
-                <>{adjustments.refundCount} estorno{adjustments.refundCount === 1 ? '' : 's'} de {fmt(adjustments.refundGross)} · custa {fmt(adjustments.refundHit)} de margem</>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, padding: '3px 0' }}>
+                  <span style={{ fontSize: 12, color: 'var(--text-secondary)', width: 120 }}>
+                    {adjustments.refundCount} estorno{adjustments.refundCount === 1 ? '' : 's'}
+                  </span>
+                  <span style={{ fontSize: 11.5, color: 'var(--text-faint)', flex: 1 }}>
+                    {fmt(adjustments.refundGross)} devolvidos ao cliente
+                  </span>
+                  <span style={{ fontSize: 12.5, fontWeight: 600, color: '#F43F5E' }}>
+                    −{fmt(adjustments.refundHit)}
+                  </span>
+                </div>
               )}
-              {adjustments.refundCount > 0 && adjustments.chargebackCount > 0 && ' · '}
               {adjustments.chargebackCount > 0 && (
-                <>{adjustments.chargebackCount} chargeback{adjustments.chargebackCount === 1 ? '' : 's'} de {fmt(adjustments.chargebackHit)} + {fmt(adjustments.chargebackFees)} em taxas</>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, padding: '3px 0' }}>
+                  <span style={{ fontSize: 12, color: 'var(--text-secondary)', width: 120 }}>
+                    {adjustments.chargebackCount} chargeback{adjustments.chargebackCount === 1 ? '' : 's'}
+                  </span>
+                  <span style={{ fontSize: 11.5, color: 'var(--text-faint)', flex: 1 }}>
+                    {fmt(adjustments.chargebackHit)} disputados + {fmt(adjustments.chargebackFees)} em taxas
+                  </span>
+                  <span style={{ fontSize: 12.5, fontWeight: 600, color: '#F43F5E' }}>
+                    −{fmt(adjustments.chargebackHit + adjustments.chargebackFees)}
+                  </span>
+                </div>
               )}
-            </p>
+            </div>
+
+            {/* The ninety-day rate belongs to the store, not to the chosen
+                period, and past 1.5% it is what costs them Shopify Payments. */}
+            {chargebackHealth?.hasData && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0',
+                borderTop: '1px solid var(--border)', fontSize: 11.5,
+              }}>
+                <span style={{ color: 'var(--text-dim)' }}>Taxa de chargeback em 90 dias</span>
+                <span style={{
+                  fontWeight: 700, fontSize: 13,
+                  color: chargebackHealth.rate >= 1.5 ? '#F43F5E' : chargebackHealth.rate >= 1 ? '#F59E0B' : '#10B981',
+                }}>
+                  {chargebackHealth.rate.toFixed(2)}%
+                </span>
+                <span style={{ color: 'var(--text-faint)' }}>
+                  {chargebackHealth.count} de {chargebackHealth.orders.toLocaleString('pt-BR')} pedidos · limite 1,5%
+                  {chargebackHealth.open > 0 && ` · ${chargebackHealth.open} em aberto`}
+                </span>
+              </div>
+            )}
             <div style={{
               display: 'flex', gap: 20, paddingTop: 8,
               borderTop: '1px solid var(--border)', fontSize: 12, flexWrap: 'wrap',

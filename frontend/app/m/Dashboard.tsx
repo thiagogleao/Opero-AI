@@ -6,12 +6,13 @@ import { unlockAudio, playChaChing } from './sound'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type Period = 'today' | 'yesterday' | '7d' | '30d' | '90d' | 'mtd' | 'lastmonth' | 'custom'
+type Period = 'today' | 'yesterday' | '7d' | '14d' | '30d' | '90d' | 'mtd' | 'lastmonth' | 'custom'
 
 const PERIODS: { key: Period; label: string }[] = [
   { key: 'today',     label: 'Hoje' },
   { key: 'yesterday', label: 'Ontem' },
   { key: '7d',        label: '7 dias' },
+  { key: '14d',       label: '14 dias' },
   { key: '30d',       label: '30 dias' },
   { key: 'mtd',       label: 'Este mês' },
   { key: 'lastmonth', label: 'Mês passado' },
@@ -57,9 +58,11 @@ interface ChargebackHealth {
   dueSoon: { externalId: string; amount: number; currency: string; reason: string; dueBy: string | null }[]
   hasData: boolean
 }
+interface StoreAdjustment extends Adjustments { id: string; name: string }
 interface Payload {
   period: Period; from: string; to: string; storeId: string
   adjustments?: Adjustments
+  adjustmentsByStore?: StoreAdjustment[]
   chargebackHealth?: ChargebackHealth | null
   totals: Totals
   previous?: Previous
@@ -309,30 +312,7 @@ export default function Dashboard() {
       </section>
 
       {adj && adj.total > 0 && (
-        <section style={{
-          border: '1px solid var(--hairline)', borderRadius: 11,
-          padding: '10px 12px', marginBottom: 18,
-        }}>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-            <span style={{ fontSize: 12, color: 'var(--ink-2)', flex: 1 }}>Ajustes que chegaram</span>
-            <span style={{ fontSize: 15, fontWeight: 640, color: 'var(--bad)' }}>−{money(adj.total)}</span>
-          </div>
-          <p style={{ fontSize: 10.5, color: 'var(--ink-3)', margin: '3px 0 0' }}>
-            {adj.refundCount > 0 && `${adj.refundCount} estorno${adj.refundCount === 1 ? '' : 's'}`}
-            {adj.refundCount > 0 && adj.chargebackCount > 0 && ' · '}
-            {adj.chargebackCount > 0 && `${adj.chargebackCount} chargeback${adj.chargebackCount === 1 ? '' : 's'} (+${money(adj.chargebackFees)} taxas)`}
-            {' · de pedidos de outros dias também'}
-          </p>
-          <div style={{
-            display: 'flex', justifyContent: 'space-between', marginTop: 7,
-            paddingTop: 7, borderTop: '1px solid var(--hairline)', fontSize: 12,
-          }}>
-            <span style={{ color: 'var(--ink-3)' }}>Resultado de caixa</span>
-            <span style={{ fontWeight: 640, color: t.profit - adj.total >= 0 ? 'var(--ink)' : 'var(--bad)' }}>
-              {money(t.profit - adj.total)}
-            </span>
-          </div>
-        </section>
+        <AdjustmentsCard adj={adj} byStore={data?.adjustmentsByStore ?? []} profit={t.profit} />
       )}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 7, marginBottom: 22 }}>
@@ -624,6 +604,89 @@ function IntradayChart({ data }: { data: Intraday }) {
             : <>Ainda não cobriu o gasto do dia.</>}
         {' '}O gasto com anúncios é diário e foi distribuído por igual entre as horas; a receita é exata.
       </p>
+    </Section>
+  )
+}
+
+// ─── Adjustments ──────────────────────────────────────────────────────────────
+
+/**
+ * Money that left after the sale, split by kind and by store.
+ *
+ * Deliberately outside the headline: most of this belongs to orders from
+ * earlier months, so folding it into the day's profit would report old trouble
+ * as today's. The cash line underneath is what actually left the bank.
+ */
+function AdjustmentsCard({ adj, byStore, profit }: {
+  adj: Adjustments
+  byStore: StoreAdjustment[]
+  profit: number
+}) {
+  const rows = [
+    adj.refundCount > 0 && {
+      label: `${adj.refundCount} estorno${adj.refundCount === 1 ? '' : 's'}`,
+      detail: `${money(adj.refundGross)} devolvidos`,
+      value: adj.refundHit,
+    },
+    adj.chargebackCount > 0 && {
+      label: `${adj.chargebackCount} chargeback${adj.chargebackCount === 1 ? '' : 's'}`,
+      detail: `${money(adj.chargebackFees)} em taxas`,
+      value: adj.chargebackHit + adj.chargebackFees,
+    },
+  ].filter(Boolean) as { label: string; detail: string; value: number }[]
+
+  return (
+    <Section title="Estornos e chargebacks">
+      <div style={{ border: '1px solid var(--hairline)', borderRadius: 11, padding: '11px 13px' }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 9 }}>
+          <span style={{ fontSize: 11.5, color: 'var(--ink-3)', flex: 1 }}>
+            Chegaram no período, de pedidos de qualquer data
+          </span>
+          <span style={{ fontSize: 19, fontWeight: 680, color: 'var(--bad)' }}>−{money(adj.total)}</span>
+        </div>
+
+        {rows.map(r => (
+          <div key={r.label} style={{ display: 'flex', alignItems: 'baseline', gap: 8, padding: '4px 0' }}>
+            <span style={{ fontSize: 12, color: 'var(--ink-2)', flex: 1 }}>{r.label}</span>
+            <span style={{ fontSize: 10.5, color: 'var(--ink-3)' }}>{r.detail}</span>
+            <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--bad)', width: 66, textAlign: 'right' }}>
+              −{money(r.value)}
+            </span>
+          </div>
+        ))}
+
+        {byStore.length > 1 && (
+          <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--hairline)' }}>
+            <p style={{ fontSize: 10.5, color: 'var(--ink-3)', margin: '0 0 5px' }}>Por loja</p>
+            {byStore.map(s => (
+              <div key={s.id} style={{ display: 'flex', alignItems: 'baseline', gap: 8, padding: '3px 0' }}>
+                <span style={{
+                  fontSize: 12, color: 'var(--ink-2)', flex: 1, minWidth: 0,
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                }}>{s.name}</span>
+                <span style={{ fontSize: 10, color: 'var(--ink-3)' }}>
+                  {s.refundCount > 0 && `${s.refundCount}e`}
+                  {s.refundCount > 0 && s.chargebackCount > 0 && ' · '}
+                  {s.chargebackCount > 0 && `${s.chargebackCount}cb`}
+                </span>
+                <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--bad)', width: 66, textAlign: 'right' }}>
+                  −{money(s.total)}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={{
+          display: 'flex', justifyContent: 'space-between', marginTop: 9,
+          paddingTop: 9, borderTop: '1px solid var(--hairline)', fontSize: 12.5,
+        }}>
+          <span style={{ color: 'var(--ink-3)' }}>Resultado de caixa</span>
+          <span style={{ fontWeight: 660, color: profit - adj.total >= 0 ? 'var(--ink)' : 'var(--bad)' }}>
+            {money(profit - adj.total)}
+          </span>
+        </div>
+      </div>
     </Section>
   )
 }

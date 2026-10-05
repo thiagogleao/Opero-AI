@@ -5,7 +5,7 @@ import { redirect } from 'next/navigation'
 import { getTenant, getTenantsByUserId, toStoreOptions } from '@/lib/tenant'
 import { getActiveTenantId } from '@/lib/activeStore'
 import { accountStores } from '@/lib/accountOverview'
-import { getAdjustmentImpact, NO_IMPACT } from '@/lib/adjustments'
+import { getAdjustmentImpact, NO_IMPACT, getChargebackHealth } from '@/lib/adjustments'
 import { creativeSignal } from '@/lib/creativeSignal'
 import StoreSwitcher from '@/components/StoreSwitcher'
 import {
@@ -191,6 +191,9 @@ export default async function Dashboard({ searchParams }: Props) {
     : 0
   const adjustments = await getAdjustmentImpact(tid, dateFrom, dateTo, nonAdRatio)
     .catch(e => { console.error('[dashboard] adjustments', e); return NO_IMPACT })
+
+  const chargebackHealth = await getChargebackHealth(tid)
+    .catch(e => { console.error("[dashboard] chargeback health", e); return null })
 
   const lastSyncIso = syncs[0]?.finished_at ?? null
   const lastSync = lastSyncIso
@@ -542,6 +545,7 @@ ${promptLang.formatNote}`
           customers={customers}
           profit={profit}
           adjustments={adjustments}
+          chargebackHealth={chargebackHealth}
           funnel={funnel}
           countrySpend={countrySpend}
           countryProfit={countryProfit}

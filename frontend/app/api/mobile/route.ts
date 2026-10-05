@@ -119,17 +119,19 @@ export async function GET(req: Request) {
   // `totals` on purpose: a chargeback arriving today for an August order is not
   // a verdict on today's trading, and burying it inside the headline would read
   // as one.
-  const adjustments = (await Promise.all(selected.map(async t => {
+  const perStoreImpact = await Promise.all(selected.map(async t => {
     try {
       const s = await getProfitSummary(t.id, from, to)
       const nonAdRatio = s.configured && s.totalRevenue > 0
         ? (s.totalCosts - s.fbSpend) / s.totalRevenue
         : 0
-      return await getAdjustmentImpact(t.id, from, to, nonAdRatio)
+      return { id: t.id, name: nameOf(t), ...(await getAdjustmentImpact(t.id, from, to, nonAdRatio)) }
     } catch {
-      return NO_IMPACT
+      return { id: t.id, name: nameOf(t), ...NO_IMPACT }
     }
-  }))).reduce((a, i) => ({
+  }))
+
+  const adjustments = perStoreImpact.reduce((a, i) => ({
     refundHit: a.refundHit + i.refundHit,
     refundGross: a.refundGross + i.refundGross,
     refundCount: a.refundCount + i.refundCount,
@@ -140,6 +142,12 @@ export async function GET(req: Request) {
     alreadyCounted: a.alreadyCounted + i.alreadyCounted,
     blindToChargebacks: a.blindToChargebacks || i.blindToChargebacks,
   }), { ...NO_IMPACT })
+
+  // Which store the money left from. Only stores that actually lost something
+  // are listed: a row of zeroes says nothing and crowds out the ones that do.
+  const adjustmentsByStore = perStoreImpact
+    .filter(s => s.total > 0)
+    .sort((a, b) => b.total - a.total)
 
   // Ninety-day dispute rate: not a property of the chosen period, but the
   // number that decides whether the store keeps Shopify Payments at all.
@@ -189,6 +197,7 @@ export async function GET(req: Request) {
     intraday,
     allStores: allTenants.map(t => ({ id: t.id, name: nameOf(t) })),
     adjustments,
+    adjustmentsByStore,
     chargebackHealth,
     lastSyncAt: lastSync[0]?.finished_at ?? null,
     recentOrders: recent.map(r => ({

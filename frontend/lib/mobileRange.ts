@@ -1,12 +1,13 @@
 /** Date-range presets shared by the mobile routes. */
 
 export type Period =
-  | 'today' | 'yesterday' | '7d' | '30d' | '90d' | 'mtd' | 'lastmonth' | 'custom'
+  | 'today' | 'yesterday' | '7d' | '14d' | '30d' | '90d' | 'mtd' | 'lastmonth' | 'custom'
 
 export const PERIODS: { key: Period; label: string }[] = [
   { key: 'today',     label: 'Hoje' },
   { key: 'yesterday', label: 'Ontem' },
   { key: '7d',        label: '7 dias' },
+  { key: '14d',       label: '14 dias' },
   { key: '30d',       label: '30 dias' },
   { key: 'mtd',       label: 'Este mês' },
   { key: 'lastmonth', label: 'Mês passado' },
@@ -55,6 +56,7 @@ export function resolveRange(
       return { from: d, to: d }
     }
     case '7d':  return { from: shiftDate(today, -6),  to: today }
+    case '14d': return { from: shiftDate(today, -13), to: today }
     case '30d': return { from: shiftDate(today, -29), to: today }
     case '90d': return { from: shiftDate(today, -89), to: today }
     case 'mtd': return { from: iso(new Date(Date.UTC(y, m - 1, 1))), to: today }

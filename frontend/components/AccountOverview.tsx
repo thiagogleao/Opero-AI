@@ -26,6 +26,9 @@ export default function AccountOverview({ data, days }: Props) {
   const { totals, stores, daily, unconfigured, failed } = data
   const adj = data.adjustments
   const blindStores = data.blindStores ?? []
+  // Only stores that actually lost something: a row of zeroes crowds out the
+  // ones that did.
+  const hitStores = [...stores].filter(s => s.impact && s.impact.total > 0).sort((a, b) => b.impact.total - a.impact.total)
 
   /** Open one store's own dashboard — same cookie the switcher writes. */
   async function openStore(storeId: string) {
@@ -101,16 +104,62 @@ export default function AccountOverview({ data, days }: Props) {
             </span>
           </div>
 
-          <p style={{ fontSize: 11.5, color: 'var(--text-muted)', margin: '0 0 8px', lineHeight: 1.6 }}>
+          <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', marginBottom: 10 }}>
             {adj.refundCount > 0 && (
-              <>{adj.refundCount} estorno{adj.refundCount === 1 ? '' : 's'} de {fmt(adj.refundGross)} ·
-              custa {fmt(adj.refundHit)} de margem{adj.chargebackCount > 0 ? ' · ' : ''}</>
+              <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                <b style={{ color: 'var(--text-primary)' }}>{adj.refundCount}</b> estorno{adj.refundCount === 1 ? '' : 's'} ·
+                {' '}{fmt(adj.refundGross)} devolvidos · custa <b style={{ color: '#F43F5E' }}>{fmt(adj.refundHit)}</b> de margem
+              </span>
             )}
             {adj.chargebackCount > 0 && (
-              <>{adj.chargebackCount} chargeback{adj.chargebackCount === 1 ? '' : 's'} de {fmt(adj.chargebackHit)} +
-              {' '}{fmt(adj.chargebackFees)} em taxas</>
+              <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                <b style={{ color: 'var(--text-primary)' }}>{adj.chargebackCount}</b> chargeback{adj.chargebackCount === 1 ? '' : 's'} ·
+                {' '}<b style={{ color: '#F43F5E' }}>{fmt(adj.chargebackHit)}</b> + {fmt(adj.chargebackFees)} em taxas
+              </span>
             )}
-          </p>
+          </div>
+
+          {/* Which store the money left from — the total alone does not say
+              where to look, and these stores behave very differently. */}
+          {hitStores.length > 1 && (
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, marginBottom: 10 }}>
+              <thead>
+                <tr style={{ color: 'var(--text-faint)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                  <th style={{ textAlign: 'left',  padding: '4px 0', fontWeight: 600 }}>Loja</th>
+                  <th style={{ textAlign: 'right', padding: '4px 8px', fontWeight: 600 }}>Estornos</th>
+                  <th style={{ textAlign: 'right', padding: '4px 8px', fontWeight: 600 }}>Chargebacks</th>
+                  <th style={{ textAlign: 'right', padding: '4px 8px', fontWeight: 600 }}>Taxas</th>
+                  <th style={{ textAlign: 'right', padding: '4px 0', fontWeight: 600 }}>Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {hitStores.map(s => (
+                  <tr key={s.id} style={{ borderTop: '1px solid var(--border)' }}>
+                    <td style={{ padding: '6px 0', color: 'var(--text-primary)' }}>
+                      {s.name}
+                      <span style={{ color: 'var(--text-faint)', fontSize: 10, marginLeft: 6 }}>
+                        {s.impact.refundCount > 0 && `${s.impact.refundCount} est.`}
+                        {s.impact.refundCount > 0 && s.impact.chargebackCount > 0 && ' · '}
+                        {s.impact.chargebackCount > 0 && `${s.impact.chargebackCount} cb`}
+                      </span>
+                    </td>
+                    <td style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--text-muted)' }}>
+                      {s.impact.refundHit > 0 ? `−${fmt(s.impact.refundHit)}` : '—'}
+                    </td>
+                    <td style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--text-muted)' }}>
+                      {s.impact.chargebackHit > 0 ? `−${fmt(s.impact.chargebackHit)}` : '—'}
+                    </td>
+                    <td style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--text-faint)' }}>
+                      {s.impact.chargebackFees > 0 ? `−${fmt(s.impact.chargebackFees)}` : '—'}
+                    </td>
+                    <td style={{ padding: '6px 0', textAlign: 'right', fontWeight: 600, color: '#F43F5E' }}>
+                      −{fmt(s.impact.total)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
 
           {/* Separated on purpose: money arriving today for an old order says
               nothing about how today's operation went. */}
