@@ -100,18 +100,18 @@ async function calculateProfit(dateFrom: string, dateTo: string, cfg: ProfitConf
     totalRevenue       += revenue
     totalShopifyFees   += shopifyFee
     totalPaymentFees   += paymentFee
-    const { cogs: orderCogs, orderFee, saving } = orderSupplierCost(order, lookups, cfg)
+    const { cogs: orderCogs, packaging, orderFee, saving } = orderSupplierCost(order, lookups, cfg)
     const shipping = getShippingCost(order.country_code, cfg)
 
     totalCogs          += orderCogs
     totalOrderFees     += orderFee
-    totalPackaging     += cfg.cogs.packaging_cost_usd
+    totalPackaging     += packaging
     totalShipping      += shipping
     totalPerOrderExtras += perOrderExtras
     totalAdditionalUnitSavings += saving
 
     const orderCost = shopifyFee + paymentFee + orderCogs + orderFee
-                    + cfg.cogs.packaging_cost_usd + shipping + perOrderExtras - saving
+                    + packaging + shipping + perOrderExtras - saving
     costByDay.set(order.order_date, (costByDay.get(order.order_date) ?? 0) + orderCost)
   }
 

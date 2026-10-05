@@ -48,7 +48,7 @@ function tierToText(prices: Record<string, number>): string {
 
 interface ProfitConfig {
   shopify: { transaction_fee_pct: number; payment_processing_pct: number; payment_processing_fixed: number }
-  cogs: { default_cost_usd: number; packaging_cost_usd: number; additional_unit_discount_usd: number; volume_discounts: VolumeDiscount[]; products: ProductCogs[]; price_tiers?: PriceTier[]; country_prices?: CountryPrices[]; order_fees?: OrderFee[] }
+  cogs: { default_cost_usd: number; packaging_cost_usd: number; packaging_per_unit_usd?: number; additional_unit_discount_usd: number; volume_discounts: VolumeDiscount[]; products: ProductCogs[]; price_tiers?: PriceTier[]; country_prices?: CountryPrices[]; order_fees?: OrderFee[] }
   shipping: { default_rate_usd: number; rates: ShippingRate[] }
   extra_costs: ExtraCost[]
 }
@@ -330,6 +330,12 @@ function ProfitModuleInner() {
             </Field>
             <Field label="Custo de embalagem por pedido">
               <NumInput value={config.cogs.packaging_cost_usd} onChange={v => upd('cogs.packaging_cost_usd', v)} prefix="$" />
+            </Field>
+            <Field
+              label="Custo de embalagem por unidade"
+              hint="Caixas, cartões e encartes comprados de uma vez e rateados: acompanham as unidades, não os pedidos."
+            >
+              <NumInput value={config.cogs.packaging_per_unit_usd ?? 0} onChange={v => upd('cogs.packaging_per_unit_usd', v)} prefix="$" />
             </Field>
 
             <Field

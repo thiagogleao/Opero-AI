@@ -1,6 +1,8 @@
 {
   "source": "MOKOO — Custo por produto e país (DSers x Shopify), pedidos de 07/05/2026 a 05/10/2026",
   "note": "Preco de tabela por unidade em US$, frete ja embutido (a coluna Shipping Cost do DSers e $0 em 100% dos pedidos). Custo do pedido = tabela x qtd + taxa fixa do pais - $3,00 por unidade adicional.",
+  "packaging_per_unit_usd": 1.80,
+  "packaging_note": "Caixas, cartoes e encartes comprados de uma vez e rateados por unidade. Nao vem do fornecedor, entao nao faz parte da tabela abaixo: soma por cima do preco de tabela de cada unidade.",
   "order_fees": {
     "amount_usd": 3.5,
     "effective_from": "2026-06-22",

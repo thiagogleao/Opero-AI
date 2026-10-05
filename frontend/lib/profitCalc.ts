@@ -48,7 +48,12 @@ export interface ProfitConfig {
   }
   cogs: {
     default_cost_usd: number
+    /** Charged once per order. */
     packaging_cost_usd: number
+    /** Charged on every unit. Boxes, cards and inserts are bought in bulk and
+     *  spread over the units they go out with, so they scale with units and
+     *  not with orders. */
+    packaging_per_unit_usd?: number
     additional_unit_discount_usd: number
     volume_discounts: {
       min_units: number
@@ -190,6 +195,8 @@ export function supplierOrderFee(
 export interface OrderSupplierCost {
   /** Unit prices summed across the order's items. */
   cogs: number
+  /** Packaging, per order plus per unit. */
+  packaging: number
   /** The destination's flat charge, counted once for the order. */
   orderFee: number
   /** What the extra-unit discount takes off, 0 under a rate card. */
@@ -210,8 +217,10 @@ export function orderSupplierCost(
   cfg: ProfitConfig,
 ): OrderSupplierCost {
   const units = order.items.reduce((s, i) => s + i.units, 0)
+  const packaging = (cfg.cogs.packaging_cost_usd ?? 0)
+                  + (cfg.cogs.packaging_per_unit_usd ?? 0) * units
   const tier = tierForDate(cfg, order.order_date)
-  if (tier) return { cogs: tierOrderCost(units, tier), orderFee: 0, saving: 0 }
+  if (tier) return { cogs: tierOrderCost(units, tier), packaging, orderFee: 0, saving: 0 }
 
   const cogs = l.hasProductCogs || l.byCountry.size > 0
     ? order.items.reduce((s, i) => s + unitCost(i, order.country_code, l, cfg) * i.units, 0)
@@ -220,6 +229,7 @@ export function orderSupplierCost(
   const addl = cfg.cogs.additional_unit_discount_usd ?? 0
   return {
     cogs,
+    packaging,
     orderFee: supplierOrderFee(order.country_code, order.order_date, cfg),
     saving: units > 1 && addl > 0 ? (units - 1) * addl : 0,
   }
@@ -367,7 +377,7 @@ export async function getProfitSummary(
     totalCogs          += supplier.cogs
     totalOrderFees     += supplier.orderFee
     totalAdditionalUnitSavings += supplier.saving
-    totalPackaging     += cfg.cogs.packaging_cost_usd
+    totalPackaging     += supplier.packaging
     totalShipping      += getShippingCost(order.country_code, cfg)
     totalPerOrderExtras += perOrderExtras
   }
