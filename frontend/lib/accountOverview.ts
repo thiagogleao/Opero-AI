@@ -1,4 +1,5 @@
 import { getProfitSummary, getDailyProfitData, type DailyProfitPoint } from './profitCalc'
+import { getAdjustmentImpact, NO_IMPACT, type AdjustmentImpact } from './adjustments'
 import { getOverviewMetrics, getDailyRevenue } from './queries'
 import { query } from './db'
 import type { Tenant } from './tenant'
@@ -18,6 +19,8 @@ export interface StoreOverviewRow {
   aov: number
   /** true = this store's queries failed; its numbers are zeroed, not real */
   failed: boolean
+  /** Refunds and chargebacks that landed in the window for this store. */
+  impact: AdjustmentImpact
 }
 
 export interface AccountTotals {
@@ -37,6 +40,12 @@ export interface AccountOverview {
   unconfigured: string[]
   failed: string[]
   lastSyncIso: string | null
+  /** Refunds and chargebacks that landed in this window, whatever day their
+   *  order is from. Kept apart from `totals` on purpose: money arriving today
+   *  for an August order is not a verdict on today's operation. */
+  adjustments: AdjustmentImpact
+  /** Stores whose token cannot read disputes — their silence is not good news. */
+  blindStores: string[]
 }
 
 /** Stores that can actually report numbers — a half-finished OAuth has no token. */
@@ -82,6 +91,13 @@ export async function getAccountOverview(
       const metrics = await getOverviewMetrics(t.id, dateFrom, dateTo)
       const summary = await getProfitSummary(t.id, dateFrom, dateTo)
 
+      // What everything except ads costs, as a share of revenue — the ratio a
+      // refund is measured against.
+      const nonAdRatio = summary.configured && summary.totalRevenue > 0
+        ? (summary.totalCosts - summary.fbSpend) / summary.totalRevenue
+        : 0
+      const impact = await getAdjustmentImpact(t.id, dateFrom, dateTo, nonAdRatio)
+
       const revenue = Number(metrics.revenue)
       const orders  = Number(metrics.orders)
       // The profit summary drops ad accounts the user switched off, so it is the
@@ -115,12 +131,13 @@ export async function getAccountOverview(
         roas:   adSpend > 0 ? revenue / adSpend : 0,
         aov:    orders  > 0 ? revenue / orders  : 0,
         failed: false,
+        impact,
       }
     } catch (err) {
       console.error('[overview] store failed', t.id, err)
       return {
         ...base, configured: false, revenue: 0, orders: 0, adSpend: 0,
-        profit: 0, margin: 0, roas: 0, aov: 0, failed: true,
+        profit: 0, margin: 0, roas: 0, aov: 0, failed: true, impact: NO_IMPACT,
       }
     }
   }))
@@ -169,5 +186,17 @@ export async function getAccountOverview(
     unconfigured: stores.filter(s => !s.configured && !s.failed).map(s => s.name),
     failed: stores.filter(s => s.failed).map(s => s.name),
     lastSyncIso,
+    adjustments: stores.reduce<AdjustmentImpact>((a, s) => ({
+      refundHit:       a.refundHit       + s.impact.refundHit,
+      refundGross:     a.refundGross     + s.impact.refundGross,
+      refundCount:     a.refundCount     + s.impact.refundCount,
+      chargebackHit:   a.chargebackHit   + s.impact.chargebackHit,
+      chargebackFees:  a.chargebackFees  + s.impact.chargebackFees,
+      chargebackCount: a.chargebackCount + s.impact.chargebackCount,
+      total:           a.total           + s.impact.total,
+      alreadyCounted:  a.alreadyCounted  + s.impact.alreadyCounted,
+      blindToChargebacks: a.blindToChargebacks || s.impact.blindToChargebacks,
+    }), { ...NO_IMPACT }),
+    blindStores: stores.filter(s => s.impact.blindToChargebacks && !s.failed).map(s => s.name),
   }
 }

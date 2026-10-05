@@ -24,6 +24,8 @@ export default function AccountOverview({ data, days }: Props) {
   const [switching, setSwitching] = useState<string | null>(null)
 
   const { totals, stores, daily, unconfigured, failed } = data
+  const adj = data.adjustments
+  const blindStores = data.blindStores ?? []
 
   /** Open one store's own dashboard — same cookie the switcher writes. */
   async function openStore(storeId: string) {
@@ -84,6 +86,58 @@ export default function AccountOverview({ data, days }: Props) {
           </p>
         </div>
       </motion.div>
+
+      {(adj.total > 0 || blindStores.length > 0) && (
+        <div style={{
+          background: 'var(--bg-surface)', border: '1px solid var(--border)',
+          borderRadius: 12, padding: '14px 18px', marginBottom: 20,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 8 }}>
+            <h2 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)', margin: 0, flex: 1 }}>
+              Ajustes que chegaram no período
+            </h2>
+            <span style={{ fontSize: 18, fontWeight: 700, color: adj.total > 0 ? '#F43F5E' : 'var(--text-dim)' }}>
+              −{fmt(adj.total)}
+            </span>
+          </div>
+
+          <p style={{ fontSize: 11.5, color: 'var(--text-muted)', margin: '0 0 8px', lineHeight: 1.6 }}>
+            {adj.refundCount > 0 && (
+              <>{adj.refundCount} estorno{adj.refundCount === 1 ? '' : 's'} de {fmt(adj.refundGross)} ·
+              custa {fmt(adj.refundHit)} de margem{adj.chargebackCount > 0 ? ' · ' : ''}</>
+            )}
+            {adj.chargebackCount > 0 && (
+              <>{adj.chargebackCount} chargeback{adj.chargebackCount === 1 ? '' : 's'} de {fmt(adj.chargebackHit)} +
+              {' '}{fmt(adj.chargebackFees)} em taxas</>
+            )}
+          </p>
+
+          {/* Separated on purpose: money arriving today for an old order says
+              nothing about how today's operation went. */}
+          <div style={{
+            display: 'flex', gap: 18, paddingTop: 8, borderTop: '1px solid var(--border)',
+            fontSize: 12, flexWrap: 'wrap',
+          }}>
+            <span style={{ color: 'var(--text-dim)' }}>
+              Lucro da operação <b style={{ color: 'var(--text-primary)' }}>{fmt(totals.profit)}</b>
+            </span>
+            <span style={{ color: 'var(--text-dim)' }}>
+              Resultado de caixa{' '}
+              <b style={{ color: totals.profit - adj.total >= 0 ? '#10B981' : '#F43F5E' }}>
+                {fmt(totals.profit - adj.total)}
+              </b>
+            </span>
+          </div>
+
+          {blindStores.length > 0 && (
+            <p style={{ fontSize: 11, color: '#F59E0B', margin: '8px 0 0' }}>
+              ⚠️ Sem leitura de chargeback em: <b>{blindStores.join(', ')}</b>. Zero aqui significa
+              sem acesso, não sem disputa — o token dessas lojas precisa ser reemitido com a
+              permissão de Shopify Payments.
+            </p>
+          )}
+        </div>
+      )}
 
       {(unconfigured.length > 0 || failed.length > 0) && (
         <div style={{

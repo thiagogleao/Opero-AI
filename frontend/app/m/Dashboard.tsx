@@ -46,8 +46,14 @@ interface Previous {
   /** Set when the older window was cut at this hour to match a day in progress. */
   throughHour: number | null
 }
+interface Adjustments {
+  refundHit: number; refundGross: number; refundCount: number
+  chargebackHit: number; chargebackFees: number; chargebackCount: number
+  total: number; alreadyCounted: number; blindToChargebacks: boolean
+}
 interface Payload {
   period: Period; from: string; to: string; storeId: string
+  adjustments?: Adjustments
   totals: Totals
   previous?: Previous
   stores: Store[]
@@ -231,6 +237,7 @@ export default function Dashboard() {
   const aov = t.orders > 0 ? t.revenue / t.orders : 0
   const multiDay = daily.length > 1
   const prev = data?.previous
+  const adj = data?.adjustments
   const profitDelta = prev ? pctDelta(t.profit, prev.profit) : null
   // When today is only half over, the comparison window was cut at the same
   // hour — say so, otherwise the number looks like a full-day comparison.
@@ -283,6 +290,33 @@ export default function Dashboard() {
           </p>
         )}
       </section>
+
+      {adj && adj.total > 0 && (
+        <section style={{
+          border: '1px solid var(--hairline)', borderRadius: 11,
+          padding: '10px 12px', marginBottom: 18,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+            <span style={{ fontSize: 12, color: 'var(--ink-2)', flex: 1 }}>Ajustes que chegaram</span>
+            <span style={{ fontSize: 15, fontWeight: 640, color: 'var(--bad)' }}>−{money(adj.total)}</span>
+          </div>
+          <p style={{ fontSize: 10.5, color: 'var(--ink-3)', margin: '3px 0 0' }}>
+            {adj.refundCount > 0 && `${adj.refundCount} estorno${adj.refundCount === 1 ? '' : 's'}`}
+            {adj.refundCount > 0 && adj.chargebackCount > 0 && ' · '}
+            {adj.chargebackCount > 0 && `${adj.chargebackCount} chargeback${adj.chargebackCount === 1 ? '' : 's'} (+${money(adj.chargebackFees)} taxas)`}
+            {' · de pedidos de outros dias também'}
+          </p>
+          <div style={{
+            display: 'flex', justifyContent: 'space-between', marginTop: 7,
+            paddingTop: 7, borderTop: '1px solid var(--hairline)', fontSize: 12,
+          }}>
+            <span style={{ color: 'var(--ink-3)' }}>Resultado de caixa</span>
+            <span style={{ fontWeight: 640, color: t.profit - adj.total >= 0 ? 'var(--ink)' : 'var(--bad)' }}>
+              {money(t.profit - adj.total)}
+            </span>
+          </div>
+        </section>
+      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 7, marginBottom: 22 }}>
         <Tile label="Receita"  value={money(t.revenue)} delta={prev ? pctDelta(t.revenue, prev.revenue) : null} />

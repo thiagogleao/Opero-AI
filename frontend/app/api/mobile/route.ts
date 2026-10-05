@@ -4,6 +4,7 @@ import { mobileAuthOk, unauthorized } from '@/lib/mobileAuth'
 import { hourInTz } from '@/lib/alerts'
 import { resolveRange, previousRange, REFERENCE_TZ, todayInTz, type Period } from '@/lib/mobileRange'
 import { getIntradayProfit, getComparableTotals } from '@/lib/intradayProfit'
+import { getAdjustmentImpact, NO_IMPACT } from '@/lib/adjustments'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -114,6 +115,32 @@ export async function GET(req: Request) {
 
   const ids = selected.map(t => t.id)
 
+  // Refunds and chargebacks that landed in this window. Returned apart from
+  // `totals` on purpose: a chargeback arriving today for an August order is not
+  // a verdict on today's trading, and burying it inside the headline would read
+  // as one.
+  const adjustments = (await Promise.all(selected.map(async t => {
+    try {
+      const s = await getProfitSummary(t.id, from, to)
+      const nonAdRatio = s.configured && s.totalRevenue > 0
+        ? (s.totalCosts - s.fbSpend) / s.totalRevenue
+        : 0
+      return await getAdjustmentImpact(t.id, from, to, nonAdRatio)
+    } catch {
+      return NO_IMPACT
+    }
+  }))).reduce((a, i) => ({
+    refundHit: a.refundHit + i.refundHit,
+    refundGross: a.refundGross + i.refundGross,
+    refundCount: a.refundCount + i.refundCount,
+    chargebackHit: a.chargebackHit + i.chargebackHit,
+    chargebackFees: a.chargebackFees + i.chargebackFees,
+    chargebackCount: a.chargebackCount + i.chargebackCount,
+    total: a.total + i.total,
+    alreadyCounted: a.alreadyCounted + i.alreadyCounted,
+    blindToChargebacks: a.blindToChargebacks || i.blindToChargebacks,
+  }), { ...NO_IMPACT })
+
   // Only a one-day view has an inside to look at.
   const intraday = wantDaily ? null : await getIntradayProfit(ids, from).catch(err => {
     console.error('[mobile] intraday failed', err)
@@ -157,6 +184,7 @@ export async function GET(req: Request) {
     daily,
     intraday,
     allStores: allTenants.map(t => ({ id: t.id, name: nameOf(t) })),
+    adjustments,
     lastSyncAt: lastSync[0]?.finished_at ?? null,
     recentOrders: recent.map(r => ({
       orderId: r.order_id,

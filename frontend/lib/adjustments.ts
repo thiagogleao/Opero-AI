@@ -335,6 +335,97 @@ export async function getAdjustments(
   }
 }
 
+export interface AdjustmentImpact {
+  /** What refunds actually cost: the contribution the order would have left. */
+  refundHit: number
+  refundGross: number
+  refundCount: number
+  /** Chargebacks take the whole value, and the fee on top. */
+  chargebackHit: number
+  chargebackFees: number
+  chargebackCount: number
+  /** Everything above, as one number to subtract from profit. */
+  total: number
+  /** Refunds skipped because the profit engine already dropped their order. */
+  alreadyCounted: number
+  /** True when this store's token cannot read disputes — clean here means blind. */
+  blindToChargebacks: boolean
+}
+
+export const NO_IMPACT: AdjustmentImpact = {
+  refundHit: 0, refundGross: 0, refundCount: 0,
+  chargebackHit: 0, chargebackFees: 0, chargebackCount: 0,
+  total: 0, alreadyCounted: 0, blindToChargebacks: false,
+}
+
+/**
+ * What the adjustments that *arrived* in this window take off the profit.
+ *
+ * Two things make this more than a sum:
+ *
+ * The profit engine already drops fully refunded orders from the day they were
+ * placed. When such an order was placed inside this same window, its refund is
+ * skipped here — subtracting it again would charge the same loss twice.
+ *
+ * A refund costs the contribution, not the revenue: treating the order as
+ * though it never happened returns the product and shipping cost along with the
+ * sale. A chargeback costs the full value plus the fee, because there the goods
+ * are gone and the money went with them.
+ */
+export async function getAdjustmentImpact(
+  tenantId: string, from: string, to: string, nonAdRatio: number
+): Promise<AdjustmentImpact> {
+  try {
+    const refunds = await query<{ amount: string; order_date: string | null; status: string | null }>(
+      `SELECT a.amount::text, a.order_date::text, o.financial_status AS status
+       FROM order_adjustments a
+       LEFT JOIN shopify_orders o ON o.order_id = a.order_id AND o.tenant_id = a.tenant_id
+       WHERE a.tenant_id = $1 AND a.kind = 'refund'
+         AND a.event_date BETWEEN $2::date AND $3::date`,
+      [tenantId, from, to]
+    )
+
+    let refundGross = 0, alreadyCounted = 0, refundCount = 0
+    for (const r of refunds) {
+      const inWindow = r.order_date !== null && r.order_date >= from && r.order_date <= to
+      if (inWindow && r.status === 'refunded') { alreadyCounted += Number(r.amount); continue }
+      refundGross += Number(r.amount)
+      refundCount++
+    }
+
+    const [cb] = await query<{ amount: string; fees: string; n: string }>(
+      `SELECT COALESCE(SUM(amount), 0)::text AS amount,
+              COALESCE(SUM(fee), 0)::text    AS fees,
+              count(*)::text                 AS n
+       FROM order_adjustments
+       WHERE tenant_id = $1 AND kind = 'chargeback'
+         AND status IS DISTINCT FROM 'won'
+         AND event_date BETWEEN $2::date AND $3::date`,
+      [tenantId, from, to]
+    )
+
+    const [seen] = await query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM order_adjustments WHERE tenant_id = $1 AND kind = 'chargeback'`,
+      [tenantId]
+    )
+
+    const refundHit = refundGross * (1 - nonAdRatio)
+    const chargebackHit = Number(cb?.amount ?? 0)
+    const chargebackFees = Number(cb?.fees ?? 0)
+
+    return {
+      refundHit, refundGross, refundCount,
+      chargebackHit, chargebackFees,
+      chargebackCount: Number(cb?.n ?? 0),
+      total: refundHit + chargebackHit + chargebackFees,
+      alreadyCounted,
+      blindToChargebacks: Number(seen?.n ?? 0) === 0,
+    }
+  } catch {
+    return NO_IMPACT
+  }
+}
+
 export interface ChargebackHealth {
   /** Disputes opened in the last 90 days. */
   count: number
