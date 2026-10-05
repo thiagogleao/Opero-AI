@@ -19,7 +19,7 @@ from typing import Optional
 
 import shopify
 from sqlalchemy.orm import Session
-from sqlalchemy import Table, MetaData
+from sqlalchemy import Table, MetaData, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.collectors.base import BaseCollector
@@ -273,9 +273,20 @@ class ShopifyCollector(BaseCollector):
             billing = getattr(order, "billing_address", None)
             country_code = (billing.country_code if billing else None) or None
 
+            # Shopify exposes the checkout fingerprint either at the top level or
+            # under client_details, depending on API version and order age.
+            details = getattr(order, "client_details", None)
+            browser_ip = (
+                getattr(order, "browser_ip", None)
+                or (getattr(details, "browser_ip", None) if details else None)
+            )
+
             rows.append({
                 "order_id": str(order.id),
                 "order_number": getattr(order, "order_number", None),
+                "browser_ip": browser_ip or None,
+                "user_agent": (getattr(details, "user_agent", None) if details else None) or None,
+                "accept_language": (getattr(details, "accept_language", None) if details else None) or None,
                 "customer_id": cid or None,
                 "customer_email": getattr(order, "email", None) or None,
                 "created_at": _parse_dt(order.created_at),
@@ -291,7 +302,12 @@ class ShopifyCollector(BaseCollector):
                 ),
             })
 
-        self._upsert_raw("shopify_orders", rows, ["order_id"])
+        # Shopify stops returning the checkout fingerprint on older orders, so a
+        # resync of history must not blank out what we already captured.
+        self._upsert_raw(
+            "shopify_orders", rows, ["order_id"],
+            preserve_on_null=["browser_ip", "user_agent", "accept_language"],
+        )
 
     def _upsert_order_items(self, orders: list):
         rows = []
@@ -587,7 +603,13 @@ class ShopifyCollector(BaseCollector):
     # Low-level upsert (mirrors FacebookCollector._upsert_raw)
     # ------------------------------------------------------------------
 
-    def _upsert_raw(self, table_name: str, rows: list[dict], conflict_columns: list[str]) -> int:
+    def _upsert_raw(
+        self,
+        table_name: str,
+        rows: list[dict],
+        conflict_columns: list[str],
+        preserve_on_null: list[str] | None = None,
+    ) -> int:
         if not rows:
             return 0
 
@@ -608,9 +630,16 @@ class ShopifyCollector(BaseCollector):
             if c.name not in conflict_columns and c.name != "id"
         ]
         stmt = pg_insert(table).values(rows)
+        keep = set(preserve_on_null or [])
         stmt = stmt.on_conflict_do_update(
             index_elements=conflict_columns,
-            set_={col: stmt.excluded[col] for col in update_cols},
+            set_={
+                col: (
+                    func.coalesce(stmt.excluded[col], table.c[col])
+                    if col in keep else stmt.excluded[col]
+                )
+                for col in update_cols
+            },
         )
         self.session.execute(stmt)
         self.session.commit()

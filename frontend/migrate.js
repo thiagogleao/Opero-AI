@@ -433,6 +433,14 @@ const sql = `
   );
 
   -- Add missing columns to existing tables (safe, idempotent)
+  -- Checkout fingerprint. Visa's Compelling Evidence 3.0 shifts liability on a
+  -- fraud dispute when two prior undisputed orders match the disputed one on the
+  -- purchase IP or device, so the IP has to be on record 120 to 365 days before
+  -- a dispute that has not happened yet. It cannot be recovered afterwards.
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS browser_ip      TEXT;
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS user_agent      TEXT;
+  ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS accept_language TEXT;
+
   ALTER TABLE tenants ADD COLUMN IF NOT EXISTS shop_name TEXT;
 
   ALTER TABLE sync_runs ADD COLUMN IF NOT EXISTS date_from              TEXT;
