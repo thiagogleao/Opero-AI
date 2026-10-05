@@ -4,6 +4,7 @@ import { query } from './db'
 import { getAlertConfig, hourInTz, runAlertChecks, runScaleChecks, sendDailySummary } from './alerts'
 import { journeyStores, syncJourneys, refreshPendingJourneys } from './journey'
 import { runBulkBackfill, storesNeedingBackfill } from './journeyBulk'
+import { adjustmentStores, syncAdjustments } from './adjustments'
 
 /**
  * Server-side sync scheduler.
@@ -117,6 +118,20 @@ async function runJourneyCycle() {
   // paged route costs about a second per order, which for these stores was the
   // difference between minutes and two days. One store per cycle, because a
   // shop may only have one bulk operation in flight.
+  // Refunds and chargebacks ride along with the journey pass: both are read
+  // from Shopify, neither is urgent to the minute, and a dispute's status can
+  // change weeks after it opened, so re-reading is the only way a win is seen.
+  for (const store of await adjustmentStores()) {
+    try {
+      const r = await syncAdjustments(store, { sinceDays: 45 })
+      if (r.refunds || r.disputes) {
+        console.log(`[adjustments] ${store.shopify_domain}: ${r.refunds} estornos, ${r.disputes} disputas${r.skipped ? ` · ${r.skipped}` : ''}`)
+      }
+    } catch (err) {
+      console.error('[adjustments] failed for', store.id, err)
+    }
+  }
+
   const pending = await storesNeedingBackfill(stores)
   if (pending.length > 0) {
     const r = await runBulkBackfill(pending[0])

@@ -391,6 +391,38 @@ const sql = `
   CREATE INDEX IF NOT EXISTS idx_touchpoints_ad ON order_touchpoints (ad_id) WHERE ad_id IS NOT NULL;
   CREATE INDEX IF NOT EXISTS idx_touchpoints_occurred ON order_touchpoints (occurred_at DESC);
 
+  -- ══════════════════════════════════════════════════════════════
+  -- Money that leaves after the sale: refunds and chargebacks
+  -- ══════════════════════════════════════════════════════════════
+  -- Two dates, and the whole design rests on keeping them apart. A chargeback
+  -- that arrives today for an order from August is not a bad day today, and
+  -- was not a worse day in August either until it happened. Storing both lets
+  -- the daily view answer "how did today's operation do" while the period
+  -- total still counts every dollar that actually left.
+  CREATE TABLE IF NOT EXISTS order_adjustments (
+    tenant_id       TEXT NOT NULL REFERENCES tenants(id),
+    kind            TEXT NOT NULL,          -- 'refund' | 'chargeback'
+    external_id     TEXT NOT NULL,          -- Shopify refund id or dispute id
+    order_id        TEXT,
+    -- When it reached us.
+    event_date      DATE NOT NULL,
+    -- When the order it belongs to was placed.
+    order_date      DATE,
+    amount          NUMERIC NOT NULL,       -- gross value, always positive
+    fee             NUMERIC DEFAULT 0,      -- the chargeback fee
+    currency        TEXT,
+    reason          TEXT,
+    status          TEXT,                   -- dispute lifecycle; null for refunds
+    evidence_due_by TIMESTAMPTZ,
+    -- Set when a dispute closes; a win reverses the charge on this date.
+    finalized_on    TIMESTAMPTZ,
+    synced_at       TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, kind, external_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_adjustments_event ON order_adjustments (tenant_id, event_date DESC);
+  CREATE INDEX IF NOT EXISTS idx_adjustments_order ON order_adjustments (tenant_id, order_id);
+  CREATE INDEX IF NOT EXISTS idx_adjustments_status ON order_adjustments (tenant_id, kind, status);
+
   -- Where the backfill has reached, per store.
   CREATE TABLE IF NOT EXISTS journey_sync_state (
     tenant_id       TEXT PRIMARY KEY REFERENCES tenants(id),
