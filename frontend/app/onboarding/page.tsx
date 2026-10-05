@@ -68,7 +68,7 @@ function OnboardingInner() {
     if (errorParam) {
       const messages: Record<string, string> = {
         invalid_state: 'Erro de segurança. Tente novamente.',
-        invalid_hmac: 'Resposta inválida do Shopify. Tente novamente.',
+        invalid_hmac: 'A assinatura do Shopify não confere: o CLIENT_SECRET configurado não pertence ao CLIENT_ID do app. Tentar de novo não resolve — é preciso corrigir o par nas variáveis do servidor.',
         token_exchange_failed: 'Não foi possível obter o token do Shopify. Verifique o app.',
       }
       setError(messages[errorParam] || 'Erro desconhecido. Tente novamente.')

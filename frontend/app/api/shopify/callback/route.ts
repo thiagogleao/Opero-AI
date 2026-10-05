@@ -23,11 +23,13 @@ export async function GET(req: NextRequest) {
 
   // Determine which secret to use for HMAC verification
   let hmacSecret = process.env.SHOPIFY_CLIENT_SECRET!
+  let usedClientId = process.env.SHOPIFY_CLIENT_ID ?? '(sem CLIENT_ID)'
   const customCredsForHmac = req.cookies.get('shopify_custom_creds')?.value
   if (customCredsForHmac) {
     try {
       const creds = JSON.parse(customCredsForHmac)
       if (creds.clientSecret) hmacSecret = creds.clientSecret
+      if (creds.clientId) usedClientId = creds.clientId
     } catch { /* ignore */ }
   }
 
@@ -41,8 +43,21 @@ export async function GET(req: NextRequest) {
     .createHmac('sha256', hmacSecret)
     .update(message)
     .digest('hex')
-  console.log('[shopify/callback] hmac match:', digest === hmac)
-  if (digest !== hmac) return fail('invalid_hmac')
+  if (digest !== hmac) {
+    // A failed HMAC is never transient: Shopify signs the callback with the
+    // secret of the app whose client_id started the flow, so a mismatch means
+    // the configured pair does not belong together. Telling the user to try
+    // again sends them round a loop that cannot close, so log the pair's
+    // identity — never the secret — and say what to compare.
+    console.error(
+      '[shopify/callback] HMAC mismatch. O CLIENT_SECRET configurado não pertence ao ' +
+      `CLIENT_ID usado na autorização (client_id=${usedClientId}, ` +
+      `secret=${hmacSecret.slice(0, 10)}…, origem=${customCredsForHmac ? 'cookie' : 'env'}). ` +
+      'Confira o par no painel do app.'
+    )
+    return fail('invalid_hmac')
+  }
+  console.log('[shopify/callback] hmac match: true')
 
   // Use custom credentials if provided (for stores outside the Partners org)
   let effectiveClientId     = process.env.SHOPIFY_CLIENT_ID!
