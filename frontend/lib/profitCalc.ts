@@ -50,10 +50,14 @@ export interface ProfitConfig {
     default_cost_usd: number
     /** Charged once per order. */
     packaging_cost_usd: number
-    /** Charged on every unit. Boxes, cards and inserts are bought in bulk and
-     *  spread over the units they go out with, so they scale with units and
+    /** Charged on each unit of the products listed in
+     *  packaging_per_unit_products. Boxes, cards and inserts are bought in bulk
+     *  and spread over the units they go out with, so they scale with units and
      *  not with orders. */
     packaging_per_unit_usd?: number
+    /** Which products ship in that packaging. Absent or empty means every one
+     *  of them does. */
+    packaging_per_unit_products?: string[]
     additional_unit_discount_usd: number
     volume_discounts: {
       min_units: number
@@ -142,6 +146,8 @@ export interface CogsLookups {
   /** product_id → country code → unit price. */
   byCountry: Map<string, Record<string, number>>
   hasProductCogs: boolean
+  /** null when the per-unit packaging applies to everything. */
+  packagingProducts: Set<string> | null
 }
 
 export function buildCogsLookups(cfg: ProfitConfig): CogsLookups {
@@ -157,7 +163,11 @@ export function buildCogsLookups(cfg: ProfitConfig): CogsLookups {
   for (const c of cfg.cogs.country_prices ?? []) {
     if (c.product_id && c.prices) byCountry.set(c.product_id, c.prices)
   }
-  return { byId, byTitle, byCountry, hasProductCogs: byId.size > 0 }
+  const only = cfg.cogs.packaging_per_unit_products
+  return {
+    byId, byTitle, byCountry, hasProductCogs: byId.size > 0,
+    packagingProducts: only && only.length > 0 ? new Set(only) : null,
+  }
 }
 
 /** What one unit costs landed, for this product going to this country. The
@@ -217,8 +227,13 @@ export function orderSupplierCost(
   cfg: ProfitConfig,
 ): OrderSupplierCost {
   const units = order.items.reduce((s, i) => s + i.units, 0)
+  // Only the products that actually ship in our own box carry its cost; a
+  // t-shirt or a giant plush goes out in neither box nor card.
+  const packagedUnits = l.packagingProducts === null ? units
+    : order.items.reduce((s, i) =>
+        s + (i.product_id && l.packagingProducts!.has(i.product_id) ? i.units : 0), 0)
   const packaging = (cfg.cogs.packaging_cost_usd ?? 0)
-                  + (cfg.cogs.packaging_per_unit_usd ?? 0) * units
+                  + (cfg.cogs.packaging_per_unit_usd ?? 0) * packagedUnits
   const tier = tierForDate(cfg, order.order_date)
   if (tier) return { cogs: tierOrderCost(units, tier), packaging, orderFee: 0, saving: 0 }
 

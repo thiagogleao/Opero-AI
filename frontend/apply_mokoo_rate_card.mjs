@@ -67,13 +67,16 @@ for (const p of card.products) {
 }
 
 // Boxes and cards are bought in bulk and spread over the units they ship with.
-// The rate card is the supplier's price alone; this rides on top of every unit.
+// The rate card is the supplier's price alone; this rides on top, and only on
+// the products that actually go out in that packaging.
 const packaging_per_unit_usd = card.packaging_per_unit_usd ?? cfg.cogs.packaging_per_unit_usd ?? 0
+const packaging_per_unit_products = card.packaging_per_unit_products ?? cfg.cogs.packaging_per_unit_products ?? []
 
-const updated = { ...cfg, cogs: { ...cfg.cogs, products, country_prices, order_fees, packaging_per_unit_usd } }
+const updated = { ...cfg, cogs: { ...cfg.cogs, products, country_prices, order_fees,
+  packaging_per_unit_usd, packaging_per_unit_products } }
 
 console.log(`${country_prices.length} tabelas de preço por país, ${order_fees.length} países com taxa fixa`)
-console.log(`embalagem: $${packaging_per_unit_usd.toFixed(2)} por unidade`)
+console.log(`embalagem: $${packaging_per_unit_usd.toFixed(2)} por unidade em ${packaging_per_unit_products.length || 'todos os'} produto(s)`)
 console.log(`${changed.length} preços base alterados:`)
 for (const c of changed) console.log('  ' + c)
 console.log(`${added.length} produtos acrescentados ao catálogo: ${added.join(', ') || '-'}`)
