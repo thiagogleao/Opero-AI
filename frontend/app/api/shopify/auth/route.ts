@@ -23,6 +23,11 @@ const SCOPES = [
   'read_metaobjects','write_metaobjects',
   'read_script_tags','write_script_tags',
   'read_translations','write_translations',
+  // Chargebacks. Declared in the app version but never requested here, so every
+  // token came back without it and four stores read as "Conectada" while being
+  // unable to see a single dispute. A token's scopes are fixed when it is
+  // granted, so adding it here only helps stores that reconnect afterwards.
+  'read_shopify_payments_disputes',
 ].join(',')
 
 export async function GET(req: NextRequest) {

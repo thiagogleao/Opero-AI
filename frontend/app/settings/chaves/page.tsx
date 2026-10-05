@@ -257,6 +257,19 @@ export default function KeysPage() {
                         <p style={{ fontSize: 10.5, color: 'var(--text-faint)', margin: '4px 0 0', fontFamily: 'monospace' }}>
                           {store.missingScopes!.map(s => s.handle).join(' · ')}
                         </p>
+                        {/* Reauthorising through the app's own credentials is all
+                            this needs — no key, no secret, no pasting. */}
+                        <a
+                          href={`/api/shopify/auth?shop=${encodeURIComponent(store.domain ?? '')}&reconnect=1`}
+                          style={{
+                            display: 'inline-block', marginTop: 8, padding: '7px 14px',
+                            borderRadius: 8, background: 'rgba(245,158,11,0.16)',
+                            border: '1px solid rgba(245,158,11,0.4)', color: '#F59E0B',
+                            fontSize: 12, fontWeight: 600, textDecoration: 'none',
+                          }}
+                        >
+                          Reautorizar esta loja
+                        </a>
                       </div>
                     )}
 

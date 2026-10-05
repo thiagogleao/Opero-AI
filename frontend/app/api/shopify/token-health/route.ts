@@ -27,7 +27,8 @@ const REQUIRED_SCOPES: { handle: string; why: string }[] = [
   { handle: 'read_orders',     why: 'pedidos e receita' },
   { handle: 'read_products',   why: 'catálogo e custo por produto' },
   { handle: 'read_shopify_payments_disputes', why: 'chargebacks' },
-  { handle: 'read_shopify_payments_payouts',  why: 'repasses' },
+  // Payouts are deliberately absent: the app does not request that scope, and
+  // reporting it missing would be nagging about something no reconnect fixes.
 ]
 
 async function readScopes(domain: string, token: string): Promise<string[] | null> {
