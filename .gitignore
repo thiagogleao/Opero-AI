@@ -19,3 +19,4 @@ desktop-app/node_modules/
 desktop-app/out/
 desktop-app/dist-installer/
 desktop-app/*.tsbuildinfo
+*.xlsx

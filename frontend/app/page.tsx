@@ -8,6 +8,7 @@ import { accountStores } from '@/lib/accountOverview'
 import { getAdjustmentImpact, NO_IMPACT, getChargebackHealth } from '@/lib/adjustments'
 import { creativeSignal } from '@/lib/creativeSignal'
 import StoreSwitcher from '@/components/StoreSwitcher'
+import ExportButton from '@/components/ExportButton'
 import {
   getOverviewMetrics, getDailyRevenue, getDailyRoas,
   getTopCreatives, getCountryMetrics, getCustomerSplit, getLastSyncTime,
@@ -532,6 +533,7 @@ ${promptLang.formatNote}`
             <Suspense>
               <TimeframeSelector from={dateFrom} to={dateTo} />
             </Suspense>
+            <ExportButton stores={toStoreOptions(stores)} activeStoreId={tid} />
             <StoreSwitcher stores={toStoreOptions(stores)} activeStoreId={tid} showOverview={multiStore} />
           </div>
         </div>

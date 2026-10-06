@@ -7,6 +7,7 @@ import { getTenantTimezone } from '@/lib/queries'
 import { accountStores, getAccountOverview } from '@/lib/accountOverview'
 import AccountOverview from '@/components/AccountOverview'
 import StoreSwitcher from '@/components/StoreSwitcher'
+import ExportButton from '@/components/ExportButton'
 import TimeframeSelector from '@/components/TimeframeSelector'
 import Sidebar from '@/components/Sidebar'
 import RefreshButton from '@/components/RefreshButton'
@@ -93,6 +94,7 @@ export default async function AccountOverviewPage({ searchParams }: Props) {
             <Suspense>
               <TimeframeSelector from={dateFrom} to={dateTo} />
             </Suspense>
+            <ExportButton stores={toStoreOptions(stores)} />
             <StoreSwitcher
               stores={toStoreOptions(stores)}
               activeStoreId={activeId}
