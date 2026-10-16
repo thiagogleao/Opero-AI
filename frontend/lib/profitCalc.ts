@@ -550,17 +550,15 @@ async function perDayOrderCosts(
       AND o.financial_status NOT IN ('refunded', 'voided')
   `, [tenantId, dateFrom, dateTo])
 
-  const productCogs = new Map<string, number>()
-  const titleCogs = new Map<string, number>()
-  for (const p of (cfg.cogs.products ?? [])) {
-    if (p.product_id && p.cost_usd > 0) productCogs.set(p.product_id, p.cost_usd)
-    if (p.name && p.cost_usd > 0) titleCogs.set(p.name, p.cost_usd)
-  }
-  const hasProductCogs = productCogs.size > 0
+  // The same lookups and the same per-order maths the period totals use. This
+  // was a private copy once, and it drifted without a sound: it never learned
+  // about per-unit packaging, the per-country supplier fee or the per-country
+  // unit price, so a store using any of those read cheaper by the day than by
+  // the period — MOKOO by $1,038 in a single week.
+  const lookups = buildCogsLookups(cfg)
 
   const perOrderExtras = (cfg.extra_costs ?? [])
     .filter(e => e.frequency === 'per_order').reduce((s, e) => s + e.amount_usd, 0)
-  const addlDiscount = cfg.cogs.additional_unit_discount_usd ?? 0
 
   type Ord = { total_price: string; country_code: string | null; order_date: string; items: { product_id: string | null; product_title: string | null; units: number }[] }
   const orderMap = new Map<string, Ord>()
@@ -574,32 +572,14 @@ async function perDayOrderCosts(
   const byDay = new Map<string, number>()
   for (const order of orderMap.values()) {
     const revenue = Number(order.total_price)
-    const units = order.items.reduce((s, i) => s + i.units, 0)
+    const supplier = orderSupplierCost(order, lookups, cfg)
 
-    let cost = revenue * (cfg.shopify.transaction_fee_pct / 100)
-             + revenue * (cfg.shopify.payment_processing_pct / 100)
-             + cfg.shopify.payment_processing_fixed
-             + cfg.cogs.packaging_cost_usd
-             + getShippingCost(order.country_code, cfg)
-             + perOrderExtras
-
-    const tier = tierForDate(cfg, order.order_date)
-    if (tier) {
-      cost += tierOrderCost(units, tier)
-    } else if (hasProductCogs) {
-      for (const item of order.items) {
-        const perUnit = item.product_id && productCogs.has(item.product_id)
-          ? productCogs.get(item.product_id)!
-          : item.product_title && titleCogs.has(item.product_title)
-            ? titleCogs.get(item.product_title)!
-            : cfg.cogs.default_cost_usd
-        cost += perUnit * item.units
-      }
-      if (units > 1 && addlDiscount > 0) cost -= (units - 1) * addlDiscount
-    } else {
-      cost += calcCogs(units, cfg)
-      if (units > 1 && addlDiscount > 0) cost -= (units - 1) * addlDiscount
-    }
+    const cost = revenue * (cfg.shopify.transaction_fee_pct / 100)
+               + revenue * (cfg.shopify.payment_processing_pct / 100)
+               + cfg.shopify.payment_processing_fixed
+               + supplier.cogs + supplier.packaging + supplier.orderFee - supplier.saving
+               + getShippingCost(order.country_code, cfg)
+               + perOrderExtras
 
     byDay.set(order.order_date, (byDay.get(order.order_date) ?? 0) + cost)
   }
