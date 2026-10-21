@@ -12,7 +12,7 @@ Data is upserted so re-runs are safe.
 
 import logging
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from facebook_business.api import FacebookAdsApi
@@ -497,22 +497,40 @@ class FacebookCollector(BaseCollector):
     # ------------------------------------------------------------------
 
     def _collect_daily_insights(self, date_from: date, date_to: date):
+        # One request per day, never a range.
+        #
+        # Asking for several days at once makes Facebook answer from a report it
+        # builds in the background, and the SDK hands back whatever that report
+        # holds at that instant — which, for a day still being tallied, is almost
+        # all zeros. The same window fetched a day at a time comes back complete.
+        # It cost MOKOO three days of ad spend reading as $0.42 instead of $619,
+        # with the sync reporting success the whole time.
+        #
+        # The extra calls are cheap: these runs cover two or three days and the
+        # account sits at ~1% of its API quota.
+        day = date_from
+        while day <= date_to:
+            self._collect_insights_for_day(day)
+            day += timedelta(days=1)
+
+    def _collect_insights_for_day(self, day: date):
         params = {
             "level": "ad",
             "time_range": {
-                "since": str(date_from),
-                "until": str(date_to),
+                "since": str(day),
+                "until": str(day),
             },
             "time_increment": 1,   # one row per day
             "limit": 500,
         }
 
-        cursor = self._account.get_insights(
+        cursor = self._with_retry(lambda: self._account.get_insights(
             fields=_INSIGHT_FIELDS,
             params=params,
-        )
+        ))
 
         rows = []
+        total = 0
         for insight in self._paginate(cursor):
             row = self._parse_daily_insight(insight)
             if row:
@@ -523,10 +541,15 @@ class FacebookCollector(BaseCollector):
             # Batch upserts every 500 rows to avoid huge transactions
             if len(rows) >= 500:
                 self._upsert_raw("fb_ad_daily_metrics", rows, ["ad_id", "date"])
+                total += len(rows)
                 rows = []
 
         if rows:
             self._upsert_raw("fb_ad_daily_metrics", rows, ["ad_id", "date"])
+            total += len(rows)
+        # Per-day counts are the cheapest way to spot this breaking again: a day
+        # that silently returns far fewer rows than its neighbours is the tell.
+        logger.info("[facebook] %s — %d ad rows", day, total)
 
     def _parse_daily_insight(self, insight: dict) -> Optional[dict]:
         ad_id = insight.get("ad_id")
