@@ -22,6 +22,7 @@ import DailyProfitChart from '@/components/DailyProfitChart'
 import MarginBreakdownChart from '@/components/MarginBreakdownChart'
 import AiPanel from '@/components/AiPanel'
 import CampaignProfitTable from '@/components/CampaignProfitTable'
+import CampaignAnalysis from '@/components/CampaignAnalysis'
 import FunnelVisual from '@/components/FunnelVisual'
 import CountrySpendTable from '@/components/CountrySpendTable'
 
@@ -617,6 +618,13 @@ export default function DashboardLayout(props: DashboardLayoutProps) {
         return (
           <div style={{ marginBottom: 12 }}>
             <BreakdownTabs device={bdDevice} placement={bdPlacement} ageGender={bdAgeGender} days={14} />
+          </div>
+        )
+
+      case 'campaign-analysis':
+        return (
+          <div style={{ marginBottom: 12 }}>
+            <CampaignAnalysis />
           </div>
         )
 

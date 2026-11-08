@@ -4,6 +4,7 @@ import { getActiveTenantId } from '@/lib/activeStore'
 import { getCampaignMetrics, getTenantTimezone } from '@/lib/queries'
 import Sidebar from '@/components/Sidebar'
 import ScalePanel from '@/components/ScalePanel'
+import CampaignAnalysis from '@/components/CampaignAnalysis'
 import { getCampaignSignals, DEFAULT_SCALE_CONFIG } from '@/lib/scaleSignals'
 import { getAlertConfig } from '@/lib/alerts'
 import Link from 'next/link'
@@ -71,6 +72,12 @@ export default async function CampaignsPage({ searchParams }: Props) {
           </p>
         </div>
 
+        {/* The money answer comes first; the Facebook-only numbers below are
+            for digging into a campaign once this panel says which one. */}
+        <div style={{ marginBottom: 22 }}>
+          <CampaignAnalysis />
+        </div>
+
         <section style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 12, marginBottom: 22, overflow: 'hidden' }}>
           <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--border)' }}>
             <h2 style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>Onde há folga para escalar</h2>
@@ -87,6 +94,12 @@ export default async function CampaignsPage({ searchParams }: Props) {
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ marginBottom: 2 }}>
+              <h2 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>Números brutos do Facebook</h2>
+              <p style={{ fontSize: 11, color: 'var(--text-faint)', margin: '2px 0 0' }}>
+                Entrega e engajamento por campanha, sem custo da loja aplicado
+              </p>
+            </div>
             {campaigns.map((camp) => {
               const spend    = Number(camp.spend)
               const spendPct = totalSpend > 0 ? (spend / totalSpend) * 100 : 0

@@ -74,8 +74,22 @@ interface Payload {
   recentOrders: LiveOrder[]
 }
 
-type Tab = 'creatives' | 'products' | 'countries' | 'customers'
+type Tab = 'campaigns' | 'creatives' | 'products' | 'countries' | 'customers'
 type Signal = 'kill' | 'scale' | 'refresh' | 'ok'
+type Verdict = 'lucro' | 'empate' | 'prejuizo' | 'pouco_dado'
+type CampTrend = 'escalar' | 'esfriando' | 'estavel' | 'curto'
+interface CampaignDay { date: string; spend: number; roas: number; profit: number | null }
+interface Campaign {
+  campaignId: string; name: string; status: string | null
+  spend: number; revenue: number; purchases: number
+  roas: number; breakEven: number
+  profit: number; profitPct: number; cpa: number | null
+  configured: boolean; verdict: Verdict
+  trend: CampTrend
+  recentDays: number; recentRoas: number; recentProfit: number
+  baseRoas: number; lift: number | null
+  days: number; daysProfitable: number; series: CampaignDay[]
+}
 interface Creative {
   adId: string; name: string; thumbnail: string | null
   spend: number; roas: number; ctr: number; frequency: number
@@ -834,7 +848,9 @@ function StoreBars({ stores }: { stores: Store[] }) {
 // ─── Detail tabs ──────────────────────────────────────────────────────────────
 
 function DetailTabs({ qs }: { qs: string }) {
-  const [tab, setTab] = useState<Tab>('products')
+  // Campaigns open first: the campaign result is the headline, and the ad level
+  // is where you go afterwards to find out why.
+  const [tab, setTab] = useState<Tab>('campaigns')
   const [cache, setCache] = useState<Record<string, unknown>>({})
   const [loading, setLoading] = useState(false)
   const cacheKey = `${tab}|${qs}`
@@ -852,9 +868,11 @@ function DetailTabs({ qs }: { qs: string }) {
   }, [cacheKey, tab, qs, cache])
 
   const d = cache[cacheKey] as {
-    products?: Product[]; countries?: Country[]; customers?: Customers; creatives?: Creative[]
+    products?: Product[]; countries?: Country[]; customers?: Customers
+    creatives?: Creative[]; campaigns?: Campaign[]
   } | undefined
   const tabs: { key: Tab; label: string }[] = [
+    { key: 'campaigns', label: 'Campanhas' },
     { key: 'creatives', label: 'Criativos' },
     { key: 'products',  label: 'Produtos' },
     { key: 'countries', label: 'Países' },
@@ -863,15 +881,20 @@ function DetailTabs({ qs }: { qs: string }) {
 
   return (
     <section style={{ marginBottom: 22 }}>
-      <div style={{ display: 'flex', gap: 5, marginBottom: 11 }}>
+      {/* Five tabs do not fit a narrow phone at a readable size, so the strip
+          scrolls sideways instead of squeezing the labels. */}
+      <div style={{
+        display: 'flex', gap: 5, marginBottom: 11, overflowX: 'auto',
+        paddingBottom: 2, scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch',
+      }}>
         {tabs.map(x => {
           const on = x.key === tab
           return (
             <button
               key={x.key} onClick={() => setTab(x.key)}
               style={{
-                flex: 1, padding: '8px 0', borderRadius: 8, fontSize: 12,
-                fontWeight: on ? 640 : 450,
+                flex: '1 0 auto', minWidth: 74, padding: '8px 10px', borderRadius: 8, fontSize: 11.5,
+                fontWeight: on ? 640 : 450, whiteSpace: 'nowrap',
                 background: on ? 'rgba(16,185,129,0.12)' : 'transparent',
                 color: on ? 'var(--accent)' : 'var(--ink-3)',
                 border: `1px solid ${on ? 'rgba(16,185,129,0.26)' : 'var(--hairline)'}`,
@@ -884,6 +907,7 @@ function DetailTabs({ qs }: { qs: string }) {
 
       {loading && !d && <p style={{ fontSize: 12, color: 'var(--ink-3)' }}>Carregando…</p>}
 
+      {tab === 'campaigns' && d?.campaigns && <CampaignList campaigns={d.campaigns} />}
       {tab === 'creatives' && d?.creatives && <CreativeList creatives={d.creatives} />}
       {tab === 'products'  && d?.products  && <ProductList products={d.products} />}
       {tab === 'countries' && d?.countries && <CountryList countries={d.countries} />}
@@ -897,6 +921,123 @@ const SIGNAL: Record<Signal, { label: string; color: string; bg: string }> = {
   scale:   { label: 'ESCALAR',  color: '#34d399', bg: 'rgba(5,150,105,0.18)' },
   refresh: { label: 'TROCAR',   color: '#fbbf24', bg: 'rgba(245,158,11,0.16)' },
   ok:      { label: 'OK',       color: 'var(--ink-3)', bg: 'rgba(255,255,255,0.05)' },
+}
+
+const VERDICT: Record<Verdict, { label: string; color: string; bg: string }> = {
+  lucro:      { label: 'LUCRO',    color: '#34d399',      bg: 'rgba(5,150,105,0.18)'   },
+  empate:     { label: 'NO FIO',   color: '#fbbf24',      bg: 'rgba(245,158,11,0.16)'  },
+  prejuizo:   { label: 'PREJUÍZO', color: '#ff6b6b',      bg: 'rgba(208,59,59,0.16)'   },
+  pouco_dado: { label: 'POUCO DADO', color: 'var(--ink-3)', bg: 'rgba(255,255,255,0.05)' },
+}
+
+/** Profit per day as a bar strip, up for a day in the black and down for red. */
+function ProfitStrip({ series }: { series: CampaignDay[] }) {
+  const real = series.filter(d => d.profit !== null)
+  if (!real.length) return null
+  const max = Math.max(...real.map(d => Math.abs(d.profit as number)), 1)
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 1.5, height: 22, marginTop: 7 }}>
+      {series.map(d => {
+        const p = d.profit
+        if (p === null) return <div key={d.date} style={{ width: 3, height: 2, background: 'var(--hairline)' }} />
+        const h = Math.max((Math.abs(p) / max) * 10, 1.5)
+        const up = p > 0
+        return (
+          <div key={d.date} style={{ width: 3, height: 22, display: 'flex', flexDirection: 'column' }}>
+            <div style={{ height: 10, display: 'flex', alignItems: 'flex-end' }}>
+              {up && <div style={{ width: '100%', height: h, background: C_PROFIT }} />}
+            </div>
+            <div style={{ height: 1, background: 'var(--hairline)' }} />
+            <div style={{ height: 10 }}>
+              {!up && <div style={{ width: '100%', height: h, background: C_LOSS }} />}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/**
+ * Campaigns ranked by what is losing money, not by what spent most.
+ *
+ * The verdict and the profit are the same ones the web dashboard computes, from
+ * lib/campaignSignal.ts, so a campaign cannot read LUCRO on the phone and
+ * PREJUÍZO on the desktop.
+ */
+function CampaignList({ campaigns }: { campaigns: Campaign[] }) {
+  if (!campaigns.length) return <Empty>Sem campanhas com gasto no período.</Empty>
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {campaigns.map(c => {
+        const v = VERDICT[c.verdict] ?? VERDICT.pouco_dado
+        const beating = c.breakEven > 0 ? c.roas >= c.breakEven : c.roas >= 1
+        const good = c.profit >= 0
+        return (
+          <div key={c.campaignId} style={{
+            background: 'var(--card)', border: '1px solid var(--hairline)',
+            borderRadius: 11, padding: '10px 11px',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6, marginBottom: 4 }}>
+              <span style={{
+                fontSize: 9, fontWeight: 700, letterSpacing: '0.04em',
+                color: v.color, background: v.bg, borderRadius: 4, padding: '2px 5px', flexShrink: 0,
+              }}>{v.label}</span>
+              {(c.trend === 'escalar' || c.trend === 'esfriando') && (
+                <span style={{
+                  fontSize: 9, fontWeight: 700, letterSpacing: '0.04em', flexShrink: 0,
+                  color: c.trend === 'escalar' ? '#34d399' : '#fbbf24',
+                  background: c.trend === 'escalar' ? 'rgba(5,150,105,0.18)' : 'rgba(245,158,11,0.16)',
+                  borderRadius: 4, padding: '2px 5px',
+                }}>{c.trend === 'escalar' ? '↑ ESCALAR' : '↓ ESFRIANDO'}</span>
+              )}
+              <span style={{
+                flex: 1, minWidth: 0, fontSize: 12, color: 'var(--ink)',
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>{c.name}</span>
+              {c.configured && (
+                <span style={{
+                  fontSize: 13, fontWeight: 660, flexShrink: 0,
+                  color: good ? 'var(--good)' : 'var(--bad)', fontVariantNumeric: 'tabular-nums',
+                }}>{good ? '+' : ''}{money(c.profit)}</span>
+              )}
+            </div>
+
+            <p style={{ fontSize: 11, color: 'var(--ink-3)', margin: 0, fontVariantNumeric: 'tabular-nums' }}>
+              {money(c.spend)} gasto ·{' '}
+              <span style={{ color: beating ? 'var(--good)' : 'var(--bad)', fontWeight: 600 }}>
+                {c.roas.toFixed(2)}×
+              </span>
+              {c.breakEven > 0 && <> (empate {c.breakEven.toFixed(2)}×)</>} · {c.purchases} compras
+            </p>
+            <p style={{ fontSize: 11, color: 'var(--ink-3)', margin: '2px 0 0', fontVariantNumeric: 'tabular-nums' }}>
+              {c.configured
+                ? <>margem {c.profitPct.toFixed(1)}%</>
+                : <>sem custos configurados</>}
+              {c.cpa != null && <> · CPA {money(c.cpa)}</>}
+              {c.configured && c.days > 0 && <> · {c.daysProfitable}/{c.days} dias no azul</>}
+              {c.status && c.status !== 'ACTIVE' && <> · {c.status === 'PAUSED' ? 'pausada' : c.status.toLowerCase()}</>}
+            </p>
+
+            {/* No hover on a phone, so the tag has to carry its evidence. */}
+            {(c.trend === 'escalar' || c.trend === 'esfriando') && (
+              <p style={{
+                fontSize: 10.5, margin: '3px 0 0', fontVariantNumeric: 'tabular-nums',
+                color: c.trend === 'escalar' ? 'var(--good)' : '#fbbf24',
+              }}>
+                últimos {c.recentDays}d: {c.recentRoas.toFixed(2)}× e {money(c.recentProfit)}
+                {c.baseRoas > 0
+                  ? <> · antes {c.baseRoas.toFixed(2)}×{c.lift !== null && <> ({c.lift > 0 ? '+' : ''}{c.lift.toFixed(0)}%)</>}</>
+                  : <> · sem período anterior</>}
+              </p>
+            )}
+
+            <ProfitStrip series={c.series} />
+          </div>
+        )
+      })}
+    </div>
+  )
 }
 
 /**

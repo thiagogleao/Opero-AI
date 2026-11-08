@@ -346,14 +346,16 @@ export async function getCustomerLtv(tenantId: string) {
 export async function getCampaignMetrics(tenantId: string, dateFrom: string, dateTo: string) {
   return query<{
     campaign_id: string; campaign_name: string; objective: string | null
+    status: string | null
     spend: number; revenue: number; roas: number; purchases: number
     impressions: number; clicks: number; ctr: number; cpm: number
     adset_count: number; ad_count: number
   }>(`
     SELECT
-      c.campaign_id,
-      COALESCE(c.name, c.campaign_id)         AS campaign_name,
-      c.objective,
+      ad.campaign_id,
+      COALESCE(MAX(c.name), MAX(ad.campaign_name), ad.campaign_id) AS campaign_name,
+      MAX(c.objective)                        AS objective,
+      MAX(c.status)                           AS status,
       ROUND(SUM(m.spend)::numeric, 2)         AS spend,
       ROUND(SUM(m.purchase_value)::numeric, 2) AS revenue,
       ROUND(CASE WHEN SUM(m.spend) > 0
@@ -367,16 +369,57 @@ export async function getCampaignMetrics(tenantId: string, dateFrom: string, dat
       ROUND(CASE WHEN SUM(m.impressions) > 0
         THEN SUM(m.spend) / SUM(m.impressions) * 1000
         ELSE 0 END::numeric, 2)              AS cpm,
-      COUNT(DISTINCT a.adset_id)              AS adset_count,
+      COUNT(DISTINCT ad.adset_id)             AS adset_count,
       COUNT(DISTINCT m.ad_id)                 AS ad_count
-    FROM fb_campaigns c
-    JOIN fb_ad_daily_metrics m ON m.campaign_id = c.campaign_id
-    LEFT JOIN fb_adsets a ON a.campaign_id = c.campaign_id
+    FROM fb_ad_daily_metrics m
+    -- The metrics row only knows its ad; the campaign it belongs to is reached
+    -- through fb_ads. Joining fb_campaigns straight to the metrics table looks
+    -- shorter but there is no campaign_id column there to join on.
+    JOIN fb_ads ad ON ad.ad_id = m.ad_id
+    -- LEFT, and grouped by the ad's campaign_id rather than the campaign row:
+    -- a sync that writes metrics before the campaign record would otherwise
+    -- make that campaign's spend vanish from this list instead of showing up
+    -- under its id. Spend never disappears; at worst the name is the raw id.
+    LEFT JOIN fb_campaigns c ON c.campaign_id = ad.campaign_id
     WHERE m.tenant_id = $1
       AND m.date BETWEEN $2::date AND $3::date
-    GROUP BY c.campaign_id, c.name, c.objective
+      AND ad.campaign_id IS NOT NULL
+    GROUP BY ad.campaign_id
     HAVING SUM(m.spend) > 0
     ORDER BY spend DESC
+  `, [tenantId, dateFrom, dateTo])
+}
+
+/**
+ * Spend and return per campaign per day inside the window.
+ *
+ * A campaign's total for a period hides the shape of it: the same $4,000 at
+ * ROAS 1.2 can be a line that is recovering or one that is falling off, and the
+ * decision is the opposite in each case. Rows come back only for days the
+ * campaign actually delivered, so the caller fills the gaps.
+ */
+export async function getCampaignDaily(tenantId: string, dateFrom: string, dateTo: string) {
+  return query<{
+    campaign_id: string; date: string
+    spend: number; revenue: number; purchases: number
+    impressions: number; clicks: number
+  }>(`
+    SELECT
+      ad.campaign_id,
+      m.date::text                              AS date,
+      ROUND(SUM(m.spend)::numeric, 2)           AS spend,
+      ROUND(SUM(m.purchase_value)::numeric, 2)  AS revenue,
+      SUM(m.purchases)                          AS purchases,
+      SUM(m.impressions)                        AS impressions,
+      SUM(m.link_clicks)                        AS clicks
+    FROM fb_ad_daily_metrics m
+    JOIN fb_ads ad ON ad.ad_id = m.ad_id
+    WHERE m.tenant_id = $1
+      AND m.date BETWEEN $2::date AND $3::date
+      AND ad.campaign_id IS NOT NULL
+    GROUP BY ad.campaign_id, m.date
+    HAVING SUM(m.spend) > 0
+    ORDER BY ad.campaign_id, m.date
   `, [tenantId, dateFrom, dateTo])
 }
 
@@ -387,8 +430,8 @@ export async function getAdsetMetrics(tenantId: string, campaignId: string, date
     impressions: number; clicks: number; ctr: number; ad_count: number
   }>(`
     SELECT
-      s.adset_id,
-      COALESCE(s.name, s.adset_id)            AS adset_name,
+      ad.adset_id,
+      COALESCE(MAX(s.name), MAX(ad.adset_name), ad.adset_id) AS adset_name,
       ROUND(SUM(m.spend)::numeric, 2)         AS spend,
       ROUND(SUM(m.purchase_value)::numeric, 2) AS revenue,
       ROUND(CASE WHEN SUM(m.spend) > 0
@@ -400,12 +443,17 @@ export async function getAdsetMetrics(tenantId: string, campaignId: string, date
         THEN SUM(m.link_clicks)::numeric / SUM(m.impressions) * 100
         ELSE 0 END::numeric, 2)              AS ctr,
       COUNT(DISTINCT m.ad_id)                 AS ad_count
-    FROM fb_adsets s
-    JOIN fb_ad_daily_metrics m ON m.adset_id = s.adset_id AND m.tenant_id = s.tenant_id
-    WHERE s.tenant_id = $1
-      AND s.campaign_id = $2
+    FROM fb_ad_daily_metrics m
+    -- Same as getCampaignMetrics: the ad set is reached through fb_ads, because
+    -- fb_ad_daily_metrics carries no adset_id of its own.
+    JOIN fb_ads ad ON ad.ad_id = m.ad_id
+    -- LEFT for the same reason as getCampaignMetrics: an ad set missing from
+    -- fb_adsets must not take its spend out of the list.
+    LEFT JOIN fb_adsets s ON s.adset_id = ad.adset_id
+    WHERE m.tenant_id = $1
+      AND ad.campaign_id = $2
       AND m.date BETWEEN $3::date AND $4::date
-    GROUP BY s.adset_id, s.name
+    GROUP BY ad.adset_id
     HAVING SUM(m.spend) > 0
     ORDER BY spend DESC
   `, [tenantId, campaignId, dateFrom, dateTo])

@@ -1,7 +1,14 @@
 import { query } from '@/lib/db'
 import { getCountryProfit, getProfitSummary } from '@/lib/profitCalc'
-import { getProductMetrics, getCustomerSplit, getTopCreatives } from '@/lib/queries'
+import {
+  getProductMetrics, getCustomerSplit, getTopCreatives,
+  getCampaignMetrics, getCampaignDaily,
+} from '@/lib/queries'
 import { creativeSignal, SIGNAL_RANK, FALLBACK_BREAK_EVEN } from '@/lib/creativeSignal'
+import {
+  campaignSignal, campaignTrend, marginRateFromSummary,
+  CAMPAIGN_RANK, TREND_RANK,
+} from '@/lib/campaignSignal'
 import { mobileAuthOk, unauthorized } from '@/lib/mobileAuth'
 import { resolveRange, REFERENCE_TZ, type Period } from '@/lib/mobileRange'
 
@@ -138,6 +145,92 @@ export async function GET(req: Request) {
       .slice(0, 30)
 
     return Response.json({ section, from, to, creatives })
+  }
+
+  if (section === 'campaigns') {
+    // Like the creatives section, each store is judged against its own margin:
+    // a campaign is only profitable relative to what that store pays to
+    // deliver an order. Campaigns never span two stores, so the lists merge
+    // cleanly afterwards.
+    const perStore = await Promise.all(ids.map(async id => {
+      try {
+        const [totals, daily, summary] = await Promise.all([
+          getCampaignMetrics(id, from, to),
+          getCampaignDaily(id, from, to),
+          getProfitSummary(id, from, to).catch(() => null),
+        ])
+        const marginRate = summary ? marginRateFromSummary(summary) : 0
+
+        const byCampaign = new Map<string, typeof daily>()
+        for (const r of daily) {
+          const list = byCampaign.get(r.campaign_id)
+          if (list) list.push(r)
+          else byCampaign.set(r.campaign_id, [r])
+        }
+
+        return totals.map(c => {
+          const spend     = Number(c.spend)
+          const revenue   = Number(c.revenue)
+          const purchases = Number(c.purchases)
+          const r = campaignSignal({ spend, revenue, purchases, marginRate })
+          const dias = byCampaign.get(c.campaign_id) ?? []
+          const series = dias.map(d => {
+            const dr = campaignSignal({
+              spend: Number(d.spend), revenue: Number(d.revenue),
+              purchases: Number(d.purchases), marginRate,
+            })
+            return {
+              date: d.date,
+              spend: Math.round(Number(d.spend) * 100) / 100,
+              roas: Math.round(dr.roas * 100) / 100,
+              profit: marginRate > 0 ? Math.round(dr.profit * 100) / 100 : null,
+            }
+          })
+          const t = campaignTrend(
+            dias.map(d => ({ date: d.date, spend: Number(d.spend), revenue: Number(d.revenue) })),
+            to, marginRate
+          )
+          return {
+            trend: t.trend,
+            recentDays: t.recentDays,
+            recentRoas: t.recentRoas,
+            recentProfit: t.recentProfit,
+            baseRoas: t.baseRoas,
+            lift: t.lift,
+            campaignId: c.campaign_id,
+            name: c.campaign_name,
+            status: c.status,
+            spend, revenue, purchases,
+            roas:      Math.round(r.roas * 100) / 100,
+            breakEven: Math.round(r.breakEven * 100) / 100,
+            profit:    Math.round(r.profit * 100) / 100,
+            profitPct: Math.round(r.profitPct * 10) / 10,
+            cpa:       r.cpa !== null ? Math.round(r.cpa * 100) / 100 : null,
+            configured: marginRate > 0,
+            verdict:   r.verdict,
+            days: series.length,
+            daysProfitable: series.filter(d => d.profit !== null && d.profit > 0).length,
+            series,
+          }
+        })
+      } catch (err) {
+        console.error('[mobile/detail] campaigns', id, err)
+        return []
+      }
+    }))
+
+    const campaigns = perStore.flat()
+      // Losing money first, and inside that the ones that are moving: the phone
+      // screen leads with the campaign that costs something every hour it stays
+      // on, and right after it the one that just started paying for itself.
+      .sort((a, b) =>
+        CAMPAIGN_RANK[a.verdict] - CAMPAIGN_RANK[b.verdict]
+        || TREND_RANK[a.trend] - TREND_RANK[b.trend]
+        || b.spend - a.spend
+      )
+      .slice(0, 30)
+
+    return Response.json({ section, from, to, campaigns })
   }
 
   if (section === 'customers') {
