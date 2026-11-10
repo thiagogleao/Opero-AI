@@ -89,6 +89,10 @@ class ShopifyCollector(BaseCollector):
         token = access_token or settings.shopify_access_token
         ver   = api_version  or settings.shopify_api_version
         shop_url = url if url.startswith("https://") else f"https://{url}"
+        # Guardados porque o ShopifyQL de Shop Campaigns precisa de uma versao
+        # de API mais nova do que a da sessao, entao a chamada e feita na mao.
+        self._shop_url = shop_url.rstrip("/")
+        self._shop_token = token
         sess = shopify.Session(shop_url, ver, token)
         shopify.ShopifyResource.activate_session(sess)
 
@@ -115,6 +119,8 @@ class ShopifyCollector(BaseCollector):
         self._aggregate_and_upsert_daily(orders)
         self._recalculate_daily_from_db(date_from, date_to)
         self._aggregate_and_upsert_countries(orders)
+
+        self._sync_shop_campaigns(date_from, date_to)
 
         logger.info("[shopify] Fetching abandoned checkouts %s → %s", date_from, date_to)
         checkouts = self._fetch_all_abandoned_checkouts(date_from, date_to)
@@ -656,6 +662,96 @@ class ShopifyCollector(BaseCollector):
             })
 
         self._upsert_raw("shopify_country_metrics", rows, ["date", "country_code", "tenant_id"])
+
+    # ------------------------------------------------------------------
+    # Shop Campaigns — anuncio que a Shopify roda e cobra por fora
+    # ------------------------------------------------------------------
+
+    def _sync_shop_campaigns(self, date_from: date, date_to: date) -> None:
+        """Gasto de Shop Campaigns, que a Shopify cobra na fatura dela.
+
+        Esse dinheiro nao passa pelo Meta, entao ate agora nao entrava em lugar
+        nenhum do Opero e o lucro saia alto — na Dumpling Squishy eram quase
+        mil dolares por dia invisiveis.
+
+        Nao esta em marketing_events nem em marketingActivities: os dois voltam
+        vazios. Vive no ShopifyQL, schema shop_campaign_insights, que exige
+        versao de API 2026-10 e o escopo read_reports. Loja sem esse escopo
+        apenas registra aviso — nao quebra o sync, porque o resto dos dados
+        dela continua bom.
+        """
+        if not self.tenant_id:
+            return
+        import json as _json
+        import urllib.request as _req
+
+        consulta = (
+            "FROM shop_campaign_insights SHOW shop_campaign_ad_spend "
+            f"GROUP BY day SINCE {date_from.isoformat()} UNTIL {date_to.isoformat()} ORDER BY day"
+        )
+        corpo = _json.dumps({
+            "query": "query($q:String!){ shopifyqlQuery(query:$q){ tableData{ rows } parseErrors } }",
+            "variables": {"q": consulta},
+        }).encode()
+        url = f"{self._shop_url}/admin/api/2026-10/graphql.json"
+        pedido = _req.Request(url, data=corpo, headers={
+            "X-Shopify-Access-Token": self._shop_token,
+            "Content-Type": "application/json",
+        })
+        try:
+            with _req.urlopen(pedido, timeout=30) as r:
+                j = _json.loads(r.read())
+        except Exception as e:
+            logger.warning("[shopify] Shop Campaigns: nao consegui consultar — %s", e)
+            return
+
+        if j.get("errors"):
+            msg = j["errors"][0].get("message", "")
+            if "read_reports" in msg:
+                logger.warning(
+                    "[shopify] Shop Campaigns: falta o escopo read_reports nesta loja; "
+                    "o gasto dela nao vai ser descontado do lucro")
+            else:
+                logger.warning("[shopify] Shop Campaigns: %s", msg[:160])
+            return
+
+        dados = (j.get("data") or {}).get("shopifyqlQuery") or {}
+        erros = dados.get("parseErrors")
+        if erros and len(str(erros)) > 2:
+            logger.warning("[shopify] Shop Campaigns: ShopifyQL recusou — %s", str(erros)[:160])
+            return
+
+        linhas = ((dados.get("tableData") or {}).get("rows")) or []
+        if not linhas:
+            return
+
+        from sqlalchemy import text
+        gravadas = 0
+        total = 0.0
+        for linha in linhas:
+            dia = linha.get("day")
+            bruto = _float(linha.get("shop_campaign_ad_spend", 0))
+            if not dia:
+                continue
+            # O ShopifyQL devolve na moeda da loja, igual aos pedidos.
+            convertido = self._usd(bruto, dia)
+            total += convertido
+            self.session.execute(
+                text(
+                    "INSERT INTO shop_campaign_daily (tenant_id, date, spend, currency, fx_rate, synced_at) "
+                    "VALUES (:t, :d, :s, :c, :fx, now()) "
+                    "ON CONFLICT (tenant_id, date) DO UPDATE SET "
+                    "spend = EXCLUDED.spend, currency = EXCLUDED.currency, "
+                    "fx_rate = EXCLUDED.fx_rate, synced_at = now()"
+                ),
+                {"t": self.tenant_id, "d": dia, "s": convertido,
+                 "c": self._moeda, "fx": self._taxa(dia)},
+            )
+            gravadas += 1
+        self.session.commit()
+        if total > 0:
+            logger.info(
+                "[shopify] Shop Campaigns: %s dia(s), $%.2f no periodo", gravadas, total)
 
     # ------------------------------------------------------------------
     # Abandoned checkouts

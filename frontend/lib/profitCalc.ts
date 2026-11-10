@@ -94,6 +94,11 @@ export interface ProfitSummary {
   /** Per-order destination charges (the EU handling fee). Included in
    *  totalCogs; broken out so it can be named rather than buried. */
   totalSupplierOrderFees: number
+  /** Advertising Shopify runs and bills on its own invoice (Shop Campaigns).
+   *  It never passes through Meta, so until it was collected the profit of a
+   *  store running it read high — on one store by nearly $1,000 a day. It is
+   *  a cost, not ad spend: fbSpend and therefore ROAS stay about Meta alone. */
+  shopCampaignSpend: number
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -319,6 +324,7 @@ export async function getProfitSummary(
       netProfit: 0, margin: 0, avgProfitPerOrder: 0, breakEvenRoas: 0,
       fbSpend: 0, totalCogs: 0, totalShipping: 0, totalFees: 0,
       totalExtraCosts: 0, totalAdditionalUnitSavings: 0, totalSupplierOrderFees: 0,
+      shopCampaignSpend: 0,
     }
   }
 
@@ -371,6 +377,17 @@ export async function getProfitSummary(
   )
   const fbSpend = Number(fbRow.spend)
 
+  // Shop Campaigns: a Shopify anuncia e cobra na fatura dela. Entra como
+  // custo, nao como gasto de anuncio, para o ROAS continuar comparavel com o
+  // que o Gerenciador do Meta mostra.
+  const [shopRow] = await query<{ spend: string }>(
+    `SELECT COALESCE(SUM(spend), 0)::text AS spend
+       FROM shop_campaign_daily
+      WHERE tenant_id = $1 AND date BETWEEN $2::date AND $3::date`,
+    [tenantId, dateFrom, dateTo]
+  )
+  const shopCampaignSpend = Number(shopRow?.spend ?? 0)
+
   const perOrderExtras = (cfg.extra_costs ?? [])
     .filter(e => e.frequency === 'per_order').reduce((s, e) => s + e.amount_usd, 0)
   const monthlyExtras = (cfg.extra_costs ?? [])
@@ -399,7 +416,7 @@ export async function getProfitSummary(
 
   const totalFees      = totalShopifyFees + totalPaymentFees
   const totalExtraCosts = totalPerOrderExtras + proratedExtras
-  const totalCosts     = totalFees + totalCogs + totalOrderFees + totalPackaging + totalShipping + totalExtraCosts + fbSpend - totalAdditionalUnitSavings
+  const totalCosts     = totalFees + totalCogs + totalOrderFees + totalPackaging + totalShipping + totalExtraCosts + fbSpend + shopCampaignSpend - totalAdditionalUnitSavings
   const netProfit      = totalRevenue - totalCosts
   const margin         = totalRevenue > 0 ? (netProfit / totalRevenue) * 100 : 0
   const orderCount     = groupedOrders.length
@@ -412,6 +429,7 @@ export async function getProfitSummary(
     fbSpend, totalCogs: totalCogs + totalOrderFees + totalPackaging, totalShipping,
     totalFees, totalExtraCosts, totalAdditionalUnitSavings,
     totalSupplierOrderFees: totalOrderFees,
+    shopCampaignSpend,
   }
 }
 
