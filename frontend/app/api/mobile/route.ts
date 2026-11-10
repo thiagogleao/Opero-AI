@@ -2,7 +2,7 @@ import { query } from '@/lib/db'
 import { getProfitSummary, getDailyProfitData } from '@/lib/profitCalc'
 import { mobileAuthOk, unauthorized } from '@/lib/mobileAuth'
 import { hourInTz } from '@/lib/alerts'
-import { resolveRange, previousRange, REFERENCE_TZ, todayInTz, type Period } from '@/lib/mobileRange'
+import { resolveRange, previousRange, anchorTz, todayInTz, type Period } from '@/lib/mobileRange'
 import { getIntradayProfit, getComparableTotals } from '@/lib/intradayProfit'
 import { getAdjustmentImpact, NO_IMPACT, getCombinedChargebackHealth } from '@/lib/adjustments'
 
@@ -19,9 +19,6 @@ export async function GET(req: Request) {
   const { searchParams } = new URL(req.url)
   const period   = (searchParams.get('period') ?? 'today') as Period
   const storeId  = searchParams.get('store')          // omitted / "all" = every store
-  const { from, to } = resolveRange(
-    period, REFERENCE_TZ, searchParams.get('from'), searchParams.get('to')
-  )
 
   const allTenants = await query<{
     id: string; shopify_domain: string | null; shop_name: string | null; timezone: string | null
@@ -48,6 +45,13 @@ export async function GET(req: Request) {
     ? allTenants.filter(t => t.id === storeId)
     : allTenants
 
+  // Which clock the window is measured on. A single store is read on its own,
+  // so "Hoje" is that store's today and not one twelve hours off it.
+  const tz = anchorTz(selected.map(t => t.timezone))
+  const { from, to } = resolveRange(
+    period, tz, searchParams.get('from'), searchParams.get('to')
+  )
+
   // A single-day range renders no chart, and getDailyProfitData recomputes the
   // whole summary internally — so skip it entirely rather than pay for a series
   // the UI will not draw. This is the common case ("Hoje") and the slowest one.
@@ -59,8 +63,11 @@ export async function GET(req: Request) {
   const byDate = new Map<string, DailyPoint>()
   const prev = previousRange(from, to)
   // A window that runs to today is only as long as the day is old so far.
-  const inProgress = to === todayInTz(REFERENCE_TZ)
-  const throughHour = inProgress ? hourInTz(REFERENCE_TZ) : null
+  // Judged on the same clock the window was cut on: a Japanese day that closed
+  // hours ago must be compared against whole days, not against days truncated
+  // at the hour it happens to be in Brazil.
+  const inProgress = to === todayInTz(tz)
+  const throughHour = inProgress ? hourInTz(tz) : null
   const [stores, previousTotals] = await Promise.all([
     // One store failing (bad credentials, sync gap) must not blank the whole
     // dashboard, so failures are reported per row.
@@ -89,7 +96,7 @@ export async function GET(req: Request) {
     // whether it is better or worse than the run-up to it. When the current
     // window is still running, the older one is cut at the same hour — today
     // at 2pm against a full yesterday would make every good day look bad.
-    getComparableTotals(selected.map(t => t.id), prev.from, prev.to, throughHour),
+    getComparableTotals(selected.map(t => t.id), prev.from, prev.to, throughHour, tz),
 
     // Daily series, summed across the selected stores by calendar date.
     wantDaily ? Promise.all(selected.map(async t => {
@@ -154,7 +161,7 @@ export async function GET(req: Request) {
   const chargebackHealth = await getCombinedChargebackHealth(ids).catch(() => null)
 
   // Only a one-day view has an inside to look at.
-  const intraday = wantDaily ? null : await getIntradayProfit(ids, from).catch(err => {
+  const intraday = wantDaily ? null : await getIntradayProfit(ids, from, tz).catch(err => {
     console.error('[mobile] intraday failed', err)
     return null
   })
@@ -189,6 +196,9 @@ export async function GET(req: Request) {
 
   return Response.json({
     period, from, to,
+    // The clock these dates were cut on, so the screen can say whose day it is
+    // showing when it is not the phone's own.
+    timezone: tz,
     storeId: storeId ?? 'all',
     previous: { ...previousTotals, from: prev.from, to: prev.to, throughHour },
     totals,

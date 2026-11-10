@@ -10,7 +10,7 @@ import {
   CAMPAIGN_RANK, TREND_RANK,
 } from '@/lib/campaignSignal'
 import { mobileAuthOk, unauthorized } from '@/lib/mobileAuth'
-import { resolveRange, REFERENCE_TZ, type Period } from '@/lib/mobileRange'
+import { resolveRange, anchorTz, type Period } from '@/lib/mobileRange'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -28,17 +28,20 @@ export async function GET(req: Request) {
   const section = searchParams.get('section') ?? 'products'
   const period  = (searchParams.get('period') ?? 'today') as Period
   const storeId = searchParams.get('store')
-  const { from, to } = resolveRange(
-    period, REFERENCE_TZ, searchParams.get('from'), searchParams.get('to')
-  )
 
-  const tenants = await query<{ id: string }>(
+  const tenants = await query<{ id: string; timezone: string | null }>(
     storeId && storeId !== 'all'
-      ? `SELECT id FROM tenants WHERE id = $1 AND shopify_access_token IS NOT NULL`
-      : `SELECT id FROM tenants WHERE shopify_access_token IS NOT NULL ORDER BY created_at`,
+      ? `SELECT id, timezone FROM tenants WHERE id = $1 AND shopify_access_token IS NOT NULL`
+      : `SELECT id, timezone FROM tenants WHERE shopify_access_token IS NOT NULL ORDER BY created_at`,
     storeId && storeId !== 'all' ? [storeId] : []
   )
   const ids = tenants.map(t => t.id)
+
+  // Same window the headline numbers used: one store is read on its own clock.
+  const { from, to } = resolveRange(
+    period, anchorTz(tenants.map(t => t.timezone)),
+    searchParams.get('from'), searchParams.get('to')
+  )
 
   // A single store's failure yields an empty contribution rather than a 500.
   const gather = async <T>(fn: (id: string) => Promise<T[]>): Promise<T[]> => {

@@ -61,6 +61,8 @@ interface ChargebackHealth {
 interface StoreAdjustment extends Adjustments { id: string; name: string }
 interface Payload {
   period: Period; from: string; to: string; storeId: string
+  /** Clock the window was cut on — the store's own when only one is selected. */
+  timezone?: string
   adjustments?: Adjustments
   adjustmentsByStore?: StoreAdjustment[]
   chargebackHealth?: ChargebackHealth | null
@@ -273,9 +275,16 @@ export default function Dashboard() {
   const adj = data?.adjustments
   const cb = data?.chargebackHealth
   const profitDelta = prev ? pctDelta(t.profit, prev.profit) : null
+  // A store in another timezone keeps its own day, so the dates on screen can
+  // differ from the phone's by one. Naming the clock stops that reading as a
+  // bug — and the hour in "até 14h" belongs to that clock too, not to this one.
+  const tzLoja = data?.timezone && data.timezone !== deviceTz() ? cidadeDoFuso(data.timezone) : null
+
   // When today is only half over, the comparison window was cut at the same
   // hour — say so, otherwise the number looks like a full-day comparison.
-  const upTo = prev?.throughHour != null ? ` até ${String(prev.throughHour).padStart(2, '0')}h` : ''
+  const upTo = prev?.throughHour != null
+    ? ` até ${String(prev.throughHour).padStart(2, '0')}h${tzLoja ? ` em ${tzLoja}` : ''}`
+    : ''
   const periodLabel = period === 'today' ? `vs ontem${upTo}`
     : period === 'yesterday' ? 'vs anteontem'
     : `vs período anterior${upTo}`
@@ -297,6 +306,7 @@ export default function Dashboard() {
         period={period} onPeriod={setPeriod}
         custom={custom} onCustom={setCustom}
         range={data ? { from: data.from, to: data.to } : null}
+        tzLoja={tzLoja}
       />
 
       {err && (
@@ -522,10 +532,11 @@ function StoreChips({ stores, value, onChange }: {
   )
 }
 
-function PeriodPicker({ period, onPeriod, custom, onCustom, range }: {
+function PeriodPicker({ period, onPeriod, custom, onCustom, range, tzLoja }: {
   period: Period; onPeriod: (p: Period) => void
   custom: { from: string; to: string }; onCustom: (c: { from: string; to: string }) => void
   range: { from: string; to: string } | null
+  tzLoja: string | null
 }) {
   const br = (d: string) => d ? d.split('-').reverse().join('/') : ''
   return (
@@ -566,10 +577,21 @@ function PeriodPicker({ period, onPeriod, custom, onCustom, range }: {
       ) : range && (
         <p style={{ fontSize: 10.5, color: 'var(--ink-3)', margin: '2px 0 0' }}>
           {br(range.from)}{range.from !== range.to && ` – ${br(range.to)}`}
+          {tzLoja && ` · dia de ${tzLoja}`}
         </p>
       )}
     </div>
   )
+}
+
+/** The device's own timezone, to tell when a store's day is not the same day. */
+function deviceTz(): string {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone } catch { return '' }
+}
+
+/** "Asia/Tokyo" -> "Tokyo". Enough to name the clock without a lookup table. */
+function cidadeDoFuso(tz: string): string {
+  return tz.split('/').pop()!.replace(/_/g, ' ')
 }
 
 const dateInput: React.CSSProperties = {

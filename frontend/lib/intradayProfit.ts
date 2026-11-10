@@ -54,7 +54,7 @@ function hoursCovered(day: string, tz: string): number {
   return Math.max(1, hour + 1)
 }
 
-async function loadStoreDay(tenantId: string, day: string): Promise<StoreDay> {
+async function loadStoreDay(tenantId: string, day: string, tz: string): Promise<StoreDay> {
   // One summary gives the day's ad spend (already excluding switched-off ad
   // accounts) and the cost base, so the hourly split needs only the revenue.
   const summary = await getProfitSummary(tenantId, day, day)
@@ -71,9 +71,11 @@ async function loadStoreDay(tenantId: string, day: string): Promise<StoreDay> {
        AND o.financial_status NOT IN ('refunded', 'voided')
      GROUP BY 1`,
     // The day is bounded by the store's own timezone, matching every other
-    // total in the app, while the hour is read in the reference timezone so
-    // that summing several stores lines their hours up.
-    [tenantId, day, REFERENCE_TZ]
+    // total in the app. The hour is read in the anchor timezone: the store's
+    // own when it is the only one selected, so the curve is drawn on the clock
+    // its buyers were on, and the reference one when several stores are summed,
+    // so their hours line up with each other.
+    [tenantId, day, tz]
   )
 
   const hourly = new Map<number, { revenue: number; orders: number }>()
@@ -119,7 +121,7 @@ export async function getDayThroughHour(
 
   const days = await Promise.all(tenantIds.map(async id => {
     try {
-      return await loadStoreDay(id, day)
+      return await loadStoreDay(id, day, tz)
     } catch (err) {
       console.error('[intraday] partial day failed', id, err)
       return null
@@ -159,6 +161,7 @@ export async function getComparableTotals(
   from: string,
   to: string,
   throughHour: number | null,
+  tz: string = REFERENCE_TZ,
 ): Promise<PartialDay> {
   const total: PartialDay = { revenue: 0, orders: 0, adSpend: 0, profit: 0 }
 
@@ -182,7 +185,7 @@ export async function getComparableTotals(
   }
 
   if (throughHour !== null) {
-    const partial = await getDayThroughHour(tenantIds, to, throughHour)
+    const partial = await getDayThroughHour(tenantIds, to, throughHour, tz)
     total.revenue += partial.revenue; total.orders += partial.orders
     total.adSpend += partial.adSpend; total.profit += partial.profit
   }
@@ -200,7 +203,7 @@ export async function getIntradayProfit(
 
   const days = await Promise.all(tenantIds.map(async id => {
     try {
-      return await loadStoreDay(id, day)
+      return await loadStoreDay(id, day, tz)
     } catch (err) {
       console.error('[intraday] store failed', id, err)
       return null

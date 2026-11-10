@@ -86,3 +86,20 @@ export function previousRange(from: string, to: string): { from: string; to: str
 
 /** Timezone the ranges are anchored to when aggregating across stores. */
 export const REFERENCE_TZ = 'America/Sao_Paulo'
+
+/**
+ * The timezone a period should be measured in.
+ *
+ * One store is read on its own clock. Asking a Japanese store for "Hoje" has to
+ * mean the Japanese day: the two calendars run twelve hours apart, so measuring
+ * it in the reference timezone showed the day that had already closed and hid
+ * the one in progress — a full day of sales reported as though it were the
+ * current one, and the current one invisible until noon in Japan.
+ *
+ * Several stores at once fall back to the reference timezone, for the reason
+ * resolveRange gives: their totals have to share one window or the sum spans
+ * different days and the daily chart stops lining up.
+ */
+export function anchorTz(timezones: (string | null | undefined)[]): string {
+  return timezones.length === 1 ? (timezones[0] || REFERENCE_TZ) : REFERENCE_TZ
+}
