@@ -20,3 +20,8 @@ desktop-app/out/
 desktop-app/dist-installer/
 desktop-app/*.tsbuildinfo
 *.xlsx
+
+# credenciais de loja em cadastro (nao commitar)
+wear_curve.env
+*.env.local
+nova_loja*.env

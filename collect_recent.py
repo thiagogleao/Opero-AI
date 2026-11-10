@@ -107,6 +107,18 @@ def run_facebook(date_from: date, date_to: date, session, tenant_id=None, creds=
 
 
 def run_shopify(date_from: date, date_to: date, session, tenant_id=None, creds=None, store_tz_name: str = "UTC"):
+    # Lojas de app do Dev Dashboard nao tem token fixo: ele vale 24h e e
+    # renovado aqui, que e o unico ponto onde o token da Shopify e lido. Para
+    # loja de token legado isto nao faz chamada nenhuma e devolve o que ja
+    # estava guardado.
+    if creds:
+        from app.collectors.shopify_auth import ensure_token, ShopifyAuthError
+        try:
+            ensure_token(session, creds)
+        except ShopifyAuthError as e:
+            print(f"  [shopify]  skipped — {e}")
+            return
+
     if creds and (not creds.get("shopify_domain") or not creds.get("shopify_access_token")):
         print("  [shopify]  skipped — no credentials configured")
         return

@@ -364,6 +364,7 @@ export async function journeyStores(): Promise<JourneyStore[]> {
     `SELECT id, shopify_domain, shopify_access_token
      FROM tenants
      WHERE shopify_access_token IS NOT NULL AND shopify_domain IS NOT NULL
+       AND archived_at IS NULL
      ORDER BY created_at`
   )
 }

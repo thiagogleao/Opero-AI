@@ -68,6 +68,7 @@ async function runCycle(source: 'shopify' | 'facebook') {
     `SELECT id, COALESCE(timezone, 'UTC') AS timezone
      FROM tenants
      WHERE shopify_access_token IS NOT NULL
+       AND archived_at IS NULL
      ORDER BY created_at`
   )
 

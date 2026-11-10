@@ -14,6 +14,14 @@ export interface Tenant {
   onboarded: boolean
   timezone: string | null
   created_at: string
+  /** Shopify Dev Dashboard app credentials. Since 2026 a store created this way
+   *  has no permanent token: the 24h one is minted from these by the collector,
+   *  which writes it back to shopify_access_token. Null on legacy stores. */
+  shopify_client_id: string | null
+  shopify_client_secret: string | null
+  shopify_token_expires_at: string | null
+  /** Set when the store is out of circulation. History and credentials stay. */
+  archived_at: string | null
 }
 
 /** The only store fields the UI needs. Tenants carry access tokens, which must
@@ -37,11 +45,13 @@ export async function getTenant(storeId: string): Promise<Tenant | null> {
   return rows[0] ?? null
 }
 
-/** Get all stores belonging to a Clerk user. */
+/** Get all stores belonging to a Clerk user. Archived stores are left out: they
+ *  keep their history and credentials, they just stop appearing and syncing. */
 export async function getTenantsByUserId(userId: string): Promise<Tenant[]> {
   const rows = await query<Tenant>(
     `SELECT * FROM tenants
-     WHERE user_id = $1 OR (user_id IS NULL AND id = $1)
+     WHERE (user_id = $1 OR (user_id IS NULL AND id = $1))
+       AND archived_at IS NULL
      ORDER BY created_at ASC`,
     [userId]
   )

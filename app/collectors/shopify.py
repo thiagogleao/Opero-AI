@@ -81,6 +81,10 @@ class ShopifyCollector(BaseCollector):
     ):
         super().__init__(session, tenant_id)
         self._store_tz_name = timezone  # IANA timezone string, e.g. "America/Sao_Paulo"
+        # Cotacao do periodo, carregada no _run. Dicionario vazio significa loja
+        # que fatura em dolar — e ai toda conversao abaixo e um no-op.
+        self._taxas: dict = {}
+        self._moeda: Optional[str] = None
         url   = store_url   or settings.shopify_store_url
         token = access_token or settings.shopify_access_token
         ver   = api_version  or settings.shopify_api_version
@@ -93,9 +97,13 @@ class ShopifyCollector(BaseCollector):
     # ------------------------------------------------------------------
 
     def _run(self, date_from: date, date_to: date) -> None:
+        # A moeda da loja vem antes de tudo: se ela nao fatura em dolar, cada
+        # valor tem de ser convertido na entrada, inclusive o preco do catalogo.
+        self._save_shop_timezone()
+        self._carregar_cotacao(date_from, date_to)
+
         logger.info("[shopify] Syncing products catalog...")
         self._sync_products()
-        self._save_shop_timezone()
 
         logger.info("[shopify] Fetching orders %s → %s", date_from, date_to)
         orders = self._fetch_all_orders(date_from, date_to)
@@ -121,32 +129,110 @@ class ShopifyCollector(BaseCollector):
     # ------------------------------------------------------------------
 
     def _save_shop_timezone(self) -> None:
-        """Fetch IANA timezone and store name from Shopify shop and persist to tenants table."""
+        """Fetch IANA timezone, store name and currency from Shopify and persist them."""
         if not self.tenant_id:
             return
         try:
             shop = shopify.Shop.current()
             tz = getattr(shop, "iana_timezone", None) or getattr(shop, "timezone", None)
             name = getattr(shop, "name", None)
+            moeda = getattr(shop, "currency", None)
+            self._moeda = moeda
             updates = {}
             if tz:
                 updates["tz"] = tz
             if name:
                 updates["name"] = name
+            if moeda:
+                updates["cur"] = moeda
             if updates:
                 from sqlalchemy import text
                 set_clause = ", ".join(
                     (["timezone = :tz"] if "tz" in updates else []) +
-                    (["shop_name = :name"] if "name" in updates else [])
+                    (["shop_name = :name"] if "name" in updates else []) +
+                    (["shopify_currency = :cur"] if "cur" in updates else [])
                 )
                 self.session.execute(
                     text(f"UPDATE tenants SET {set_clause} WHERE id = :tid"),
                     {**updates, "tid": self.tenant_id},
                 )
                 self.session.commit()
-                logger.info("[shopify] Store info saved: tz=%s name=%s", tz, name)
+                logger.info(
+                    "[shopify] Store info saved: tz=%s name=%s currency=%s", tz, name, moeda
+                )
         except Exception as e:
             logger.warning("[shopify] Could not fetch shop info: %s", e)
+
+    def _carregar_cotacao(self, date_from: date, date_to: date) -> None:
+        """Carrega a cotacao do periodo quando a loja nao fatura em dolar.
+
+        Loja em dolar sai daqui sem tocar em rede nem em banco, e `self._taxas`
+        fica vazio — o que torna `_usd` uma funcao identidade. E por isso que
+        esta mudanca nao pode alterar numero de nenhuma loja existente.
+        """
+        # O _save_shop_timezone engole qualquer erro de rede e segue em frente.
+        # Se ele falhar numa loja em moeda local, self._moeda fica None, a
+        # conversao e pulada e o sync grava iene como se fosse dolar — e ainda
+        # reporta sucesso. Ja aconteceu. Entao, quando a leitura ao vivo nao
+        # trouxe a moeda, caio no que esta gravado na loja.
+        if not self._moeda and self.tenant_id:
+            from sqlalchemy import text
+            guardada = self.session.execute(
+                text("SELECT shopify_currency FROM tenants WHERE id = :tid"),
+                {"tid": self.tenant_id},
+            ).scalar()
+            if guardada:
+                self._moeda = guardada
+                logger.warning(
+                    "[shopify] nao li a moeda da loja agora; usando a gravada: %s", guardada
+                )
+
+        if not self._moeda:
+            # Loja nova cuja moeda ainda nao conhecemos. Seguir converteria nada
+            # e poderia gravar valor cru sem ninguem perceber.
+            logger.warning("[shopify] moeda da loja desconhecida — nao vou converter nada")
+            return
+        if self._moeda.upper() == "USD":
+            return
+        from app.collectors.fx import taxas_do_periodo, FxError
+        try:
+            self._taxas = taxas_do_periodo(self.session, self._moeda, date_from, date_to)
+            amostra = self._taxas.get(date_to) or next(iter(self._taxas.values()))
+            logger.info(
+                "[shopify] loja em %s — convertendo para USD (%s dias de cotacao, "
+                "1 %s = %.8f USD em %s)",
+                self._moeda, len(self._taxas), self._moeda, amostra, date_to,
+            )
+        except FxError as e:
+            # Importar iene como se fosse dolar inflaria a receita ~158x. Melhor
+            # falhar o sync e aparecer no log do que gravar numero errado.
+            raise RuntimeError(
+                f"[shopify] loja fatura em {self._moeda} e eu nao consegui cotacao: {e}"
+            ) from e
+
+    @staticmethod
+    def _como_data(dia):
+        """Aceita date, 'AAAA-MM-DD' ou o timestamp cru da Shopify."""
+        if dia is None or isinstance(dia, date):
+            return dia
+        try:
+            return date.fromisoformat(str(dia)[:10])
+        except ValueError:
+            return None
+
+    def _usd(self, valor: float, dia=None) -> float:
+        """Valor em dolar. Para loja em dolar devolve o proprio valor."""
+        if not self._taxas:
+            return valor
+        from app.collectors.fx import para_usd
+        return para_usd(valor, self._como_data(dia), self._taxas)
+
+    def _taxa(self, dia=None):
+        """A cotacao aplicada, gravada junto do pedido para dar auditoria."""
+        if not self._taxas:
+            return None
+        from app.collectors.fx import taxa_do_dia
+        return taxa_do_dia(self._como_data(dia), self._taxas)
 
     def _tz_bounds(self, d: date) -> tuple[str, str]:
         """Return (start, end) ISO 8601 strings for a date with the store's timezone offset.
@@ -290,10 +376,14 @@ class ShopifyCollector(BaseCollector):
                 "customer_id": cid or None,
                 "customer_email": getattr(order, "email", None) or None,
                 "created_at": _parse_dt(order.created_at),
-                "total_price": _float(getattr(order, "total_price", 0)),
-                "subtotal_price": _float(getattr(order, "subtotal_price", 0)),
-                "total_discounts": _float(getattr(order, "total_discounts", 0)),
+                # Convertido para dolar na entrada. A moeda original e a taxa
+                # usada ficam gravadas ao lado, entao da para reconstruir o
+                # valor que a Shopify mostra.
+                "total_price": self._usd(_float(getattr(order, "total_price", 0)), order.created_at),
+                "subtotal_price": self._usd(_float(getattr(order, "subtotal_price", 0)), order.created_at),
+                "total_discounts": self._usd(_float(getattr(order, "total_discounts", 0)), order.created_at),
                 "currency": getattr(order, "currency", None),
+                "fx_rate": self._taxa(order.created_at),
                 "country_code": country_code,
                 "financial_status": getattr(order, "financial_status", None),
                 "fulfillment_status": getattr(order, "fulfillment_status", None),
@@ -301,6 +391,24 @@ class ShopifyCollector(BaseCollector):
                     bool(cid and customer_first_order.get(cid) == str(order.id))
                 ),
             })
+
+        # Trava de seguranca. O Opero soma dinheiro como numero puro, entao um
+        # pedido em moeda local sem taxa aplicada entra inflado — na Hibikura
+        # seria 158x. Isso ja aconteceu de verdade, silenciosamente, porque o
+        # _save_shop_timezone engole erro de rede e o sync segue reportando
+        # sucesso. Aqui eu uso a moeda do PROPRIO pedido, que nao depende de
+        # nada ter dado certo antes, e prefiro quebrar o sync a gravar errado.
+        suspeitos = [
+            r for r in rows
+            if (r.get("currency") or "USD").upper() != "USD" and r.get("fx_rate") is None
+        ]
+        if suspeitos:
+            moedas = sorted({(r.get("currency") or "?") for r in suspeitos})
+            raise RuntimeError(
+                f"[shopify] {len(suspeitos)} pedido(s) em {', '.join(moedas)} sem cotacao "
+                f"aplicada. Nao vou gravar: entraria como se fosse dolar. "
+                f"Verifique a cotacao e a moeda da loja (tenants.shopify_currency)."
+            )
 
         # Shopify stops returning the checkout fingerprint on older orders, so a
         # resync of history must not blank out what we already captured.
@@ -322,7 +430,7 @@ class ShopifyCollector(BaseCollector):
                     "product_title": getattr(item, "title", None),
                     "variant_title": getattr(item, "variant_title", None),
                     "quantity": int(getattr(item, "quantity", 1) or 1),
-                    "price": _float(getattr(item, "price", 0)),
+                    "price": self._usd(_float(getattr(item, "price", 0)), order.created_at),
                 })
         self._upsert_raw("shopify_order_items", rows, ["order_id", "line_item_id"])
 
@@ -349,8 +457,11 @@ class ShopifyCollector(BaseCollector):
             sample_order = corders[0]
             customer_obj = getattr(sample_order, "customer", None)
 
-            # Use Shopify's lifetime totals if available on the customer object
-            total_spent = _float(getattr(customer_obj, "total_spent", None) or 0)
+            # Use Shopify's lifetime totals if available on the customer object.
+            # Esse total nao tem data propria — e a vida inteira do cliente —,
+            # entao numa loja em moeda local ele vai pela cotacao mais recente.
+            # E aproximacao, e so afeta a coluna de LTV do cliente.
+            total_spent = self._usd(_float(getattr(customer_obj, "total_spent", None) or 0))
             orders_count = int(getattr(customer_obj, "orders_count", None) or len(corders))
             avg_order_value = (total_spent / orders_count) if orders_count > 0 else 0
 
@@ -365,7 +476,9 @@ class ShopifyCollector(BaseCollector):
                 "customer_id": cid,
                 "email": getattr(customer_obj, "email", None) or getattr(sample_order, "email", None),
                 "created_at": _parse_dt(getattr(customer_obj, "created_at", None)),
-                "total_spent": total_spent or sum(_float(o.total_price) for o in corders),
+                "total_spent": total_spent or sum(
+                    self._usd(_float(o.total_price), o.created_at) for o in corders
+                ),
                 "orders_count": orders_count,
                 "avg_order_value": avg_order_value,
                 "first_order_at": first_order_at,
@@ -391,7 +504,7 @@ class ShopifyCollector(BaseCollector):
             d = _local_date(order.created_at)
             if not d:
                 continue
-            revenue = _float(getattr(order, "total_price", 0))
+            revenue = self._usd(_float(getattr(order, "total_price", 0)), d)
             by_date[d]["total_orders"] += 1
             by_date[d]["total_revenue"] += revenue
 
@@ -482,7 +595,8 @@ class ShopifyCollector(BaseCollector):
             if not d:
                 continue
             by_date[d]["count"] += 1
-            by_date[d]["value"] += _float(getattr(checkout, "total_price", 0))
+            by_date[d]["value"] += self._usd(
+                _float(getattr(checkout, "total_price", 0)), d)
 
         from sqlalchemy import text
 
@@ -521,7 +635,7 @@ class ShopifyCollector(BaseCollector):
             billing = getattr(order, "billing_address", None)
             country = (billing.country_code if billing else None) or "XX"
             key = (d, country)
-            revenue = _float(getattr(order, "total_price", 0))
+            revenue = self._usd(_float(getattr(order, "total_price", 0)), d)
             cid = str(getattr(order, "customer", None) and order.customer.id or "")
             by_country[key]["orders_count"] += 1
             by_country[key]["revenue"] += revenue
@@ -554,7 +668,9 @@ class ShopifyCollector(BaseCollector):
                 "checkout_id": str(checkout.id),
                 "customer_email": getattr(checkout, "email", None) or None,
                 "created_at": _parse_dt(getattr(checkout, "created_at", None)) or datetime.utcnow(),
-                "total_price": _float(getattr(checkout, "total_price", 0)),
+                "total_price": self._usd(
+                    _float(getattr(checkout, "total_price", 0)),
+                    getattr(checkout, "created_at", None)),
                 "recovered": False,  # updated by a separate recovery check if needed
             })
         self._upsert_raw("shopify_abandoned_checkouts", rows, ["checkout_id"])
@@ -579,7 +695,12 @@ class ShopifyCollector(BaseCollector):
         rows = []
         for p in all_products:
             variants = list(getattr(p, "variants", []) or [])
-            prices = [_float(getattr(v, "price", 0)) for v in variants if getattr(v, "price", None)]
+            # Preco de catalogo tambem esta na moeda da loja. Sem data propria,
+            # entao vai pela cotacao mais recente do periodo.
+            prices = [
+                self._usd(_float(getattr(v, "price", 0)))
+                for v in variants if getattr(v, "price", None)
+            ]
             image = getattr(p, "image", None)
             image_url = getattr(image, "src", None) if image else None
             rows.append({

@@ -90,7 +90,9 @@ export async function saveAlertConfig(patch: Partial<AlertConfig>): Promise<Aler
 /** Every store the mobile app reports on. */
 export async function allStores(): Promise<Tenant[]> {
   return query<Tenant>(
-    `SELECT * FROM tenants WHERE shopify_access_token IS NOT NULL ORDER BY created_at`
+    `SELECT * FROM tenants
+      WHERE shopify_access_token IS NOT NULL AND archived_at IS NULL
+      ORDER BY created_at`
   )
 }
 
