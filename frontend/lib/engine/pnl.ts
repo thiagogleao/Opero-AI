@@ -530,8 +530,11 @@ export async function computePnL(
     let hourly: HourPoint[] | null = null
     if (hourLines) {
       const day = days[0]
-      const hoursCovered = cutoff !== null ? Math.max(1, Math.ceil(cutoff / 60))
-        : day === storeToday ? Math.max(1, Math.ceil(minutesCovered / 60)) : 24
+      // The hour in progress counts: at 10:00 an order placed at 10:00 is in
+      // the totals, so hour 10 must be on the curve too.
+      const hourOf = (mins: number) => Math.min(24, Math.floor(mins / 60) + 1)
+      const hoursCovered = cutoff !== null ? hourOf(cutoff)
+        : day === storeToday ? hourOf(minutesCovered) : 24
       const burn = totals.metaSpend + totals.shopSpend + totals.fixedCosts
       let cumC = 0, cumR = 0
       hourly = []
