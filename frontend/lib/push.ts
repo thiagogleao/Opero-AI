@@ -1,30 +1,42 @@
 import webpush from 'web-push'
 import { query } from './db'
 
-let _configured = false
+/**
+ * Web push to the owner's devices.
+ *
+ * Every send reports how many devices it actually reached, because the callers
+ * (alerts, the daily summary, the test button) must not record "sent" when the
+ * table is empty or every device refused: production ran for days claiming
+ * alerts as sent with zero subscriptions.
+ */
 
-/** Configure web-push once per process. Returns false when VAPID keys are missing. */
+let _configured: boolean | null = null
+
+/** Configure web-push once per process. False when the VAPID keys are missing. */
 function configure(): boolean {
-  if (_configured) return true
-  const publicKey  = process.env.VAPID_PUBLIC_KEY
+  if (_configured !== null) return _configured
+  const publicKey = process.env.VAPID_PUBLIC_KEY
   const privateKey = process.env.VAPID_PRIVATE_KEY
   if (!publicKey || !privateKey) {
     console.warn('[push] VAPID keys not configured — notifications disabled')
+    _configured = false
     return false
   }
-  webpush.setVapidDetails(
-    process.env.VAPID_SUBJECT || 'mailto:thiago.garcialeao@gmail.com',
-    publicKey,
-    privateKey,
-  )
+  webpush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:thiago.garcialeao@gmail.com', publicKey, privateKey)
   _configured = true
   return true
 }
 
+/** What a push is about. The service worker chimes only for 'sale'. */
+export type PushKind = 'sale' | 'alert' | 'summary' | 'scale' | 'test'
+
 export interface PushPayload {
   title: string
   body: string
-  /** Path opened when the notification is tapped. */
+  /** What this push is about; the service worker tells the open app, which
+   *  plays the cash-register sound only for a sale. */
+  kind?: PushKind
+  /** Path opened when the notification is tapped, e.g. /m?loja=<id>. */
   url?: string
   /** Groups notifications: a new one with the same tag replaces the previous. */
   tag?: string
@@ -32,22 +44,56 @@ export interface PushPayload {
   data?: Record<string, unknown>
 }
 
+export interface PushResult {
+  /** Devices that accepted the message. */
+  sent: number
+  failed: number
+  /** Subscriptions the push service says are gone (404/410), now deleted. */
+  pruned: number
+  /** Subscriptions refused for credentials (401/403): usually a VAPID key that
+   *  changed after the device subscribed. Kept, because a wrong key on the
+   *  server would otherwise wipe every device; the device must resubscribe. */
+  rejected: number
+  /** Subscriptions on file when the send started. */
+  devices: number
+}
+
+const NOTHING: PushResult = { sent: 0, failed: 0, pruned: 0, rejected: 0, devices: 0 }
+
+/** Devices a push would reach right now (0 when VAPID is not configured). */
+export async function pushDeviceCount(): Promise<number> {
+  if (!configure()) return 0
+  const rows = await query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM push_subscriptions`)
+  return Number(rows[0]?.n ?? 0)
+}
+
+/** Whether this endpoint is on file, so a device can tell a lost subscription
+ *  from a working one and subscribe again. */
+export async function isKnownEndpoint(endpoint: string): Promise<boolean> {
+  const rows = await query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n FROM push_subscriptions WHERE endpoint = $1`, [endpoint])
+  return Number(rows[0]?.n ?? 0) > 0
+}
+
 /**
  * Send a notification to every registered device.
- * Subscriptions rejected by the push service (410/404 = uninstalled or
- * permission revoked) are deleted so the table doesn't accumulate dead rows.
+ * Subscriptions the push service has dropped (404/410: app uninstalled,
+ * permission revoked) are deleted. Only the endpoints that accepted the
+ * message get their last_used_at stamped.
  */
-export async function sendPushToAll(payload: PushPayload): Promise<{ sent: number; failed: number }> {
-  if (!configure()) return { sent: 0, failed: 0 }
+export async function sendPushToAll(payload: PushPayload): Promise<PushResult> {
+  if (!configure()) return NOTHING
 
   const subs = await query<{ endpoint: string; p256dh: string; auth: string }>(
-    `SELECT endpoint, p256dh, auth FROM push_subscriptions`
+    `SELECT endpoint, p256dh, auth FROM push_subscriptions`,
   )
-  if (subs.length === 0) return { sent: 0, failed: 0 }
+  if (subs.length === 0) return NOTHING
 
   const body = JSON.stringify(payload)
-  let sent = 0, failed = 0
+  const ok: string[] = []
   const dead: string[] = []
+  let failed = 0
+  let rejected = 0
 
   await Promise.all(subs.map(async sub => {
     try {
@@ -56,12 +102,15 @@ export async function sendPushToAll(payload: PushPayload): Promise<{ sent: numbe
         body,
         { TTL: 3600, urgency: 'high' },
       )
-      sent++
+      ok.push(sub.endpoint)
     } catch (err) {
       failed++
       const status = (err as { statusCode?: number }).statusCode
       if (status === 410 || status === 404) dead.push(sub.endpoint)
-      else console.error('[push] send failed:', status, (err as Error).message)
+      else if (status === 401 || status === 403) {
+        rejected++
+        console.error('[push] subscription refused the VAPID credentials; the device must subscribe again', status)
+      } else console.error('[push] send failed:', status, (err as Error).message)
     }
   }))
 
@@ -69,9 +118,9 @@ export async function sendPushToAll(payload: PushPayload): Promise<{ sent: numbe
     await query(`DELETE FROM push_subscriptions WHERE endpoint = ANY($1::text[])`, [dead])
     console.log(`[push] pruned ${dead.length} dead subscription(s)`)
   }
-  if (sent) {
-    await query(`UPDATE push_subscriptions SET last_used_at = NOW()`)
+  if (ok.length) {
+    await query(`UPDATE push_subscriptions SET last_used_at = NOW() WHERE endpoint = ANY($1::text[])`, [ok])
   }
 
-  return { sent, failed }
+  return { sent: ok.length, failed, pruned: dead.length, rejected, devices: subs.length }
 }

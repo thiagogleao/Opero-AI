@@ -1,18 +1,22 @@
 import { query } from './db'
-import { sendPushToAll } from './push'
-import { getAccountOverview, type StoreOverviewRow } from './accountOverview'
-import { getDayThroughHour } from './intradayProfit'
+import { pushDeviceCount, sendPushToAll, type PushKind } from './push'
+import { listStores, type StoreRef } from './access'
+import { computePnL, type PnL } from './engine/pnl'
+import { REFERENCE_TZ, minutesIntoDay, safeTz, shiftDate, todayInTz } from './engine/dates'
 import { getCampaignSignals, DEFAULT_SCALE_CONFIG } from './scaleSignals'
-import { REFERENCE_TZ, todayInTz, shiftDate } from './mobileRange'
-import type { Tenant } from './tenant'
+import { buildPortfolio, type PortfolioStoreRow } from './views/portfolio'
 
 /**
  * Alerts and the daily summary.
  *
  * The thresholds live in the database rather than in a browser, because the
  * thing that evaluates them is a server-side scheduler with no client. They are
- * owner-level, not per-tenant: this is the same scope as the mobile app, which
- * spans every store and sits outside Clerk.
+ * owner-level: the same scope as the phone, which spans every active store.
+ *
+ * Every number comes from the profit engine, and each store is judged on its
+ * own clock and against its own break-even: a single fixed ROAS target was
+ * wrong for every store at once (MOKOO breaks even near 2.7×, Dumpling near
+ * 1.6×), and a day with spend and no sales slipped past every rule.
  */
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -20,24 +24,31 @@ import type { Tenant } from './tenant'
 export interface Rule { enabled: boolean; threshold: number }
 
 export interface AlertConfig {
-  /** Net ROAS for the day below this number. */
+  /** Meta ROAS of the day below the store's own break-even ROAS (revenue ÷
+   *  contribution over the last 7 complete days). `threshold` is the target
+   *  used only for stores without cost settings, whose break-even is unknown. */
   roasDrop: Rule
-  /** Day's ad spend above this percentage of the trailing 7-day average. */
+  /** At least `threshold` dollars of ads today and not one sale. */
+  spendNoSales: Rule
+  /** Day's Meta spend above this percentage of the trailing 7-day average. */
   spendSpike: Rule
-  /** Margin for the day below this percentage. */
+  /** Operating margin for the day below this percentage (stores with cost
+   *  settings only: without costs the margin means nothing). */
   marginDrop: Rule
-  /** Campaigns that earned more budget, or are burning it. */
+  /** Campaigns that earned more budget, or are burning it; threshold = minimum
+   *  margin % a campaign must hold to be worth scaling. */
   scaleAlerts: Rule
-  /** Push a summary of the day at `hour`, local to the reference timezone. */
+  /** Push a summary of the day at `hour`, in the reference timezone (Brasília). */
   dailySummary: { enabled: boolean; hour: number }
-  /** A store below this ad spend today is too early to judge. */
+  /** A store below this Meta spend today is too early to judge on ROAS/margin. */
   minSpend: number
-  /** No performance alert before this hour: mornings are always ugly. */
+  /** No performance alert before this hour of the store's own day. */
   fromHour: number
 }
 
 export const DEFAULT_CONFIG: AlertConfig = {
   roasDrop:     { enabled: true,  threshold: 1.5 },
+  spendNoSales: { enabled: true,  threshold: 50 },
   spendSpike:   { enabled: false, threshold: 200 },
   marginDrop:   { enabled: true,  threshold: 10 },
   scaleAlerts:  { enabled: true,  threshold: 20 },
@@ -48,161 +59,336 @@ export const DEFAULT_CONFIG: AlertConfig = {
 
 const CONFIG_ID = 'owner'
 
-/** Merge a stored blob over the defaults so a new field never reads undefined. */
-function merge(raw: Partial<AlertConfig> | null | undefined): AlertConfig {
-  if (!raw) return DEFAULT_CONFIG
+type RuleKey = 'roasDrop' | 'spendNoSales' | 'spendSpike' | 'marginDrop' | 'scaleAlerts'
+const RULES: Record<RuleKey, { min: number; max: number }> = {
+  roasDrop:     { min: 0, max: 100 },
+  spendNoSales: { min: 0, max: 1_000_000 },
+  spendSpike:   { min: 0, max: 10_000 },
+  marginDrop:   { min: -100, max: 100 },
+  scaleAlerts:  { min: -100, max: 100 },
+}
+
+export class AlertConfigError extends Error {
+  constructor(public problems: string[]) { super(problems.join('; ')) }
+}
+
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
+const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
+const hourOk = (v: unknown): v is number => finite(v) && Number.isInteger(v) && v >= 0 && v <= 23
+
+/**
+ * Problems with a config patch, one Portuguese sentence each. Fields that are
+ * absent are fine; fields that are present must be valid. A cleared input
+ * arriving as 0 or "" is refused instead of silently becoming "summary at
+ * midnight" or "ROAS target 0".
+ */
+export function alertPatchProblems(patch: unknown): string[] {
+  if (!isObj(patch)) return ['Configuração inválida']
+  const out: string[] = []
+  for (const key of Object.keys(RULES) as RuleKey[]) {
+    const r = patch[key]
+    if (r === undefined) continue
+    if (!isObj(r)) { out.push(`${key}: formato inválido`); continue }
+    if (r.enabled !== undefined && typeof r.enabled !== 'boolean') out.push(`${key}.enabled deve ser verdadeiro ou falso`)
+    if (r.threshold !== undefined) {
+      const { min, max } = RULES[key]
+      if (!finite(r.threshold) || r.threshold < min || r.threshold > max) out.push(`${key}.threshold deve ser um número entre ${min} e ${max}`)
+      else if (key === 'roasDrop' && r.threshold === 0) out.push('roasDrop.threshold não pode ser 0')
+    }
+  }
+  const ds = patch.dailySummary
+  if (ds !== undefined) {
+    if (!isObj(ds)) out.push('dailySummary: formato inválido')
+    else {
+      if (ds.enabled !== undefined && typeof ds.enabled !== 'boolean') out.push('dailySummary.enabled deve ser verdadeiro ou falso')
+      if (ds.hour !== undefined && !hourOk(ds.hour)) out.push('dailySummary.hour deve ser uma hora inteira de 0 a 23')
+    }
+  }
+  if (patch.minSpend !== undefined && !(finite(patch.minSpend) && patch.minSpend >= 0)) out.push('minSpend deve ser um número ≥ 0')
+  if (patch.fromHour !== undefined && !hourOk(patch.fromHour)) out.push('fromHour deve ser uma hora inteira de 0 a 23')
+  return out
+}
+
+/**
+ * A stored or patched blob, field by field over a base: anything missing or
+ * invalid keeps the base value, so a new field never reads undefined and a bad
+ * row in the table cannot switch rules off by accident.
+ */
+export function mergeAlertConfig(base: AlertConfig, raw: unknown): AlertConfig {
+  const src = isObj(raw) ? raw : {}
+  const rule = (key: RuleKey): Rule => {
+    const r = isObj(src[key]) ? (src[key] as Record<string, unknown>) : {}
+    const { min, max } = RULES[key]
+    return {
+      enabled: typeof r.enabled === 'boolean' ? r.enabled : base[key].enabled,
+      threshold: finite(r.threshold) && r.threshold >= min && r.threshold <= max ? r.threshold : base[key].threshold,
+    }
+  }
+  const ds = isObj(src.dailySummary) ? src.dailySummary : {}
   return {
-    roasDrop:     { ...DEFAULT_CONFIG.roasDrop,     ...(raw.roasDrop     ?? {}) },
-    spendSpike:   { ...DEFAULT_CONFIG.spendSpike,   ...(raw.spendSpike   ?? {}) },
-    marginDrop:   { ...DEFAULT_CONFIG.marginDrop,   ...(raw.marginDrop   ?? {}) },
-    scaleAlerts:  { ...DEFAULT_CONFIG.scaleAlerts,  ...(raw.scaleAlerts  ?? {}) },
-    dailySummary: { ...DEFAULT_CONFIG.dailySummary, ...(raw.dailySummary ?? {}) },
-    minSpend: raw.minSpend ?? DEFAULT_CONFIG.minSpend,
-    fromHour: raw.fromHour ?? DEFAULT_CONFIG.fromHour,
+    roasDrop: rule('roasDrop'),
+    spendNoSales: rule('spendNoSales'),
+    spendSpike: rule('spendSpike'),
+    marginDrop: rule('marginDrop'),
+    scaleAlerts: rule('scaleAlerts'),
+    dailySummary: {
+      enabled: typeof ds.enabled === 'boolean' ? ds.enabled : base.dailySummary.enabled,
+      hour: hourOk(ds.hour) ? ds.hour : base.dailySummary.hour,
+    },
+    minSpend: finite(src.minSpend) && src.minSpend >= 0 ? src.minSpend : base.minSpend,
+    fromHour: hourOk(src.fromHour) ? src.fromHour : base.fromHour,
   }
 }
 
 export async function getAlertConfig(): Promise<AlertConfig> {
   try {
-    const rows = await query<{ settings: Partial<AlertConfig> }>(
-      `SELECT settings FROM alert_settings WHERE id = $1`, [CONFIG_ID]
-    )
-    return merge(rows[0]?.settings)
+    const rows = await query<{ settings: unknown }>(`SELECT settings FROM alert_settings WHERE id = $1`, [CONFIG_ID])
+    return mergeAlertConfig(DEFAULT_CONFIG, rows[0]?.settings)
   } catch {
-    // Table not migrated yet — defaults keep the scheduler running.
+    // Table not migrated yet: defaults keep the scheduler running.
     return DEFAULT_CONFIG
   }
 }
 
-export async function saveAlertConfig(patch: Partial<AlertConfig>): Promise<AlertConfig> {
-  const next = merge({ ...(await getAlertConfig()), ...patch })
+/** @throws AlertConfigError when a present field is invalid. */
+export async function saveAlertConfig(patch: unknown): Promise<AlertConfig> {
+  const problems = alertPatchProblems(patch)
+  if (problems.length) throw new AlertConfigError(problems)
+  const next = mergeAlertConfig(await getAlertConfig(), patch)
   await query(
     `INSERT INTO alert_settings (id, settings, updated_at)
      VALUES ($1, $2::jsonb, NOW())
      ON CONFLICT (id) DO UPDATE SET settings = $2::jsonb, updated_at = NOW()`,
-    [CONFIG_ID, JSON.stringify(next)]
+    [CONFIG_ID, JSON.stringify(next)],
   )
   return next
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Every store the mobile app reports on. */
-export async function allStores(): Promise<Tenant[]> {
-  return query<Tenant>(
-    `SELECT * FROM tenants
-      WHERE shopify_access_token IS NOT NULL AND archived_at IS NULL
-      ORDER BY created_at`
-  )
+/** Hour of day (0-23) in `tz`, the reference timezone by default. */
+export function hourInTz(tz: string = REFERENCE_TZ, now: Date = new Date()): number {
+  return Math.floor(minutesIntoDay(tz, now) / 60)
 }
 
-/** Hour of day (0-23) in the reference timezone. */
-export function hourInTz(tz = REFERENCE_TZ): number {
-  return Number(
-    new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', hour12: false }).format(new Date())
-  )
+/** Every store the alerts report on: active (not archived) stores. */
+async function activeStores(): Promise<StoreRef[]> {
+  return listStores({ kind: 'owner' })
 }
 
 /**
- * Claim an alert for today. Returns false when it was already sent — the
- * unique index does the work, so two overlapping scheduler passes cannot
- * both win.
+ * Claim an alert for a day. False when it was already claimed — the unique
+ * index does the work, so two overlapping scheduler passes cannot both win.
  */
-async function claim(kind: string, tenantId: string, day: string, payload: unknown): Promise<boolean> {
+async function claim(kind: string, key: string, day: string, payload: unknown): Promise<boolean> {
   const rows = await query<{ id: string }>(
     `INSERT INTO alert_events (kind, tenant_id, day, payload)
      VALUES ($1, $2, $3::date, $4::jsonb)
      ON CONFLICT (kind, tenant_id, day) DO NOTHING
      RETURNING id`,
-    [kind, tenantId, day, JSON.stringify(payload ?? {})]
+    [kind, key, day, JSON.stringify(payload ?? {})],
   )
   return rows.length > 0
 }
 
-function money(v: number): string {
+/** Undo a claim whose push reached nobody, so it can still fire once a device
+ *  is registered instead of being silently spent for the day. */
+async function release(kind: string, key: string, day: string): Promise<void> {
+  await query(`DELETE FROM alert_events WHERE kind = $1 AND tenant_id = $2 AND day = $3::date`, [kind, key, day])
+}
+
+export function money(v: number): string {
   const s = v < 0 ? '-' : ''
   const a = Math.abs(v)
   if (a >= 10_000) return `${s}$${(a / 1000).toFixed(1)}K`
   return `${s}$${a.toFixed(0)}`
 }
 
-/** Trailing ad spend per store over `days` days, ending the day before today. */
-async function spendBaseline(day: string, days = 7): Promise<Map<string, number>> {
-  const rows = await query<{ tenant_id: string; avg_spend: string }>(
-    `SELECT tenant_id, (SUM(spend) / $3::numeric)::text AS avg_spend
-     FROM fb_ad_daily_metrics
-     WHERE date BETWEEN $1::date AND $2::date
-     GROUP BY tenant_id`,
-    [shiftDate(day, -days), shiftDate(day, -1), days]
-  )
-  return new Map(rows.map(r => [r.tenant_id, Number(r.avg_spend)]))
+const x2 = (v: number) => `${v.toFixed(2)}×`
+
+/** The phone, opened on one store. */
+export const storeUrl = (storeId: string, tab?: string) =>
+  `/m?loja=${encodeURIComponent(storeId)}${tab ? `&aba=${encodeURIComponent(tab)}` : ''}`
+
+// ─── Threshold alerts (pure evaluation) ───────────────────────────────────────
+
+export type AlertKind = 'roas_drop' | 'spend_no_sales' | 'margin_drop' | 'spend_spike'
+
+/** One store on its own day, as the rules see it. */
+export interface StoreAlertInput {
+  storeId: string
+  name: string
+  /** The store's own today (alerts are claimed per store per store-day). */
+  day: string
+  /** Minutes into the store's own day. */
+  minutesIntoDay: number
+  configured: boolean
+  /** Today so far, from the engine. */
+  today: PnL
+  /** The last 7 complete days, from the engine: the break-even and the spend
+   *  baseline come from here, not from a morning's handful of orders. */
+  trailing: PnL
 }
 
-// ─── Threshold alerts ─────────────────────────────────────────────────────────
+export interface AlertCandidate {
+  kind: AlertKind
+  storeId: string
+  store: string
+  day: string
+  title: string
+  body: string
+  url: string
+}
 
-export interface FiredAlert { kind: string; store: string; title: string; body: string }
+/** Days in StoreAlertInput.trailing. */
+export const TRAILING_DAYS = 7
 
 /**
- * Evaluate today's numbers for every store and push whatever crossed a line.
- * Each alert is sent at most once per store per day.
- *
- * `dryRun` returns what would fire without claiming the day's slot or sending
- * anything — running a check by hand must not silently swallow the real alert.
+ * The rules, for one store. Pure, so every edge (no sales, no settings, early
+ * morning) is tested without a database.
  */
-export async function runAlertChecks(
-  opts: { force?: boolean; dryRun?: boolean } = {}
-): Promise<FiredAlert[]> {
+export function evaluateStoreAlerts(
+  s: StoreAlertInput, cfg: AlertConfig, opts: { ignoreHour?: boolean } = {},
+): AlertCandidate[] {
+  if (!opts.ignoreHour && s.minutesIntoDay < cfg.fromHour * 60) return []
+  const t = s.today
+  const out: AlertCandidate[] = []
+  const base = { storeId: s.storeId, store: s.name, day: s.day, url: storeUrl(s.storeId) }
+
+  // The worst day of all: money going out and nothing coming in. Its own rule,
+  // because ROAS 0 and "no revenue, no margin" used to skip every other one.
+  if (cfg.spendNoSales.enabled && t.orders === 0 && t.adSpend >= cfg.spendNoSales.threshold) {
+    out.push({
+      ...base, kind: 'spend_no_sales',
+      title: `💸 ${money(t.adSpend)} em anúncios e nenhuma venda — ${s.name}`,
+      body: `Hoje até agora: ${money(t.metaSpend)} na Meta${t.shopSpend > 0 ? ` e ${money(t.shopSpend)} em anúncios Shopify` : ''}, 0 pedidos. Confira checkout, pagamento e pixel.`,
+    })
+  }
+
+  const judgeable = t.orders > 0 && t.metaSpend >= cfg.minSpend
+  if (cfg.roasDrop.enabled && judgeable && t.roas !== null) {
+    const own = s.configured ? (s.trailing.breakEvenRoas ?? t.breakEvenRoas) : null
+    const target = s.configured ? own : cfg.roasDrop.threshold
+    if (target !== null && t.roas < target) {
+      const why = s.configured
+        ? `Empate desta loja: ${x2(target)} (receita ÷ margem de contribuição, últimos ${TRAILING_DAYS} dias).`
+        : `Custos não configurados: comparado com a meta fixa de ${x2(target)}.`
+      out.push({
+        ...base, kind: 'roas_drop',
+        title: `⚠️ ROAS ${x2(t.roas)} abaixo do empate — ${s.name}`,
+        body: `${why} Hoje: ${money(t.revenue)} de receita, ${money(t.metaSpend)} na Meta, lucro ${money(t.operatingProfit)}.`,
+      })
+    }
+  }
+
+  // Below break-even already implies a thin margin: one push per problem.
+  const roasFired = out.some(a => a.kind === 'roas_drop')
+  if (cfg.marginDrop.enabled && judgeable && !roasFired && s.configured && t.margin !== null && t.margin < cfg.marginDrop.threshold) {
+    out.push({
+      ...base, kind: 'margin_drop',
+      title: `⚠️ Margem ${t.margin.toFixed(0)}% — ${s.name}`,
+      body: `Abaixo de ${cfg.marginDrop.threshold}%. Hoje: ${money(t.revenue)} de receita e ${money(t.operatingProfit)} de lucro em ${t.orders} pedido${t.orders === 1 ? '' : 's'}.`,
+    })
+  }
+
+  if (cfg.spendSpike.enabled) {
+    const avg = s.trailing.metaSpend / TRAILING_DAYS
+    const pct = avg > 0 ? (t.metaSpend / avg) * 100 : 0
+    if (avg > 0 && t.metaSpend >= cfg.minSpend && pct >= cfg.spendSpike.threshold) {
+      out.push({
+        ...base, kind: 'spend_spike',
+        title: `📣 Gasto ${pct.toFixed(0)}% da média — ${s.name}`,
+        body: `${money(t.metaSpend)} hoje contra ${money(avg)} de média nos últimos ${TRAILING_DAYS} dias. ROAS ${t.roas !== null ? x2(t.roas) : '—'}.`,
+      })
+    }
+  }
+  return out
+}
+
+// ─── Threshold alerts (running) ───────────────────────────────────────────────
+
+export interface FiredAlert {
+  kind: string
+  storeId: string
+  store: string
+  title: string
+  body: string
+  /** Devices reached; 0 on a dry run. */
+  delivered: number
+}
+
+/** Price every store on its own today, plus its last 7 complete days. Stores
+ *  sharing a calendar date share one engine call. */
+export async function loadAlertInputs(stores: StoreRef[], now: Date = new Date()): Promise<StoreAlertInput[]> {
+  const byDay = new Map<string, StoreRef[]>()
+  for (const s of stores) {
+    const day = todayInTz(safeTz(s.timezone), now)
+    byDay.set(day, [...(byDay.get(day) ?? []), s])
+  }
+  const out: StoreAlertInput[] = []
+  await Promise.all([...byDay].map(async ([day, group]) => {
+    const ids = group.map(s => s.id)
+    const [today, trailing] = await Promise.all([
+      computePnL(ids, { from: day, to: day }, {}, now),
+      computePnL(ids, { from: shiftDate(day, -TRAILING_DAYS), to: shiftDate(day, -1) }, {}, now),
+    ])
+    for (const s of group) {
+      const t = today.get(s.id)
+      const tr = trailing.get(s.id)
+      if (!t || !tr) continue
+      out.push({
+        storeId: s.id, name: s.name, day, minutesIntoDay: minutesIntoDay(safeTz(s.timezone), now),
+        configured: t.configured, today: t.totals, trailing: tr.totals,
+      })
+    }
+  }))
+  return out
+}
+
+interface RunOpts { force?: boolean; dryRun?: boolean }
+
+/** Send one push under a once-per-day claim; release the claim when nobody
+ *  received it. Returns devices reached (0 also when the claim was lost). */
+async function deliver(
+  claimKind: string, claimKey: string, day: string,
+  push: { title: string; body: string; url: string; tag: string; kind: PushKind; data: Record<string, unknown> },
+  opts: RunOpts,
+): Promise<number> {
+  if (!opts.force && !(await claim(claimKind, claimKey, day, { title: push.title }))) return 0
+  const res = await sendPushToAll(push)
+  if (res.sent === 0 && !opts.force) await release(claimKind, claimKey, day)
+  return res.sent
+}
+
+/**
+ * Evaluate today's numbers for every active store and push whatever crossed a
+ * line, at most once per store per day.
+ *
+ * `dryRun` returns what would fire right now without claiming or sending —
+ * running a check by hand must not silently swallow the real alert. `force`
+ * ignores the hour and the once-a-day claim (the "Testar agora" button).
+ */
+export async function runAlertChecks(opts: RunOpts = {}): Promise<FiredAlert[]> {
   const cfg = await getAlertConfig()
-  const day = todayInTz(REFERENCE_TZ)
-
-  const anyRule = cfg.roasDrop.enabled || cfg.spendSpike.enabled || cfg.marginDrop.enabled
+  const anyRule = cfg.roasDrop.enabled || cfg.spendNoSales.enabled || cfg.spendSpike.enabled || cfg.marginDrop.enabled
   if (!anyRule) return []
-  // Half a day of orders against a full day of ad spend always looks like a
-  // disaster, so nothing fires before the configured hour.
-  if (!opts.force && !opts.dryRun && hourInTz() < cfg.fromHour) return []
+  // Nobody to tell: do not price anything, and claim nothing.
+  if (!opts.dryRun && (await pushDeviceCount()) === 0) return []
 
-  const stores = await allStores()
-  if (stores.length === 0) return []
-
-  const overview = await getAccountOverview(stores, day, day)
-  const baseline = cfg.spendSpike.enabled ? await spendBaseline(day) : new Map<string, number>()
+  const stores = await activeStores()
+  if (!stores.length) return []
+  const inputs = await loadAlertInputs(stores)
 
   const fired: FiredAlert[] = []
-
-  for (const s of overview.stores) {
-    if (s.failed) continue
-
-    // Too little spent today to judge anything by.
-    const judgeable = s.adSpend >= cfg.minSpend
-
-    if (cfg.roasDrop.enabled && judgeable && s.roas > 0 && s.roas < cfg.roasDrop.threshold) {
-      const alert = {
-        kind: 'roas_drop', store: s.name,
-        title: `⚠️ ROAS ${s.roas.toFixed(2)}× — ${s.name}`,
-        body: `Abaixo da meta de ${cfg.roasDrop.threshold}×. Hoje: ${money(s.revenue)} de receita, ${money(s.adSpend)} em anúncios, lucro ${money(s.profit)}.`,
-      }
-      if (await maybeSend(alert, s, day, opts)) fired.push(alert)
-    }
-
-    if (cfg.marginDrop.enabled && judgeable && s.revenue > 0 && s.margin < cfg.marginDrop.threshold) {
-      const alert = {
-        kind: 'margin_drop', store: s.name,
-        title: `⚠️ Margem ${s.margin.toFixed(0)}% — ${s.name}`,
-        body: `Abaixo de ${cfg.marginDrop.threshold}%. Hoje: ${money(s.revenue)} de receita e ${money(s.profit)} de lucro em ${s.orders} pedidos.`,
-      }
-      if (await maybeSend(alert, s, day, opts)) fired.push(alert)
-    }
-
-    if (cfg.spendSpike.enabled) {
-      const avg = baseline.get(s.id) ?? 0
-      const pct = avg > 0 ? (s.adSpend / avg) * 100 : 0
-      if (avg > 0 && s.adSpend >= cfg.minSpend && pct >= cfg.spendSpike.threshold) {
-        const alert = {
-          kind: 'spend_spike', store: s.name,
-          title: `📣 Gasto ${pct.toFixed(0)}% da média — ${s.name}`,
-          body: `${money(s.adSpend)} hoje contra ${money(avg)} de média dos últimos 7 dias. ROAS ${s.roas > 0 ? `${s.roas.toFixed(2)}×` : '—'}.`,
-        }
-        if (await maybeSend(alert, s, day, opts)) fired.push(alert)
+  for (const input of inputs) {
+    for (const a of evaluateStoreAlerts(input, cfg, { ignoreHour: opts.force })) {
+      const delivered = opts.dryRun ? 0 : await deliver(a.kind, a.storeId, a.day, {
+        title: a.title, body: a.body, url: a.url, kind: 'alert',
+        tag: `${a.kind}-${a.storeId}-${a.day}`,
+        data: { kind: a.kind, tenantId: a.storeId },
+      }, opts)
+      if (opts.dryRun || delivered > 0) {
+        fired.push({ kind: a.kind, storeId: a.storeId, store: a.store, title: a.title, body: a.body, delivered })
       }
     }
   }
@@ -214,22 +400,6 @@ export async function runAlertChecks(
   return fired
 }
 
-async function maybeSend(
-  alert: FiredAlert, store: StoreOverviewRow, day: string,
-  opts: { force?: boolean; dryRun?: boolean }
-): Promise<boolean> {
-  if (opts.dryRun) return true
-  if (!opts.force && !(await claim(alert.kind, store.id, day, { title: alert.title }))) return false
-  await sendPushToAll({
-    title: alert.title,
-    body: alert.body,
-    url: '/m',
-    tag: `${alert.kind}-${store.id}-${day}`,
-    data: { kind: alert.kind, tenantId: store.id },
-  })
-  return true
-}
-
 // ─── Scale opportunities ──────────────────────────────────────────────────────
 
 /**
@@ -239,65 +409,51 @@ async function maybeSend(
  * Campaign level because that is the level that can actually be funded in this
  * account's structure, and judged on the margin of the sales the campaign can
  * be shown to have started — ad spend in full against credited revenue only.
- * That is deliberately the strict reading: the organic and repeat revenue that
- * rides on top of a campaign is not counted toward it.
  */
-export async function runScaleChecks(
-  opts: { force?: boolean; dryRun?: boolean } = {}
-): Promise<FiredAlert[]> {
+export async function runScaleChecks(opts: RunOpts = {}): Promise<FiredAlert[]> {
   const cfg = await getAlertConfig()
   if (!cfg.scaleAlerts.enabled && !opts.force && !opts.dryRun) return []
+  if (!opts.dryRun && (await pushDeviceCount()) === 0) return []
 
-  const day = todayInTz(REFERENCE_TZ)
-  const stores = await allStores()
+  const stores = await activeStores()
   const fired: FiredAlert[] = []
 
   for (const store of stores) {
+    const tz = safeTz(store.timezone)
+    const day = todayInTz(tz)
     let signals
     try {
-      signals = await getCampaignSignals(store.id, {
-        ...DEFAULT_SCALE_CONFIG,
-        minMargin: cfg.scaleAlerts.threshold,
-      })
+      signals = await getCampaignSignals(store.id, { ...DEFAULT_SCALE_CONFIG, minMargin: cfg.scaleAlerts.threshold }, tz)
     } catch (err) {
       console.error('[alerts] scale check failed for', store.id, err)
       continue
     }
 
-    const label = store.shop_name ?? store.shopify_domain?.replace('.myshopify.com', '') ?? 'Loja'
-
     for (const c of signals) {
       if (c.verdict !== 'scale' && c.verdict !== 'cut') continue
       // A paused campaign cannot be given more budget, and telling anyone to
-      // cut one they already stopped is noise. Most campaigns here are paused.
+      // cut one they already stopped is noise.
       if (c.status !== 'ACTIVE') continue
 
       const scaling = c.verdict === 'scale'
-      const alert: FiredAlert = {
-        kind: scaling ? 'scale_up' : 'scale_cut',
-        store: label,
-        title: scaling
-          ? `🚀 ${c.name.slice(0, 40)} — dá para escalar`
-          : `🛑 ${c.name.slice(0, 40)} — queimando dinheiro`,
-        body: [
-          c.reasons[0],
-          c.reasons[1],
-          `${label}: $${c.spend.toFixed(0)} gastos, ${c.orders} pedidos nos últimos 7 dias fechados.`,
-        ].filter(Boolean).join(' · '),
-      }
+      const kind = scaling ? 'scale_up' : 'scale_cut'
+      const title = scaling
+        ? `🚀 ${c.name.slice(0, 40)} — dá para escalar`
+        : `🛑 ${c.name.slice(0, 40)} — queimando dinheiro`
+      const body = [
+        c.reasons[0],
+        c.reasons[1],
+        `${store.name}: $${c.spend.toFixed(0)} gastos, ${c.orders} pedidos nos últimos 7 dias fechados.`,
+      ].filter(Boolean).join(' · ')
 
-      if (opts.dryRun) { fired.push(alert); continue }
-      // One per campaign per day, claimed through the same unique index the
-      // other alerts use.
-      if (!opts.force && !(await claim(alert.kind, `${store.id}:${c.campaignId}`, day, { margin: c.margin }))) continue
-      await sendPushToAll({
-        title: alert.title,
-        body: alert.body,
-        url: '/campaigns',
-        tag: `${alert.kind}-${c.campaignId}-${day}`,
-        data: { kind: alert.kind, tenantId: store.id, campaignId: c.campaignId },
-      })
-      fired.push(alert)
+      // The phone, on this store's campaigns: /campaigns is a Clerk page the
+      // phone cannot open.
+      const delivered = opts.dryRun ? 0 : await deliver(kind, `${store.id}:${c.campaignId}`, day, {
+        title, body, url: storeUrl(store.id, 'campanhas'), kind: 'scale',
+        tag: `${kind}-${c.campaignId}-${day}`,
+        data: { kind, tenantId: store.id, campaignId: c.campaignId },
+      }, opts)
+      if (opts.dryRun || delivered > 0) fired.push({ kind, storeId: store.id, store: store.name, title, body, delivered })
     }
   }
 
@@ -310,50 +466,110 @@ export async function runScaleChecks(
 
 // ─── Daily summary ────────────────────────────────────────────────────────────
 
-/** Push the day's account-wide result, compared with yesterday. */
-export async function sendDailySummary(opts: { force?: boolean } = {}): Promise<boolean> {
+export interface DailySummary {
+  title: string
+  body: string
+  profit: number
+}
+
+/** Title and body of the summary, from the same portfolio view the phone
+ *  shows for Todas / Hoje. Pure. */
+export function summaryText(
+  t: PnL, before: PnL, stores: Pick<PortfolioStoreRow, 'name' | 'totals' | 'configured' | 'dayClosed'>[],
+  sameTimeOfDay: boolean,
+): DailySummary {
+  const delta = before.operatingProfit !== 0
+    ? ` (${t.operatingProfit >= before.operatingProfit ? '+' : ''}${(((t.operatingProfit - before.operatingProfit) / Math.abs(before.operatingProfit)) * 100).toFixed(0)}% vs ontem${sameTimeOfDay ? ' nesta hora' : ''})`
+    : ''
+  const active = stores.filter(s => s.totals.orders > 0 || s.totals.adSpend > 0)
+  const ranked = [...active].sort((a, b) => b.totals.operatingProfit - a.totals.operatingProfit)
+  const best = ranked[0]
+  const worst = ranked[ranked.length - 1]
+  const noSales = stores.filter(s => s.totals.orders === 0 && s.totals.adSpend > 0)
+  const unconfigured = stores.filter(s => !s.configured && (s.totals.orders > 0 || s.totals.adSpend > 0))
+  const lines = [
+    `${t.orders} pedidos · ${money(t.revenue)} receita · ${money(t.adSpend)} anúncios · margem ${t.margin !== null ? `${t.margin.toFixed(0)}%` : '—'}`,
+    ranked.length > 1 && best ? `Melhor: ${best.name} ${money(best.totals.operatingProfit)}` : null,
+    ranked.length > 1 && worst && worst !== best ? `Pior: ${worst.name} ${money(worst.totals.operatingProfit)}` : null,
+    noSales.length ? `Sem vendas: ${noSales.map(s => `${s.name} (${money(s.totals.adSpend)} em anúncios)`).join(', ')}` : null,
+    unconfigured.length ? `Sem custos configurados: ${unconfigured.map(s => s.name).join(', ')}` : null,
+  ].filter((l): l is string => !!l)
+  return { title: `📊 Hoje: ${money(t.operatingProfit)} de lucro${delta}`, body: lines.join(' · '), profit: t.operatingProfit }
+}
+
+export interface SummaryResult {
+  sent: boolean
+  /** Devices reached. */
+  delivered: number
+  summary: DailySummary | null
+}
+
+/**
+ * Push the day's result for every active store, compared with yesterday at the
+ * same time on each store's own clock — the same numbers as the phone's
+ * Todas / Hoje. Once per day unless forced; `dryRun` builds it without sending.
+ */
+export async function sendDailySummary(opts: RunOpts = {}): Promise<SummaryResult> {
   const cfg = await getAlertConfig()
-  if (!cfg.dailySummary.enabled && !opts.force) return false
+  const none: SummaryResult = { sent: false, delivered: 0, summary: null }
+  if (!cfg.dailySummary.enabled && !opts.force && !opts.dryRun) return none
 
   const day = todayInTz(REFERENCE_TZ)
-  const prev = shiftDate(day, -1)
+  if (!opts.dryRun) {
+    if ((await pushDeviceCount()) === 0) return none
+    if (!opts.force && !(await claim('daily_summary', '*', day, { hour: cfg.dailySummary.hour }))) return none
+  }
 
-  if (!opts.force && !(await claim('daily_summary', '*', day, { hour: cfg.dailySummary.hour }))) return false
+  try {
+    const stores = await activeStores()
+    if (!stores.length) {
+      if (!opts.dryRun && !opts.force) await release('daily_summary', '*', day)
+      return none
+    }
+    const view = await buildPortfolio(stores, 'today', null, null, new Date(),
+      { liveFeed: false, chargebackHealth: false, freshness: false })
+    const summary = summaryText(view.totals, view.comparison.totals, view.stores, view.comparison.sameTimeOfDay)
+    if (opts.dryRun) return { sent: false, delivered: 0, summary }
 
-  const stores = await allStores()
-  if (stores.length === 0) return false
+    const res = await sendPushToAll({
+      title: summary.title, body: summary.body, url: '/m', kind: 'summary',
+      tag: `daily-summary-${day}`,
+      data: { kind: 'daily_summary', profit: summary.profit },
+    })
+    if (res.sent === 0 && !opts.force) await release('daily_summary', '*', day)
+    console.log(`[alerts] daily summary for ${day}: profit ${summary.profit.toFixed(2)}, ${res.sent} device(s)`)
+    return { sent: res.sent > 0, delivered: res.sent, summary }
+  } catch (err) {
+    // A claim whose summary never went out must not block the day.
+    if (!opts.dryRun && !opts.force) await release('daily_summary', '*', day).catch(() => {})
+    throw err
+  }
+}
 
-  // Yesterday is cut at the hour this summary is being sent, so a 9pm report
-  // is not comparing twenty-one hours against twenty-four.
-  const hour = hourInTz()
-  const [today, yesterday] = await Promise.all([
-    getAccountOverview(stores, day, day),
-    getDayThroughHour(stores.map(s => s.id), prev, hour),
-  ])
+// ─── API shapes (GET/POST /api/mobile/alerts) ─────────────────────────────────
 
-  const t = today.totals
-  const delta = yesterday.profit !== 0
-    ? ` (${t.profit >= yesterday.profit ? '+' : ''}${(((t.profit - yesterday.profit) / Math.abs(yesterday.profit)) * 100).toFixed(0)}% vs ontem nesta hora)`
-    : ''
+export interface AlertEventRow {
+  kind: string
+  /** Store id, or null for the account-wide summary. */
+  storeId: string | null
+  store: string | null
+  /** The store-day the alert was claimed for. */
+  day: string
+  sentAt: string
+  title: string | null
+}
 
-  const ranked = today.stores.filter(s => !s.failed)
-  const worst = ranked[ranked.length - 1]
-  const best  = ranked[0]
+export interface AlertsGetResponse {
+  config: AlertConfig
+  /** What was delivered in the last 24 hours, newest first. */
+  recent: AlertEventRow[]
+  /** Devices a push would reach right now; 0 means alerts cannot arrive. */
+  devices: number
+}
 
-  const lines = [
-    `${t.orders} pedidos · ${money(t.revenue)} receita · ${money(t.adSpend)} ads · margem ${t.revenue > 0 ? `${t.margin.toFixed(0)}%` : '—'}`,
-    ranked.length > 1 && best  ? `Melhor: ${best.name} ${money(best.profit)}`   : null,
-    ranked.length > 1 && worst && worst.id !== best?.id ? `Pior: ${worst.name} ${money(worst.profit)}` : null,
-  ].filter(Boolean)
-
-  await sendPushToAll({
-    title: `📊 Hoje: ${money(t.profit)} de lucro${delta}`,
-    body: lines.join(' · '),
-    url: '/m',
-    tag: `daily-summary-${day}`,
-    data: { kind: 'daily_summary', profit: t.profit },
-  })
-
-  console.log(`[alerts] daily summary sent for ${day}: profit ${t.profit.toFixed(2)}`)
-  return true
+export interface AlertsTestResponse {
+  tested: true
+  devices: number
+  alerts: FiredAlert[]
+  summary: SummaryResult
 }

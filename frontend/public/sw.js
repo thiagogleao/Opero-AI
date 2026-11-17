@@ -1,9 +1,10 @@
 /* Opero AI — service worker for the mobile PWA.
- * Handles web-push delivery and notification taps. Deliberately does NOT
- * cache app shell or API responses: this dashboard is only useful with live
- * data, and a stale cache would be worse than a spinner. */
+ * Handles web-push delivery, notification taps and subscription rotation.
+ * Deliberately does NOT cache the app shell or API responses: this dashboard
+ * is only useful with live data, and a stale cache would be worse than a
+ * spinner. */
 
-const VERSION = 'opero-v1'
+const VERSION = 'opero-v2'
 
 self.addEventListener('install', () => {
   // Take over immediately so a redeploy doesn't leave an old worker handling push.
@@ -14,6 +15,15 @@ self.addEventListener('activate', event => {
   event.waitUntil(self.clients.claim())
 })
 
+/** What a push is about. Senders set `kind`; the order webhook sends a sale
+ *  with an orderId (and may not set kind). Anything else is not a sale. */
+function kindOf(payload) {
+  const data = payload.data || {}
+  if (payload.kind) return payload.kind
+  if (data.kind === 'sale' || (!data.kind && data.orderId)) return 'sale'
+  return data.kind ? 'alert' : 'other'
+}
+
 self.addEventListener('push', event => {
   let payload = {}
   try {
@@ -22,6 +32,7 @@ self.addEventListener('push', event => {
     payload = { title: 'Opero AI', body: event.data ? event.data.text() : '' }
   }
 
+  const kind = kindOf(payload)
   const title = payload.title || 'Opero AI'
   const options = {
     body: payload.body || '',
@@ -31,33 +42,105 @@ self.addEventListener('push', event => {
     // Each sale is its own event worth seeing, so don't collapse silently.
     renotify: Boolean(payload.tag),
     vibrate: [80, 40, 80],
-    data: { url: payload.url || '/m', ...(payload.data || {}) },
+    data: { ...(payload.data || {}), pushKind: kind, url: payload.url || '/m', version: VERSION },
     timestamp: Date.now(),
   }
 
   event.waitUntil(Promise.all([
     self.registration.showNotification(title, options),
-    // Tell any open tab a sale landed, so it can chime and refresh right away
-    // instead of waiting up to a full poll interval to notice.
+    // Tell any open tab. Only a sale is announced as one — the app plays the
+    // cash-register sound for it; an alert or a summary just asks for a reload.
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(clients => {
-      for (const client of clients) {
-        client.postMessage({ type: 'sale', payload: payload.data || {} })
-      }
+      const message = kind === 'sale'
+        ? { type: 'sale', payload: payload.data || {} }
+        : { type: 'push', kind, payload: payload.data || {} }
+      for (const client of clients) client.postMessage(message)
     }),
   ]))
 })
 
+/** Same-origin path of a client URL ('' when it cannot be parsed). */
+function pathOf(url) {
+  try { return new URL(url).pathname } catch { return '' }
+}
+
 self.addEventListener('notificationclick', event => {
   event.notification.close()
-  const target = (event.notification.data && event.notification.data.url) || '/m'
+  const data = event.notification.data || {}
+  // The payload's URL, e.g. /m?loja=<id>: the store the alert is about. Only
+  // this app's own pages are opened, whatever a payload carries.
+  let target = new URL('/m', self.location.origin).href
+  try {
+    const u = new URL(data.url || '/m', self.location.origin)
+    if (u.origin === self.location.origin) target = u.href
+  } catch { /* malformed url: open the app */ }
 
-  event.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(clients => {
-      // Focus an already-open tab rather than stacking new ones.
-      for (const client of clients) {
-        if (client.url.includes('/m') && 'focus' in client) return client.focus()
-      }
-      return self.clients.openWindow(target)
+  event.waitUntil((async () => {
+    const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+    const app = clients.find(c => {
+      const p = pathOf(c.url)
+      return p === '/m' || p.startsWith('/m/')
     })
-  )
+    if (!app) return self.clients.openWindow(target)
+    // Reuse the open app, but show what was tapped. navigate() only works on a
+    // window this worker controls; otherwise the page is asked to go there.
+    if (app.url !== target) {
+      try {
+        if ('navigate' in app) {
+          const navigated = await app.navigate(target)
+          if (navigated) return navigated.focus()
+        }
+      } catch { /* not controlled by this worker */ }
+      app.postMessage({ type: 'navigate', url: target })
+    }
+    return 'focus' in app ? app.focus() : undefined
+  })())
 })
+
+/**
+ * The push service rotated or dropped the subscription (browser update, key
+ * change). Subscribe again with the same server key and tell the server, so
+ * pushes keep arriving without the owner reopening the app. Same-origin fetch
+ * carries the opero_m cookie.
+ */
+self.addEventListener('pushsubscriptionchange', event => {
+  event.waitUntil((async () => {
+    try {
+      let key = event.oldSubscription && event.oldSubscription.options
+        ? event.oldSubscription.options.applicationServerKey
+        : null
+      if (!key) {
+        const res = await fetch('/api/push/subscribe', { credentials: 'same-origin' })
+        const info = res.ok ? await res.json() : null
+        if (!info || !info.vapidPublicKey) return
+        key = urlBase64ToUint8Array(info.vapidPublicKey)
+      }
+      const sub = event.newSubscription
+        || await self.registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key })
+      await fetch('/api/push/subscribe', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(sub.toJSON()),
+      })
+      if (event.oldSubscription && event.oldSubscription.endpoint !== sub.endpoint) {
+        await fetch('/api/push/subscribe', {
+          method: 'DELETE',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ endpoint: event.oldSubscription.endpoint }),
+        })
+      }
+    } catch (err) {
+      console.error('[sw] resubscribe failed', err)
+    }
+  })())
+})
+
+function urlBase64ToUint8Array(base64) {
+  const padding = '='.repeat((4 - (base64.length % 4)) % 4)
+  const raw = atob((base64 + padding).replace(/-/g, '+').replace(/_/g, '/'))
+  const out = new Uint8Array(raw.length)
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i)
+  return out
+}

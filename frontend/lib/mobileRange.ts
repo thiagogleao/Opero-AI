@@ -1,105 +1,22 @@
-/** Date-range presets shared by the mobile routes. */
+/**
+ * Compatibility re-export: the date presets live in lib/engine/dates.ts.
+ *
+ * Kept so existing importers (lib/scaleSignals, app/api/mobile/detail) keep
+ * compiling; new code should import from '@/lib/engine/dates' directly.
+ */
 
-export type Period =
-  | 'today' | 'yesterday' | '7d' | '14d' | '30d' | '90d' | 'mtd' | 'lastmonth' | 'custom'
+import { daysBetween, shiftDate, type DateRange } from './engine/dates'
 
-export const PERIODS: { key: Period; label: string }[] = [
-  { key: 'today',     label: 'Hoje' },
-  { key: 'yesterday', label: 'Ontem' },
-  { key: '7d',        label: '7 dias' },
-  { key: '14d',       label: '14 dias' },
-  { key: '30d',       label: '30 dias' },
-  { key: 'mtd',       label: 'Este mês' },
-  { key: 'lastmonth', label: 'Mês passado' },
-  { key: '90d',       label: '90 dias' },
-  { key: 'custom',    label: 'Escolher' },
-]
-
-/** YYYY-MM-DD for "now" in an IANA timezone. */
-export function todayInTz(tz: string): string {
-  return new Date().toLocaleDateString('en-CA', { timeZone: tz })
-}
-
-/** Shift a YYYY-MM-DD string by N days without DST drift. */
-export function shiftDate(date: string, days: number): string {
-  const [y, m, d] = date.split('-').map(Number)
-  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10)
-}
-
-const iso = (d: Date) => d.toISOString().slice(0, 10)
+export {
+  todayInTz, shiftDate, REFERENCE_TZ, resolveRange, anchorTz, PERIODS, type Period,
+} from './engine/dates'
 
 /**
- * Resolve a preset to absolute dates.
- *
- * The same absolute window is then applied to every store. Resolving per-store
- * instead would make the totals a sum over different windows and the daily
- * chart incoherent, since each store keeps its own timezone — so the reference
- * timezone anchors the range and each store is measured against it.
+ * The window of the same length ending the day before `from`. Prefer
+ * comparisonRange from lib/engine/dates, which also knows calendar months and
+ * "today until this hour".
  */
-export function resolveRange(
-  period: Period,
-  tz: string,
-  from?: string | null,
-  to?: string | null,
-): { from: string; to: string } {
-  if (period === 'custom' && from && to) {
-    // Guard against a reversed range from the two date inputs.
-    return from <= to ? { from, to } : { from: to, to: from }
-  }
-
-  const today = todayInTz(tz)
-  const [y, m] = today.split('-').map(Number)
-
-  switch (period) {
-    case 'yesterday': {
-      const d = shiftDate(today, -1)
-      return { from: d, to: d }
-    }
-    case '7d':  return { from: shiftDate(today, -6),  to: today }
-    case '14d': return { from: shiftDate(today, -13), to: today }
-    case '30d': return { from: shiftDate(today, -29), to: today }
-    case '90d': return { from: shiftDate(today, -89), to: today }
-    case 'mtd': return { from: iso(new Date(Date.UTC(y, m - 1, 1))), to: today }
-    case 'lastmonth': return {
-      from: iso(new Date(Date.UTC(y, m - 2, 1))),
-      to:   iso(new Date(Date.UTC(y, m - 1, 0))), // day 0 = last day of prev month
-    }
-    case 'today':
-    default: return { from: today, to: today }
-  }
-}
-
-/**
- * The window of the same length ending the day before `from`.
- *
- * One rule for every preset, including the calendar ones: "this month" compares
- * against the equally long stretch that came before it, not against the whole
- * of last month, so a comparison made on the 3rd is not measured against 31
- * days of sales.
- */
-export function previousRange(from: string, to: string): { from: string; to: string } {
-  const days = Math.round(
-    (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000
-  ) + 1
-  return { from: shiftDate(from, -days), to: shiftDate(from, -1) }
-}
-
-/** Timezone the ranges are anchored to when aggregating across stores. */
-export const REFERENCE_TZ = 'America/Sao_Paulo'
-
-/**
- * The timezone a period should be measured in.
- *
- * One store is read on its own clock. Asking a Japanese store for "Hoje" has to
- * mean the Japanese day: the two calendars run twelve hours apart, so measuring
- * it in the reference timezone showed the day that had already closed and hid
- * the one in progress — a full day of sales reported as though it were the
- * current one, and the current one invisible until noon in Japan.
- *
- * Several stores at once fall back to the reference timezone, for the reason
- * resolveRange gives: their totals have to share one window or the sum spans
- * different days and the daily chart stops lining up.
- */
-export function anchorTz(timezones: (string | null | undefined)[]): string {
-  return timezones.length === 1 ? (timezones[0] || REFERENCE_TZ) : REFERENCE_TZ
+export function previousRange(from: string, to: string): DateRange {
+  const n = daysBetween(from, to)
+  return { from: shiftDate(from, -n), to: shiftDate(from, -1) }
 }
