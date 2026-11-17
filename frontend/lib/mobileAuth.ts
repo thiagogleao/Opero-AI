@@ -54,14 +54,17 @@ export function makeSessionCookie(): string | null {
   return t ? sessionValue(t) : null
 }
 
+/** True when `value` is the session cookie the configured token produces. */
+export function isValidSessionValue(value: string | null | undefined): boolean {
+  const t = token()
+  if (!t || !value) return false
+  return sameSecret(value, sessionValue(t))
+}
+
 /** True when the request carries a valid mobile session cookie. */
 export async function hasMobileSession(): Promise<boolean> {
-  const t = token()
-  if (!t) return false
   const jar = await cookies()
-  const got = jar.get(MOBILE_COOKIE)?.value
-  if (!got) return false
-  return sameSecret(got, sessionValue(t))
+  return isValidSessionValue(jar.get(MOBILE_COOKIE)?.value)
 }
 
 /**
