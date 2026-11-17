@@ -368,12 +368,25 @@ async function deliver(
  * running a check by hand must not silently swallow the real alert. `force`
  * ignores the hour and the once-a-day claim (the "Testar agora" button).
  */
+/** Owner's quiet hours, on the Brasília clock: no alert pushes from 23:00 to 08:00. */
+export const QUIET_FROM_HOUR = 23
+export const QUIET_TO_HOUR = 8
+
+export function inQuietHours(now: Date = new Date()): boolean {
+  const h = Math.floor(minutesIntoDay(REFERENCE_TZ, now) / 60)
+  return h >= QUIET_FROM_HOUR || h < QUIET_TO_HOUR
+}
+
 export async function runAlertChecks(opts: RunOpts = {}): Promise<FiredAlert[]> {
   const cfg = await getAlertConfig()
   const anyRule = cfg.roasDrop.enabled || cfg.spendNoSales.enabled || cfg.spendSpike.enabled || cfg.marginDrop.enabled
   if (!anyRule) return []
   // Nobody to tell: do not price anything, and claim nothing.
   if (!opts.dryRun && (await pushDeviceCount()) === 0) return []
+  // Each store is judged on its own clock, but the owner sleeps on Brasília's:
+  // a Tokyo store's mature day lands at night in Brazil. Nothing is claimed
+  // in quiet hours, so the alert still fires once the owner is awake.
+  if (!opts.force && !opts.dryRun && inQuietHours()) return []
 
   const stores = await activeStores()
   if (!stores.length) return []
@@ -414,6 +427,7 @@ export async function runScaleChecks(opts: RunOpts = {}): Promise<FiredAlert[]> 
   const cfg = await getAlertConfig()
   if (!cfg.scaleAlerts.enabled && !opts.force && !opts.dryRun) return []
   if (!opts.dryRun && (await pushDeviceCount()) === 0) return []
+  if (!opts.force && !opts.dryRun && inQuietHours()) return []
 
   const stores = await activeStores()
   const fired: FiredAlert[] = []

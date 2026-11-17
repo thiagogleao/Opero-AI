@@ -88,3 +88,13 @@ describe('summaryText', () => {
     expect(s.body).toContain('Melhor: MOKOO $300')
   })
 })
+
+describe('quiet hours', () => {
+  it('holds alert pushes from 23:00 to 08:00 in Brasília', async () => {
+    const { inQuietHours } = await import('../../alerts')
+    expect(inQuietHours(new Date('2026-11-17T02:30:00Z'))).toBe(true)  // 23:30 BRT
+    expect(inQuietHours(new Date('2026-11-17T10:59:00Z'))).toBe(true)  // 07:59 BRT
+    expect(inQuietHours(new Date('2026-11-17T11:00:00Z'))).toBe(false) // 08:00 BRT
+    expect(inQuietHours(new Date('2026-11-17T16:30:00Z'))).toBe(false) // 13:30 BRT
+  })
+})
