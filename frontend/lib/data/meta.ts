@@ -57,6 +57,27 @@ export function orphanAdName(adId: string): string {
 /** The campaign bucket for spend whose ad has no campaign on record yet. */
 export const ORPHAN_CAMPAIGN_NAME = 'Anúncios ainda não sincronizados'
 
+/**
+ * The catalog row of an ad and of its campaign, at most ONE each.
+ *
+ * fb_ads / fb_campaigns are keyed by store as well as id (an ad account can
+ * move between stores), so the same ad can have a row per store. Joining on
+ * the id alone would then repeat every metric row once per copy and add the
+ * spend up twice. Each metric row takes the copy of its own store when there
+ * is one, else the freshest other copy (which still carries the names).
+ * Needs the aliases m (fb_ad_daily_metrics) and, for the campaign, a.
+ */
+export const AD_FOR_METRIC = `LEFT JOIN LATERAL (
+         SELECT a.* FROM fb_ads a
+          WHERE a.ad_id = m.ad_id
+          ORDER BY (a.tenant_id = m.tenant_id) DESC NULLS LAST, a.synced_at DESC NULLS LAST
+          LIMIT 1) a ON true`
+export const CAMPAIGN_FOR_AD = `LEFT JOIN LATERAL (
+         SELECT c.* FROM fb_campaigns c
+          WHERE c.campaign_id = a.campaign_id
+          ORDER BY (c.tenant_id = a.tenant_id) DESC NULLS LAST, c.synced_at DESC NULLS LAST
+          LIMIT 1) c ON true`
+
 // ─── Facts ────────────────────────────────────────────────────────────────────
 
 /** One ad on one Meta day. Money in USD (every ad account is USD). */
@@ -133,8 +154,8 @@ export async function loadAdDayFacts(storeId: string, range: DateRange, filter: 
             COALESCE(m.video_p100, 0)::float8 AS p100
        FROM fb_ad_daily_metrics m
        JOIN tenants t ON t.id = m.tenant_id
-       LEFT JOIN fb_ads a ON a.ad_id = m.ad_id
-       LEFT JOIN fb_campaigns c ON c.campaign_id = a.campaign_id
+       ${AD_FOR_METRIC}
+       ${CAMPAIGN_FOR_AD}
       WHERE m.tenant_id = $1 AND m.date BETWEEN $2::date AND $3::date${extra}`,
     params,
   )
@@ -194,7 +215,7 @@ export async function loadCampaignInfo(campaignIds: string[]): Promise<Map<strin
     `SELECT a.campaign_id, COALESCE(MAX(c.name), MAX(a.campaign_name)) AS name,
             MAX(c.status) AS status, MAX(c.objective) AS objective, MAX(c.account_id) AS account_id
        FROM fb_ads a
-       LEFT JOIN fb_campaigns c ON c.campaign_id = a.campaign_id
+       ${CAMPAIGN_FOR_AD}
       WHERE a.campaign_id = ANY($1::text[])
       GROUP BY a.campaign_id`,
     [ids],
@@ -254,8 +275,12 @@ export async function loadAdInfo(adIds: string[]): Promise<Map<string, AdInfo>> 
             c.status AS campaign_status, c.objective, c.account_id,
             a.thumbnail_url, a.creative_url, a.landing_url, a.created_time::text AS created_time
        FROM fb_ads a
-       LEFT JOIN fb_adsets s ON s.adset_id = a.adset_id
-       LEFT JOIN fb_campaigns c ON c.campaign_id = a.campaign_id
+       LEFT JOIN LATERAL (
+         SELECT s.name, s.status FROM fb_adsets s
+          WHERE s.adset_id = a.adset_id
+          ORDER BY (s.tenant_id = a.tenant_id) DESC NULLS LAST, s.synced_at DESC NULLS LAST
+          LIMIT 1) s ON true
+       ${CAMPAIGN_FOR_AD}
       WHERE a.ad_id = ANY($1::text[])`,
     [ids],
   )
@@ -379,8 +404,8 @@ export async function loadCampaignsBilledElsewhere(storeId: string, range: DateR
             SUM(${purchasesSql('m.purchase_value', 'm.purchases')})::float8 AS pc,
             MAX(s.here)::float8 AS here, MAX(s.total)::float8 AS total
        FROM fb_ad_daily_metrics m
-       JOIN fb_ads a ON a.ad_id = m.ad_id
-       LEFT JOIN fb_campaigns c ON c.campaign_id = a.campaign_id
+       ${AD_FOR_METRIC}
+       ${CAMPAIGN_FOR_AD}
        JOIN share s ON s.campaign_id = a.campaign_id
       WHERE m.tenant_id <> $1 AND m.date BETWEEN $2::date AND $3::date
         AND s.here >= ${JOURNEY_MIN_ORDERS} AND s.here * 2 > s.total

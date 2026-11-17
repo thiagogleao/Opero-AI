@@ -539,6 +539,11 @@ const V2_INDEXES = [
   ['uq_fb_ads_tenant_ad',        'CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS uq_fb_ads_tenant_ad ON fb_ads (tenant_id, ad_id)'],
   ['uq_fb_campaigns_tenant',     'CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS uq_fb_campaigns_tenant ON fb_campaigns (tenant_id, campaign_id)'],
   ['uq_fb_adsets_tenant',        'CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS uq_fb_adsets_tenant ON fb_adsets (tenant_id, adset_id)'],
+  // Lookups by the Meta id alone (lib/data/meta.ts picks one catalog row per
+  // ad/campaign) keep an index once the global unique keys are dropped.
+  ['idx_fb_ads_ad_id',             'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_fb_ads_ad_id ON fb_ads (ad_id)'],
+  ['idx_fb_campaigns_campaign_id', 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_fb_campaigns_campaign_id ON fb_campaigns (campaign_id)'],
+  ['idx_fb_adsets_adset_id',       'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_fb_adsets_adset_id ON fb_adsets (adset_id)'],
   // Freshness and status queries: newest run per store and source.
   ['idx_sync_runs_tenant_source_started',
    'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_sync_runs_tenant_source_started ON sync_runs (tenant_id, source, started_at DESC)'],
@@ -594,10 +599,51 @@ async function step(label, sql) {
 }
 
 async function indexState(name) {
-  const { rows } = await pool.query(
-    `SELECT i.indisvalid AS valid FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid WHERE c.relname = $1`,
-    [name])
-  return rows[0] ? (rows[0].valid ? 'valid' : 'invalid') : 'missing'
+  try {
+    const { rows } = await pool.query(
+      `SELECT i.indisvalid AS valid FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid WHERE c.relname = $1`,
+      [name])
+    return rows[0] ? (rows[0].valid ? 'valid' : 'invalid') : 'missing'
+  } catch (err) {
+    failures++
+    console.error(`[db] ✗ estado do índice ${name}: ${err.message}`)
+    return 'unknown'
+  }
+}
+
+/**
+ * What already exists, read once. `ALTER TABLE … ADD COLUMN IF NOT EXISTS`
+ * takes an ACCESS EXCLUSIVE lock even when the column is there, so on a live
+ * table every deploy queued every query behind ~56 no-op ALTERs. Statements
+ * whose object already exists are skipped instead of sent.
+ */
+const existing = { columns: new Set(), indexes: new Set() }
+
+async function loadExisting() {
+  try {
+    const cols = await pool.query(
+      `SELECT table_name || '.' || column_name AS k FROM information_schema.columns WHERE table_schema = 'public'`)
+    cols.rows.forEach(r => existing.columns.add(r.k))
+    const idx = await pool.query(`SELECT indexname AS k FROM pg_indexes WHERE schemaname = 'public'`)
+    idx.rows.forEach(r => existing.indexes.add(r.k))
+  } catch (err) {
+    // Without the snapshot every statement is sent, which is still correct.
+    console.warn('[db] catálogo não lido, nenhum passo será pulado:', err.message)
+  }
+}
+
+function alreadyApplied(sql) {
+  const col = sql.match(/^ALTER TABLE\s+(\w+)\s+ADD COLUMN IF NOT EXISTS\s+(\w+)/i)
+  if (col) return existing.columns.has(`${col[1]}.${col[2]}`)
+  const idx = sql.match(/^CREATE (?:UNIQUE )?INDEX (?:CONCURRENTLY )?IF NOT EXISTS\s+(\w+)/i)
+  if (idx) return existing.indexes.has(idx[1])
+  return false
+}
+
+let skipped = 0
+async function stepUnlessApplied(label, sql) {
+  if (alreadyApplied(sql)) { skipped++; return }
+  await step(label, sql)
 }
 
 /** True when each hand-made account cut is recorded (or the account has since
@@ -628,6 +674,14 @@ async function ensureIndex(name, ddl) {
     await step(`drop invalid ${name}`, `DROP INDEX CONCURRENTLY IF EXISTS ${name}`)
   }
   await step(`index ${name}`, ddl)
+  // A build that failed just now (lock or statement timeout) leaves an invalid
+  // index too. Don't keep it until the next deploy: app/collectors/upsert.py
+  // reflects it as a unique key and prefers it, Postgres refuses an invalid
+  // index as an ON CONFLICT arbiter, and every fb_ads/fb_adsets/fb_campaigns
+  // upsert would fail meanwhile. Without it the collector keeps the global key.
+  if ((await indexState(name)) === 'invalid') {
+    await step(`drop failed ${name}`, `DROP INDEX CONCURRENTLY IF EXISTS ${name}`)
+  }
 }
 
 function printAll() {
@@ -640,10 +694,24 @@ ${x};
 }
 
 async function main() {
-  for (const s of statements(BASE)) await step(s.split('\n')[0].slice(0, 70), s)
-  for (const s of statements(V2_COLUMNS)) await step(s.slice(0, 70), s)
+  await loadExisting()
+  for (const s of statements(BASE)) await stepUnlessApplied(s.split('\n')[0].slice(0, 70), s)
+  for (const s of statements(V2_COLUMNS)) await stepUnlessApplied(s.slice(0, 70), s)
   for (const s of statements(V2_SEED_CUTS)) await step('seed collect_from', s)
   for (const [name, ddl] of V2_INDEXES) await ensureIndex(name, ddl)
+  // The global keys go in a second, deliberate step. The collector that is
+  // live before this deploy upserts ON CONFLICT (ad_id) etc.: if the keys
+  // vanished while it still runs (the deploy overlap, or a rollback), every
+  // Meta sync of the old code would fail. The new collector works with or
+  // without them, and with them an ad still cannot move between stores (the
+  // insert is refused instead). Set MIGRATE_DROP_GLOBAL_META_KEYS=1 once the
+  // new version is live and stable.
+  if (process.env.MIGRATE_DROP_GLOBAL_META_KEYS !== '1') {
+    console.log('[db] chaves globais do Meta mantidas (MIGRATE_DROP_GLOBAL_META_KEYS≠1)')
+    await step('sync_runs retention', RETENTION)
+    console.log(failures ? `[db] schema aplicado com ${failures} falha(s) — a próxima subida tenta de novo` : `[db] schema ready (${skipped} passo(s) já aplicados)`)
+    return
+  }
   // Without the cuts, dropping the global ad-day keys would let a 28-day
   // re-pull copy another store's history into Glooty, Hibikura or EPOCH.
   const cuts = await cutsReady()
@@ -659,7 +727,7 @@ async function main() {
     await step(d.sql, d.sql)
   }
   await step('sync_runs retention', RETENTION)
-  console.log(failures ? `[db] schema aplicado com ${failures} falha(s) — a próxima subida tenta de novo` : '[db] schema ready')
+  console.log(failures ? `[db] schema aplicado com ${failures} falha(s) — a próxima subida tenta de novo` : `[db] schema ready (${skipped} passo(s) já aplicados)`)
 }
 
 if (PRINT) {
