@@ -1,122 +1,93 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { upsertTenant } from '@/lib/tenant'
-import { query } from '@/lib/db'
+import { NextResponse, type NextRequest } from 'next/server'
+import { getViewer, requireStore } from '@/lib/access'
+import { attachAdAccount } from '@/lib/integrations/adAccounts'
+import { storeCredentials } from '@/lib/integrations/credentials'
+import { exchangeCodeForLongToken, facebookApp, listAdAccounts } from '@/lib/integrations/facebook'
+import { appOrigin, errorResponse, flowCookie, HttpError } from '@/lib/integrations/http'
+import { LEGACY_OAUTH_COOKIES, NONCE_COOKIE, readOAuthState, viewerKey } from '@/lib/integrations/oauthState'
+import { FB_PENDING_COOKIE, FB_PENDING_TTL_SECONDS, sealPending } from '@/lib/integrations/pending'
 
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
+
+/**
+ * GET /api/facebook/callback — Facebook's redirect after the dialog.
+ *
+ * 1. The state must be ours (signature, expiry, nonce cookie of this browser),
+ *    started by this same viewer, for a store this viewer may see (else 404).
+ * 2. code → long-lived token, then the ad accounts it can read.
+ * 3. The token waits in a sealed cookie for the person to choose an account.
+ *    When the token reads exactly one live account, linking it breaks no rule
+ *    and it would not replace the store's current main account with another,
+ *    it is linked right away.
+ *
+ * Exits: `<return>?fb_connected=true&store=<id>` on success, the picker
+ * (/facebook/accounts or /facebook/extra-accounts, `?store=<id>`) to choose,
+ * or `<return>?fb_error=<code>&store=<id>` — and every exit clears the flow
+ * cookies, so a cancelled flow can never steer the next one.
+ */
 export async function GET(req: NextRequest) {
-  const { searchParams } = req.nextUrl
-  const code  = searchParams.get('code')
-  const state = searchParams.get('state')
-  const error = searchParams.get('error')
+  const origin = appOrigin(req)
+  const sp = new URL(req.url).searchParams
+  const check = readOAuthState(sp.get('state'), req.cookies.get(NONCE_COOKIE.facebook)?.value, 'facebook')
+  const st = check.ok ? check.state : null
+  const returnTo = st?.returnTo ?? '/settings'
 
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL || req.nextUrl.origin
-  const fail   = (reason: string) =>
-    NextResponse.redirect(new URL(`/settings?fb_error=${reason}`, appUrl))
+  const finish = (res: NextResponse, pending?: string) => {
+    res.cookies.delete(NONCE_COOKIE.facebook)
+    for (const c of LEGACY_OAUTH_COOKIES) res.cookies.delete(c)
+    if (pending) res.cookies.set(FB_PENDING_COOKIE, pending, flowCookie(FB_PENDING_TTL_SECONDS))
+    else res.cookies.delete(FB_PENDING_COOKIE)
+    return res
+  }
+  const to = (path: string, params: Record<string, string>) => {
+    const u = new URL(path, origin)
+    for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v)
+    return NextResponse.redirect(u)
+  }
+  const fail = (code: string) => finish(to(returnTo, st?.storeId ? { fb_error: code, store: st.storeId } : { fb_error: code }))
 
-  if (error || !code) return fail('access_denied')
+  try {
+    if (!st || !st.storeId) return fail('invalid_state')
+    const viewer = await getViewer()
+    if (!viewer) return finish(NextResponse.redirect(new URL('/sign-in', origin)))
+    if (viewerKey(viewer) !== st.viewer) return finish(NextResponse.json({ error: 'Loja não encontrada', code: 'not_found' }, { status: 404 }))
+    const store = await requireStore(viewer, st.storeId)
 
-  const cookieState = req.cookies.get('fb_oauth_state')?.value
-  if (!cookieState || cookieState !== state) return fail('invalid_state')
+    if (sp.get('error') || !sp.get('code')) return fail('access_denied')
+    const app = facebookApp()
+    if (!app) return fail('not_configured')
 
-  // userId is embedded after the first colon
-  const colonIdx = state!.indexOf(':')
-  const userId   = colonIdx >= 0 ? state!.slice(colonIdx + 1) : ''
-  if (!userId) return fail('invalid_state')
+    const exchanged = await exchangeCodeForLongToken(app, sp.get('code')!, `${origin}/api/facebook/callback`)
+    if (!exchanged.ok) return fail(exchanged.reason)
+    const listed = await listAdAccounts(exchanged.token)
+    const accounts = listed.ok ? listed.accounts : []
+    const mode = st.mode === 'extra' ? 'extra' : 'main'
 
-  const APP_ID     = process.env.FACEBOOK_APP_ID!
-  const APP_SECRET = process.env.FACEBOOK_APP_SECRET!
-  const redirectUri = `${appUrl}/api/facebook/callback`
-
-  // 1. Exchange code → short-lived token
-  const tokenRes = await fetch(
-    'https://graph.facebook.com/v20.0/oauth/access_token?' +
-    new URLSearchParams({ client_id: APP_ID, client_secret: APP_SECRET, redirect_uri: redirectUri, code }).toString()
-  )
-  if (!tokenRes.ok) return fail('token_exchange_failed')
-  const { access_token: shortToken } = await tokenRes.json()
-
-  // 2. Exchange short-lived → long-lived token (valid ~60 days)
-  const longRes = await fetch(
-    'https://graph.facebook.com/oauth/access_token?' +
-    new URLSearchParams({ grant_type: 'fb_exchange_token', client_id: APP_ID, client_secret: APP_SECRET, fb_exchange_token: shortToken }).toString()
-  )
-  if (!longRes.ok) return fail('long_token_failed')
-  const { access_token: longToken } = await longRes.json()
-
-  // 3. Fetch user's ad accounts
-  const accountsRes = await fetch(
-    `https://graph.facebook.com/me/adaccounts?fields=id,name,account_status&limit=50&access_token=${longToken}`
-  )
-  const accountsData = await accountsRes.json()
-  const accounts: { id: string; name: string; account_status: number }[] = accountsData.data || []
-
-  // ── Extra-account flow ────────────────────────────────────────────────────────
-  // Triggered when the user adds a second FB account from Settings.
-  // Saves to tenant_fb_accounts instead of tenants — does NOT touch existing data.
-  const oauthMode = req.cookies.get('fb_oauth_mode')?.value
-  if (oauthMode?.startsWith('add_extra:')) {
-    const tenantId = oauthMode.slice('add_extra:'.length)
-
-    const clearCookies = (r: NextResponse) => {
-      r.cookies.delete('fb_oauth_state')
-      r.cookies.delete('fb_oauth_mode')
-      return r
+    // Link without asking only when nothing changes but the token: a live
+    // account, and for "main" either the store has none yet or it is the same
+    // one. Switching a store's main account silently would splice two
+    // accounts' histories with no effective date, so that goes to the picker.
+    const currentMain = mode === 'main' ? (await storeCredentials(store.id))?.fbAdAccountId ?? null : null
+    const only = accounts.length === 1 ? accounts[0] : null
+    if (only && only.account_status === 1 && (mode === 'extra' || !currentMain || currentMain === only.id)) {
+      try {
+        await attachAdAccount(viewer, store, { adAccountId: only.id, role: mode, token: exchanged.token })
+        // 'true', the value the current Settings screen tests for.
+        return finish(to(returnTo, { fb_connected: 'true', store: store.id }))
+      } catch (err) {
+        // A rule stopped the automatic link (already linked elsewhere, would
+        // replace a permanent token…): let the picker explain it.
+        if (!(err instanceof HttpError)) throw err
+      }
     }
 
-    if (accounts.length === 0) {
-      // /me/adaccounts returned empty — common with Business Manager setups.
-      // Store the token and redirect to a manual account ID entry form.
-      const pending = Buffer.from(JSON.stringify({ tenantId, token: longToken })).toString('base64')
-      const res = NextResponse.redirect(new URL('/facebook/extra-accounts?manual=true', appUrl))
-      res.cookies.set('fb_extra_pending', pending, { httpOnly: true, maxAge: 300, path: '/', sameSite: 'lax' })
-      return clearCookies(res)
-    }
-
-    if (accounts.length === 1) {
-      // Single account — insert directly
-      await query(`
-        INSERT INTO tenant_fb_accounts (tenant_id, fb_ad_account_id, fb_access_token, is_active)
-        VALUES ($1, $2, $3, true)
-        ON CONFLICT (tenant_id, fb_ad_account_id) DO UPDATE SET
-          fb_access_token = EXCLUDED.fb_access_token,
-          is_active       = true
-      `, [tenantId, accounts[0].id, longToken])
-      return clearCookies(NextResponse.redirect(new URL('/settings?fb_extra_connected=true', appUrl)))
-    }
-
-    // Multiple accounts — store pending data in a short-lived httpOnly cookie
-    // so the picker page can retrieve and save the chosen account.
-    const pending = Buffer.from(JSON.stringify({ tenantId, token: longToken })).toString('base64')
-    const res = NextResponse.redirect(new URL('/facebook/extra-accounts', appUrl))
-    res.cookies.set('fb_extra_pending', pending, { httpOnly: true, maxAge: 300, path: '/', sameSite: 'lax' })
-    return clearCookies(res)
+    const pending = sealPending({ viewer: st.viewer, storeId: store.id, mode, token: exchanged.token })
+    const picker = mode === 'extra' ? '/facebook/extra-accounts' : '/facebook/accounts'
+    return finish(to(picker, accounts.length === 0 ? { store: store.id, manual: 'true' } : { store: store.id }), pending)
+  } catch (err) {
+    const res = errorResponse(err)
+    if (res.status === 404 || res.status === 401) return finish(NextResponse.json(await res.json(), { status: res.status }))
+    return fail('save_failed')
   }
-  // ─────────────────────────────────────────────────────────────────────────────
-
-  // Use the active tenant stored during auth (falls back to userId for primary store)
-  const activeTenantId = req.cookies.get('fb_oauth_tenant')?.value || userId
-
-  // Save token; update account ID only if we found exactly one account
-  const update: Record<string, string> = { fb_access_token: longToken }
-  if (accounts.length === 1) update.fb_ad_account_id = accounts[0].id
-  await upsertTenant(activeTenantId, update)
-
-  const clearCookies = (r: NextResponse) => {
-    r.cookies.delete('fb_oauth_state')
-    r.cookies.delete('fb_oauth_tenant')
-    return r
-  }
-
-  if (accounts.length > 1) {
-    // Multiple accounts: redirect to picker
-    const pickerUrl = new URL('/facebook/accounts', appUrl)
-    return clearCookies(NextResponse.redirect(pickerUrl.toString()))
-  }
-
-  if (accounts.length === 0) {
-    // No accounts returned (Business Manager setup) — ask user to enter manually
-    return clearCookies(NextResponse.redirect(new URL('/settings?fb_connected=true&no_account=true', appUrl)))
-  }
-
-  // One account auto-selected: redirect to success
-  return clearCookies(NextResponse.redirect(new URL('/settings?fb_connected=true', appUrl)))
 }

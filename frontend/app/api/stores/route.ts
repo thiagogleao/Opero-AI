@@ -1,36 +1,27 @@
-import { auth, currentUser } from '@clerk/nextjs/server'
-import { NextResponse } from 'next/server'
-import { getTenantsByUserId, upsertTenant } from '@/lib/tenant'
-import crypto from 'crypto'
+import { listStores } from '@/lib/access'
+import { errorResponse, viewerOrThrow } from '@/lib/integrations/http'
+import { loadStoreSummaries } from '@/lib/integrations/stores'
 
-export async function GET() {
-  const { userId } = await auth()
-  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  const stores = await getTenantsByUserId(userId)
-  return NextResponse.json({ stores })
-}
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
 
-export async function POST(req: Request) {
-  const { userId } = await auth()
-  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-
-  const body = await req.json()
-  const shopify_domain = body.shopify_domain?.replace(/https?:\/\//, '').replace(/\/$/, '')
-  const shopify_access_token = body.shopify_access_token
-
-  if (!shopify_domain || !shopify_access_token)
-    return NextResponse.json({ error: 'Campos obrigatórios: shopify_domain e shopify_access_token' }, { status: 400 })
-
-  const user = await currentUser()
-  const storeId = crypto.randomUUID()
-
-  const store = await upsertTenant(storeId, {
-    user_id: userId,
-    email: user?.emailAddresses[0]?.emailAddress,
-    shopify_domain,
-    shopify_access_token,
-    onboarded: true,
-  })
-
-  return NextResponse.json({ store })
+/**
+ * GET /api/stores[?archived=1]
+ *
+ * The viewer's stores (a partner: their account's; the owner: all), oldest
+ * first, as StoreSummary — presence and health flags, never a credential.
+ * Archived stores only with ?archived=1 (the "arquivadas" view).
+ *
+ * There is no POST: stores are created by connecting Shopify
+ * (GET /api/shopify/auth?mode=add or POST /api/shopify/connect).
+ */
+export async function GET(req: Request) {
+  try {
+    const viewer = await viewerOrThrow()
+    const includeArchived = new URL(req.url).searchParams.get('archived') === '1'
+    const refs = await listStores(viewer, { includeArchived })
+    return Response.json({ stores: await loadStoreSummaries(refs) })
+  } catch (err) {
+    return errorResponse(err)
+  }
 }

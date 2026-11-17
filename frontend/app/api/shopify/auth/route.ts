@@ -1,70 +1,106 @@
-import { NextRequest, NextResponse } from 'next/server'
-import crypto from 'crypto'
+import { NextResponse, type NextRequest } from 'next/server'
+import { getViewer, listStores, requireStore } from '@/lib/access'
+import { storeCredentials } from '@/lib/integrations/credentials'
+import { accountForNewStore, appOrigin, errorResponse, flowCookie, HttpError, storeParam } from '@/lib/integrations/http'
+import {
+  createOAuthState, LEGACY_OAUTH_COOKIES, NONCE_COOKIE, OAUTH_TTL_SECONDS, safeReturnTo, viewerKey,
+} from '@/lib/integrations/oauthState'
+import { normalizeShopDomain, partnersApp, SHOPIFY_SCOPES } from '@/lib/integrations/shopify'
 
-const SCOPES = [
-  'read_orders','write_orders','read_analytics',
-  'read_draft_orders','write_draft_orders',
-  'read_products','write_products',
-  'read_customers','write_customers',
-  'read_checkouts','write_checkouts',
-  'read_inventory','write_inventory',
-  'read_locations','write_locations',
-  'read_content','write_content',
-  'read_online_store_pages','write_online_store_pages',
-  'read_themes','write_themes','write_theme_code',
-  'read_price_rules','write_price_rules',
-  'read_discounts','write_discounts',
-  'read_fulfillments','write_fulfillments',
-  'read_returns','write_returns',
-  'read_shipping','write_shipping',
-  'read_reports','write_reports',
-  'read_marketing_events','write_marketing_events',
-  'read_files','write_files',
-  'read_metaobjects','write_metaobjects',
-  'read_script_tags','write_script_tags',
-  'read_translations','write_translations',
-  // Chargebacks. Declared in the app version but never requested here, so every
-  // token came back without it and four stores read as "Conectada" while being
-  // unable to see a single dispute. A token's scopes are fixed when it is
-  // granted, so adding it here only helps stores that reconnect afterwards.
-  'read_shopify_payments_disputes',
-].join(',')
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
 
+/**
+ * GET /api/shopify/auth?shop=<handle or domain>&mode=reconnect|add&store=<id>
+ *                      [&return=/settings|/settings/chaves|/onboarding][&storeStartDate=YYYY-MM-DD]
+ *
+ * Starts the Partners-app OAuth (the app in SHOPIFY_CLIENT_ID/SECRET).
+ *  - reconnect: `store` (or, for the current links, the viewer's store with
+ *    this domain) must be the viewer's — else 404 — and `shop` must be its
+ *    domain. Dev Dashboard stores cannot use this: they connect with Client
+ *    ID + Secret through POST /api/shopify/connect.
+ *  - add: a new store in the viewer's account (or the viewer's existing store
+ *    with that domain). Whether the domain belongs to another account is
+ *    checked in the callback, once Shopify has proven the person administers it.
+ * `reconnect=1` / `addStore=1` are accepted for the current links.
+ *
+ * Client ID and Secret are never accepted in the URL (it ends up in browser
+ * history and access logs): 400. `shop` must be a *.myshopify.com domain.
+ * Errors come back as `<return>?shopify_error=<code>`.
+ */
 export async function GET(req: NextRequest) {
-  const { searchParams, origin } = req.nextUrl
-  const shop = searchParams.get('shop')?.replace(/https?:\/\//, '').replace(/\/$/, '')
-  const storeStartDate = searchParams.get('storeStartDate') || ''
-
-  if (!shop) return NextResponse.json({ error: 'Missing shop' }, { status: 400 })
-
-  // Support custom Client ID/Secret for stores not in the same Partners org
-  const customClientId     = searchParams.get('clientId')     || ''
-  const customClientSecret = searchParams.get('clientSecret') || ''
-  const clientId = customClientId || process.env.SHOPIFY_CLIENT_ID
-  if (!clientId) return NextResponse.json({ error: 'SHOPIFY_CLIENT_ID not configured' }, { status: 500 })
-
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL || origin
-  const reconnect = searchParams.get('reconnect') === '1'
-  const addStore  = searchParams.get('addStore')  === '1'
-  const nonce = crypto.randomBytes(16).toString('hex')
-  const state = `${nonce}:${encodeURIComponent(storeStartDate)}:${reconnect ? '1' : '0'}:${addStore ? '1' : '0'}`
-  const redirectUri = `${appUrl}/api/shopify/callback`
-
-  const authUrl = new URL(`https://${shop}/admin/oauth/authorize`)
-  authUrl.searchParams.set('client_id', clientId)
-  authUrl.searchParams.set('scope', SCOPES)
-  authUrl.searchParams.set('redirect_uri', redirectUri)
-  authUrl.searchParams.set('state', state)
-
-  const res = NextResponse.redirect(authUrl.toString())
-  res.cookies.set('shopify_oauth_state', state, {
-    httpOnly: true, maxAge: 600, path: '/', sameSite: 'lax',
-  })
-  // Store custom credentials in cookie so callback can use them
-  if (customClientSecret) {
-    res.cookies.set('shopify_custom_creds', JSON.stringify({ clientId, clientSecret: customClientSecret }), {
-      httpOnly: true, maxAge: 600, path: '/', sameSite: 'lax',
-    })
+  const origin = appOrigin(req)
+  const sp = new URL(req.url).searchParams
+  const mode = sp.get('mode') === 'reconnect' || sp.get('reconnect') === '1' ? 'reconnect' : 'add'
+  const returnTo = safeReturnTo(sp.get('return'), mode === 'reconnect' ? '/settings' : '/onboarding')
+  const back = (code: string) => {
+    const u = new URL(returnTo, origin)
+    u.searchParams.set('shopify_error', code)
+    // What the current onboarding screen reads to show the failure.
+    if (returnTo === '/onboarding') u.searchParams.set('error', code)
+    return NextResponse.redirect(u)
   }
-  return res
+
+  try {
+    if (sp.has('clientSecret') || sp.has('clientId')) {
+      throw new HttpError(400, 'secret_in_url',
+        'Não envie Client ID/Secret pela URL. Use POST /api/shopify/connect com { shop, clientId, clientSecret }.')
+    }
+    const viewer = await getViewer()
+    if (!viewer) return NextResponse.redirect(new URL('/sign-in', origin))
+
+    let shop = normalizeShopDomain(sp.get('shop'))
+    const explicitStore = storeParam(new URL(req.url))
+    let storeId: string | null = null
+
+    if (mode === 'reconnect') {
+      if (explicitStore) {
+        const store = await requireStore(viewer, explicitStore)
+        storeId = store.id
+        // The store's own domain when the link does not repeat it.
+        if (!sp.get('shop')) shop = normalizeShopDomain(store.domain)
+      } else {
+        if (!shop) return back('invalid_shop')
+        const mine = (await listStores(viewer, { includeArchived: true })).find(s => s.domain?.toLowerCase() === shop)
+        if (!mine) return errorResponse(new HttpError(404, 'not_found', 'Loja não encontrada'))
+        storeId = mine.id
+      }
+    } else {
+      if (!shop) return back('invalid_shop')
+      const mine = (await listStores(viewer, { includeArchived: true })).find(s => s.domain?.toLowerCase() === shop)
+      if (mine?.archived) return back('store_archived')
+      if (mine) storeId = mine.id
+      else await accountForNewStore(viewer)
+    }
+
+    if (storeId) {
+      const creds = await storeCredentials(storeId)
+      if (!shop || creds?.shopifyDomain?.toLowerCase() !== shop) return back('domain_mismatch')
+      if (creds.devDashboard) return back('dev_dashboard_store')
+    }
+    if (!shop) return back('invalid_shop')
+
+    const app = partnersApp()
+    if (!app) return back('not_configured')
+
+    const startDate = sp.get('storeStartDate')
+    const { state, nonce } = createOAuthState({
+      provider: 'shopify', viewer: viewerKey(viewer), storeId, mode, returnTo, shop,
+      ...(startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate) ? { startDate } : {}),
+    })
+
+    const authUrl = new URL(`https://${shop}/admin/oauth/authorize`)
+    authUrl.searchParams.set('client_id', app.clientId)
+    authUrl.searchParams.set('scope', SHOPIFY_SCOPES)
+    authUrl.searchParams.set('redirect_uri', `${origin}/api/shopify/callback`)
+    authUrl.searchParams.set('state', state)
+
+    const res = NextResponse.redirect(authUrl)
+    res.cookies.set(NONCE_COOKIE.shopify, nonce, flowCookie(OAUTH_TTL_SECONDS))
+    for (const c of LEGACY_OAUTH_COOKIES) res.cookies.delete(c)
+    return res
+  } catch (err) {
+    if (err instanceof HttpError && err.code === 'account_required') return back('account_required')
+    return errorResponse(err)
+  }
 }

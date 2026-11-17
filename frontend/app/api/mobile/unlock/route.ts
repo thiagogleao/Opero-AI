@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { isValidToken, makeSessionCookie, rateLimited, MOBILE_COOKIE } from '@/lib/mobileAuth'
+import { clientIp, unlockTarget } from '@/lib/integrations/request'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -10,8 +11,8 @@ export const dynamic = 'force-dynamic'
  * Behind Railway's proxy `req.nextUrl.origin` is the container's own address
  * (https://localhost:8080), so redirecting to it dead-ends the user's browser.
  * The configured public URL is preferred because, unlike the forwarded host
- * header, it cannot be set by the caller — which keeps this off the list of
- * open-redirect footguns.
+ * header, it cannot be set by the caller. The redirect PATH is never taken
+ * from the request (see unlockTarget).
  */
 function appOrigin(req: NextRequest): string {
   const configured = process.env.NEXT_PUBLIC_APP_URL
@@ -26,18 +27,16 @@ function appOrigin(req: NextRequest): string {
 }
 
 /**
- * Magic-link unlock: /api/mobile/unlock?k=<token>
+ * Magic-link unlock: /api/mobile/unlock?k=<token>[&to=desktop]
  *
- * Exchanges the token for an HttpOnly session cookie and redirects to /m so
- * the secret leaves the URL bar, browser history and any Referer header.
+ * Exchanges the token for an HttpOnly session cookie and redirects so the
+ * secret leaves the URL bar, browser history and any Referer header. The same
+ * cookie unlocks every store on the phone (/m) and on the desktop site (/):
+ * `to=desktop` lands on '/', anything else on '/m'. Only those two targets
+ * exist, so this cannot be used as an open redirect.
  */
 export async function GET(req: NextRequest) {
-  const ip =
-    req.headers.get('x-forwarded-for')?.split(',')[0].trim() ??
-    req.headers.get('x-real-ip') ??
-    'unknown'
-
-  if (rateLimited(ip)) {
+  if (rateLimited(clientIp(req.headers))) {
     return new NextResponse('Too many attempts', { status: 429 })
   }
 
@@ -49,7 +48,8 @@ export async function GET(req: NextRequest) {
   const value = makeSessionCookie()
   if (!value) return new NextResponse('Not configured', { status: 500 })
 
-  const res = NextResponse.redirect(new URL('/m', appOrigin(req)))
+  const target = unlockTarget(req.nextUrl.searchParams.get('to'))
+  const res = NextResponse.redirect(new URL(target, appOrigin(req)))
   // Safari will happily reuse a remembered redirect target, which strands the
   // user if this URL's destination ever changes. Never let it be cached.
   res.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate')
@@ -64,7 +64,7 @@ export async function GET(req: NextRequest) {
 }
 
 /** Sign this device out. */
-export async function DELETE(req: NextRequest) {
+export async function DELETE() {
   const res = NextResponse.json({ ok: true })
   res.cookies.set(MOBILE_COOKIE, '', { httpOnly: true, path: '/', maxAge: 0 })
   return res

@@ -1,57 +1,34 @@
-import { NextRequest, NextResponse } from 'next/server'
-import crypto from 'crypto'
-import { auth, currentUser } from '@clerk/nextjs/server'
-import { createStoreForUser, updateShopifyTokenByDomain } from '@/lib/tenant'
-import { query } from '@/lib/db'
+import { NextResponse } from 'next/server'
+import { requireStore } from '@/lib/access'
+import { errorResponse, readJson, storeFromBody, viewerOrThrow } from '@/lib/integrations/http'
+import { connectFromRequest } from '@/lib/integrations/shopifyConnect'
+import { storeSummary } from '@/lib/integrations/stores'
 
-export async function POST(req: NextRequest) {
-  const { userId } = await auth()
-  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
 
-  const { domain, accessToken } = await req.json()
-  if (!domain || !accessToken) {
-    return NextResponse.json({ error: 'domain e accessToken são obrigatórios' }, { status: 400 })
-  }
-
-  const cleanDomain = domain.replace(/https?:\/\//, '').replace(/\/$/, '')
-
-  // Validate the token by calling Shopify shop endpoint
-  const testRes = await fetch(`https://${cleanDomain}/admin/api/2024-01/shop.json`, {
-    headers: { 'X-Shopify-Access-Token': accessToken },
-  })
-
-  if (!testRes.ok) {
-    return NextResponse.json(
-      { error: 'Token inválido ou domínio incorreto. Verifique e tente novamente.' },
-      { status: 422 }
-    )
-  }
-
-  const user = await currentUser()
-  const email = user?.emailAddresses[0]?.emailAddress
-
-  // Check if this domain already belongs to this user — just update the token
-  const updated = await updateShopifyTokenByDomain(cleanDomain, accessToken, userId)
-
-  let storeId: string
-  if (updated > 0) {
-    const rows = await query<{ id: string }>(
-      `SELECT id FROM tenants WHERE shopify_domain = $1 AND (user_id = $2 OR (user_id IS NULL AND id = $2))`,
-      [cleanDomain, userId]
-    )
-    storeId = rows[0]?.id ?? userId
-  } else {
-    storeId = crypto.randomUUID()
-    await createStoreForUser(userId, storeId, {
-      email,
-      shopify_domain: cleanDomain,
-      shopify_access_token: accessToken,
+/**
+ * POST /api/shopify/connect-manual  { domain, accessToken, storeId? }
+ *   → { ok: true, storeId, store: StoreSummary }
+ *
+ * Kept for the current /settings/chaves screen: a pasted shpat_ token for one
+ * of the viewer's stores. Same rules as POST /api/shopify/connect (which new
+ * screens should use). It no longer creates stores — use connect with
+ * mode "add" — and no longer switches the active store.
+ */
+export async function POST(req: Request) {
+  try {
+    const viewer = await viewerOrThrow()
+    const body = await readJson(req)
+    const { storeId } = await connectFromRequest(viewer, {
+      storeId: storeFromBody(body),
+      shop: body.domain ?? body.shop,
+      mode: 'reconnect',
+      accessToken: body.accessToken,
     })
+    const store = await storeSummary(await requireStore(viewer, storeId))
+    return NextResponse.json({ ok: true, storeId, store })
+  } catch (err) {
+    return errorResponse(err)
   }
-
-  const res = NextResponse.json({ ok: true, storeId })
-  res.cookies.set('active_store_id', storeId, {
-    httpOnly: true, path: '/', maxAge: 60 * 60 * 24 * 365, sameSite: 'lax',
-  })
-  return res
 }

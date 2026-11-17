@@ -1,52 +1,54 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { auth } from '@clerk/nextjs/server'
-import { query } from '@/lib/db'
+import { NextResponse, type NextRequest } from 'next/server'
+import { requireStore } from '@/lib/access'
+import { errorResponse, HttpError, readJson, viewerOrThrow } from '@/lib/integrations/http'
+import { linkAdAccount, pickerFor } from '@/lib/integrations/fbConnect'
+import { viewerKey } from '@/lib/integrations/oauthState'
+import { FB_PENDING_COOKIE, readPending } from '@/lib/integrations/pending'
 
-type PendingData = { tenantId: string; token: string }
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
 
-function parsePending(req: NextRequest): PendingData | null {
-  const raw = req.cookies.get('fb_extra_pending')?.value
-  if (!raw) return null
-  try { return JSON.parse(Buffer.from(raw, 'base64').toString('utf8')) } catch { return null }
+/**
+ * The picker after a Facebook login, for the current /facebook/extra-accounts
+ * screen (which sends no store id). Store and mode come from the sealed
+ * pending cookie, which is bound to this viewer, and the store is re-checked
+ * with requireStore. New screens call /api/facebook/accounts?store=<id>.
+ *
+ * GET  → FacebookPicker (400 no_pending when no login is waiting)
+ * POST { fb_ad_account_id, nickname?, confirmReplacePermanent? }
+ *      → { ok: true, account: StoreAdAccount, backfillFrom, warning }
+ */
+async function pendingStore(req: NextRequest) {
+  const viewer = await viewerOrThrow()
+  const raw = req.cookies.get(FB_PENDING_COOKIE)?.value
+  const pending = readPending(raw, viewerKey(viewer))
+  if (!pending) throw new HttpError(400, 'no_pending', 'Nenhum login do Facebook aguardando. Conecte de novo.')
+  return { viewer, raw, pending, store: await requireStore(viewer, pending.storeId) }
 }
 
-// Returns the list of ad accounts from the stored token so the picker page can display them.
 export async function GET(req: NextRequest) {
-  const { userId } = await auth()
-  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-
-  const pending = parsePending(req)
-  if (!pending) return NextResponse.json({ error: 'No pending data' }, { status: 400 })
-
-  const res = await fetch(
-    `https://graph.facebook.com/me/adaccounts?fields=id,name,account_status&limit=50&access_token=${pending.token}`
-  )
-  if (!res.ok) return NextResponse.json({ error: 'Facebook API error' }, { status: 502 })
-
-  const data = await res.json()
-  return NextResponse.json({ accounts: data.data || [] })
+  try {
+    const { viewer, raw, store } = await pendingStore(req)
+    return NextResponse.json(await pickerFor(viewer, store, raw))
+  } catch (err) {
+    return errorResponse(err)
+  }
 }
 
-// Saves the chosen account to tenant_fb_accounts and clears the pending cookie.
 export async function POST(req: NextRequest) {
-  const { userId } = await auth()
-  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-
-  const pending = parsePending(req)
-  if (!pending) return NextResponse.json({ error: 'No pending data' }, { status: 400 })
-
-  const { fb_ad_account_id } = await req.json()
-  if (!fb_ad_account_id) return NextResponse.json({ error: 'Missing fb_ad_account_id' }, { status: 400 })
-
-  await query(`
-    INSERT INTO tenant_fb_accounts (tenant_id, fb_ad_account_id, fb_access_token, is_active)
-    VALUES ($1, $2, $3, true)
-    ON CONFLICT (tenant_id, fb_ad_account_id) DO UPDATE SET
-      fb_access_token = EXCLUDED.fb_access_token,
-      is_active       = true
-  `, [pending.tenantId, fb_ad_account_id, pending.token])
-
-  const response = NextResponse.json({ ok: true })
-  response.cookies.delete('fb_extra_pending')
-  return response
+  try {
+    const { viewer, raw, pending, store } = await pendingStore(req)
+    const body = await readJson(req)
+    const linked = await linkAdAccount(viewer, store, {
+      adAccountId: body.fb_ad_account_id,
+      role: pending.mode,
+      nickname: body.nickname,
+      confirmReplacePermanent: body.confirmReplacePermanent,
+    }, raw)
+    const res = NextResponse.json({ ok: true, account: linked.account, backfillFrom: linked.backfillFrom, warning: linked.warning })
+    res.cookies.delete(FB_PENDING_COOKIE)
+    return res
+  } catch (err) {
+    return errorResponse(err)
+  }
 }

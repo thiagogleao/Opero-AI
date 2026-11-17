@@ -1,56 +1,51 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { auth } from '@clerk/nextjs/server'
-import { query } from '@/lib/db'
-import { getActiveTenantId } from '@/lib/activeStore'
+import { NextResponse, type NextRequest } from 'next/server'
+import { errorResponse, readJson, storeFromBody, storeParam, targetStore, viewerOrThrow } from '@/lib/integrations/http'
+import { listExtraAccountsLegacy, listStoreAdAccounts } from '@/lib/integrations/adAccounts'
+import { linkAdAccount } from '@/lib/integrations/fbConnect'
 
-export interface ExtraFbAccount {
-  id: number
-  tenant_id: string
-  fb_ad_account_id: string
-  nickname: string | null
-  is_active: boolean
-  created_at: string
-}
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
 
-export async function GET() {
-  const { userId } = await auth()
-  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-
-  const tenantId = await getActiveTenantId(userId)
-
+/**
+ * GET /api/facebook/extra-accounts?store=<id>
+ *   → { storeId, accounts: ExtraFbAccount[], adAccounts: StoreAdAccount[] }
+ *
+ * `adAccounts` is the full list for Settings: main, extra and "historical"
+ * (no longer linked, history still in the books), with 30-day spend.
+ * `accounts` is the old extras-only shape the current Settings reads.
+ */
+export async function GET(req: NextRequest) {
   try {
-    const accounts = await query<ExtraFbAccount>(
-      `SELECT id, tenant_id, fb_ad_account_id, nickname, is_active, created_at
-       FROM tenant_fb_accounts WHERE tenant_id = $1 ORDER BY created_at ASC`,
-      [tenantId]
-    )
-    return NextResponse.json({ accounts })
-  } catch {
-    // Table may not exist yet — return empty list
-    return NextResponse.json({ accounts: [] })
+    const viewer = await viewerOrThrow()
+    const store = await targetStore(viewer, storeParam(new URL(req.url)))
+    const [accounts, adAccounts] = await Promise.all([listExtraAccountsLegacy(store.id), listStoreAdAccounts(store.id)])
+    return NextResponse.json({ storeId: store.id, accounts, adAccounts })
+  } catch (err) {
+    return errorResponse(err)
   }
 }
 
+/**
+ * POST /api/facebook/extra-accounts  { storeId, fb_ad_account_id, fb_access_token, nickname? }
+ *   → { ok: true, account: StoreAdAccount, backfillFrom, warning }
+ *
+ * Links an extra account with a typed token (typically a system-user token,
+ * which never expires). Same rules as POST /api/facebook/accounts, role "extra".
+ */
 export async function POST(req: NextRequest) {
-  const { userId } = await auth()
-  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-
-  const tenantId = await getActiveTenantId(userId)
-  const { fb_ad_account_id, fb_access_token, nickname } = await req.json()
-
-  if (!fb_ad_account_id || !fb_access_token) {
-    return NextResponse.json({ error: 'Missing fb_ad_account_id or fb_access_token' }, { status: 400 })
+  try {
+    const viewer = await viewerOrThrow()
+    const body = await readJson(req)
+    const store = await targetStore(viewer, storeFromBody(body))
+    const linked = await linkAdAccount(viewer, store, {
+      adAccountId: body.fb_ad_account_id,
+      role: 'extra',
+      pastedToken: body.fb_access_token ?? body.token,
+      nickname: body.nickname,
+      confirmReplacePermanent: body.confirmReplacePermanent,
+    }, undefined)
+    return NextResponse.json({ ok: true, account: linked.account, backfillFrom: linked.backfillFrom, warning: linked.warning })
+  } catch (err) {
+    return errorResponse(err)
   }
-
-  const [account] = await query<ExtraFbAccount>(`
-    INSERT INTO tenant_fb_accounts (tenant_id, fb_ad_account_id, fb_access_token, nickname, is_active)
-    VALUES ($1, $2, $3, $4, true)
-    ON CONFLICT (tenant_id, fb_ad_account_id) DO UPDATE SET
-      fb_access_token = EXCLUDED.fb_access_token,
-      nickname        = COALESCE(EXCLUDED.nickname, tenant_fb_accounts.nickname),
-      is_active       = true
-    RETURNING id, tenant_id, fb_ad_account_id, nickname, is_active, created_at
-  `, [tenantId, fb_ad_account_id, fb_access_token, nickname ?? null])
-
-  return NextResponse.json({ account })
 }

@@ -1,5 +1,12 @@
 import { SignIn } from '@clerk/nextjs'
 
+/**
+ * Sign-in for partners. Opero is a private tool: accounts are created by the
+ * owner (the public /sign-up page is gone), so the widget offers no sign-up —
+ * withSignUp={false} turns off Clerk's combined sign-in-or-up flow and the
+ * footer link to it is hidden. Turning sign-ups off in the Clerk dashboard is
+ * what actually closes them.
+ */
 export default function SignInPage() {
   return (
     <div style={{
@@ -20,9 +27,12 @@ export default function SignInPage() {
             <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.07em', color: '#10b981', background: 'rgba(16,185,129,0.13)', padding: '3px 7px', borderRadius: 4 }}>AI</span>
           </div>
         </div>
-        <p style={{ fontSize: 13, color: 'var(--text-faint)' }}>Facebook Ads + Shopify analytics</p>
+        <p style={{ fontSize: 13, color: 'var(--text-faint)' }}>Lucro e anúncios das suas lojas — acesso para sócios</p>
       </div>
-      <SignIn />
+      <SignIn
+        withSignUp={false}
+        appearance={{ elements: { footerAction: { display: 'none' } } }}
+      />
     </div>
   )
 }

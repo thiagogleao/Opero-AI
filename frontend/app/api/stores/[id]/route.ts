@@ -1,24 +1,57 @@
-import { auth } from '@clerk/nextjs/server'
-import { NextResponse } from 'next/server'
-import { getTenantsByUserId } from '@/lib/tenant'
-import { query } from '@/lib/db'
+import { requireStore } from '@/lib/access'
+import { errorResponse, HttpError, readJson, viewerOrThrow } from '@/lib/integrations/http'
+import { setArchived, storeSummary } from '@/lib/integrations/stores'
 
-export async function DELETE(
-  _req: Request,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const { userId } = await auth()
-  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
 
-  const { id } = await params
+type Ctx = { params: Promise<{ id: string }> }
 
-  if (id === userId)
-    return NextResponse.json({ error: 'Não é possível remover a loja principal' }, { status: 400 })
+/** GET /api/stores/:id → { store: StoreSummary }. 404 unless the viewer may see it. */
+export async function GET(_req: Request, { params }: Ctx) {
+  try {
+    const viewer = await viewerOrThrow()
+    const store = await requireStore(viewer, (await params).id)
+    return Response.json({ store: await storeSummary(store) })
+  } catch (err) {
+    return errorResponse(err)
+  }
+}
 
-  const stores = await getTenantsByUserId(userId)
-  const store = stores.find(s => s.id === id)
-  if (!store) return NextResponse.json({ error: 'Loja não encontrada' }, { status: 404 })
+/**
+ * PATCH /api/stores/:id  { archived: boolean } → { store: StoreSummary }
+ *
+ * Archive or restore a store. Only the owner or the partner whose account the
+ * store belongs to (requireStore). Archiving keeps history and credentials;
+ * the store leaves "Todas", the pickers and the sync.
+ */
+export async function PATCH(req: Request, { params }: Ctx) {
+  try {
+    const viewer = await viewerOrThrow()
+    const store = await requireStore(viewer, (await params).id)
+    const body = await readJson(req)
+    if (typeof body.archived !== 'boolean') throw new HttpError(400, 'invalid_body', 'Envie { archived: true | false }')
+    await setArchived(store.id, body.archived)
+    return Response.json({ store: await storeSummary({ ...store, archived: body.archived }) })
+  } catch (err) {
+    return errorResponse(err)
+  }
+}
 
-  await query('DELETE FROM tenants WHERE id = $1', [id])
-  return NextResponse.json({ ok: true })
+/**
+ * DELETE /api/stores/:id → { ok: true, archived: true, store }
+ *
+ * Kept for the current "Remover" button: it archives (never a hard delete,
+ * which either failed on the tables that reference the store or destroyed a
+ * new store with its credentials). Restore with PATCH { archived: false }.
+ */
+export async function DELETE(_req: Request, { params }: Ctx) {
+  try {
+    const viewer = await viewerOrThrow()
+    const store = await requireStore(viewer, (await params).id)
+    await setArchived(store.id, true)
+    return Response.json({ ok: true, archived: true, store: await storeSummary({ ...store, archived: true }) })
+  } catch (err) {
+    return errorResponse(err)
+  }
 }

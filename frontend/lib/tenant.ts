@@ -1,8 +1,22 @@
 import { query } from './db'
 
+/**
+ * Raw tenant rows, for server code that needs credentials.
+ *
+ * A Tenant carries access tokens and, for Dev Dashboard stores, the client
+ * secret that mints new tokens. Never return one from a route or pass it to a
+ * client component: routes use lib/access (StoreRef) and
+ * lib/integrations/stores (StoreSummary, presence flags only).
+ *
+ * Writes live in lib/integrations: connectShopify() for Shopify credentials,
+ * attachAdAccount() for Facebook, setArchived() for archiving. The old
+ * upsertTenant / createStoreForUser / updateShopifyTokenByDomain (one of which
+ * updated by domain across every account) and claimLegacyData are gone.
+ */
+
 export interface Tenant {
-  id: string          // Store ID (= Clerk userId for primary store, UUID for additional)
-  user_id: string     // Clerk user ID (owner of this store)
+  id: string          // Store ID (= Clerk userId for the oldest stores, UUID for the rest)
+  user_id: string     // Clerk user ID (the account this store belongs to)
   email: string | null
   shopify_domain: string | null
   shop_name: string | null
@@ -24,8 +38,7 @@ export interface Tenant {
   archived_at: string | null
 }
 
-/** The only store fields the UI needs. Tenants carry access tokens, which must
- *  never cross into a client component's props. */
+/** The only store fields the UI needs. */
 export interface StoreOption {
   id: string
   shop_name: string | null
@@ -36,123 +49,21 @@ export function toStoreOptions(tenants: Tenant[]): StoreOption[] {
   return tenants.map(t => ({ id: t.id, shop_name: t.shop_name, shopify_domain: t.shopify_domain }))
 }
 
-/** Get a single store/tenant by its store ID. */
+/** @deprecated Server-only credential read. Prefer lib/access requireStore()
+ *  for the store and lib/integrations/credentials for its credentials. */
 export async function getTenant(storeId: string): Promise<Tenant | null> {
-  const rows = await query<Tenant>(
-    `SELECT * FROM tenants WHERE id = $1`,
-    [storeId]
-  )
+  const rows = await query<Tenant>(`SELECT * FROM tenants WHERE id = $1`, [storeId])
   return rows[0] ?? null
 }
 
-/** Get all stores belonging to a Clerk user. Archived stores are left out: they
- *  keep their history and credentials, they just stop appearing and syncing. */
+/** @deprecated Use lib/access listStores(viewer). All non-archived stores of a
+ *  Clerk account, oldest first. */
 export async function getTenantsByUserId(userId: string): Promise<Tenant[]> {
-  const rows = await query<Tenant>(
+  return query<Tenant>(
     `SELECT * FROM tenants
      WHERE (user_id = $1 OR (user_id IS NULL AND id = $1))
        AND archived_at IS NULL
      ORDER BY created_at ASC`,
-    [userId]
+    [userId],
   )
-  return rows
-}
-
-/** Upsert a store/tenant. For new stores, user_id defaults to id (primary store). */
-export async function upsertTenant(
-  storeId: string,
-  data: {
-    user_id?: string
-    email?: string
-    shopify_domain?: string
-    shopify_access_token?: string
-    fb_ad_account_id?: string
-    fb_access_token?: string
-    facebook_app_id?: string
-    facebook_app_secret?: string
-    onboarded?: boolean
-    timezone?: string
-  }
-): Promise<Tenant> {
-  const rows = await query<Tenant>(`
-    INSERT INTO tenants (id, user_id, email, shopify_domain, shopify_access_token, fb_ad_account_id, fb_access_token, facebook_app_id, facebook_app_secret, onboarded, timezone)
-    VALUES ($1, COALESCE($2, $1), $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, 'UTC'))
-    ON CONFLICT (id) DO UPDATE SET
-      email                 = COALESCE($3, tenants.email),
-      shopify_domain        = COALESCE($4, tenants.shopify_domain),
-      shopify_access_token  = COALESCE($5, tenants.shopify_access_token),
-      fb_ad_account_id      = COALESCE($6, tenants.fb_ad_account_id),
-      fb_access_token       = COALESCE($7, tenants.fb_access_token),
-      facebook_app_id       = COALESCE($8, tenants.facebook_app_id),
-      facebook_app_secret   = COALESCE($9, tenants.facebook_app_secret),
-      onboarded             = COALESCE($10, tenants.onboarded),
-      timezone              = COALESCE($11, tenants.timezone, 'UTC'),
-      updated_at            = NOW()
-    RETURNING *
-  `, [
-    storeId,
-    data.user_id ?? null,
-    data.email ?? null,
-    data.shopify_domain ?? null,
-    data.shopify_access_token ?? null,
-    data.fb_ad_account_id ?? null,
-    data.fb_access_token ?? null,
-    data.facebook_app_id ?? null,
-    data.facebook_app_secret ?? null,
-    data.onboarded ?? null,
-    data.timezone ?? null,
-  ])
-  return rows[0]
-}
-
-/** Create a brand-new store for a user (used in add-store OAuth flow). */
-export async function createStoreForUser(
-  userId: string,
-  storeId: string,
-  data: {
-    email?: string
-    shopify_domain: string
-    shopify_access_token: string
-  }
-): Promise<Tenant> {
-  const rows = await query<Tenant>(`
-    INSERT INTO tenants (id, user_id, email, shopify_domain, shopify_access_token, onboarded, timezone)
-    VALUES ($1, $2, $3, $4, $5, false, 'UTC')
-    ON CONFLICT (id) DO UPDATE SET
-      shopify_access_token = $5,
-      updated_at = NOW()
-    RETURNING *
-  `, [storeId, userId, data.email ?? null, data.shopify_domain, data.shopify_access_token])
-  return rows[0]
-}
-
-/** Update shopify token on whichever store owns this domain for this user. */
-export async function updateShopifyTokenByDomain(
-  shopDomain: string,
-  token: string,
-  userId?: string
-): Promise<number> {
-  const sql = userId
-    ? `UPDATE tenants SET shopify_access_token = $1, shopify_domain = $2, updated_at = NOW()
-       WHERE shopify_domain = $2 AND (user_id = $3 OR (user_id IS NULL AND id = $3))
-       RETURNING id`
-    : `UPDATE tenants SET shopify_access_token = $1, shopify_domain = $2, updated_at = NOW()
-       WHERE shopify_domain = $2
-       RETURNING id`
-  const params = userId ? [token, shopDomain, userId] : [token, shopDomain]
-  const rows = await query<Tenant>(sql, params)
-  return rows.length
-}
-
-/** Claim all rows with no tenant_id (existing data from before multi-tenancy) */
-export async function claimLegacyData(tenantId: string): Promise<void> {
-  const tables = [
-    'shopify_orders', 'shopify_order_items', 'shopify_daily_metrics',
-    'shopify_abandoned_checkouts', 'shopify_country_metrics',
-    'shopify_products', 'fb_ad_daily_metrics', 'fb_ads',
-    'fb_ad_breakdowns', 'sync_runs', 'profit_settings',
-  ]
-  for (const table of tables) {
-    await query(`UPDATE ${table} SET tenant_id = $1 WHERE tenant_id IS NULL`, [tenantId])
-  }
 }
