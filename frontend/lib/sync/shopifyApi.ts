@@ -42,10 +42,27 @@ export function verifyWebhook(opts: {
   expectedToken?: string | null
   secrets: (string | null | undefined)[]
 }): boolean {
+  return webhookAuthMethod(opts) !== null
+}
+
+/**
+ * How a delivery proved itself: 'hmac' (Shopify signed this exact body with
+ * the app secret, so the body can be trusted) or 'token' (the URL carried our
+ * shared token, which proves the sender knows the token but not that the body
+ * came from Shopify). HMAC is checked first, so a signed delivery is never
+ * downgraded to the weaker proof.
+ */
+export function webhookAuthMethod(opts: {
+  rawBody: string
+  hmacHeader: string | null
+  urlToken: string | null
+  expectedToken?: string | null
+  secrets: (string | null | undefined)[]
+}): 'hmac' | 'token' | null {
   const { rawBody, hmacHeader, urlToken, expectedToken, secrets } = opts
-  if (expectedToken && urlToken && safeEqual(urlToken, expectedToken)) return true
-  if (!hmacHeader) return false
-  return secrets.some(s => !!s && safeEqual(webhookDigest(rawBody, s), hmacHeader))
+  if (hmacHeader && secrets.some(s => !!s && safeEqual(webhookDigest(rawBody, s), hmacHeader))) return 'hmac'
+  if (expectedToken && urlToken && safeEqual(urlToken, expectedToken)) return 'token'
+  return null
 }
 
 /** Topics the orders endpoint handles; register_webhooks.js subscribes these. */

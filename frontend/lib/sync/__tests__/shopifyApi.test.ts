@@ -1,6 +1,20 @@
 import { describe, expect, it } from 'vitest'
-import { isOrderTopic, verifyWebhook, webhookDigest } from '../shopifyApi'
+import { isOrderTopic, verifyWebhook, webhookAuthMethod, webhookDigest } from '../shopifyApi'
 import { redactText } from '../jobs'
+
+describe('webhookAuthMethod', () => {
+  const body = '{"id":1}'
+  it('reports a signed body as hmac, even when the URL token is also present', () => {
+    const h = webhookDigest(body, 'secret')
+    expect(webhookAuthMethod({ rawBody: body, hmacHeader: h, urlToken: 'abc', expectedToken: 'abc', secrets: ['secret'] })).toBe('hmac')
+  })
+  it('reports a token-only delivery as token, so the order is read back from Shopify', () => {
+    expect(webhookAuthMethod({ rawBody: body, hmacHeader: null, urlToken: 'abc', expectedToken: 'abc', secrets: ['secret'] })).toBe('token')
+  })
+  it('rejects a forged signature without the token', () => {
+    expect(webhookAuthMethod({ rawBody: body, hmacHeader: 'forged', urlToken: null, expectedToken: 'abc', secrets: ['secret'] })).toBe(null)
+  })
+})
 
 describe('verifyWebhook', () => {
   const body = '{"id":1}'

@@ -2,7 +2,7 @@ import { query } from '@/lib/db'
 import { computeStorePnL, todayInTz } from '@/lib/engine'
 import { sendPushToAll } from '@/lib/push'
 import { localDay } from '@/lib/sync/orderMapping'
-import { isOrderTopic, verifyWebhook } from '@/lib/sync/shopifyApi'
+import { adminUrl, isOrderTopic, webhookAuthMethod } from '@/lib/sync/shopifyApi'
 import { usdRate } from '@/lib/sync/fx'
 import { upsertOrderFromWebhook } from '@/lib/sync/webhookOrders'
 
@@ -24,13 +24,14 @@ export const dynamic = 'force-dynamic'
 
 interface Tenant {
   id: string; shop_name: string | null; shopify_domain: string; timezone: string
-  client_secret: string | null; archived: boolean
+  client_secret: string | null; access_token: string | null; archived: boolean
 }
 
 async function findTenant(shopDomain: string): Promise<Tenant | null> {
   const rows = await query<Tenant>(
     `SELECT id, shop_name, shopify_domain, COALESCE(timezone, 'UTC') AS timezone,
-            shopify_client_secret AS client_secret, (archived_at IS NOT NULL) AS archived
+            shopify_client_secret AS client_secret, shopify_access_token AS access_token,
+            (archived_at IS NOT NULL) AS archived
        FROM tenants WHERE lower(shopify_domain) = lower($1)
       ORDER BY archived_at NULLS FIRST, created_at LIMIT 1`,
     [shopDomain],
@@ -70,6 +71,25 @@ async function todayProfit(tenantId: string, tz: string): Promise<number | null>
   }
 }
 
+/** Read one order back from the store's Admin API, or null. Bounded so the
+ *  webhook still answers inside Shopify's five seconds. */
+function fetchOrder(tenant: Tenant) {
+  return async (orderId: string): Promise<Record<string, unknown> | null> => {
+    if (!tenant.access_token) return null
+    try {
+      const res = await fetch(adminUrl(tenant.shopify_domain, `orders/${orderId}.json`), {
+        headers: { 'X-Shopify-Access-Token': tenant.access_token },
+        signal: AbortSignal.timeout(3000),
+      })
+      if (!res.ok) return null
+      const json = await res.json() as { order?: Record<string, unknown> }
+      return json.order && String(json.order.id) === orderId ? json.order : null
+    } catch {
+      return null
+    }
+  }
+}
+
 export async function POST(req: Request) {
   // Raw body is required for the HMAC — read as text before parsing.
   const rawBody = await req.text()
@@ -77,14 +97,14 @@ export async function POST(req: Request) {
   const topic = req.headers.get('x-shopify-topic')
   const tenant = shopDomain ? await findTenant(shopDomain) : null
 
-  const ok = verifyWebhook({
+  const method = webhookAuthMethod({
     rawBody,
     hmacHeader: req.headers.get('x-shopify-hmac-sha256'),
     urlToken: new URL(req.url).searchParams.get('token'),
     expectedToken: process.env.SHOPIFY_WEBHOOK_TOKEN ?? null,
     secrets: [process.env.SHOPIFY_CLIENT_SECRET, tenant?.client_secret],
   })
-  if (!ok) {
+  if (!method) {
     console.warn('[webhook] recusado: assinatura inválida', shopDomain ?? '')
     return new Response('Unauthorized', { status: 401 })
   }
@@ -101,7 +121,20 @@ export async function POST(req: Request) {
     return new Response('Bad JSON', { status: 400 })
   }
   const orderId = String(order.id ?? '')
-  if (!orderId) return new Response('OK', { status: 200 })
+  if (!/^\d+$/.test(orderId)) return new Response('OK', { status: 200 })
+
+  // A delivery that only carried the URL token proves its sender knows the
+  // token, not that Shopify wrote the body. Before it can touch revenue, the
+  // order is read back from Shopify itself; a body that does not match a real
+  // order of this store is dropped. A signed (HMAC) delivery is trusted as is.
+  if (method === 'token') {
+    const real = await fetchOrder(tenant)(orderId)
+    if (!real) {
+      console.warn(`[webhook] ${tenant.shopify_domain} ${orderId}: entrega só com token e o pedido não foi confirmado na Shopify — ignorada`)
+      return new Response('OK', { status: 200 })
+    }
+    order = real
+  }
 
   // 1. The analytics row, for every topic.
   let usdTotal: number | null = null
