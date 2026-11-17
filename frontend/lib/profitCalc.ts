@@ -12,6 +12,13 @@ export interface CogsPriceTier {
   /** YYYY-MM-DD, inclusive. Compared against the order date in store time. */
   effective_from: string
   label?: string
+  /** The products this rate card is quoted for. Absent or empty means every
+   *  product in the order, which is what a one-product store wants and how the
+   *  first tiers were written. Once a store sells something the supplier of
+   *  this card does not make — a jacket next to the heater — the card has to
+   *  say so, or its unit curve prices the jacket too. Each listed product is
+   *  counted once, under the first card that claims it. */
+  product_ids?: string[]
   /** Unit count → total cost of an order with exactly that many units. */
   order_prices: Record<string, number>
   /** Cost of each unit past the largest listed step. */
@@ -65,6 +72,12 @@ export interface ProfitConfig {
       discount_value: number
     }[]
     products: { product_id: string; name: string; cost_usd: number }[]
+    /** Products that genuinely cost nothing to fulfil — an extended warranty,
+     *  a digital add-on, a remote given away with a four-pack. A product left
+     *  at 0 in `products` means "not priced yet" and falls back to
+     *  default_cost_usd, which is right for a catalogue being filled in and
+     *  wrong for these; listing it here is how a store says it meant zero. */
+    zero_cost_products?: string[]
     price_tiers?: CogsPriceTier[]
     country_prices?: CountryPriceList[]
     order_fees?: SupplierOrderFee[]
@@ -121,6 +134,20 @@ export function tierForDate(cfg: ProfitConfig, orderDate: string): CogsPriceTier
   return best
 }
 
+/** The cards in force on `orderDate`, one per set of products quoted. Two cards
+ *  for the same products are a price change and the later one wins; two cards
+ *  for different products are two suppliers and both apply. */
+export function tiersForDate(cfg: ProfitConfig, orderDate: string): CogsPriceTier[] {
+  const byScope = new Map<string, CogsPriceTier>()
+  for (const t of cfg.cogs.price_tiers ?? []) {
+    if (!t?.effective_from || orderDate < t.effective_from) continue
+    const scope = [...(t.product_ids ?? [])].sort().join(',')
+    const current = byScope.get(scope)
+    if (!current || t.effective_from > current.effective_from) byScope.set(scope, t)
+  }
+  return [...byScope.values()]
+}
+
 /** Total supplier cost of one order under a tier. Unlisted counts above the
  *  largest step extend at extra_unit_usd; below the smallest step we fall back
  *  to it rather than inventing a cheaper price. */
@@ -153,6 +180,8 @@ export interface CogsLookups {
   hasProductCogs: boolean
   /** null when the per-unit packaging applies to everything. */
   packagingProducts: Set<string> | null
+  /** Products declared to cost nothing, as opposed to not yet priced. */
+  zeroCost: Set<string>
 }
 
 export function buildCogsLookups(cfg: ProfitConfig): CogsLookups {
@@ -169,9 +198,15 @@ export function buildCogsLookups(cfg: ProfitConfig): CogsLookups {
     if (c.product_id && c.prices) byCountry.set(c.product_id, c.prices)
   }
   const only = cfg.cogs.packaging_per_unit_products
+  const zeroCost = new Set(cfg.cogs.zero_cost_products ?? [])
   return {
-    byId, byTitle, byCountry, hasProductCogs: byId.size > 0,
+    byId, byTitle, byCountry,
+    // Declaring a product free is pricing it, so it counts: without this a
+    // catalogue whose only entries are free ones would skip unitCost entirely
+    // and charge default_cost_usd for them.
+    hasProductCogs: byId.size > 0 || zeroCost.size > 0,
     packagingProducts: only && only.length > 0 ? new Set(only) : null,
+    zeroCost,
   }
 }
 
@@ -184,6 +219,10 @@ export function unitCost(
   l: CogsLookups,
   cfg: ProfitConfig,
 ): number {
+  // Declared-free comes first: a warranty has no country price and no supplier
+  // price, and without this it would land on default_cost_usd like an
+  // unpriced product and be charged for.
+  if (item.product_id && l.zeroCost.has(item.product_id)) return 0
   if (item.product_id && countryCode) {
     const price = l.byCountry.get(item.product_id)?.[countryCode]
     if (price !== undefined && price > 0) return price
@@ -220,8 +259,10 @@ export interface OrderSupplierCost {
 
 /** The supplier's own arithmetic for one order:
  *    table price x quantity + the country's flat fee - $3 per extra unit.
- *  A price tier in force on the order's date is the supplier's whole rate card
- *  and replaces all three, so it is handled first and alone. */
+ *  A rate card in force on the order's date takes over for the products it is
+ *  quoted for. A card naming no products covers the whole order and replaces
+ *  all three terms; a card naming products prices only those, off its own unit
+ *  curve, and the rest of the order is still priced item by item. */
 export function orderSupplierCost(
   order: {
     country_code: string | null
@@ -239,8 +280,41 @@ export function orderSupplierCost(
         s + (i.product_id && l.packagingProducts!.has(i.product_id) ? i.units : 0), 0)
   const packaging = (cfg.cogs.packaging_cost_usd ?? 0)
                   + (cfg.cogs.packaging_per_unit_usd ?? 0) * packagedUnits
-  const tier = tierForDate(cfg, order.order_date)
-  if (tier) return { cogs: tierOrderCost(units, tier), packaging, orderFee: 0, saving: 0 }
+  const inForce = tiersForDate(cfg, order.order_date)
+  // A card quoted for no particular product is the whole order's rate card and
+  // replaces the per-item arithmetic, the destination fee and the extra-unit
+  // discount, which is how the one-product stores have always used it.
+  const wholeOrder = inForce.find(t => !(t.product_ids ?? []).length)
+  if (wholeOrder) return { cogs: tierOrderCost(units, wholeOrder), packaging, orderFee: 0, saving: 0 }
+
+  const scoped = inForce.filter(t => (t.product_ids ?? []).length)
+  if (scoped.length) {
+    // Each card prices its own products off its own unit curve; whatever it
+    // does not claim is priced item by item. A product named by two cards is
+    // counted under the first, never twice.
+    const claimed = new Set<string>()
+    let cogs = 0
+    for (const t of scoped) {
+      let tierUnits = 0
+      for (const i of order.items) {
+        if (!i.product_id || claimed.has(i.product_id)) continue
+        if (!t.product_ids!.includes(i.product_id)) continue
+        tierUnits += i.units
+        claimed.add(i.product_id)
+      }
+      if (tierUnits > 0) cogs += tierOrderCost(tierUnits, t)
+    }
+    const rest = order.items.filter(i => !i.product_id || !claimed.has(i.product_id))
+    cogs += rest.reduce((s, i) => s + unitCost(i, order.country_code, l, cfg) * i.units, 0)
+    const restUnits = rest.reduce((s, i) => s + i.units, 0)
+    const addl = cfg.cogs.additional_unit_discount_usd ?? 0
+    return {
+      cogs,
+      packaging,
+      orderFee: supplierOrderFee(order.country_code, order.order_date, cfg),
+      saving: restUnits > 1 && addl > 0 ? (restUnits - 1) * addl : 0,
+    }
+  }
 
   const cogs = l.hasProductCogs || l.byCountry.size > 0
     ? order.items.reduce((s, i) => s + unitCost(i, order.country_code, l, cfg) * i.units, 0)
