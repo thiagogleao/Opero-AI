@@ -1,8 +1,16 @@
-import { getProfitSummary, getDailyProfitData, type DailyProfitPoint } from './profitCalc'
-import { getAdjustmentImpact, NO_IMPACT, type AdjustmentImpact } from './adjustments'
-import { getOverviewMetrics, getDailyRevenue } from './queries'
-import { query } from './db'
+import { accountOverviewForRange, type AccountOverviewView, type OverviewStoreRow } from './data/overview'
+import type { AdjustmentImpact } from './adjustments'
+import type { StoreFreshness } from './views/portfolio'
+import type { SharedAdAccount } from './attributionModels'
 import type { Tenant } from './tenant'
+
+/**
+ * The account overview in the shape the current /overview screen and the
+ * alerts (lib/alerts.ts) read. Every number now comes from lib/data/overview.ts
+ * — one computePnL call for all the stores — so this file only renames fields.
+ * New code should use buildAccountOverview / accountOverviewForRange there and
+ * read the engine's PnL directly.
+ */
 
 export interface StoreOverviewRow {
   id: string
@@ -12,12 +20,28 @@ export interface StoreOverviewRow {
   configured: boolean
   revenue: number
   orders: number
+  /** Meta spend. Shopify ads ("Anúncios Shopify") are their own line,
+   *  `shopSpend`, and are never mixed into the Meta ROAS. */
   adSpend: number
+  shopSpend: number
+  /** Revenue − variable costs, before any ads. */
+  contribution: number
+  /** The engine's operating profit: contribution − Meta − Shopify ads − fixed costs. */
   profit: number
   margin: number
+  /** Store revenue ÷ Meta spend. */
   roas: number
+  /** revenue ÷ contribution: the Meta ROAS below which ads eat the margin.
+   *  Null when the store has no positive contribution, and when it has no
+   *  cost settings (the engine's 1.00 there only means "no costs known").
+   *  Alerts should judge each store against its own break-even. */
+  breakEvenRoas: number | null
   aov: number
-  /** true = this store's queries failed; its numbers are zeroed, not real */
+  /** The store's own today, and where its day stands for this window. */
+  storeToday: string
+  dayState: OverviewStoreRow['dayState']
+  freshness: StoreFreshness
+  /** true = the engine returned nothing for this store; its numbers are zero, not real */
   failed: boolean
   /** Refunds and chargebacks that landed in the window for this store. */
   impact: AdjustmentImpact
@@ -27,29 +51,50 @@ export interface AccountTotals {
   revenue: number
   orders: number
   adSpend: number
+  shopSpend: number
+  contribution: number
   profit: number
   margin: number
   roas: number
   aov: number
 }
 
+/** Same fields as profitCalc's DailyProfitPoint. `profit` is the operating
+ *  profit, so the days sum to the totals' profit (Shop Campaigns included). */
+export interface OverviewDailyPoint {
+  date: string
+  revenue: number
+  profit: number
+  fbSpend: number
+  margin: number | null
+}
+
 export interface AccountOverview {
   stores: StoreOverviewRow[]
   totals: AccountTotals
-  daily: DailyProfitPoint[]
+  daily: OverviewDailyPoint[]
   unconfigured: string[]
   failed: string[]
+  /** Newest successful sync across the stores (what AutoSync waits on). */
   lastSyncIso: string | null
+  /** Oldest of the stores' last successful syncs: a store whose sync stopped
+   *  shows here, where the newest would hide it. */
+  oldestSyncIso: string | null
+  /** Stores whose numbers are older than their sync cadence allows. */
+  staleStores: string[]
   /** Refunds and chargebacks that landed in this window, whatever day their
    *  order is from. Kept apart from `totals` on purpose: money arriving today
    *  for an August order is not a verdict on today's operation. */
   adjustments: AdjustmentImpact
   /** Stores whose token cannot read disputes — their silence is not good news. */
   blindStores: string[]
+  /** CAMP HALLOW selling on ads billed to EPOCH, and the like. */
+  sharedAdAccounts: SharedAdAccount[]
+  sharedAccountNote: string | null
 }
 
 /** Stores that can actually report numbers — a half-finished OAuth has no token. */
-export function accountStores(tenants: Tenant[]): Tenant[] {
+export function accountStores<T extends { shopify_access_token: string | null }>(tenants: T[]): T[] {
   return tenants.filter(t => t.shopify_access_token !== null)
 }
 
@@ -69,134 +114,89 @@ function labeller(tenants: Named[]): (t: Named) => string {
       : baseLabel(t)
 }
 
-/** Account-wide numbers: every store of one user summed for the period,
- *  plus the per-store rows behind the total. */
-export async function getAccountOverview(
-  tenants: Tenant[],
-  dateFrom: string,
-  dateTo: string
-): Promise<AccountOverview> {
-  const nameOf = labeller(tenants)
-
-  // A single-day range draws no chart, and getDailyProfitData recomputes the
-  // whole summary internally — so skip it rather than pay for an unused series.
-  const wantDaily = dateFrom !== dateTo
-  const byDate = new Map<string, DailyProfitPoint>()
-
-  // One store failing (bad credentials, sync gap) must not blank the whole
-  // page, so failures are caught per store and flagged on the row.
-  const stores = await Promise.all(tenants.map(async (t): Promise<StoreOverviewRow> => {
-    const base = { id: t.id, name: nameOf(t), domain: t.shopify_domain }
-    try {
-      const metrics = await getOverviewMetrics(t.id, dateFrom, dateTo)
-      const summary = await getProfitSummary(t.id, dateFrom, dateTo)
-
-      // What everything except ads costs, as a share of revenue — the ratio a
-      // refund is measured against.
-      const nonAdRatio = summary.configured && summary.totalRevenue > 0
-        ? (summary.totalCosts - summary.fbSpend) / summary.totalRevenue
-        : 0
-      const impact = await getAdjustmentImpact(t.id, dateFrom, dateTo, nonAdRatio)
-
-      const revenue = Number(metrics.revenue)
-      const orders  = Number(metrics.orders)
-      // The profit summary drops ad accounts the user switched off, so it is the
-      // truer spend whenever costs are configured at all.
-      const adSpend = summary.configured ? summary.fbSpend : Number(metrics.spend)
-      const profit  = summary.configured ? summary.netProfit : revenue - adSpend
-
-      if (wantDaily) {
-        const points = summary.configured
-          ? (await getDailyProfitData(t.id, dateFrom, dateTo)).dailyData
-          : (await getDailyRevenue(t.id, dateFrom, dateTo))
-              .filter(d => d.revenue > 0 || d.spend > 0)
-              .map(d => ({
-                date: d.date, revenue: d.revenue, fbSpend: d.spend,
-                profit: d.revenue - d.spend, margin: null,
-              }))
-        for (const p of points) {
-          const cur = byDate.get(p.date) ?? { date: p.date, revenue: 0, profit: 0, fbSpend: 0, margin: null }
-          cur.revenue += p.revenue
-          cur.profit  += p.profit
-          cur.fbSpend += p.fbSpend
-          byDate.set(p.date, cur)
-        }
-      }
-
-      return {
-        ...base,
-        configured: summary.configured,
-        revenue, orders, adSpend, profit,
-        margin: revenue > 0 ? (profit / revenue) * 100 : 0,
-        roas:   adSpend > 0 ? revenue / adSpend : 0,
-        aov:    orders  > 0 ? revenue / orders  : 0,
-        failed: false,
-        impact,
-      }
-    } catch (err) {
-      console.error('[overview] store failed', t.id, err)
-      return {
-        ...base, configured: false, revenue: 0, orders: 0, adSpend: 0,
-        profit: 0, margin: 0, roas: 0, aov: 0, failed: true, impact: NO_IMPACT,
-      }
-    }
-  }))
-
-  const sum = stores.reduce((a, s) => ({
-    revenue: a.revenue + s.revenue,
-    orders:  a.orders  + s.orders,
-    adSpend: a.adSpend + s.adSpend,
-    profit:  a.profit  + s.profit,
-  }), { revenue: 0, orders: 0, adSpend: 0, profit: 0 })
-
-  // Margin and ROAS come from the summed totals — averaging each store's own
-  // ratio would weight a tiny store the same as a large one.
-  const totals: AccountTotals = {
-    ...sum,
-    margin: sum.revenue  > 0 ? (sum.profit / sum.revenue) * 100 : 0,
-    roas:   sum.adSpend  > 0 ? sum.revenue / sum.adSpend : 0,
-    aov:    sum.orders   > 0 ? sum.revenue / sum.orders  : 0,
+function impactOf(r: OverviewStoreRow): AdjustmentImpact {
+  const t = r.totals
+  return {
+    refundHit: t.refunds, refundGross: t.refundGross, refundCount: t.refundCount,
+    chargebackHit: t.chargebacks, chargebackFees: t.chargebackFees, chargebackCount: t.chargebackCount,
+    total: t.adjustments,
+    alreadyCounted: r.refundsAlreadyDropped,
+    blindToChargebacks: r.blindToChargebacks,
   }
+}
 
-  const daily = [...byDate.values()]
-    .sort((a, b) => a.date.localeCompare(b.date))
-    .map(p => ({
-      date: p.date,
-      revenue: Math.round(p.revenue * 100) / 100,
-      profit:  Math.round(p.profit  * 100) / 100,
-      fbSpend: Math.round(p.fbSpend * 100) / 100,
-      margin:  p.revenue > 0 ? Math.round((p.profit / p.revenue) * 1000) / 10 : null,
-    }))
+function toRow(r: OverviewStoreRow, domain: string | null): StoreOverviewRow {
+  const t = r.totals
+  return {
+    id: r.id, name: r.name, domain,
+    configured: r.configured,
+    revenue: t.revenue, orders: t.orders,
+    adSpend: t.metaSpend, shopSpend: t.shopSpend,
+    contribution: t.contribution,
+    profit: t.operatingProfit,
+    margin: t.margin ?? 0,
+    roas: t.roas ?? 0,
+    breakEvenRoas: r.configured ? t.breakEvenRoas : null,
+    aov: t.orders > 0 ? t.revenue / t.orders : 0,
+    storeToday: r.storeToday, dayState: r.dayState, freshness: r.freshness,
+    failed: false,
+    impact: impactOf(r),
+  }
+}
 
-  let lastSyncIso: string | null = null
-  try {
-    const [row] = await query<{ finished_at: string | null }>(
-      `SELECT MAX(finished_at)::text AS finished_at
-       FROM sync_runs
-       WHERE tenant_id = ANY($1::text[]) AND status = 'success'`,
-      [tenants.map(t => t.id)]
-    )
-    lastSyncIso = row?.finished_at ?? null
-  } catch { /* sync time is cosmetic — never block the page on it */ }
+function legacyShape(view: AccountOverviewView, tenants: (Named & { id: string })[], nameOf: (t: Named) => string): AccountOverview {
+  const domainOf = new Map(tenants.map(t => [t.id, t.shopify_domain]))
+  const stores = view.stores.map(r => toRow(r, domainOf.get(r.id) ?? null))
+  const failed = tenants.filter(t => view.missingStoreIds.includes(t.id)).map(nameOf)
+  const t = view.totals
+  const r2 = (v: number) => Math.round(v * 100) / 100
+  const adjustments = view.stores.map(impactOf).reduce<AdjustmentImpact>((a, s) => ({
+    refundHit: a.refundHit + s.refundHit, refundGross: a.refundGross + s.refundGross,
+    refundCount: a.refundCount + s.refundCount, chargebackHit: a.chargebackHit + s.chargebackHit,
+    chargebackFees: a.chargebackFees + s.chargebackFees, chargebackCount: a.chargebackCount + s.chargebackCount,
+    total: a.total + s.total, alreadyCounted: a.alreadyCounted + s.alreadyCounted,
+    blindToChargebacks: a.blindToChargebacks || s.blindToChargebacks,
+  }), {
+    refundHit: 0, refundGross: 0, refundCount: 0, chargebackHit: 0, chargebackFees: 0, chargebackCount: 0,
+    total: 0, alreadyCounted: 0, blindToChargebacks: false,
+  })
 
   return {
-    stores: [...stores].sort((a, b) => b.profit - a.profit),
-    totals,
-    daily,
-    unconfigured: stores.filter(s => !s.configured && !s.failed).map(s => s.name),
-    failed: stores.filter(s => s.failed).map(s => s.name),
-    lastSyncIso,
-    adjustments: stores.reduce<AdjustmentImpact>((a, s) => ({
-      refundHit:       a.refundHit       + s.impact.refundHit,
-      refundGross:     a.refundGross     + s.impact.refundGross,
-      refundCount:     a.refundCount     + s.impact.refundCount,
-      chargebackHit:   a.chargebackHit   + s.impact.chargebackHit,
-      chargebackFees:  a.chargebackFees  + s.impact.chargebackFees,
-      chargebackCount: a.chargebackCount + s.impact.chargebackCount,
-      total:           a.total           + s.impact.total,
-      alreadyCounted:  a.alreadyCounted  + s.impact.alreadyCounted,
-      blindToChargebacks: a.blindToChargebacks || s.impact.blindToChargebacks,
-    }), { ...NO_IMPACT }),
-    blindStores: stores.filter(s => s.impact.blindToChargebacks && !s.failed).map(s => s.name),
+    stores,
+    totals: {
+      revenue: t.revenue, orders: t.orders, adSpend: t.metaSpend, shopSpend: t.shopSpend,
+      contribution: t.contribution, profit: t.operatingProfit,
+      margin: t.margin ?? 0, roas: t.roas ?? 0, aov: t.orders > 0 ? t.revenue / t.orders : 0,
+    },
+    daily: view.daily.map(d => ({
+      date: d.date, revenue: r2(d.revenue), profit: r2(d.operatingProfit), fbSpend: r2(d.metaSpend),
+      margin: d.margin === null ? null : Math.round(d.margin * 10) / 10,
+    })),
+    unconfigured: view.stores.filter(s => !s.configured).map(s => s.name),
+    failed,
+    lastSyncIso: view.freshness.newestSuccessAt,
+    oldestSyncIso: view.freshness.oldestSuccessAt,
+    staleStores: view.freshness.staleStores.map(s => s.name),
+    adjustments,
+    blindStores: view.stores.filter(s => s.blindToChargebacks).map(s => s.name),
+    sharedAdAccounts: view.sharedAdAccounts,
+    sharedAccountNote: view.sharedAccountNote,
   }
+}
+
+/**
+ * Account-wide numbers for explicit dates: every store summed, plus the rows
+ * behind the total. Each store reads the dates on its own calendar.
+ */
+export async function getAccountOverview(
+  tenants: Pick<Tenant, 'id' | 'shop_name' | 'shopify_domain' | 'timezone'>[],
+  dateFrom: string,
+  dateTo: string,
+): Promise<AccountOverview> {
+  const nameOf = labeller(tenants)
+  const view = await accountOverviewForRange(
+    tenants.map(t => ({ id: t.id, name: nameOf(t), timezone: t.timezone || 'UTC' })),
+    { from: dateFrom, to: dateTo },
+  )
+  return legacyShape(view, tenants, nameOf)
 }

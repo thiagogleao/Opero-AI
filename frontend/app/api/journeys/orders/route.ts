@@ -1,43 +1,58 @@
-import { auth } from '@clerk/nextjs/server'
-import { NextResponse } from 'next/server'
-import { getActiveTenantId } from '@/lib/activeStore'
-import { getJourneyPage } from '@/lib/attribution'
-import type { JourneyFilter } from '@/lib/attributionModels'
+import { getViewer, requireStore, resolveStore, accessErrorResponse, AccessError } from '@/lib/access'
+import { decodeJourneyCursor, getJourneyPage } from '@/lib/attribution'
+import { isJourneyFilter } from '@/lib/attributionModels'
+import { isIsoDate } from '@/lib/engine/dates'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-const FILTERS: JourneyFilter[] = ['all', 'paid', 'unattributed', 'multi']
-
-/** A page of orders and their paths, for the reader on the attribution screen. */
+/**
+ * A page of orders and their paths, for the reader on the attribution screen.
+ *
+ * GET ?store=<id>&from=YYYY-MM-DD&to=YYYY-MM-DD[&filter=all|paid|unattributed|multi]
+ *     [&search=<order number digits>][&limit=1..100][&cursor=<nextCursor>]
+ *
+ * `store` is checked against the viewer (lib/access); without it the page's
+ * active store is used, which is what the current client sends. Pages are
+ * keyset-paged: pass the previous response's `nextCursor`. `offset` is still
+ * read for the current client and ignored once a cursor is given.
+ *
+ * Errors are JSON `{ error }` with 400 (bad dates), 401 or 404 — never a body
+ * the client could mistake for a page.
+ */
 export async function GET(req: Request) {
-  const { userId } = await auth()
-  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-
-  const { searchParams } = new URL(req.url)
-  const from = searchParams.get('from')
-  const to   = searchParams.get('to')
-  const iso = /^\d{4}-\d{2}-\d{2}$/
-  if (!from || !to || !iso.test(from) || !iso.test(to)) {
-    return NextResponse.json({ error: 'from and to are required as YYYY-MM-DD' }, { status: 400 })
-  }
-
-  const raw = searchParams.get('filter') as JourneyFilter | null
-  const filter: JourneyFilter = raw && FILTERS.includes(raw) ? raw : 'all'
-
-  let tenantId: string
   try {
-    tenantId = await getActiveTenantId(userId)
-  } catch {
-    return NextResponse.json({ error: 'No store' }, { status: 400 })
+    const viewer = await getViewer()
+    if (!viewer) throw new AccessError(401)
+
+    const sp = new URL(req.url).searchParams
+    const from = sp.get('from')
+    const to = sp.get('to')
+    if (!isIsoDate(from) || !isIsoDate(to) || from > to) {
+      return Response.json({ error: 'Informe from e to como AAAA-MM-DD, com from <= to' }, { status: 400 })
+    }
+
+    const cursor = sp.get('cursor')
+    if (cursor && !decodeJourneyCursor(cursor)) {
+      return Response.json({ error: 'Cursor inválido' }, { status: 400 })
+    }
+
+    const storeParam = sp.get('store')
+    const store = storeParam
+      ? await requireStore(viewer, storeParam)
+      : (await resolveStore(viewer, null)).store
+    if (!store) throw new AccessError(404)
+
+    const filter = sp.get('filter')
+    const page = await getJourneyPage(store.id, from, to, {
+      limit: Number(sp.get('limit')) || 30,
+      cursor,
+      offset: Number(sp.get('offset')) || 0,
+      search: sp.get('search') ?? '',
+      filter: isJourneyFilter(filter) ? filter : 'all',
+    })
+    return Response.json({ storeId: store.id, ...page })
+  } catch (err) {
+    return accessErrorResponse(err)
   }
-
-  const page = await getJourneyPage(tenantId, from, to, {
-    limit:  Number(searchParams.get('limit')) || 30,
-    offset: Number(searchParams.get('offset')) || 0,
-    search: searchParams.get('search') ?? '',
-    filter,
-  })
-
-  return NextResponse.json(page)
 }

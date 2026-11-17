@@ -1,5 +1,8 @@
 import { query } from './db'
-import type { JourneyStore } from './journey'
+import {
+  MOMENT_FIELDS, numericId, shopifyGraphql, sortMoments, writeJourneys,
+  type JourneyStore, type JourneySummary, type Moment, type ParsedJourney,
+} from './journey'
 
 /**
  * History backfill through Shopify's Bulk Operations API.
@@ -8,19 +11,17 @@ import type { JourneyStore } from './journey'
  * customerJourneySummary is expensive and the cost budget has to be respected.
  * A bulk operation asks Shopify to run the same query on its own side and hand
  * back a file: one store's 3,135 orders took roughly thirty seconds instead of
- * an hour. That is the difference between a backfill that finishes today and
- * one that finishes over two days.
+ * an hour.
  *
  * The file is JSONL with a line per object. Orders carry the journey summary;
- * each visit is its own line pointing at its order through __parentId.
+ * each visit is its own line pointing at its order through __parentId. Parsing
+ * ends in the same ParsedJourney the paged collector builds, and both go
+ * through journey.ts's one writer — so an order is stored the same way (moments
+ * sorted by time, first and last ad from the full list) whichever path saw it.
  */
 
-const API_VERSION = '2024-10'
-
-// One statement per batch instead of per row: 50k inserts one at a time is
-// almost all round-trip time.
-const INSERT_BATCH = 300
-
+// Bulk queries take no pagination arguments: Shopify walks every connection,
+// which is why this path always has every moment of every order.
 const BULK_QUERY = `
 {
   orders {
@@ -32,15 +33,7 @@ const BULK_QUERY = `
         momentsCount { count precision }
         daysToConversion
         customerOrderIndex
-        moments {
-          edges { node {
-            occurredAt
-            ... on CustomerVisit {
-              landingPage referrerUrl source sourceType
-              utmParameters { source medium campaign content term }
-            }
-          } }
-        }
+        moments { edges { node { ${MOMENT_FIELDS} } } }
       }
     } }
   }
@@ -54,32 +47,16 @@ interface BulkOperation {
   url: string | null
 }
 
-async function gql<T>(store: JourneyStore, query_: string): Promise<T> {
-  const res = await fetch(`https://${store.shopify_domain}/admin/api/${API_VERSION}/graphql.json`, {
-    method: 'POST',
-    headers: {
-      'X-Shopify-Access-Token': store.shopify_access_token,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ query: query_ }),
-  })
-  if (!res.ok) throw new Error(`Shopify ${res.status}: ${(await res.text()).slice(0, 200)}`)
-  const json = await res.json()
-  if (json.errors) throw new Error(`GraphQL: ${JSON.stringify(json.errors).slice(0, 300)}`)
-  return json.data as T
-}
-
 async function currentOperation(store: JourneyStore): Promise<BulkOperation | null> {
-  const data = await gql<{ currentBulkOperation: BulkOperation | null }>(
-    store,
-    `{ currentBulkOperation { id status errorCode objectCount url } }`
+  const data = await shopifyGraphql<{ currentBulkOperation: BulkOperation | null }>(
+    store, `{ currentBulkOperation { id status errorCode objectCount url } }`,
   )
   return data.currentBulkOperation
 }
 
 /** Ask Shopify to start building the file. */
 async function startOperation(store: JourneyStore): Promise<string> {
-  const data = await gql<{
+  const data = await shopifyGraphql<{
     bulkOperationRunQuery: { bulkOperation: { id: string } | null; userErrors: { message: string }[] }
   }>(store, `
     mutation {
@@ -88,7 +65,6 @@ async function startOperation(store: JourneyStore): Promise<string> {
         userErrors { field message }
       }
     }`)
-
   const errs = data.bulkOperationRunQuery.userErrors
   if (errs.length) throw new Error(errs.map(e => e.message).join('; '))
   const id = data.bulkOperationRunQuery.bulkOperation?.id
@@ -98,37 +74,47 @@ async function startOperation(store: JourneyStore): Promise<string> {
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
-function numericId(gid: string): string {
-  return (gid.split('/').pop() ?? gid).split('?')[0]
-}
-
-function asMetaId(value: string | null | undefined): string | null {
-  if (!value) return null
-  return /^\d{10,}$/.test(value) ? value : null
-}
-
 interface OrderLine {
   id: string
   createdAt: string
-  customerJourneySummary?: {
-    ready: boolean
-    momentsCount: { count: number; precision: string } | null
-    daysToConversion: number | null
-    customerOrderIndex: number | null
-  } | null
+  customerJourneySummary?: JourneySummary | null
 }
 
-interface VisitLine {
-  occurredAt?: string | null
-  landingPage?: string | null
-  referrerUrl?: string | null
-  source?: string | null
-  sourceType?: string | null
-  utmParameters?: {
-    source?: string | null; medium?: string | null; campaign?: string | null
-    content?: string | null; term?: string | null
-  } | null
-  __parentId: string
+type VisitLine = Moment & { __parentId: string }
+
+/** Turn the JSONL file into one ParsedJourney per order. Pure, for the tests. */
+export function parseBulkJsonl(text: string): ParsedJourney[] {
+  const orders: OrderLine[] = []
+  const visitsByOrder = new Map<string, Moment[]>()
+
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue
+    let obj: Partial<OrderLine & VisitLine>
+    try { obj = JSON.parse(line) } catch { continue }
+    if (obj.__parentId) {
+      const key = numericId(obj.__parentId)
+      const { __parentId: _p, ...visit } = obj as VisitLine
+      const list = visitsByOrder.get(key)
+      if (list) list.push(visit)
+      else visitsByOrder.set(key, [visit])
+    } else if (obj.id && obj.createdAt) {
+      orders.push(obj as OrderLine)
+    }
+  }
+
+  return orders.map(o => {
+    const orderId = numericId(o.id)
+    const s = o.customerJourneySummary
+    return {
+      orderId,
+      createdAt: o.createdAt,
+      summary: s ? {
+        ready: s.ready, momentsCount: s.momentsCount ?? null,
+        daysToConversion: s.daysToConversion ?? null, customerOrderIndex: s.customerOrderIndex ?? null,
+      } : null,
+      moments: sortMoments(visitsByOrder.get(orderId) ?? []),
+    }
+  })
 }
 
 export interface BulkResult {
@@ -139,120 +125,12 @@ export interface BulkResult {
   error?: string
 }
 
-/** Read the JSONL and write both tables. */
 async function ingest(store: JourneyStore, url: string): Promise<{ orders: number; touches: number }> {
-  const text = await fetch(url).then(r => r.text())
-  const lines = text.split('\n').filter(Boolean)
-
-  const orders: OrderLine[] = []
-  const visitsByOrder = new Map<string, VisitLine[]>()
-
-  for (const line of lines) {
-    let obj: OrderLine & VisitLine
-    try { obj = JSON.parse(line) } catch { continue }
-    if (obj.__parentId) {
-      const key = numericId(obj.__parentId)
-      const list = visitsByOrder.get(key)
-      if (list) list.push(obj)
-      else visitsByOrder.set(key, [obj])
-    } else if (obj.id) {
-      orders.push(obj)
-    }
-  }
-
-  // ── Journeys ──────────────────────────────────────────────────────────────
-  let written = 0
-  for (let i = 0; i < orders.length; i += INSERT_BATCH) {
-    const slice = orders.slice(i, i + INSERT_BATCH)
-    const values: unknown[] = []
-    const rows: string[] = []
-
-    for (const o of slice) {
-      const orderId = numericId(o.id)
-      const j = o.customerJourneySummary
-      const visits = (visitsByOrder.get(orderId) ?? [])
-        .sort((a, b) => String(a.occurredAt ?? '').localeCompare(String(b.occurredAt ?? '')))
-      const ads = visits.map(v => asMetaId(v.utmParameters?.content)).filter((a): a is string => a !== null)
-
-      const n = values.length
-      rows.push(`($${n + 1},$${n + 2},$${n + 3},$${n + 4},$${n + 5},$${n + 6},$${n + 7},$${n + 8},$${n + 9},$${n + 10},NOW())`)
-      values.push(
-        store.id, orderId, j?.ready ?? false,
-        j?.momentsCount?.count ?? null, j?.momentsCount?.precision ?? null,
-        j?.daysToConversion ?? null, j?.customerOrderIndex ?? null,
-        ads[0] ?? null, ads[ads.length - 1] ?? null, o.createdAt,
-      )
-    }
-
-    await query(
-      `INSERT INTO order_journeys (
-         tenant_id, order_id, ready, moments_count, moments_precision,
-         days_to_conversion, customer_order_index, first_ad_id, last_ad_id,
-         order_created_at, synced_at
-       ) VALUES ${rows.join(',')}
-       ON CONFLICT (tenant_id, order_id) DO UPDATE SET
-         ready = EXCLUDED.ready, moments_count = EXCLUDED.moments_count,
-         moments_precision = EXCLUDED.moments_precision,
-         days_to_conversion = EXCLUDED.days_to_conversion,
-         customer_order_index = EXCLUDED.customer_order_index,
-         first_ad_id = EXCLUDED.first_ad_id, last_ad_id = EXCLUDED.last_ad_id,
-         order_created_at = EXCLUDED.order_created_at, synced_at = NOW()`,
-      values
-    )
-    written += slice.length
-  }
-
-  // ── Touches ───────────────────────────────────────────────────────────────
-  // Rewritten wholesale per order, so re-running the backfill cannot leave a
-  // half-old, half-new sequence behind.
-  const orderIds = [...visitsByOrder.keys()]
-  for (let i = 0; i < orderIds.length; i += INSERT_BATCH) {
-    await query(
-      `DELETE FROM order_touchpoints WHERE tenant_id = $1 AND order_id = ANY($2::text[])`,
-      [store.id, orderIds.slice(i, i + INSERT_BATCH)]
-    )
-  }
-
-  const flat: { orderId: string; seq: number; v: VisitLine }[] = []
-  for (const [orderId, visits] of visitsByOrder) {
-    visits
-      .sort((a, b) => String(a.occurredAt ?? '').localeCompare(String(b.occurredAt ?? '')))
-      .forEach((v, idx) => flat.push({ orderId, seq: idx + 1, v }))
-  }
-
-  let touches = 0
-  for (let i = 0; i < flat.length; i += INSERT_BATCH) {
-    const slice = flat.slice(i, i + INSERT_BATCH)
-    const values: unknown[] = []
-    const rows: string[] = []
-
-    for (const { orderId, seq, v } of slice) {
-      const u = v.utmParameters ?? {}
-      const n = values.length
-      rows.push(`(${Array.from({ length: 16 }, (_, k) => `$${n + k + 1}`).join(',')})`)
-      values.push(
-        store.id, orderId, seq, v.occurredAt ?? null,
-        v.source ?? null, v.sourceType ?? null,
-        v.referrerUrl ?? null, v.landingPage ?? null,
-        u.source ?? null, u.medium ?? null, u.campaign ?? null,
-        u.content ?? null, u.term ?? null,
-        asMetaId(u.content), asMetaId(u.term), asMetaId(u.campaign),
-      )
-    }
-
-    await query(
-      `INSERT INTO order_touchpoints (
-         tenant_id, order_id, seq, occurred_at, source, source_type,
-         referrer_url, landing_page, utm_source, utm_medium, utm_campaign,
-         utm_content, utm_term, ad_id, adset_id, campaign_id
-       ) VALUES ${rows.join(',')}
-       ON CONFLICT (tenant_id, order_id, seq) DO NOTHING`,
-      values
-    )
-    touches += slice.length
-  }
-
-  return { orders: written, touches }
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`bulk file ${res.status}`)
+  const journeys = parseBulkJsonl(await res.text())
+  const touches = await writeJourneys(store.id, journeys)
+  return { orders: journeys.length, touches }
 }
 
 /**
@@ -263,7 +141,7 @@ async function ingest(store: JourneyStore, url: string): Promise<{ orders: numbe
  */
 export async function runBulkBackfill(
   store: JourneyStore,
-  opts: { maxWaitMs?: number } = {}
+  opts: { maxWaitMs?: number } = {},
 ): Promise<BulkResult> {
   const started = Date.now()
   const maxWait = opts.maxWaitMs ?? 8 * 60_000
@@ -287,16 +165,12 @@ export async function runBulkBackfill(
 
     if (!op || op.status !== 'COMPLETED') throw new Error('bulk operation did not finish in time')
     // A store with no orders completes with no file at all.
-    if (!op.url) {
-      await markDone(store.id, 0)
-      out.seconds = Math.round((Date.now() - started) / 1000)
-      return out
+    if (op.url) {
+      const { orders, touches } = await ingest(store, op.url)
+      out.orders = orders
+      out.touches = touches
     }
-
-    const { orders, touches } = await ingest(store, op.url)
-    out.orders = orders
-    out.touches = touches
-    await markDone(store.id, orders)
+    await markDone(store.id, out.orders)
   } catch (err) {
     out.error = err instanceof Error ? err.message : String(err)
     console.error('[journey/bulk] failed for', store.id, out.error)
@@ -313,14 +187,14 @@ async function markDone(tenantId: string, orders: number): Promise<void> {
      ON CONFLICT (tenant_id) DO UPDATE SET
        backfill_done = true, last_run_at = NOW(),
        orders_synced = journey_sync_state.orders_synced + $2`,
-    [tenantId, orders]
+    [tenantId, orders],
   )
 }
 
 /** Stores whose history has not been pulled yet. */
 export async function storesNeedingBackfill(stores: JourneyStore[]): Promise<JourneyStore[]> {
   const rows = await query<{ tenant_id: string }>(
-    `SELECT tenant_id FROM journey_sync_state WHERE backfill_done = true`
+    `SELECT tenant_id FROM journey_sync_state WHERE backfill_done = true`,
   )
   const done = new Set(rows.map(r => r.tenant_id))
   return stores.filter(s => !done.has(s.id))

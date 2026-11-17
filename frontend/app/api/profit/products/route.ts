@@ -1,108 +1,90 @@
-import { NextRequest } from 'next/server'
-import { auth } from '@clerk/nextjs/server'
-import { query } from '@/lib/db'
-import { getActiveTenantId } from '@/lib/activeStore'
-import { getProfitSummary, type ProfitConfig } from '@/lib/profitCalc'
+import { getViewer, requireStore, resolveStore, accessErrorResponse, AccessError } from '@/lib/access'
+import { getProductReport, type ProductReport, type ProductRow } from '@/lib/data/products'
+import { isModel } from '@/lib/attributionModels'
+import { isIsoDate, isPeriod, resolveRange, type Period } from '@/lib/engine/dates'
 
-export async function GET(req: NextRequest) {
-  const { userId } = await auth()
-  if (!userId) return Response.json({ error: 'Unauthorized' }, { status: 401 })
-  const tenantId = await getActiveTenantId(userId)
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
 
-  const { searchParams } = new URL(req.url)
-  const dateFrom = searchParams.get('dateFrom') ?? ''
-  const dateTo   = searchParams.get('dateTo')   ?? ''
-  if (!dateFrom || !dateTo) return Response.json({ error: 'dateFrom and dateTo required' }, { status: 400 })
+/**
+ * Products of one store for a period, every number from the profit engine.
+ *
+ * GET ?store=<id>&period=30d            (preset, resolved in the store's timezone)
+ * GET ?store=<id>&period=custom&from=YYYY-MM-DD&to=YYYY-MM-DD
+ *     [&model=first|last|linear]        (journey credit rule for the attributed-spend column)
+ * Legacy: ?dateFrom=&dateTo= is read as a custom period, and without `store`
+ * the page's active store is used — that is what ProductProfitTable sends.
+ *
+ * Response: ProductReport (lib/data/products.ts) plus `period`, and on each
+ * product the snake_case fields the current ProductProfitTable reads. Those
+ * are derived from the engine numbers and go away with the UI rewrite.
+ */
 
-  // Full profit summary to know if configured and get total FB spend
-  const summary = await getProfitSummary(tenantId, dateFrom, dateTo)
+/** @deprecated Fields read by the current ProductProfitTable. */
+interface LegacyFields {
+  product_id: string
+  image_url: string | null
+  /** All variable costs of the product (engine), not COGS alone. */
+  cogs: number
+  allocated_fb_spend: number
+  /** contribution − journey-attributed Meta spend. */
+  estimated_profit: number
+  margin: number
+  configured: boolean
+}
 
-  // Load config for per-product COGS overrides
-  const cfgRows = await query<{ value: ProfitConfig }>(
-    `SELECT settings AS value FROM profit_settings WHERE tenant_id = $1`,
-    [tenantId]
-  )
-  const cfg = cfgRows[0]?.value
-
-  const productCogsMap = new Map<string, number>()
-  const titleCogsMap   = new Map<string, number>()
-  for (const p of (cfg?.cogs?.products ?? [])) {
-    if (p.product_id && p.cost_usd > 0) productCogsMap.set(p.product_id, p.cost_usd)
-    if (p.name      && p.cost_usd > 0) titleCogsMap.set(p.name, p.cost_usd)
+function legacy(p: ProductRow, configured: boolean): ProductRow & LegacyFields {
+  const r2 = (v: number) => Math.round(v * 100) / 100
+  const profit = p.contributionAfterAttributedSpend
+  return {
+    ...p,
+    product_id: p.productId ?? '',
+    image_url: p.imageUrl,
+    cogs: r2(p.variableCosts),
+    allocated_fb_spend: r2(p.attributedSpend),
+    estimated_profit: r2(profit),
+    margin: p.revenue > 0 ? Math.round((profit / p.revenue) * 1000) / 10 : 0,
+    configured,
   }
-  const defaultCogs     = cfg?.cogs?.default_cost_usd ?? 0
-  const packagingCost   = cfg?.cogs?.packaging_cost_usd ?? 0
-  const defaultShipping = cfg?.shipping?.default_rate_usd ?? 0
-  const txFeePct        = ((cfg?.shopify?.transaction_fee_pct ?? 0) + (cfg?.shopify?.payment_processing_pct ?? 0)) / 100
-  const paymentFixed    = cfg?.shopify?.payment_processing_fixed ?? 0
+}
 
-  // Product-level Shopify metrics
-  const products = await query<{
-    product_id: string | null; title: string
-    units: string; orders: string; revenue: string; image_url: string | null
-  }>(`
-    SELECT
-      oi.product_id,
-      COALESCE(p.title, oi.product_title, oi.title, 'Produto sem nome') AS title,
-      SUM(oi.quantity)::text                               AS units,
-      COUNT(DISTINCT o.order_id)::text                    AS orders,
-      ROUND(SUM(oi.quantity * oi.price)::numeric, 2)::text AS revenue,
-      p.image_url
-    FROM shopify_order_items oi
-    JOIN shopify_orders o ON oi.order_id = o.order_id AND (oi.tenant_id IS NULL OR oi.tenant_id = o.tenant_id)
-    JOIN tenants t ON t.id = o.tenant_id
-    LEFT JOIN shopify_products p ON oi.product_id = p.product_id AND p.tenant_id = o.tenant_id
-    WHERE o.tenant_id = $1
-      AND (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date BETWEEN $2::date AND $3::date
-      AND o.financial_status NOT IN ('refunded','voided')
-    GROUP BY oi.product_id, p.title, oi.product_title, oi.title, p.image_url
-    ORDER BY SUM(oi.quantity * oi.price) DESC
-    LIMIT 30
-  `, [tenantId, dateFrom, dateTo])
+export async function GET(req: Request) {
+  try {
+    const viewer = await getViewer()
+    if (!viewer) throw new AccessError(401)
+    const sp = new URL(req.url).searchParams
 
-  const totalProductRevenue = products.reduce((s, p) => s + Number(p.revenue), 0)
+    const storeParam = sp.get('store')
+    const store = storeParam
+      ? await requireStore(viewer, storeParam)
+      : (await resolveStore(viewer, null)).store
+    if (!store) throw new AccessError(404)
 
-  const result = products.map(p => {
-    const revenue  = Number(p.revenue)
-    const units    = Number(p.units)
-    const orders   = Number(p.orders)
-    const pid      = p.product_id ?? ''
-
-    // Allocate FB spend proportionally by Shopify revenue share
-    const allocFbSpend = totalProductRevenue > 0
-      ? summary.fbSpend * (revenue / totalProductRevenue)
-      : 0
-
-    if (!summary.configured) {
-      const profit = revenue - allocFbSpend
-      return {
-        product_id: pid, title: p.title, image_url: p.image_url,
-        units, orders, revenue,
-        cogs: 0, allocated_fb_spend: Math.round(allocFbSpend * 100) / 100,
-        estimated_profit: Math.round(profit * 100) / 100,
-        margin: revenue > 0 ? Math.round((profit / revenue) * 1000) / 10 : 0,
-        configured: false,
-      }
+    const legacyFrom = sp.get('dateFrom'), legacyTo = sp.get('dateTo')
+    const from = sp.get('from') ?? legacyFrom
+    const to = sp.get('to') ?? legacyTo
+    const rawPeriod = sp.get('period') ?? (from || to ? 'custom' : '30d')
+    if (!isPeriod(rawPeriod)) return Response.json({ error: 'Período inválido' }, { status: 400 })
+    const period: Period = rawPeriod
+    if (period === 'custom' && !(isIsoDate(from) && isIsoDate(to))) {
+      return Response.json({ error: 'Informe as datas como AAAA-MM-DD' }, { status: 400 })
     }
+    const range = resolveRange(period, store.timezone, from, to)
+    const rawModel = sp.get('model')
+    const model = isModel(rawModel) ? rawModel : 'first'
 
-    // Per-product COGS: try by ID, then by title (handles archived/replaced product IDs), then default
-    const cogsPerUnit = productCogsMap.get(pid) ?? titleCogsMap.get(p.title) ?? defaultCogs
-    const totalCogs   = cogsPerUnit * units + packagingCost * orders
-    const fees        = revenue * txFeePct + orders * paymentFixed
-    const shipping    = orders * defaultShipping
-    const profit      = revenue - totalCogs - allocFbSpend - fees - shipping
-    const margin      = revenue > 0 ? (profit / revenue) * 100 : 0
-
-    return {
-      product_id: pid, title: p.title, image_url: p.image_url,
-      units, orders, revenue,
-      cogs: Math.round(totalCogs * 100) / 100,
-      allocated_fb_spend: Math.round(allocFbSpend * 100) / 100,
-      estimated_profit:   Math.round(profit * 100) / 100,
-      margin:             Math.round(margin * 10) / 10,
-      configured: true,
+    const report = await getProductReport(store, range, { model })
+    if (!report) throw new AccessError(404)
+    const body: ProductReport & { period: Period; storeName: string; totalFbSpend: number } = {
+      ...report,
+      period,
+      storeName: store.name,
+      products: report.products.map(p => legacy(p, report.configured)),
+      // Legacy: the table's footer reads it.
+      totalFbSpend: report.totals.metaSpend,
     }
-  }).sort((a, b) => b.estimated_profit - a.estimated_profit)
-
-  return Response.json({ products: result, configured: summary.configured, totalFbSpend: summary.fbSpend })
+    return Response.json(body)
+  } catch (err) {
+    return accessErrorResponse(err)
+  }
 }
