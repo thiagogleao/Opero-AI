@@ -1,20 +1,26 @@
 import { query } from './db'
+import { todayInTz } from './engine/dates'
+import { usdRate } from './sync/fx'
+import { adminUrl } from './sync/shopifyApi'
 
 /**
  * Refunds and chargebacks — the money that leaves after the sale.
  *
- * Every row carries two dates: when it reached us, and when the order it
- * belongs to was placed. Nothing else in this file matters as much. A $500
- * chargeback landing today for an August order is not a bad day today, and
- * pretending otherwise is how a good day reads as a disaster.
+ * Every row carries two dates, both in the STORE's timezone like every other
+ * date in the app: when it reached us (event_date) and when its order was
+ * placed (order_date). A $500 chargeback landing today for an August order is
+ * not a bad day today.
  *
- * A chargeback is modelled as one row whose status changes, not as a stream of
- * events. Its effect on profit is derived from that status, so winning a
- * dispute reverses the charge by itself at the next sync instead of needing a
- * second record that could go missing.
+ * `amount` is always US dollars. What Shopify reported — the customer's
+ * currency for a refund, the dispute's currency for a chargeback — is kept in
+ * original_amount / original_currency. A row that cannot be converted is not
+ * written (and is counted in `unconverted`) rather than stored in yen or
+ * rupees read as dollars: the yen store's first ¥12,750 refund would have
+ * been subtracted as $12,750.
+ *
+ * A chargeback is one row whose status changes; its effect on profit is
+ * derived from that status, so a won dispute reverses itself at the next sync.
  */
-
-const API_VERSION = '2024-10'
 
 /** What Shopify Payments charges per dispute, regardless of the outcome. */
 export const CHARGEBACK_FEE = 15
@@ -23,6 +29,10 @@ export interface AdjustmentStore {
   id: string
   shopify_domain: string
   shopify_access_token: string
+  /** IANA timezone of the store: event and order dates are its calendar days. */
+  timezone: string
+  /** The shop's own currency (shopMoney); null = USD. */
+  shopify_currency: string | null
 }
 
 /** Dispute states where the money is currently out of our hands. */
@@ -37,8 +47,53 @@ export function disputeCosts(status: string | null): boolean {
   return OPEN_STATES.has(status) || LOST_STATES.has(status)
 }
 
-const isoDate = (v: string | null | undefined): string | null =>
-  v ? new Date(v).toISOString().slice(0, 10) : null
+/** The store-local calendar day of a timestamp. */
+export function localDate(ts: string | null | undefined, tz: string): string | null {
+  if (!ts) return null
+  const t = Date.parse(ts)
+  return Number.isFinite(t) ? todayInTz(tz, new Date(t)) : null
+}
+
+export interface KnownOrder {
+  /** total_price as stored: already US dollars. */
+  totalUsd: number
+  /** The shop currency the order was billed in. */
+  currency: string | null
+  /** USD per unit of that currency, as applied to the order. */
+  fxRate: number | null
+}
+
+/**
+ * US dollars for an amount Shopify reported, or null when there is no honest
+ * conversion. In order of preference:
+ *   1. already dollars;
+ *   2. the rate the order itself was converted with (same currency);
+ *   3. a chargeback only: the order's dollar total — a dispute is raised
+ *      against the whole order, and Shopify gives no shop-currency amount for
+ *      it (one was LBP 5,886,900 = $65.77). This is how every existing
+ *      chargeback was valued, so their amounts do not move;
+ *   4. the day's rate for that currency (fx_rates, fetched when missing) —
+ *      what was missing for a dispute whose order we never imported (INR 3,600
+ *      was stored as $3,600).
+ */
+export async function toUsd(input: {
+  amount: number
+  currency: string | null
+  kind: 'refund' | 'chargeback'
+  day: string
+  order: KnownOrder | null
+  rateFor: (currency: string, day: string) => Promise<number | null>
+}): Promise<number | null> {
+  const cur = (input.currency || 'USD').toUpperCase()
+  if (cur === 'USD') return input.amount
+  const o = input.order
+  if (o && (o.currency || '').toUpperCase() === cur && o.fxRate && o.fxRate > 0) return round2(input.amount * o.fxRate)
+  if (input.kind === 'chargeback' && o && o.totalUsd > 0) return o.totalUsd
+  const rate = await input.rateFor(cur, input.day)
+  return rate ? round2(input.amount * rate) : null
+}
+
+const round2 = (v: number) => Math.round(v * 100) / 100
 
 interface Money { amount: string; currencyCode: string }
 
@@ -85,12 +140,6 @@ interface ShopifyDispute {
   initiated_at: string
 }
 
-async function shopify(store: AdjustmentStore, path: string): Promise<Response> {
-  return fetch(`https://${store.shopify_domain}/admin/api/${API_VERSION}/${path}`, {
-    headers: { 'X-Shopify-Access-Token': store.shopify_access_token },
-  })
-}
-
 /** Follow Shopify's Link header to the next page. */
 function nextPage(res: Response): string | null {
   const link = res.headers.get('Link') ?? ''
@@ -102,83 +151,102 @@ export interface SyncAdjustments {
   tenantId: string
   refunds: number
   disputes: number
+  /** Rows not written because no USD conversion was possible. */
+  unconverted: number
   skipped?: string
   error?: string
 }
 
+/** Orders this pass needs, from the database: dollars, currency, rate, local day. */
+async function knownOrders(store: AdjustmentStore, ids: string[]): Promise<Map<string, KnownOrder & { day: string }>> {
+  const out = new Map<string, KnownOrder & { day: string }>()
+  if (!ids.length) return out
+  const rows = await query<{ order_id: string; total: string; currency: string | null; fx_rate: string | null; day: string }>(
+    `SELECT order_id, total_price::text AS total, currency, fx_rate::text,
+            (created_at AT TIME ZONE $3)::date::text AS day
+       FROM shopify_orders WHERE tenant_id = $1 AND order_id = ANY($2::text[])`,
+    [store.id, ids, store.timezone],
+  )
+  for (const r of rows) {
+    out.set(r.order_id, { totalUsd: Number(r.total) || 0, currency: r.currency, fxRate: r.fx_rate ? Number(r.fx_rate) : null, day: r.day })
+  }
+  return out
+}
+
+const rateFor = (currency: string, day: string) => usdRate(currency, day, { fetchMissing: true })
+
 /**
  * Pull refunds and disputes for one store.
  *
- * `sinceDays` bounds the incremental pass. Disputes are always read whole:
- * there are tens of them, not thousands, and their status changes over time,
- * so re-reading is how a win or a loss ever gets noticed.
+ * `sinceDays` bounds the refund pass (orders updated since). Disputes are
+ * always read whole: there are tens, not thousands, and a status can change
+ * weeks later, so re-reading is how a win is ever seen.
  */
 export async function syncAdjustments(
   store: AdjustmentStore,
   opts: { sinceDays?: number } = {}
 ): Promise<SyncAdjustments> {
-  const out: SyncAdjustments = { tenantId: store.id, refunds: 0, disputes: 0 }
+  const out: SyncAdjustments = { tenantId: store.id, refunds: 0, disputes: 0, unconverted: 0 }
+  const tz = store.timezone || 'UTC'
   const since = new Date(Date.now() - (opts.sinceDays ?? 60) * 86400000).toISOString()
+  const headers = { 'X-Shopify-Access-Token': store.shopify_access_token }
 
   // ── Refunds ───────────────────────────────────────────────────────────────
-  // Through GraphQL, for one reason: the REST transaction amount is in the
-  // currency the customer paid in. A refund of PKR 24,800 is $89.56, and
-  // summing that first number as dollars turns a routine refund into a
-  // five-figure hole in the day. shopMoney is the store's own currency.
+  // GraphQL, because shopMoney is the store's own currency; the REST amount is
+  // the customer's (a PKR 24,800 refund is $89.56).
   try {
     const filter =
       `updated_at:>=${since.slice(0, 10)} ` +
       `AND (financial_status:refunded OR financial_status:partially_refunded)`
     let cursor: string | null = null
-
     for (;;) {
-      const res: Response = await fetch(
-        `https://${store.shopify_domain}/admin/api/${API_VERSION}/graphql.json`,
-        {
-          method: 'POST',
-          headers: {
-            'X-Shopify-Access-Token': store.shopify_access_token,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ query: REFUNDS_QUERY, variables: { cursor, q: filter } }),
-        }
-      )
-      if (!res.ok) throw new Error(`refunds HTTP ${res.status}`)
+      const res: Response = await fetch(adminUrl(store.shopify_domain, 'graphql.json'), {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: REFUNDS_QUERY, variables: { cursor, q: filter } }),
+      })
+      if (!res.ok) throw new Error(`estornos: Shopify HTTP ${res.status}`)
       const json = await res.json()
-      if (json.errors) throw new Error(`refunds GraphQL: ${JSON.stringify(json.errors).slice(0, 200)}`)
+      if (json.errors) throw new Error(`estornos GraphQL: ${JSON.stringify(json.errors).slice(0, 200)}`)
 
       const conn = json.data?.orders
-      for (const edge of conn?.edges ?? []) {
-        const order = edge.node as GqlOrder
+      const nodes = (conn?.edges ?? []).map((e: { node: GqlOrder }) => e.node) as GqlOrder[]
+      const orders = await knownOrders(store, nodes.map(n => String(n.id).split('/').pop() ?? ''))
+      for (const order of nodes) {
         const orderId = String(order.id).split('/').pop() ?? null
-
+        const known = orderId ? orders.get(orderId) ?? null : null
         for (const refund of order.refunds ?? []) {
           const shop = refund.totalRefundedSet?.shopMoney
           const presented = refund.totalRefundedSet?.presentmentMoney
-          const amount = Number(shop?.amount ?? 0)
-          if (amount <= 0) continue
-
+          const raw = Number(shop?.amount ?? 0)
+          if (!(raw > 0)) continue
+          const eventDate = localDate(refund.createdAt, tz)
+          if (!eventDate) continue
+          const usd = await toUsd({
+            amount: raw, currency: shop?.currencyCode ?? store.shopify_currency, kind: 'refund',
+            day: eventDate, order: known, rateFor,
+          })
+          if (usd === null) { out.unconverted++; continue }
           await query(
             `INSERT INTO order_adjustments (
                tenant_id, kind, external_id, order_id, event_date, order_date,
                amount, currency, original_amount, original_currency, reason, synced_at
-             ) VALUES ($1,'refund',$2,$3,$4::date,$5::date,$6,$7,$8,$9,$10,NOW())
+             ) VALUES ($1,'refund',$2,$3,$4::date,$5::date,$6,'USD',$7,$8,$9,NOW())
              ON CONFLICT (tenant_id, kind, external_id) DO UPDATE SET
-               amount = $6, currency = $7, original_amount = $8,
-               original_currency = $9, event_date = $4::date, synced_at = NOW()`,
+               amount = $6, currency = 'USD', original_amount = $7, original_currency = $8,
+               event_date = $4::date, order_date = $5::date, synced_at = NOW()`,
             [
               store.id, String(refund.id).split('/').pop(), orderId,
-              isoDate(refund.createdAt), isoDate(order.createdAt),
-              amount, shop?.currencyCode ?? null,
-              presented ? Number(presented.amount) : null,
-              presented?.currencyCode ?? null,
+              eventDate, known?.day ?? localDate(order.createdAt, tz),
+              usd,
+              presented ? Number(presented.amount) : raw,
+              presented?.currencyCode ?? shop?.currencyCode ?? null,
               refund.note ?? null,
             ]
           )
           out.refunds++
         }
       }
-
       if (!conn?.pageInfo?.hasNextPage) break
       cursor = conn.pageInfo.endCursor
     }
@@ -188,75 +256,47 @@ export async function syncAdjustments(
 
   // ── Chargebacks ───────────────────────────────────────────────────────────
   try {
-    let url: string | null = `shopify_payments/disputes.json?limit=250`
-    const orderDates = new Map<string, string | null>()
-    const orderTotals = new Map<string, { total: number; currency: string | null } | null>()
-
+    let url: string | null = adminUrl(store.shopify_domain, 'shopify_payments/disputes.json?limit=250')
     while (url) {
-      const res: Response = await shopify(store, url)
+      const res: Response = await fetch(url, { headers })
       if (res.status === 403) {
-        // The token predates the payments scope. Reinstalling the private app
-        // issues a new one; until then this store simply has no dispute data.
+        // The token predates the payments scope; until it is reissued this
+        // store simply has no dispute data (blindToChargebacks says so).
         out.skipped = 'sem permissão de Shopify Payments neste token'
         break
       }
-      if (!res.ok) throw new Error(`disputes HTTP ${res.status}`)
+      if (!res.ok) throw new Error(`disputas: Shopify HTTP ${res.status}`)
       const { disputes = [] } = await res.json() as { disputes: ShopifyDispute[] }
+      const orders = await knownOrders(store, disputes.map(d => (d.order_id ? String(d.order_id) : '')).filter(Boolean))
 
       for (const d of disputes) {
         const orderId = d.order_id ? String(d.order_id) : null
-        let order: { created_at: string; total_price: string; currency: string | null } | undefined
-        if (orderId && !orderDates.has(orderId)) {
-          ;[order] = await query<{ created_at: string; total_price: string; currency: string | null }>(
-            `SELECT created_at::text, total_price::text, currency
-             FROM shopify_orders WHERE tenant_id = $1 AND order_id = $2`,
-            [store.id, orderId]
-          )
-          orderDates.set(orderId, order ? isoDate(order.created_at) : null)
-          orderTotals.set(orderId, order ? { total: Number(order.total_price), currency: order.currency } : null)
-        }
-
-        // Disputes arrive in whatever the customer paid in — one of these is
-        // LBP 5,886,900, which is $65.77. Shopify does not hand back a shop-
-        // currency amount here, so the order's own total stands in for it: a
-        // chargeback is raised against the whole order, and the order is
-        // already stored in the store's currency.
-        const known = orderId ? orderTotals.get(orderId) : null
-        const shopCurrency = known?.currency ?? 'USD'
-        const converted = d.currency !== shopCurrency && known?.total
-        const amount = converted ? known.total : Number(d.amount)
-        if (converted) {
-          console.log(
-            `[adjustments] dispute ${d.id}: ${d.currency} ${d.amount} lida como ` +
-            `${shopCurrency} ${known.total} pelo total do pedido`
-          )
-        }
-
+        const known = orderId ? orders.get(orderId) ?? null : null
+        const eventDate = localDate(d.initiated_at, tz)
+        if (!eventDate) continue
+        const usd = await toUsd({ amount: Number(d.amount), currency: d.currency, kind: 'chargeback', day: eventDate, order: known, rateFor })
+        if (usd === null) { out.unconverted++; continue }
         await query(
           `INSERT INTO order_adjustments (
              tenant_id, kind, external_id, order_id, event_date, order_date,
              amount, fee, currency, original_amount, original_currency,
              reason, status, evidence_due_by, finalized_on, synced_at
-           ) VALUES ($1,'chargeback',$2,$3,$4::date,$5::date,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
+           ) VALUES ($1,'chargeback',$2,$3,$4::date,$5::date,$6,$7,'USD',$8,$9,$10,$11,$12,$13,NOW())
            ON CONFLICT (tenant_id, kind, external_id) DO UPDATE SET
-             -- Status is the field that moves; everything else is restated so a
+             -- Status is the field that moves; the rest is restated so a
              -- correction on Shopify's side lands here too.
-             status = $12, amount = $6, currency = $8, evidence_due_by = $13,
-             finalized_on = $14, order_date = $5::date, synced_at = NOW()`,
+             status = $11, amount = $6, currency = 'USD', original_amount = $8, original_currency = $9,
+             evidence_due_by = $12, finalized_on = $13, event_date = $4::date, order_date = $5::date,
+             synced_at = NOW()`,
           [
-            store.id, String(d.id), orderId,
-            isoDate(d.initiated_at), orderId ? orderDates.get(orderId) ?? null : null,
-            amount, CHARGEBACK_FEE, shopCurrency,
-            Number(d.amount), d.currency,
-            d.reason, d.status,
-            d.evidence_due_by ?? null, d.finalized_on ?? null,
+            store.id, String(d.id), orderId, eventDate, known?.day ?? null,
+            usd, CHARGEBACK_FEE, Number(d.amount), d.currency,
+            d.reason, d.status, d.evidence_due_by ?? null, d.finalized_on ?? null,
           ]
         )
         out.disputes++
       }
-
       url = nextPage(res)
-      if (url) url = url.replace(`https://${store.shopify_domain}/admin/api/${API_VERSION}/`, '')
     }
   } catch (err) {
     out.error = [out.error, err instanceof Error ? err.message : String(err)].filter(Boolean).join(' · ')
@@ -265,9 +305,10 @@ export async function syncAdjustments(
   return out
 }
 
+/** Active stores with a Shopify token (archived ones keep history, no sync). */
 export async function adjustmentStores(): Promise<AdjustmentStore[]> {
   return query<AdjustmentStore>(
-    `SELECT id, shopify_domain, shopify_access_token
+    `SELECT id, shopify_domain, shopify_access_token, COALESCE(timezone, 'UTC') AS timezone, shopify_currency
      FROM tenants
      WHERE shopify_access_token IS NOT NULL AND shopify_domain IS NOT NULL
        AND archived_at IS NULL
@@ -364,9 +405,12 @@ export const NO_IMPACT: AdjustmentImpact = {
  *
  * Two things make this more than a sum:
  *
- * The profit engine already drops fully refunded orders from the day they were
- * placed. When such an order was placed inside this same window, its refund is
- * skipped here — subtracting it again would charge the same loss twice.
+ * The profit engine already drops a fully refunded order from the day it was
+ * placed — whatever window that day is in. Its refund is therefore skipped
+ * here whenever we hold the order as 'refunded', as lib/engine/pnl.ts does.
+ * (Skipping only when the order fell inside this window charged the loss
+ * twice across periods: once by dropping the order from October, again as a
+ * November refund.)
  *
  * A refund costs the contribution, not the revenue: treating the order as
  * though it never happened returns the product and shipping cost along with the
@@ -377,8 +421,8 @@ export async function getAdjustmentImpact(
   tenantId: string, from: string, to: string, nonAdRatio: number
 ): Promise<AdjustmentImpact> {
   try {
-    const refunds = await query<{ amount: string; order_date: string | null; status: string | null }>(
-      `SELECT a.amount::text, a.order_date::text, o.financial_status AS status
+    const refunds = await query<{ amount: string; status: string | null }>(
+      `SELECT a.amount::text, o.financial_status AS status
        FROM order_adjustments a
        LEFT JOIN shopify_orders o ON o.order_id = a.order_id AND o.tenant_id = a.tenant_id
        WHERE a.tenant_id = $1 AND a.kind = 'refund'
@@ -388,8 +432,7 @@ export async function getAdjustmentImpact(
 
     let refundGross = 0, alreadyCounted = 0, refundCount = 0
     for (const r of refunds) {
-      const inWindow = r.order_date !== null && r.order_date >= from && r.order_date <= to
-      if (inWindow && r.status === 'refunded') { alreadyCounted += Number(r.amount); continue }
+      if (r.status === 'refunded') { alreadyCounted += Number(r.amount); continue }
       refundGross += Number(r.amount)
       refundCount++
     }

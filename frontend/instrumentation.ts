@@ -1,12 +1,16 @@
 /**
- * Runs once when the server process starts.
+ * Runs once when a server process starts.
  *
- * The runtime guard matters: this file is also evaluated for the edge runtime,
- * where child_process and pg do not exist, so the scheduler is imported lazily
- * and only under Node.
+ * Next evaluates this file for both runtimes. The Node-only code (the sync
+ * scheduler, child_process, pg) lives in instrumentation-node.ts and is
+ * imported inside `if (process.env.NEXT_RUNTIME === 'nodejs')` — the
+ * documented pattern. The compiler replaces NEXT_RUNTIME per build and drops
+ * the import from the edge bundle; the old early-return form did not, so the
+ * edge compile of `next dev` tried to bundle child_process and every route
+ * answered 500.
  */
 export async function register() {
-  if (process.env.NEXT_RUNTIME !== 'nodejs') return
-  const { startAutoSync } = await import('./lib/autoSync')
-  startAutoSync()
+  if (process.env.NEXT_RUNTIME === 'nodejs') {
+    await import('./instrumentation-node')
+  }
 }

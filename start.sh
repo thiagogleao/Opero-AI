@@ -1,10 +1,9 @@
 #!/bin/sh
 set -e
 echo "[start] Running migrations..."
-# Hard ceiling on top of the in-query timeouts: the app must reach the
-# healthcheck even if the database is unreachable and the client never returns.
-# Kept well under railway.toml's 120s healthcheckTimeout so that even a
-# worst-case migration still leaves most of the window for Next.js to boot.
-timeout 45 node frontend/migrate.js || echo "[start] WARN: migrations failed or timed out, continuing startup"
+# Every migration step is idempotent and bounded by lock/statement timeouts
+# (frontend/migrate.js); this ceiling covers an unreachable database. It stays
+# well under railway.toml's 120 s healthcheck so Next.js still has time to boot.
+timeout 60 node frontend/migrate.js || echo "[start] WARN: migrations failed or timed out, continuing startup"
 echo "[start] Starting Next.js on port ${PORT:-3000}..."
 cd frontend && exec node node_modules/next/dist/bin/next start -p ${PORT:-3000}

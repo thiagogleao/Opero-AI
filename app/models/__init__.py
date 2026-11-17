@@ -1,16 +1,11 @@
-from app.models.sync import SyncRun
-from app.models.facebook import FbAdAccount, FbCampaign, FbAdSet, FbAd, FbAdDailyMetric, FbAdBreakdown
-from app.models.shopify import (
-    ShopifyOrder, ShopifyOrderItem, ShopifyCustomer,
-    ShopifyDailyMetric, ShopifyAbandonedCheckout, ShopifyCountryMetric,
-)
-from app.models.analysis import CreativeAnalysis, PlatformInsight, AttributionSnapshot
+"""
+The SQLAlchemy ORM models were removed: they no longer matched the production
+schema (no tenant_id, wrong unique keys) and `create_tables.py` would have
+created tables from them. The schema lives in frontend/migrate.js; the
+collectors write with SQL through app/collectors/upsert.py.
+"""
 
-__all__ = [
-    "SyncRun",
-    "FbAdAccount", "FbCampaign", "FbAdSet", "FbAd",
-    "FbAdDailyMetric", "FbAdBreakdown",
-    "ShopifyOrder", "ShopifyOrderItem", "ShopifyCustomer",
-    "ShopifyDailyMetric", "ShopifyAbandonedCheckout", "ShopifyCountryMetric",
-    "CreativeAnalysis", "PlatformInsight", "AttributionSnapshot",
-]
+raise ImportError(
+    "app.models foi removido: o schema vive em frontend/migrate.js "
+    "(os modelos ORM nao batiam com o banco de producao)."
+)

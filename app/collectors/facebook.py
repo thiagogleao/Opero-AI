@@ -1,782 +1,413 @@
 """
-Facebook Ads collector.
+Meta Ads collector — one ad account per instance.
 
-Collects per ad/day:
-  - Core metrics: spend, impressions, reach, frequency, clicks, CTR, CPM, CPC
-  - Conversions: purchases, purchase_value, ROAS, cost_per_purchase
-  - Video: plays, P25/P50/P75/P100 views, hook_rate, hold_rates
-  - Breakdowns: country, device, placement, age+gender
+Two phases, recorded as separate sync_runs sources so one cannot hide the other:
+  'facebook'            daily insights per ad (spend, purchases, video) for the
+                        requested days, plus minimal ad/adset/campaign rows for
+                        any ad the structure tables do not know yet;
+  'facebook_structure'  campaigns, ad sets, ads (creatives fetched only for new
+                        or changed ads) and the four breakdowns for the last
+                        14 days of the window. A breakdown that fails makes the
+                        run 'partial' and names the breakdown.
 
-Data is upserted so re-runs are safe.
+Guarantees:
+  - an account whose account_status is not 1 (disabled, closed, unsettled) is
+    not collected at all — its history stays, nothing new is asked;
+  - nothing before the account link's `collect_from` is collected for this
+    store (an ad account that changed stores keeps its history where it was);
+  - every row is written under this store's tenant_id and never moves another
+    store's row (see upsert.py);
+  - an account billing in another currency is converted to USD on the way in.
 """
+
+from __future__ import annotations
 
 import logging
 import time
-from datetime import date, datetime, timedelta
-from typing import Optional
+from datetime import date, datetime, timedelta, timezone
+from typing import Callable, Optional
 
-from facebook_business.api import FacebookAdsApi
 from facebook_business.adobjects.adaccount import AdAccount
 from facebook_business.adobjects.adcreative import AdCreative
-from facebook_business.adobjects.campaign import Campaign
-from facebook_business.adobjects.adset import AdSet
-from facebook_business.adobjects.ad import Ad
+from facebook_business.api import FacebookAdsApi
 from facebook_business.exceptions import FacebookRequestError
+from facebook_business.session import FacebookSession
+from sqlalchemy import text
 from sqlalchemy.orm import Session
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from app.collectors.base import BaseCollector
-from app.config import settings
+from app.collectors.facebook_mapping import (
+    BREAKDOWN_FIELDS, BREAKDOWNS, INSIGHT_FIELDS, parse_breakdown, parse_daily_insight,
+    structure_from_insights,
+)
+from app.collectors.redact import redact
+from app.collectors.upsert import upsert
 
 logger = logging.getLogger(__name__)
 
-# Module-level cache for reflected table objects.
-# meta.reflect() is a DB round-trip that introspects the schema — calling it
-# once per table per process is enough since the schema never changes mid-run.
-_TABLE_CACHE: dict = {}
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-# All insight fields we want at the ad level (daily)
-_INSIGHT_FIELDS = [
-    "ad_id", "ad_name", "adset_id", "campaign_id",
-    "spend", "impressions", "reach", "frequency",
-    "clicks", "ctr", "cpm", "cpc",
-    "actions", "action_values", "cost_per_action_type",
-    "outbound_clicks",
-    "video_play_actions",
-    "video_p25_watched_actions",
-    "video_p50_watched_actions",
-    "video_p75_watched_actions",
-    "video_p100_watched_actions",
-]
-
-_BREAKDOWN_FIELDS = [
-    "ad_id", "spend", "impressions", "clicks", "ctr", "cpm",
-    "actions", "action_values",
-]
-
-# Breakdown specs: (db_type_label, api_breakdowns_list)
-_BREAKDOWNS = [
-    ("country",    ["country"]),
-    ("device",     ["device_platform"]),
-    ("placement",  ["publisher_platform", "platform_position"]),
-    ("age_gender", ["age", "gender"]),
-]
-
-# Breakdowns are capped to last N days to prevent timeouts on long date ranges.
-# Daily insights (spend/ROAS/purchases) are still collected for the full period.
-_BREAKDOWN_MAX_DAYS = 14
+API_VERSION = "v20.0"
+BREAKDOWN_MAX_DAYS = 14
+# Retried with backoff: throttling (4 app, 17 user, 32 page, 613 calls,
+# 80000-80014 ads insights) and Meta's transient failures (1 unknown, 2
+# "Service temporarily unavailable" — seen while verifying this collector).
+THROTTLE_CODES = {4, 17, 32, 613} | set(range(80000, 80015))
+TRANSIENT_CODES = {1, 2}
+RETRY_CODES = THROTTLE_CODES | TRANSIENT_CODES
+# Total seconds a run may spend sleeping on throttles. Kept well under the
+# scheduler's kill timer so a throttled run ends with an honest error instead
+# of being killed mid-write.
+THROTTLE_BUDGET = 240
+# A known-dead account is re-checked once a day, in case it was reactivated.
+DEAD_RECHECK = timedelta(hours=24)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _parse_action(actions: list, action_type: str, default=0):
-    """Extract a numeric value from Facebook's action list."""
-    if not actions:
-        return default
-    for a in actions:
-        if a.get("action_type") == action_type:
-            return float(a.get("value", 0))
-    return default
-
-
-def _first_action(actions: list, *action_types, default=0.0):
-    """Return the value of the FIRST matching action type.
-    Use instead of summing multiple action_types that may represent the same event
-    (e.g. 'purchase' and 'offsite_conversion.fb_pixel_purchase' are the same conversion).
-    """
-    if not actions:
-        return default
-    for action_type in action_types:
-        for a in actions:
-            if a.get("action_type") == action_type:
-                return float(a.get("value", 0))
-    return default
-
-
-def _int(value, default=0) -> int:
+def graph_ts(value: Optional[str]) -> Optional[datetime]:
+    """Graph timestamps look like 2026-11-10T12:00:00+0000."""
+    if not value:
+        return None
     try:
-        return int(float(value))
-    except (TypeError, ValueError):
-        return default
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S%z")
+    except (ValueError, TypeError):
+        return None
 
 
-def _float(value, default=0.0) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
+def normalize_account(raw: str) -> str:
+    n = (raw or "").replace("act_", "").replace("act=", "").replace("act:", "").strip("_=: ")
+    return f"act_{n}" if n else raw
 
 
-def _video_action_value(field_list, default=None) -> Optional[int]:
-    """
-    Video metric fields are lists like [{"action_type": "video_view", "value": "1000"}].
-    Returns int or None.
-    """
-    if not field_list:
-        return default
-    try:
-        return int(float(field_list[0].get("value", 0)))
-    except (IndexError, TypeError, ValueError):
-        return default
-
-
-# ---------------------------------------------------------------------------
-# Collector
-# ---------------------------------------------------------------------------
-
-def _refresh_token_if_needed() -> str:
-    """
-    Check token expiry via Graph API. If < 7 days remaining, exchange for a
-    new long-lived token and update .env automatically. Returns the active token.
-    """
-    import datetime
-    import re
-    import requests
-
-    token     = settings.facebook_access_token
-    app_id    = settings.facebook_app_id
-    app_secret = settings.facebook_app_secret
-
-    try:
-        resp = requests.get(
-            "https://graph.facebook.com/debug_token",
-            params={"input_token": token, "access_token": f"{app_id}|{app_secret}"},
-            timeout=10,
-        )
-        info = resp.json().get("data", {})
-    except Exception as e:
-        logger.warning("[facebook] Could not check token expiry: %s", e)
-        return token
-
-    expires_at = info.get("expires_at", 0)
-    if not expires_at:
-        return token  # non-expiring token (system user)
-
-    days_left = (datetime.datetime.fromtimestamp(expires_at) - datetime.datetime.now()).days
-    logger.info("[facebook] Token valid for %d more days", days_left)
-
-    if days_left > 7:
-        return token
-
-    # Exchange for long-lived token
-    logger.info("[facebook] Token expiring soon — auto-renewing...")
-    try:
-        r = requests.get(
-            "https://graph.facebook.com/oauth/access_token",
-            params={
-                "grant_type": "fb_exchange_token",
-                "client_id": app_id,
-                "client_secret": app_secret,
-                "fb_exchange_token": token,
-            },
-            timeout=10,
-        )
-        new_token = r.json().get("access_token")
-        if not new_token:
-            raise ValueError(r.json())
-    except Exception as e:
-        logger.warning("[facebook] Auto-renewal failed: %s", e)
-        return token
-
-    # Persist to .env
-    try:
-        env_path = ".env"
-        with open(env_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        new_content = re.sub(
-            r"^FACEBOOK_ACCESS_TOKEN=.*$",
-            f"FACEBOOK_ACCESS_TOKEN={new_token}",
-            content,
-            flags=re.MULTILINE,
-        )
-        with open(env_path, "w", encoding="utf-8") as f:
-            f.write(new_content)
-        logger.info("[facebook] Token renewed and saved to .env (valid 60 days)")
-    except Exception as e:
-        logger.warning("[facebook] Could not save renewed token to .env: %s", e)
-
-    return new_token
+def describe_meta_error(exc: BaseException) -> Optional[str]:
+    if not isinstance(exc, FacebookRequestError):
+        return None
+    code = exc.api_error_code()
+    msg = (exc.api_error_message() or "")
+    if code == 190:
+        return "Token do Meta expirado ou inválido — reconecte a conta de anúncio"
+    if code == 100 and "appsecret_proof" in msg:
+        return "Token do Meta emitido por outro app (appsecret_proof inválido) — reconecte a conta"
+    if code in THROTTLE_CODES:
+        return "Limite de chamadas do Meta atingido — a próxima rodada tenta de novo"
+    if code in (10, 200, 294) or (code and 200 <= code < 300):
+        return "Sem permissão nesta conta de anúncio — confira o acesso no Business Manager"
+    return redact(f"Meta ({code}): {msg}")
 
 
 class FacebookCollector(BaseCollector):
     source = "facebook"
 
-    def __init__(
-        self,
-        session: Session,
-        tenant_id: Optional[str] = None,
-        access_token: Optional[str] = None,
-        ad_account_id: Optional[str] = None,
-        app_id: Optional[str] = None,
-        app_secret: Optional[str] = None,
-        mode: str = "full",
-        fb_ad_account_id_tag: Optional[str] = None,
-    ):
-        super().__init__(session, tenant_id)
-        # mode controls what this run collects:
-        #   "quick"     — only daily insights (spend/ROAS/purchases). Fast first-pass.
-        #   "structure" — only account structure + breakdowns. Background second-pass.
-        #   "full"      — everything (default, used for manual / scheduled runs).
-        self._mode = mode
-        # When set, each daily insight row is tagged with this account ID in
-        # fb_ad_daily_metrics.fb_ad_account_id so spend from extra accounts can be
-        # toggled on/off in analysis without touching the primary account's rows.
-        self._fb_ad_account_id_tag = fb_ad_account_id_tag
-        _app_id = app_id or settings.facebook_app_id
-        # appsecret_proof = HMAC(token, app_secret) using the app that issued the token.
-        # All tenant tokens go through our own Facebook App (FACEBOOK_APP_ID), so our
-        # app_secret is always the correct one to use.
-        # The only exception: if a tenant explicitly passes a different app_id, they're
-        # using a separate Facebook App — in that case, skip the proof rather than use
-        # the wrong secret (Facebook would reject it with error 100).
-        if access_token and app_id and app_id != settings.facebook_app_id:
-            _app_secret = app_secret or None
-        else:
-            _app_secret = app_secret or settings.facebook_app_secret
-        _token      = access_token or _refresh_token_if_needed()
-        _raw_id     = ad_account_id or settings.facebook_ad_account_id or ""
-        # Normalize: strip any prefix and rebuild as act_XXXXX (SDK format)
-        _numeric    = _raw_id.replace("act_", "").replace("act=", "").replace("act:", "").lstrip("_=: ")
-        _account_id = f"act_{_numeric}" if _numeric else _raw_id
-        FacebookAdsApi.init(app_id=_app_id, app_secret=_app_secret, access_token=_token)
-        self._account = AdAccount(_account_id)
-        self._account_id = _account_id
+    def __init__(self, session: Session, tenant_id: str, account_id: str, access_token: str,
+                 app_id: Optional[str], app_secret: Optional[str], *, phase: str = "insights",
+                 mode: Optional[str] = None, collect_from: Optional[date] = None):
+        account_id = normalize_account(account_id)
+        super().__init__(session, tenant_id, account_id=account_id, mode=mode)
+        self.phase = phase
+        if phase == "structure":
+            self.source = "facebook_structure"
+            self.allow_partial = True
+        self.collect_from = collect_from
+        self._creds = (app_id, app_secret, access_token)
+        self.api = self._new_api()
+        self.account = AdAccount(account_id, api=self.api)
+        self.money_rate: Callable[[str], float] = lambda _day: 1.0
+        self._slept = 0.0
 
-    # ------------------------------------------------------------------
-    # Main entry
-    # ------------------------------------------------------------------
+    def _new_api(self) -> FacebookAdsApi:
+        app_id, app_secret, token = self._creds
+        # Without the app secret the SDK sends no appsecret_proof, which is what
+        # a token from a different Meta app needs; with the wrong secret Meta
+        # rejects every call (code 100).
+        return FacebookAdsApi(FacebookSession(app_id, app_secret, token), API_VERSION)
+
+    def describe_error(self, exc: BaseException) -> str:
+        return describe_meta_error(exc) or super().describe_error(exc)
+
+    # ── Account status (called before a run is recorded) ────────────────────
+
+    def account_state(self) -> tuple[str, Optional[int], Optional[str]]:
+        """('active' | 'inactive', status, currency). An account known dead
+        is not even asked again for a day; one that cannot be read but is
+        known dead is treated as dead (Dumpling's old primary failed 3,900
+        times with 'Invalid appsecret_proof')."""
+        row = self.session.execute(
+            text("SELECT account_status, synced_at, currency FROM fb_ad_accounts WHERE account_id = :a"),
+            {"a": self.account_id},
+        ).fetchone()
+        known_status = row[0] if row else None
+        if row and known_status is not None and known_status != 1 and row[1] is not None:
+            checked = row[1] if row[1].tzinfo else row[1].replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) - checked < DEAD_RECHECK:
+                return "inactive", known_status, row[2]
+        try:
+            info = self._throttled(lambda: self.account.api_get(
+                fields=["name", "currency", "account_status", "timezone_name"]))
+        except FacebookRequestError:
+            if known_status is not None and known_status != 1:
+                # Still unreadable and known dead: note the check so the next
+                # one waits a day (Dumpling's old main account refuses every
+                # call, and was asked again on every pass).
+                self.session.execute(
+                    text("UPDATE fb_ad_accounts SET synced_at = now() WHERE account_id = :a "
+                         "AND tenant_id IS NOT DISTINCT FROM :t"),
+                    {"a": self.account_id, "t": self.tenant_id},
+                )
+                self.session.commit()
+                return "inactive", known_status, row[2] if row else None
+            raise
+        status = info.get("account_status")
+        upsert(self.session, "fb_ad_accounts", [{
+            "account_id": self.account_id, "tenant_id": self.tenant_id, "name": info.get("name"),
+            "currency": info.get("currency"), "account_status": status,
+            "synced_at": datetime.now(timezone.utc),
+        }], [["account_id"]])
+        return ("active" if status == 1 else "inactive"), status, info.get("currency")
+
+    def use_currency(self, currency: Optional[str], first: date, last: date) -> None:
+        """Convert an account that does not bill in dollars."""
+        if not currency or currency.upper() == "USD":
+            return
+        from app.collectors.fx import taxas_do_periodo, para_usd
+        rates = taxas_do_periodo(self.session, currency, first, last)
+        self.money_rate = lambda day: para_usd(1.0, date.fromisoformat(day) if day else None, rates)
+
+    # ── Run ─────────────────────────────────────────────────────────────────
+
+    def window(self, date_from: date, date_to: date) -> Optional[tuple[date, date]]:
+        start = max(date_from, self.collect_from) if self.collect_from else date_from
+        return (start, date_to) if start <= date_to else None
 
     def _run(self, date_from: date, date_to: date) -> None:
-        from datetime import timedelta
+        if self.phase == "structure":
+            self._sync_structure()
+            bd_from = max(date_from, date_to - timedelta(days=BREAKDOWN_MAX_DAYS - 1))
+            self._collect_breakdowns(bd_from, date_to)
+        else:
+            raw: list[dict] = []
+            day = date_from
+            while day <= date_to:
+                raw.extend(self._insights_for_day(day))
+                day += timedelta(days=1)
+            ads, adsets, campaigns = structure_from_insights(raw)
+            self._upsert_structure(ads, adsets, campaigns)
 
-        mode = self._mode
-        days_span = (date_to - date_from).days + 1
-        logger.info("[facebook] mode=%s  %s → %s  (%d days)", mode, date_from, date_to, days_span)
+    def _throttled(self, fn):
+        """Run a Graph call, sleeping through throttling within the budget."""
+        wait = 30.0
+        while True:
+            try:
+                return fn()
+            except FacebookRequestError as exc:
+                if exc.api_error_code() not in RETRY_CODES or self._slept + wait > THROTTLE_BUDGET:
+                    raise
+                logger.warning("[facebook] throttle %s — aguardando %ds", exc.api_error_code(), wait)
+                time.sleep(wait)
+                self._slept += wait
+                wait *= 2
 
-        # ── Phase 1: daily insights (spend / ROAS / purchases) ────────────────
-        if mode in ("quick", "full"):
-            logger.info("[facebook] Collecting daily insights (spend/ROAS/purchases)...")
-            self._collect_daily_insights(date_from, date_to)
+    def _pages(self, cursor):
+        for item in cursor:
+            yield item
+        while self._throttled(cursor.load_next_page):
+            time.sleep(0.2)
+            for item in cursor:
+                yield item
 
-        # ── Phase 2: account structure (campaigns / adsets / ads / creatives) ─
-        if mode in ("structure", "full"):
-            # Skip heavy structure re-sync on short incremental runs (≤3 days).
-            # Campaigns/adsets/ads rarely change day-to-day; creatives are cached.
-            # Use mode="full" or a longer date range to force a full structure refresh.
-            if days_span <= 3 and mode == "structure":
-                logger.info(
-                    "[facebook] Short sync (%d days) — skipping structure re-sync, doing breakdowns only",
-                    days_span,
-                )
-            else:
-                logger.info("[facebook] Syncing account structure...")
-                self._sync_account()
-                self._sync_campaigns()
-                self._sync_adsets()
-                self._sync_ads()
+    # ── Insights ────────────────────────────────────────────────────────────
 
-            # Cap breakdowns to last _BREAKDOWN_MAX_DAYS days to avoid timeouts
-            breakdown_from = max(date_from, date_to - timedelta(days=_BREAKDOWN_MAX_DAYS - 1))
-            if breakdown_from > date_from:
-                logger.info(
-                    "[facebook] Breakdowns capped to last %d days (%s → %s)",
-                    _BREAKDOWN_MAX_DAYS, breakdown_from, date_to,
-                )
+    def _insights_for_day(self, day: date) -> list[dict]:
+        """One request per day, never a range: a multi-day request is answered
+        from a background report that, for a day still being tallied, comes
+        back nearly all zeros (MOKOO read $0.42 instead of $619 that way)."""
+        params = {"level": "ad", "time_range": {"since": str(day), "until": str(day)},
+                  "time_increment": 1, "limit": 500}
+        cursor = self._throttled(lambda: self.account.get_insights(fields=INSIGHT_FIELDS, params=params))
+        raw = [dict(i) for i in self._pages(cursor)]
+        rate = self.money_rate(str(day))
+        rows = [r for r in (parse_daily_insight(i, self.account_id, rate) for i in raw) if r]
+        for r in rows:
+            if r["phantom_purchase"]:
+                logger.warning("[facebook] %s ad %s: valor de compra %.2f marcado como fantasma",
+                               r["date"], r["ad_id"], r["purchase_value"])
+        self.records += upsert(self.session, "fb_ad_daily_metrics", self.inject_tenant(rows),
+                               [["tenant_id", "ad_id", "date"], ["ad_id", "date"]])
+        logger.info("[facebook] %s %s — %d anúncios", self.account_id, day, len(rows))
+        return raw
 
-            # Run the 4 breakdown types in parallel — each gets its own DB session
-            # so SQLAlchemy thread-safety is preserved.
-            logger.info("[facebook] Collecting breakdowns in parallel (4 workers)...")
-            self._collect_breakdowns_parallel(breakdown_from, date_to)
+    def _upsert_structure(self, ads: list[dict], adsets: list[dict], campaigns: list[dict]) -> None:
+        upsert(self.session, "fb_ads", self.inject_tenant(ads), [["tenant_id", "ad_id"], ["ad_id"]])
+        upsert(self.session, "fb_adsets", self.inject_tenant(adsets), [["tenant_id", "adset_id"], ["adset_id"]])
+        camp = [{**c, "account_id": self.account_id} for c in campaigns]
+        upsert(self.session, "fb_campaigns", self.inject_tenant(camp), [["tenant_id", "campaign_id"], ["campaign_id"]])
 
-    def _collect_breakdowns_parallel(self, date_from: date, date_to: date) -> None:
-        """Run all 4 breakdown types concurrently — each thread owns its DB session."""
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+    # ── Structure ───────────────────────────────────────────────────────────
+
+    def _sync_structure(self) -> None:
+        now = datetime.now(timezone.utc)
+        campaigns = self._throttled(lambda: list(self._pages(self.account.get_campaigns(
+            fields=["id", "name", "status", "effective_status", "objective"], params={"limit": 200}))))
+        adsets = self._throttled(lambda: list(self._pages(self.account.get_ad_sets(
+            fields=["id", "name", "status", "campaign_id"], params={"limit": 200}))))
+        ads = self._throttled(lambda: list(self._pages(self.account.get_ads(
+            fields=["id", "name", "status", "effective_status", "adset_id", "campaign_id",
+                    "creative", "created_time", "updated_time"], params={"limit": 200}))))
+
+        ads = self._scope_ads(ads)
+        camp_names = {c["id"]: c.get("name") for c in campaigns}
+        set_names = {a["id"]: a.get("name") for a in adsets}
+        creative = self._creatives(ads)
+
+        self.records += upsert(self.session, "fb_campaigns", self.inject_tenant([{
+            "campaign_id": c["id"], "account_id": self.account_id, "name": c.get("name"),
+            "status": c.get("status"), "objective": c.get("objective"), "synced_at": now,
+        } for c in campaigns]), [["tenant_id", "campaign_id"], ["campaign_id"]])
+        self.records += upsert(self.session, "fb_adsets", self.inject_tenant([{
+            "adset_id": a["id"], "campaign_id": a.get("campaign_id"), "name": a.get("name"),
+            "status": a.get("status"), "synced_at": now,
+        } for a in adsets]), [["tenant_id", "adset_id"], ["adset_id"]])
+        rows = []
+        for ad in ads:
+            c = creative.get(ad["id"], {})
+            rows.append({
+                "ad_id": ad["id"], "name": ad.get("name"), "status": ad.get("status"),
+                "effective_status": ad.get("effective_status"),
+                "adset_id": ad.get("adset_id"), "adset_name": set_names.get(ad.get("adset_id")),
+                "campaign_id": ad.get("campaign_id"), "campaign_name": camp_names.get(ad.get("campaign_id")),
+                "created_time": graph_ts(ad.get("created_time")), "updated_time": graph_ts(ad.get("updated_time")),
+                "synced_at": now, **c,
+            })
+        self.records += upsert(self.session, "fb_ads", self.inject_tenant(rows),
+                               [["tenant_id", "ad_id"], ["ad_id"]])
+
+    def _scope_ads(self, ads: list[dict]) -> list[dict]:
+        """With a collect_from cut, keep only this store's ads: those it has
+        spend for, or that were created after the cut. A shared or re-assigned
+        account lists every ad it ever ran, including another store's."""
+        if not self.collect_from:
+            return ads
+        mine = {r[0] for r in self.session.execute(
+            text("SELECT DISTINCT ad_id FROM fb_ad_daily_metrics WHERE tenant_id = :t AND date >= :d"),
+            {"t": self.tenant_id, "d": self.collect_from})}
+        cut = self.collect_from.isoformat()
+        return [a for a in ads if a["id"] in mine or (a.get("created_time") or "")[:10] >= cut]
+
+    def _creatives(self, ads: list[dict]) -> dict[str, dict]:
+        """Creative details per ad, fetched only when the ad is new or its
+        creative changed. The old cache keyed on image_url, which video ads
+        never have, so ~5,800 creatives were re-downloaded on every full sync."""
+        stored = {r[0]: r for r in self.session.execute(
+            text("SELECT ad_id, creative_id, creative_url, thumbnail_url, landing_url FROM fb_ads "
+                 "WHERE tenant_id = :t AND ad_id = ANY(:ids)"),
+            {"t": self.tenant_id, "ids": [a["id"] for a in ads]})} if ads else {}
+        has_creative_id = "creative_id" in self._fb_ads_columns()
+        out: dict[str, dict] = {}
+        to_fetch: dict[str, list[str]] = {}
+        for ad in ads:
+            cid = (ad.get("creative") or {}).get("id")
+            if not cid:
+                continue
+            row = stored.get(ad["id"])
+            if row is not None and (row[1] == cid or (row[1] is None and (row[2] or row[3] or row[4]))):
+                # Same creative as stored, or a legacy row with details already
+                # fetched: keep what is there, just remember the creative id.
+                if has_creative_id and row[1] != cid:
+                    out[ad["id"]] = {"creative_id": cid}
+                continue
+            to_fetch.setdefault(cid, []).append(ad["id"])
+        if to_fetch:
+            logger.info("[facebook] buscando %d criativos novos (%d anúncios já em cache)",
+                        len(to_fetch), len(ads) - sum(len(v) for v in to_fetch.values()))
+        for cid, details in self._fetch_creatives(list(to_fetch)).items():
+            for ad_id in to_fetch[cid]:
+                out[ad_id] = {**details, **({"creative_id": cid} if has_creative_id else {})}
+        return out
+
+    def _fb_ads_columns(self) -> set[str]:
+        from app.collectors.upsert import _table
+        return {c.name for c in _table(self.session, "fb_ads").columns}
+
+    def _fetch_creatives(self, creative_ids: list[str]) -> dict[str, dict]:
+        from concurrent.futures import ThreadPoolExecutor
+
+        fields = ["id", "image_url", "thumbnail_url", "object_story_spec", "asset_feed_spec"]
+
+        def one(cid: str):
+            try:
+                c = AdCreative(cid, api=self._new_api()).api_get(fields=fields)
+                return cid, _parse_creative(dict(c))
+            except Exception as e:  # noqa: BLE001 — one bad creative never fails the run
+                logger.warning("[facebook] criativo %s: %s", cid, redact(e, 160))
+                return cid, None
+
+        out: dict[str, dict] = {}
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            for cid, details in pool.map(one, creative_ids):
+                if details is not None:
+                    out[cid] = details
+        return out
+
+    # ── Breakdowns ──────────────────────────────────────────────────────────
+
+    def _collect_breakdowns(self, date_from: date, date_to: date) -> None:
+        """Four breakdown types in parallel, each with its own API client and
+        DB session. A failed type is retried through throttling and, if it
+        still fails, named on the run instead of being swallowed."""
+        from concurrent.futures import ThreadPoolExecutor
         from app.database import SessionLocal
 
-        _account_id = self._account_id
-        _tenant_id  = self.tenant_id
-        # Snapshot API credentials from current initialized API
-        _api        = self._account.get_api()
-        _session    = _api._session
-        _app_id     = _session.app_id
-        _app_secret = _session.app_secret
-        _token      = _session.access_token
-
-        def run_one(label: str, breakdowns: list):
-            """Thread worker: own session + own FacebookCollector (no token refresh)."""
+        def one(label: str, dims: list[str]) -> tuple[str, int, Optional[str]]:
             session = SessionLocal()
             try:
-                collector = FacebookCollector(
-                    session=session,
-                    tenant_id=_tenant_id,
-                    access_token=_token,
-                    ad_account_id=_account_id,
-                    app_id=_app_id,
-                    app_secret=_app_secret,
-                )
-                collector._collect_breakdown(label, breakdowns, date_from, date_to)
-                session.commit()
-            except Exception as exc:
-                session.rollback()
-                logger.error("[facebook] Breakdown '%s' failed: %s", label, exc, exc_info=True)
+                account = AdAccount(self.account_id, api=self._new_api())
+                params = {"level": "ad", "breakdowns": dims,
+                          "time_range": {"since": str(date_from), "until": str(date_to)},
+                          "time_increment": 1, "limit": 500}
+                cursor = self._throttled(lambda: account.get_insights(fields=BREAKDOWN_FIELDS, params=params))
+                n = 0
+                batch: list[dict] = []
+                for i in self._pages(cursor):
+                    i = dict(i)
+                    r = parse_breakdown(i, label, dims, self.money_rate(i.get("date_start")))
+                    if r:
+                        batch.append({**r, "tenant_id": self.tenant_id})
+                    if len(batch) >= 500:
+                        n += upsert(session, "fb_ad_breakdowns", batch,
+                                    [["date", "tenant_id", "ad_id", "breakdown_type", "breakdown_value"],
+                                     ["ad_id", "date", "breakdown_type", "breakdown_value"]])
+                        batch = []
+                n += upsert(session, "fb_ad_breakdowns", batch,
+                            [["date", "tenant_id", "ad_id", "breakdown_type", "breakdown_value"],
+                             ["ad_id", "date", "breakdown_type", "breakdown_value"]])
+                return label, n, None
+            except Exception as e:  # noqa: BLE001 — reported on the run
+                try:
+                    session.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                return label, 0, describe_meta_error(e) or redact(e, 160)
             finally:
                 session.close()
 
         with ThreadPoolExecutor(max_workers=4, thread_name_prefix="fb-breakdown") as pool:
-            futures = {
-                pool.submit(run_one, label, bds): label
-                for label, bds in _BREAKDOWNS
-            }
-            for fut in as_completed(futures):
-                label = futures[fut]
-                if fut.exception():
-                    logger.error("[facebook] Breakdown '%s' error: %s", label, fut.exception())
-                else:
-                    logger.info("[facebook] Breakdown '%s' complete", label)
+            results = list(pool.map(lambda b: one(*b), BREAKDOWNS))
+        for label, n, err in results:
+            self.records += n
+            if err:
+                self.failures.append(f"breakdown {label} falhou: {err}")
+                logger.error("[facebook] breakdown %s falhou: %s", label, err)
 
-    # ------------------------------------------------------------------
-    # Structure sync
-    # ------------------------------------------------------------------
 
-    def _sync_account(self):
-        info = self._with_retry(lambda: self._account.api_get(fields=["name", "currency", "account_status"]))
-        rows = [{
-            "account_id": self._account_id,
-            "name": info.get("name"),
-            "currency": info.get("currency"),
-            "account_status": info.get("account_status"),
-            "synced_at": datetime.utcnow(),
-        }]
-        self._upsert_raw("fb_ad_accounts", rows, ["account_id"])
-
-    def _sync_campaigns(self):
-        campaigns = self._with_retry(lambda: list(self._paginate(
-            self._account.get_campaigns(
-                fields=["id", "name", "status", "objective"],
-                params={"limit": 200},
-            )
-        )))
-        rows = [
-            {
-                "campaign_id": c["id"],
-                "account_id": self._account_id,
-                "name": c.get("name"),
-                "status": c.get("status"),
-                "objective": c.get("objective"),
-                "synced_at": datetime.utcnow(),
-            }
-            for c in campaigns
-        ]
-        self._upsert_raw("fb_campaigns", rows, ["campaign_id"])
-
-    def _sync_adsets(self):
-        adsets = self._with_retry(lambda: list(self._paginate(
-            self._account.get_ad_sets(
-                fields=["id", "name", "status", "campaign_id"],
-                params={"limit": 200},
-            )
-        )))
-        rows = [
-            {
-                "adset_id": a["id"],
-                "campaign_id": a.get("campaign_id"),
-                "name": a.get("name"),
-                "status": a.get("status"),
-                "synced_at": datetime.utcnow(),
-            }
-            for a in adsets
-        ]
-        self._upsert_raw("fb_adsets", rows, ["adset_id"])
-
-    @staticmethod
-    def _parse_creative(creative: dict) -> dict:
-        story      = creative.get("object_story_spec") or {}
-        link_data  = story.get("link_data")  or {}
-        video_data = story.get("video_data") or {}
-        cta_value  = (video_data.get("call_to_action") or {}).get("value") or {}
-        landing_url = (
-            link_data.get("link")
-            or cta_value.get("link")
-            or (story.get("template_data", {}).get("link") if isinstance(story.get("template_data"), dict) else None)
-        )
-        if not landing_url:
-            feed = creative.get("asset_feed_spec") or {}
-            link_urls = feed.get("link_urls") or []
-            if link_urls:
-                landing_url = (link_urls[0] or {}).get("website_url")
-        return {
-            "image_url": creative.get("image_url"),
-            "thumbnail_url": creative.get("thumbnail_url"),
-            "landing_url": landing_url,
-        }
-
-    def _fetch_creative_details(self, creative_ids: list[str]) -> dict[str, dict]:
-        """Fetch AdCreative objects in parallel (5 workers) to avoid slow sequential calls."""
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        _CREATIVE_FIELDS = ["id", "image_url", "thumbnail_url", "object_story_spec", "asset_feed_spec"]
-
-        def fetch_one(cid: str):
-            try:
-                creative = AdCreative(cid).api_get(fields=_CREATIVE_FIELDS)
-                return cid, self._parse_creative(creative)
-            except Exception as e:
-                logger.warning("[facebook] Could not fetch creative %s: %s", cid, e)
-                return cid, {}
-
-        creative_map: dict[str, dict] = {}
-        with ThreadPoolExecutor(max_workers=5) as pool:
-            for cid, details in pool.map(fetch_one, creative_ids):
-                if details:
-                    creative_map[cid] = details
-        logger.info("[facebook] Fetched %d/%d creative details", len(creative_map), len(creative_ids))
-        return creative_map
-
-    def _sync_ads(self) -> list[str]:
-        ads = self._with_retry(lambda: list(self._paginate(
-            self._account.get_ads(
-                fields=["id", "name", "status", "adset_id", "campaign_id", "creative"],
-                params={"limit": 200},
-            )
-        )))
-
-        # Only fetch creatives for ads that don't already have creative data cached.
-        # Re-fetching all creatives on every sync is the single biggest time sink.
-        from sqlalchemy import text as sa_text
-        cached_creative: dict[str, dict] = {}
-        if ads:
-            ad_id_list = [ad["id"] for ad in ads]
-            rows_db = self.session.execute(
-                sa_text("SELECT ad_id, creative_url, landing_url, thumbnail_url FROM fb_ads WHERE ad_id = ANY(:ids) AND creative_url IS NOT NULL"),
-                {"ids": ad_id_list},
-            ).fetchall()
-            # Use existing DB creative data so we don't overwrite with NULLs on upsert
-            cached_creative = {
-                r[0]: {"image_url": r[1], "landing_url": r[2], "thumbnail_url": r[3]}
-                for r in rows_db
-            }
-
-        creative_ids = list({
-            (ad.get("creative") or {}).get("id")
-            for ad in ads
-            if (ad.get("creative") or {}).get("id") and ad["id"] not in cached_creative
-        })
-        if creative_ids:
-            logger.info("[facebook] Fetching creatives for %d ads (skipping %d cached)", len(creative_ids), len(cached_creative))
-        else:
-            logger.info("[facebook] All creative data cached — skipping creative fetch")
-        creative_map = self._fetch_creative_details(creative_ids) if creative_ids else {}
-
-        rows = []
-        for ad in ads:
-            cid = (ad.get("creative") or {}).get("id")
-            details = creative_map.get(cid) or cached_creative.get(ad["id"]) or {}
-            rows.append({
-                "ad_id": ad["id"],
-                "adset_id": ad.get("adset_id"),
-                "campaign_id": ad.get("campaign_id"),
-                "name": ad.get("name"),
-                "status": ad.get("status"),
-                "creative_type": None,
-                "landing_url": details.get("landing_url"),
-                "creative_url": details.get("image_url"),
-                "thumbnail_url": details.get("thumbnail_url"),
-                "synced_at": datetime.utcnow(),
-            })
-        self._upsert_raw("fb_ads", rows, ["ad_id"])
-        return [ad["id"] for ad in ads]
-
-    # ------------------------------------------------------------------
-    # Daily insights
-    # ------------------------------------------------------------------
-
-    def _collect_daily_insights(self, date_from: date, date_to: date):
-        # One request per day, never a range.
-        #
-        # Asking for several days at once makes Facebook answer from a report it
-        # builds in the background, and the SDK hands back whatever that report
-        # holds at that instant — which, for a day still being tallied, is almost
-        # all zeros. The same window fetched a day at a time comes back complete.
-        # It cost MOKOO three days of ad spend reading as $0.42 instead of $619,
-        # with the sync reporting success the whole time.
-        #
-        # The extra calls are cheap: these runs cover two or three days and the
-        # account sits at ~1% of its API quota.
-        day = date_from
-        while day <= date_to:
-            self._collect_insights_for_day(day)
-            day += timedelta(days=1)
-
-    def _collect_insights_for_day(self, day: date):
-        params = {
-            "level": "ad",
-            "time_range": {
-                "since": str(day),
-                "until": str(day),
-            },
-            "time_increment": 1,   # one row per day
-            "limit": 500,
-        }
-
-        cursor = self._with_retry(lambda: self._account.get_insights(
-            fields=_INSIGHT_FIELDS,
-            params=params,
-        ))
-
-        rows = []
-        total = 0
-        for insight in self._paginate(cursor):
-            row = self._parse_daily_insight(insight)
-            if row:
-                if self._fb_ad_account_id_tag:
-                    row["fb_ad_account_id"] = self._fb_ad_account_id_tag
-                rows.append(row)
-
-            # Batch upserts every 500 rows to avoid huge transactions
-            if len(rows) >= 500:
-                self._upsert_raw("fb_ad_daily_metrics", rows, ["ad_id", "date"])
-                total += len(rows)
-                rows = []
-
-        if rows:
-            self._upsert_raw("fb_ad_daily_metrics", rows, ["ad_id", "date"])
-            total += len(rows)
-        # Per-day counts are the cheapest way to spot this breaking again: a day
-        # that silently returns far fewer rows than its neighbours is the tell.
-        logger.info("[facebook] %s — %d ad rows", day, total)
-
-    def _parse_daily_insight(self, insight: dict) -> Optional[dict]:
-        ad_id = insight.get("ad_id")
-        raw_date = insight.get("date_start")
-        if not ad_id or not raw_date:
-            return None
-
-        actions = insight.get("actions") or []
-        action_values = insight.get("action_values") or []
-        cost_per = insight.get("cost_per_action_type") or []
-
-        # Use _first_action to avoid double-counting: FB API often returns the same
-        # conversion under both the generic name ("purchase") and the pixel-specific
-        # name ("offsite_conversion.fb_pixel_purchase"). Summing both inflates values 2×.
-        purchases = int(_first_action(actions, "purchase", "offsite_conversion.fb_pixel_purchase"))
-        purchase_value = _first_action(action_values, "purchase", "offsite_conversion.fb_pixel_purchase")
-        add_to_cart = int(_first_action(actions, "add_to_cart", "offsite_conversion.fb_pixel_add_to_cart", "omni_add_to_cart"))
-        initiate_checkout = int(_first_action(actions, "initiate_checkout", "offsite_conversion.fb_pixel_initiate_checkout", "omni_initiated_checkout"))
-
-        spend = _float(insight.get("spend"))
-        roas = (purchase_value / spend) if spend > 0 else 0
-        cost_per_purchase = (spend / purchases) if purchases > 0 else 0
-
-        impressions = _int(insight.get("impressions"))
-        video_plays = _video_action_value(insight.get("video_play_actions"))
-        video_p25 = _video_action_value(insight.get("video_p25_watched_actions"))
-        video_p50 = _video_action_value(insight.get("video_p50_watched_actions"))
-        video_p75 = _video_action_value(insight.get("video_p75_watched_actions"))
-        video_p100 = _video_action_value(insight.get("video_p100_watched_actions"))
-
-        # hook_rate: % of people who saw the ad and started watching (3-sec view / impression)
-        hook_rate = (video_plays / impressions) if (video_plays and impressions) else None
-        # hold_rates: % of viewers who kept watching past each milestone
-        hold_rate_25 = (video_p25 / video_plays) if (video_p25 and video_plays) else None
-        hold_rate_50 = (video_p50 / video_plays) if (video_p50 and video_plays) else None
-        hold_rate_75 = (video_p75 / video_plays) if (video_p75 and video_plays) else None
-        hold_rate_100 = (video_p100 / video_plays) if (video_p100 and video_plays) else None
-
-        # link_clicks comes from outbound_clicks
-        outbound = insight.get("outbound_clicks") or []
-        link_clicks = _int(_parse_action(outbound, "outbound_click")) if outbound else _int(_parse_action(actions, "link_click"))
-
-        return {
-            "ad_id": ad_id,
-            "adset_id": insight.get("adset_id", ""),
-            "campaign_id": insight.get("campaign_id", ""),
-            "date": raw_date,
-            "spend": spend,
-            "impressions": impressions,
-            "reach": _int(insight.get("reach")),
-            "frequency": _float(insight.get("frequency")),
-            "clicks": _int(insight.get("clicks")),
-            "link_clicks": link_clicks,
-            "landing_page_views": _int(insight.get("landing_page_views")),
-            "ctr": _float(insight.get("ctr")),
-            "link_ctr": (link_clicks / impressions * 100) if (link_clicks and impressions) else 0,
-            "cpm": _float(insight.get("cpm")),
-            "cpc": _float(insight.get("cpc")),
-            "purchases": purchases,
-            "purchase_value": purchase_value,
-            "roas": roas,
-            "cost_per_purchase": cost_per_purchase,
-            "add_to_cart": add_to_cart,
-            "initiate_checkout": initiate_checkout,
-            "post_engagement": _int(_parse_action(actions, "post_engagement")),
-            "video_plays": video_plays,
-            "video_p25": video_p25,
-            "video_p50": video_p50,
-            "video_p75": video_p75,
-            "video_p100": video_p100,
-            "hook_rate": hook_rate,
-            "hold_rate_25": hold_rate_25,
-            "hold_rate_50": hold_rate_50,
-            "hold_rate_75": hold_rate_75,
-            "hold_rate_100": hold_rate_100,
-        }
-
-    # ------------------------------------------------------------------
-    # Breakdowns
-    # ------------------------------------------------------------------
-
-    def _collect_breakdown(
-        self,
-        label: str,
-        breakdowns: list[str],
-        date_from: date,
-        date_to: date,
-    ):
-        logger.info("[facebook] Breakdown: %s", label)
-        params = {
-            "level": "ad",
-            "breakdowns": breakdowns,
-            "time_range": {"since": str(date_from), "until": str(date_to)},
-            "time_increment": 1,
-            "limit": 500,
-        }
-
-        cursor = self._account.get_insights(
-            fields=_BREAKDOWN_FIELDS,
-            params=params,
-        )
-
-        rows = []
-        for insight in self._paginate(cursor):
-            ad_id = insight.get("ad_id")
-            raw_date = insight.get("date_start")
-            if not ad_id or not raw_date:
-                continue
-
-            # Build breakdown_value from whichever breakdown fields are present
-            breakdown_value = self._build_breakdown_value(insight, breakdowns)
-
-            actions = insight.get("actions") or []
-            action_values = insight.get("action_values") or []
-            spend = _float(insight.get("spend"))
-            purchase_value = _first_action(action_values, "purchase", "offsite_conversion.fb_pixel_purchase")
-            purchases = int(_first_action(actions, "purchase", "offsite_conversion.fb_pixel_purchase"))
-            roas = (purchase_value / spend) if spend > 0 else 0
-
-            rows.append({
-                "ad_id": ad_id,
-                "date": raw_date,
-                "breakdown_type": label,
-                "breakdown_value": breakdown_value,
-                "spend": spend,
-                "impressions": _int(insight.get("impressions")),
-                "clicks": _int(insight.get("clicks")),
-                "ctr": _float(insight.get("ctr")),
-                "cpm": _float(insight.get("cpm")),
-                "purchases": purchases,
-                "purchase_value": purchase_value,
-                "roas": roas,
-            })
-
-            if len(rows) >= 500:
-                self._upsert_raw(
-                    "fb_ad_breakdowns", rows,
-                    ["ad_id", "date", "breakdown_type", "breakdown_value"],
-                )
-                rows = []
-
-        if rows:
-            self._upsert_raw(
-                "fb_ad_breakdowns", rows,
-                ["ad_id", "date", "breakdown_type", "breakdown_value"],
-            )
-
-    @staticmethod
-    def _build_breakdown_value(insight: dict, breakdowns: list[str]) -> str:
-        """Combine multiple breakdown dimensions into a single string key."""
-        parts = []
-        mapping = {
-            "country": "country",
-            "device_platform": "device_platform",
-            "publisher_platform": "publisher_platform",
-            "platform_position": "platform_position",
-            "age": "age",
-            "gender": "gender",
-        }
-        for api_field in breakdowns:
-            key = mapping.get(api_field, api_field)
-            val = insight.get(key) or insight.get(api_field, "unknown")
-            parts.append(str(val))
-        return "_".join(parts)
-
-    # ------------------------------------------------------------------
-    # Pagination helper
-    # ------------------------------------------------------------------
-
-    def _with_retry(self, fn, max_retries: int = 3):
-        """Run fn(), retrying on Facebook rate limit (code 17) with exponential backoff."""
-        for attempt in range(max_retries):
-            try:
-                return fn()
-            except FacebookRequestError as exc:
-                if exc.api_error_code() == 17 and attempt < max_retries - 1:
-                    wait_sec = 90 * (2 ** attempt)  # 90s then 180s
-                    logger.warning(
-                        "[facebook] Rate limit (code 17) — waiting %ds (attempt %d/%d)",
-                        wait_sec, attempt + 1, max_retries - 1,
-                    )
-                    time.sleep(wait_sec)
-                else:
-                    raise
-
-    @staticmethod
-    def _paginate(cursor, sleep_between_pages: float = 0.2):
-        """Iterate all pages of a Facebook API cursor with rate-limit sleep."""
-        for item in cursor:
-            yield item
-        while cursor.load_next_page():
-            time.sleep(sleep_between_pages)
-            for item in cursor:
-                yield item
-
-    # ------------------------------------------------------------------
-    # Low-level upsert (uses table name string, not model class)
-    # ------------------------------------------------------------------
-
-    def _upsert_raw(self, table_name: str, rows: list[dict], conflict_columns: list[str]) -> int:
-        if not rows:
-            return 0
-        from sqlalchemy import text, Table, MetaData
-        from sqlalchemy.dialects.postgresql import insert as pg_insert
-
-        rows = self._inject_tenant(rows)
-
-        if table_name not in _TABLE_CACHE:
-            meta = MetaData()
-            meta.reflect(bind=self.session.bind, only=[table_name])
-            _TABLE_CACHE[table_name] = meta.tables[table_name]
-        table = _TABLE_CACHE[table_name]
-
-        # Strip keys not present in the DB table so extra collector fields never cause errors
-        col_names = {c.name for c in table.columns}
-        rows = [{k: v for k, v in row.items() if k in col_names} for row in rows]
-
-        update_cols = [
-            c.name for c in table.columns
-            if c.name not in conflict_columns and c.name != "id"
-        ]
-        stmt = pg_insert(table).values(rows)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=conflict_columns,
-            set_={col: stmt.excluded[col] for col in update_cols},
-        )
-        self.session.execute(stmt)
-        self.session.commit()
-        self._records_collected += len(rows)
-        return len(rows)
+def _parse_creative(creative: dict) -> dict:
+    story = creative.get("object_story_spec") or {}
+    link_data = story.get("link_data") or {}
+    video_data = story.get("video_data") or {}
+    cta = (video_data.get("call_to_action") or {}).get("value") or {}
+    template = story.get("template_data") if isinstance(story.get("template_data"), dict) else {}
+    landing = link_data.get("link") or cta.get("link") or (template or {}).get("link")
+    if not landing:
+        urls = (creative.get("asset_feed_spec") or {}).get("link_urls") or []
+        if urls:
+            landing = (urls[0] or {}).get("website_url")
+    return {
+        "creative_url": creative.get("image_url"),
+        "thumbnail_url": creative.get("thumbnail_url"),
+        "landing_url": landing,
+    }

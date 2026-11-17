@@ -1,249 +1,249 @@
 """
-Manual collection runner.
+Collect one store's data from one source. Spawned by the server scheduler and
+the refresh endpoint (frontend/lib/sync/jobs.ts); also usable by hand.
 
-Usage:
-  python collect_recent.py                        # last 30 days, both sources, uses .env creds
-  python collect_recent.py --days 7               # last 7 days
-  python collect_recent.py --source facebook      # only facebook
-  python collect_recent.py --tenant <clerk_user_id>  # use credentials from tenants table
-  python collect_recent.py --date-from 2024-01-01 --date-to 2024-01-31
+  python collect_recent.py --tenant <id> --source shopify
+  python collect_recent.py --tenant <id> --source facebook --mode structure
+  python collect_recent.py --tenant <id> --source facebook --mode backfill \
+        --account act_123 --date-from 2026-10-01
+
+--mode
+  shopify : recorded on the run only (scheduled | refresh | backfill).
+  facebook: quick | repull7 | repull28 | backfill → daily insights;
+            structure → campaigns/ads/creatives + breakdowns;
+            full → both.
+
+Default window: the last two days plus today, in the store's timezone.
+
+Exit codes: 0 ok · 1 a run failed · 2 bad arguments or unknown store ·
+75 another run of this store+source holds the lock (try again later).
 """
+
+from __future__ import annotations
 
 import argparse
 import logging
 import os
+import signal
 import sys
 import tempfile
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from typing import Optional
 from zoneinfo import ZoneInfo
 
-if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
-    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-if sys.stderr.encoding and sys.stderr.encoding.lower() != 'utf-8':
-    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+for stream in (sys.stdout, sys.stderr):
+    if stream.encoding and stream.encoding.lower() != "utf-8":
+        stream.reconfigure(encoding="utf-8", errors="replace")
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # noqa: E402
+
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger("collect_recent")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s  %(message)s",
+                    datefmt="%H:%M:%S")
+logger = logging.getLogger("collect")
+
+EXIT_LOCKED = 75
+FACEBOOK_INSIGHT_MODES = {"quick", "repull7", "repull28", "backfill", "full"}
+FACEBOOK_STRUCTURE_MODES = {"structure", "full"}
 
 
-def acquire_sync_lock(tenant_id: str | None):
-    """Return an open lock file handle if we acquired the lock, None if another sync is running.
-
-    Uses fcntl.flock (Linux/Mac) which auto-releases on process exit/crash.
-    Falls back to a no-op on Windows (development machines).
-    """
-    slug = (tenant_id or "default").replace("/", "_")
-    lock_path = os.path.join(tempfile.gettempdir(), f"adanalyzer_sync_{slug}.lock")
-    fd = open(lock_path, "w")
+def acquire_lock(key: str):
+    """A per store+source file lock (fcntl), released by the OS on exit or
+    crash. None when another process holds it. No-op on Windows."""
+    path = os.path.join(tempfile.gettempdir(), f"opero_sync_{key.replace('/', '_')}.lock")
+    fd = open(path, "w")
     try:
         import fcntl
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         fd.write(str(os.getpid()))
         fd.flush()
-        logger.info("Sync lock acquired: %s", lock_path)
         return fd
     except ImportError:
-        # Windows — skip locking
         return fd
     except OSError:
         fd.close()
-        logger.warning("Another sync is already running for tenant=%s — exiting", tenant_id)
         return None
 
 
-def parse_args():
-    p = argparse.ArgumentParser(description="Collect Facebook Ads + Shopify data")
-    p.add_argument("--source", choices=["facebook", "shopify", "both"], default="both")
-    p.add_argument("--days", type=int, default=30, help="Collect last N days (default: 30)")
+def lane(source: str, mode: Optional[str]) -> str:
+    """The lock lane, the same one the job runner uses (frontend/lib/sync/plan.ts):
+    Meta structure runs beside Meta insights, never beside another structure run."""
+    return "facebook_structure" if source == "facebook" and mode == "structure" else source
+
+
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(description="Opero — coleta de uma loja")
+    p.add_argument("--tenant", dest="tenant_id", required=True)
+    p.add_argument("--source", choices=["shopify", "facebook"], required=True)
+    p.add_argument("--mode", default=None)
     p.add_argument("--date-from", dest="date_from", type=date.fromisoformat)
-    p.add_argument("--date-to",   dest="date_to",   type=date.fromisoformat)
-    p.add_argument("--tenant",    dest="tenant_id",  default=None,
-                   help="Clerk user_id — reads credentials from tenants table")
-    p.add_argument("--mode", choices=["quick", "structure", "full"], default="full",
-                   help="Facebook collection mode: quick=metrics only, structure=structure+breakdowns only, full=everything")
-    return p.parse_args()
+    p.add_argument("--date-to", dest="date_to", type=date.fromisoformat)
+    p.add_argument("--account", default=None, help="só esta conta de anúncio (act_...)")
+    p.add_argument("--include-archived", dest="include_archived", action="store_true",
+                   help="coletar mesmo uma loja arquivada (só à mão)")
+    return p.parse_args(argv)
 
 
-def load_tenant_creds(tenant_id: str, session) -> dict:
-    """Fetch credentials from tenants table for the given Clerk user_id."""
+def resolve_window(today: date, date_from: Optional[date], date_to: Optional[date]) -> tuple[date, date]:
+    end = date_to or today
+    start = date_from or (end - timedelta(days=2))
+    if start > end:
+        start, end = end, start
+    return start, end
+
+
+def load_store(session, tenant_id: str) -> Optional[dict]:
     from sqlalchemy import text
-    row = session.execute(
-        text("SELECT * FROM tenants WHERE id = :id"),
-        {"id": tenant_id}
-    ).mappings().fetchone()
-    if not row:
-        raise ValueError(f"Tenant '{tenant_id}' not found in tenants table")
-    return dict(row)
+    row = session.execute(text("SELECT * FROM tenants WHERE id = :id"), {"id": tenant_id}).mappings().fetchone()
+    return dict(row) if row else None
 
 
-def run_facebook(date_from: date, date_to: date, session, tenant_id=None, creds=None, mode="full", fb_ad_account_id_tag=None):
-    if creds and (not creds.get("fb_access_token") or not creds.get("fb_ad_account_id")):
-        print("  [facebook] skipped — no credentials configured")
-        return
-    from app.collectors.facebook import FacebookCollector
-    kwargs = {"tenant_id": tenant_id, "mode": mode}
-    if creds:
-        kwargs["access_token"]  = creds["fb_access_token"]
-        kwargs["ad_account_id"] = creds["fb_ad_account_id"]
-        # Use per-tenant Facebook app credentials when available (for stores
-        # using a different Meta app than the default env-var app)
-        if creds.get("facebook_app_id"):
-            kwargs["app_id"] = creds["facebook_app_id"]
-        if creds.get("facebook_app_secret"):
-            kwargs["app_secret"] = creds["facebook_app_secret"]
-    if fb_ad_account_id_tag:
-        kwargs["fb_ad_account_id_tag"] = fb_ad_account_id_tag
-    collector = FacebookCollector(session, **kwargs)
-    n = collector.collect(date_from, date_to)
-    label = f"facebook/{fb_ad_account_id_tag}" if fb_ad_account_id_tag else "facebook"
-    print(f"  [{label}] {n} records collected")
+def ad_accounts(session, store: dict, only: Optional[str]) -> list[dict]:
+    """The store's ad accounts to collect: the tenant-level one and every
+    active extra account, each with its own token and collect_from cut."""
+    from sqlalchemy import text
+    from app.collectors.facebook import normalize_account
+    out: list[dict] = []
+    if store.get("fb_ad_account_id") and store.get("fb_access_token"):
+        out.append({"account_id": normalize_account(store["fb_ad_account_id"]),
+                    "token": store["fb_access_token"], "collect_from": store.get("fb_collect_from")})
+    cols = {r[0] for r in session.execute(text(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'tenant_fb_accounts'"))}
+    extra_cut = "collect_from" if "collect_from" in cols else "NULL::date"
+    for r in session.execute(text(
+            f"SELECT fb_ad_account_id, fb_access_token, {extra_cut} AS collect_from FROM tenant_fb_accounts "
+            "WHERE tenant_id = :t AND is_active = true ORDER BY id"), {"t": store["id"]}):
+        acc = normalize_account(r[0])
+        if any(a["account_id"] == acc for a in out):
+            continue
+        out.append({"account_id": acc, "token": r[1], "collect_from": r[2]})
+    if only:
+        only = normalize_account(only)
+        out = [a for a in out if a["account_id"] == only]
+    return out
 
 
-def run_shopify(date_from: date, date_to: date, session, tenant_id=None, creds=None, store_tz_name: str = "UTC"):
-    # Lojas de app do Dev Dashboard nao tem token fixo: ele vale 24h e e
-    # renovado aqui, que e o unico ponto onde o token da Shopify e lido. Para
-    # loja de token legado isto nao faz chamada nenhuma e devolve o que ja
-    # estava guardado.
-    if creds:
-        from app.collectors.shopify_auth import ensure_token, ShopifyAuthError
-        try:
-            ensure_token(session, creds)
-        except ShopifyAuthError as e:
-            print(f"  [shopify]  skipped — {e}")
-            return
-
-    if creds and (not creds.get("shopify_domain") or not creds.get("shopify_access_token")):
-        print("  [shopify]  skipped — no credentials configured")
-        return
+def run_shopify(session, store: dict, start: date, end: date, mode: Optional[str]) -> bool:
+    from app.collectors.base import record_failed_run
     from app.collectors.shopify import ShopifyCollector
-    kwargs = {"tenant_id": tenant_id, "timezone": store_tz_name}
-    if creds:
-        kwargs["store_url"]    = creds["shopify_domain"]
-        kwargs["access_token"] = creds["shopify_access_token"]
-    collector = ShopifyCollector(session, **kwargs)
-    n = collector.collect(date_from, date_to)
-    print(f"  [shopify]  {n} records collected")
+    from app.collectors.shopify_auth import can_renew
+    if not store.get("shopify_domain") or not (store.get("shopify_access_token") or can_renew(store)):
+        record_failed_run(session, store["id"], "shopify", "Loja sem credenciais da Shopify — reconecte a loja",
+                          start, end, mode=mode)
+        return False
+    try:
+        ShopifyCollector(session, store, store.get("timezone"), mode=mode).collect(start, end)
+        return True
+    except Exception:  # noqa: BLE001 — already recorded on the run
+        logger.exception("shopify falhou")
+        return False
 
 
-def main():
-    args = parse_args()
+def run_facebook(session, store: dict, start: date, end: date, mode: str, only: Optional[str]) -> bool:
+    from app.collectors.facebook import FacebookCollector
+    from app.config import settings
+    accounts = ad_accounts(session, store, only)
+    if not accounts:
+        logger.info("loja sem conta de anúncio ativa — nada a coletar")
+        return True
+    app_id = store.get("facebook_app_id") or settings.facebook_app_id
+    # A store on its own Meta app without a stored secret signs nothing: the
+    # default app's secret would make Meta reject the proof (code 100).
+    if store.get("facebook_app_id") and store.get("facebook_app_id") != settings.facebook_app_id:
+        app_secret = store.get("facebook_app_secret") or None
+    else:
+        app_secret = store.get("facebook_app_secret") or settings.facebook_app_secret
+    ok = True
+    for acc in accounts:
+        phases = []
+        if mode in FACEBOOK_INSIGHT_MODES:
+            phases.append("insights")
+        if mode in FACEBOOK_STRUCTURE_MODES:
+            phases.append("structure")
+        first: Optional[FacebookCollector] = None
+        for phase in phases:
+            c = FacebookCollector(session, store["id"], acc["account_id"], acc["token"], app_id, app_secret,
+                                  phase=phase, mode=mode, collect_from=acc.get("collect_from"))
+            win = c.window(start, end)
+            if win is None:
+                logger.info("%s: janela antes do corte %s — nada a coletar", acc["account_id"], acc.get("collect_from"))
+                break
+            if first is None:
+                try:
+                    state, status, currency = c.account_state()
+                except Exception as e:  # noqa: BLE001 — record the failure on a run
+                    from app.collectors.base import record_failed_run
+                    from app.collectors.facebook import describe_meta_error
+                    from app.collectors.redact import redact
+                    record_failed_run(session, store["id"], c.source, describe_meta_error(e) or redact(e),
+                                      win[0], win[1], account_id=acc["account_id"], mode=mode)
+                    ok = False
+                    break
+                if state != "active":
+                    # Not an error: a dead account is simply not collected.
+                    logger.info("%s: conta inativa (account_status=%s) — ignorada", acc["account_id"], status)
+                    break
+                first = c
+                try:
+                    c.use_currency(currency, win[0], win[1])
+                except Exception as e:  # noqa: BLE001
+                    from app.collectors.base import record_failed_run
+                    record_failed_run(session, store["id"], c.source, f"Conta em {currency} sem cotação: {e}",
+                                      win[0], win[1], account_id=acc["account_id"], mode=mode)
+                    ok = False
+                    break
+            else:
+                c.money_rate = first.money_rate
+            try:
+                c.collect(*win)
+            except Exception:  # noqa: BLE001 — recorded on the run
+                logger.exception("facebook %s/%s falhou", acc["account_id"], phase)
+                ok = False
+    return ok
 
-    # Prevent duplicate syncs for the same tenant running simultaneously.
-    # The lock is per-source so shopify and facebook can run in parallel.
-    lock_key = f"{args.tenant_id or 'default'}_{args.source}"
-    lock_fd = acquire_sync_lock(lock_key)
-    if lock_fd is None:
-        sys.exit(0)  # Another process is already syncing — silent exit is fine
+
+def main(argv=None) -> int:
+    args = parse_args(argv)
+    lock = acquire_lock(f"{args.tenant_id}_{lane(args.source, args.mode)}")
+    if lock is None:
+        print(f"[collect] {args.tenant_id}/{lane(args.source, args.mode)}: já em andamento", flush=True)
+        return EXIT_LOCKED
+
+    from app.collectors.base import Interrupted
+
+    def on_term(signum, _frame):
+        raise Interrupted(f"signal {signum}")
+
+    signal.signal(signal.SIGTERM, on_term)
 
     from app.database import get_db
-
-    errors = []
-
     with get_db() as session:
-        creds = None
-        if args.tenant_id:
-            try:
-                creds = load_tenant_creds(args.tenant_id, session)
-            except Exception as e:
-                print(f"  ✗ {e}")
-                sys.exit(1)
-
-        # Use the store's timezone to determine "today" so date boundaries
-        # match the store's business day, not the server's UTC clock.
-        store_tz_name = (creds or {}).get("timezone") or "UTC"
+        store = load_store(session, args.tenant_id)
+        if not store:
+            print(f"[collect] loja {args.tenant_id} não existe", flush=True)
+            return 2
+        # Archived stores keep their history and are never synced; every
+        # spawner filters them, and this holds for any that does not (the
+        # suspended Squishy World logged a 402 error on every phone refresh).
+        if store.get("archived_at") and not args.include_archived:
+            print(f"[collect] loja {store.get('shop_name') or args.tenant_id} está arquivada — nada a coletar", flush=True)
+            return 0
+        tz_name = store.get("timezone") or "UTC"
         try:
-            store_tz = ZoneInfo(store_tz_name)
-        except Exception:
-            store_tz = ZoneInfo("UTC")
-
-        from datetime import datetime
-        today     = datetime.now(store_tz).date()
-        date_to   = args.date_to   or today
-        date_from = args.date_from or (date_to - timedelta(days=args.days))
-
-        print("=" * 52)
-        print("  AdAnalyzer — Data Collection")
-        print("=" * 52)
-        print(f"  Period : {date_from} → {date_to}")
-        print(f"  Source : {args.source}")
-        if args.tenant_id:
-            print(f"  Tenant : {args.tenant_id}")
-        print(f"  TZ     : {store_tz_name}  (today = {today})")
-        print("=" * 52)
-
-        if creds:
-            print(f"  Store  : {creds['shopify_domain']}")
-            print(f"  FB Acc : {creds['fb_ad_account_id']}")
-            print("=" * 52)
-
-        if args.source in ("facebook", "both"):
-            try:
-                run_facebook(date_from, date_to, session, args.tenant_id, creds, mode=args.mode)
-            except Exception as e:
-                logger.exception("Facebook collection failed")
-                errors.append(f"Facebook: {e}")
-
-            # Collect extra FB accounts (only when running with a specific tenant)
-            if args.tenant_id:
-                try:
-                    from sqlalchemy import text as sa_text
-                    extra_rows = session.execute(
-                        sa_text("SELECT fb_ad_account_id, fb_access_token FROM tenant_fb_accounts WHERE tenant_id = :tid AND is_active = true"),
-                        {"tid": args.tenant_id}
-                    ).fetchall()
-                    for extra in extra_rows:
-                        print(f"  [facebook-extra] Collecting account {extra.fb_ad_account_id}...")
-                        try:
-                            # Carry the tenant's Meta app credentials over. Without
-                            # them the collector falls back to the default app's
-                            # secret and signs the call with the wrong key, which
-                            # Facebook rejects: "Invalid appsecret_proof" (code
-                            # 100). A tenant on a separate Meta app has no secret
-                            # here, and the collector then skips the proof — which
-                            # is exactly what a token from another app needs.
-                            extra_creds = {
-                                "fb_access_token": extra.fb_access_token,
-                                "fb_ad_account_id": extra.fb_ad_account_id,
-                                "facebook_app_id": (creds or {}).get("facebook_app_id"),
-                                "facebook_app_secret": (creds or {}).get("facebook_app_secret"),
-                            }
-                            run_facebook(
-                                date_from, date_to, session,
-                                args.tenant_id, extra_creds, mode=args.mode,
-                                fb_ad_account_id_tag=extra.fb_ad_account_id,
-                            )
-                        except Exception as e:
-                            logger.exception("Extra FB account %s collection failed", extra.fb_ad_account_id)
-                            errors.append(f"Facebook (extra {extra.fb_ad_account_id}): {e}")
-                except Exception as e:
-                    logger.warning("Could not query extra FB accounts (table may not exist yet): %s", e)
-
-        if args.source in ("shopify", "both"):
-            try:
-                run_shopify(date_from, date_to, session, args.tenant_id, creds, store_tz_name)
-            except Exception as e:
-                logger.exception("Shopify collection failed")
-                errors.append(f"Shopify: {e}")
-
-    print("\n" + "=" * 52)
-    if errors:
-        print("  FAILED")
-        for err in errors:
-            print(f"  ✗ {err}")
-        lock_fd.close()
-        sys.exit(1)
-    else:
-        print("  Done.")
-        lock_fd.close()
-        sys.exit(0)
+            tz = ZoneInfo(tz_name)
+        except Exception:  # noqa: BLE001
+            tz = ZoneInfo("UTC")
+        start, end = resolve_window(datetime.now(tz).date(), args.date_from, args.date_to)
+        logger.info("%s %s %s → %s (%s)", store.get("shop_name") or store["id"], args.source, start, end,
+                    args.mode or "padrão")
+        if args.source == "shopify":
+            ok = run_shopify(session, store, start, end, args.mode or "scheduled")
+        else:
+            ok = run_facebook(session, store, start, end, args.mode or "quick", args.account)
+    lock.close()
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

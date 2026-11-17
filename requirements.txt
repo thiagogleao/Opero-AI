@@ -1,36 +1,22 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
+# Python side of the container: only collect_recent.py and app/collectors run
+# here. FastAPI/uvicorn/alembic/anthropic/httpx/anyio/tenacity/dateutil and the
+# ShopifyAPI library were never served or no longer imported, and are gone.
+
 pydantic==2.9.2
 pydantic-settings==2.5.2
+python-dotenv==1.0.1
 
 # Database
 sqlalchemy==2.0.36
 psycopg[binary]==3.2.3
-alembic==1.13.3
 
-# Facebook Ads
+# Meta Ads
 facebook-business==20.0.0
 
-# Shopify
-ShopifyAPI==12.6.0
-
-# Anthropic
-anthropic==0.40.0
-
-# Media processing (adicionar depois quando for implementar análise de vídeo)
-# openai-whisper==20231117
-# ffmpeg-python==0.2.0
-
-# HTTP client
-httpx==0.27.2
+# Shopify (REST/GraphQL through app/collectors/shopify_client.py) and FX
 requests==2.32.3
 
-# Async support
-anyio==4.6.2
-
-# Environment
-python-dotenv==1.0.1
-
-# Utilities
-tenacity==9.0.0
-python-dateutil==2.9.0
+# Store timezones for zoneinfo: every collection window is a store-local day,
+# and a missing zone database silently falls back to UTC. Bundled here so it
+# never depends on what the base image happens to ship.
+tzdata==2026.1

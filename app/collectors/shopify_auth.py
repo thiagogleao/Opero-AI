@@ -75,13 +75,22 @@ def _pedir_token(dominio: str, client_id: str, client_secret: str) -> tuple[str,
     return token, corpo.get("scope", "") or "", int(corpo.get("expires_in") or 0)
 
 
-def ensure_token(session: Session, creds: dict) -> Optional[str]:
+def can_renew(creds: dict) -> bool:
+    """True for a Dev Dashboard store, whose token can be minted again."""
+    return bool(creds.get("shopify_client_id") and creds.get("shopify_client_secret"))
+
+
+def ensure_token(session: Session, creds: dict, force: bool = False) -> Optional[str]:
     """Devolve um token de Admin API usavel para esta loja, ou None.
 
     - Loja com token legado (sem `shopify_client_id`): devolve o que esta
       guardado, sem nenhuma chamada de rede.
     - Loja de app do Dev Dashboard: renova quando o token guardado nao existe
       ou esta perto de vencer, grava o novo no banco e devolve.
+    - force=True renova mesmo com validade sobrando. E o caminho do HTTP 401:
+      a Shopify recusou um token que ainda "valia" (app recriado, segredo
+      trocado). Sem isso o token recusado era confiado ate vencer — a Hibikura
+      ficou ~38h sem pedidos assim, sem nenhum registro de erro.
 
     O token novo fica em `tenants.shopify_access_token` de proposito: o resto
     do sistema (alertas, jornadas, ajustes, no TypeScript) le essa coluna
@@ -102,7 +111,7 @@ def ensure_token(session: Session, creds: dict) -> Optional[str]:
 
     vence = creds.get("shopify_token_expires_at")
     agora = datetime.now(timezone.utc)
-    if guardado and vence is not None:
+    if guardado and vence is not None and not force:
         if vence.tzinfo is None:
             vence = vence.replace(tzinfo=timezone.utc)
         if vence - agora > MARGEM:

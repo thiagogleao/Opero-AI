@@ -1,57 +1,41 @@
-import { auth } from '@clerk/nextjs/server'
-import { getCurrentSyncStatus, getLastSyncDurations } from '@/lib/queries'
-import { getActiveTenantId } from '@/lib/activeStore'
+import { accessErrorResponse, requireStore, requireViewer, resolveStore } from '@/lib/access'
+import { getFreshness, jobSnapshot, legacyStatus } from '@/lib/sync/status'
 
-export async function GET() {
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
+
+/**
+ * GET /api/sync-status?storeIds=a,b   (or ?storeId=a; default: current store)
+ *
+ *   stores  StoreFreshness[]  per store: last order, and per source (Shopify,
+ *                             Meta insights, Meta structure) last success,
+ *                             last attempt, status, short reason, busy,
+ *                             staleness; per ad account the same plus
+ *                             Meta's account status
+ *   jobs    JobSnapshot[]     jobs running or waiting in this server
+ *   shopify / facebook / lastSync   the old single-store shape, for the first
+ *                             store (RefreshButton / AutoSync); lastSync is
+ *                             now when every source has finished, not the
+ *                             first one
+ */
+export async function GET(req: Request) {
   try {
-    const { userId } = await auth()
-    if (!userId) return Response.json({ error: 'Unauthorized' }, { status: 401 })
-    const tenantId = await getActiveTenantId(userId)
-
-    const [runs, durations] = await Promise.all([
-      getCurrentSyncStatus(tenantId),
-      getLastSyncDurations(tenantId),
-    ])
-
-    const durationBySource: Record<string, number> = {}
-    for (const d of durations) {
-      durationBySource[d.source] = d.duration_seconds
+    const viewer = await requireViewer()
+    const url = new URL(req.url)
+    const raw = url.searchParams.get('storeIds') ?? url.searchParams.get('storeId')
+    let ids: string[]
+    if (raw) {
+      const refs = await Promise.all([...new Set(raw.split(',').map(s => s.trim()).filter(Boolean))]
+        .map(id => requireStore(viewer, id)))
+      ids = refs.map(r => r.id)
+    } else {
+      const { store } = await resolveStore(viewer, null)
+      ids = store ? [store.id] : []
     }
-
-    const bySource: Record<string, {
-      status: string
-      startedAt: string | null
-      finishedAt: string | null
-      recordsCollected: number
-      errorMessage: string | null
-      estimatedDurationSeconds: number | null
-    }> = {}
-
-    for (const run of runs) {
-      bySource[run.source] = {
-        status: run.status,
-        startedAt: run.started_at,
-        finishedAt: run.finished_at,
-        recordsCollected: run.records_collected,
-        errorMessage: run.error_message ?? null,
-        // Use the last successful run's duration as the ETA baseline.
-        // Only meaningful while status = 'running'.
-        estimatedDurationSeconds: durationBySource[run.source] ?? null,
-      }
-    }
-
-    // lastSync: most recent successful finish across all sources (for AutoSync compatibility)
-    const lastSync = runs
-      .filter(r => r.status === 'success' && r.finished_at)
-      .sort((a, b) => (b.finished_at ?? '').localeCompare(a.finished_at ?? ''))[0]
-      ?.finished_at ?? null
-
-    return Response.json({
-      shopify:  bySource['shopify']  ?? null,
-      facebook: bySource['facebook'] ?? null,
-      lastSync,
-    })
+    if (!ids.length) return Response.json({ stores: [], jobs: [], shopify: null, facebook: null, lastSync: null })
+    const [stores, legacy] = await Promise.all([getFreshness(ids), legacyStatus(ids[0])])
+    return Response.json({ stores, jobs: jobSnapshot(ids), ...legacy })
   } catch (err) {
-    return Response.json({ error: String(err) }, { status: 500 })
+    return accessErrorResponse(err)
   }
 }

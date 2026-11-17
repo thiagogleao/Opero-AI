@@ -1,50 +1,46 @@
-import crypto from 'crypto'
 import { query } from '@/lib/db'
+import { computeStorePnL, todayInTz } from '@/lib/engine'
 import { sendPushToAll } from '@/lib/push'
-import { getProfitSummary } from '@/lib/profitCalc'
+import { localDay } from '@/lib/sync/orderMapping'
+import { isOrderTopic, verifyWebhook } from '@/lib/sync/shopifyApi'
+import { usdRate } from '@/lib/sync/fx'
+import { upsertOrderFromWebhook } from '@/lib/sync/webhookOrders'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-/** Constant-time string compare that tolerates length mismatch. */
-function safeEqual(a: string, b: string): boolean {
-  const ab = Buffer.from(a)
-  const bb = Buffer.from(b)
-  if (ab.length !== bb.length) return false
-  return crypto.timingSafeEqual(ab, bb)
+/**
+ * Shopify order webhooks: orders/create, orders/updated, orders/paid.
+ *
+ * Every topic writes the order into shopify_orders (and its items) with the
+ * collector's own mapping, so numbers move with the push — a paid, refunded
+ * or cancelled order no longer waits for the next ten-minute sync, and a sale
+ * is in "Lucro hoje" when its notification arrives. orders/create also feeds
+ * the live feed (live_orders) and sends the sale push, once per order.
+ *
+ * Shopify drops a delivery that takes longer than five seconds, so the profit
+ * line of the push is bounded and optional; the write never is.
+ */
+
+interface Tenant {
+  id: string; shop_name: string | null; shopify_domain: string; timezone: string
+  client_secret: string | null; archived: boolean
 }
 
-/**
- * Verify the request really came from Shopify.
- *
- * Two independent proofs are accepted because stores are connected through
- * different Shopify apps (our Partners app, or a per-store custom app whose
- * secret we never persist):
- *   1. HMAC-SHA256 of the raw body with SHOPIFY_CLIENT_SECRET — works for
- *      stores connected via our own app.
- *   2. A secret token in the query string, set by us at registration time —
- *      the fallback for stores whose app secret we don't hold.
- */
-function verify(req: Request, rawBody: string): boolean {
-  const token = process.env.SHOPIFY_WEBHOOK_TOKEN
-  if (token) {
-    const sent = new URL(req.url).searchParams.get('token')
-    if (sent && safeEqual(sent, token)) return true
-  }
-
-  const secret = process.env.SHOPIFY_CLIENT_SECRET
-  const hmac   = req.headers.get('x-shopify-hmac-sha256')
-  if (secret && hmac) {
-    const digest = crypto.createHmac('sha256', secret).update(rawBody, 'utf8').digest('base64')
-    if (safeEqual(digest, hmac)) return true
-  }
-
-  return false
+async function findTenant(shopDomain: string): Promise<Tenant | null> {
+  const rows = await query<Tenant>(
+    `SELECT id, shop_name, shopify_domain, COALESCE(timezone, 'UTC') AS timezone,
+            shopify_client_secret AS client_secret, (archived_at IS NOT NULL) AS archived
+       FROM tenants WHERE lower(shopify_domain) = lower($1)
+      ORDER BY archived_at NULLS FIRST, created_at LIMIT 1`,
+    [shopDomain],
+  )
+  return rows[0] ?? null
 }
 
 const money = (v: number, currency: string) => {
   try {
-    return new Intl.NumberFormat('en-US', { style: 'currency', currency, maximumFractionDigits: 2 }).format(v)
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency, maximumFractionDigits: currency === 'JPY' ? 0 : 2 }).format(v)
   } catch {
     return `${currency} ${v.toFixed(2)}`
   }
@@ -58,40 +54,45 @@ const compactUsd = (v: number) => {
   return `${sign}$${Math.round(a).toLocaleString('en-US')}`
 }
 
-/**
- * This store's profit so far today, for the notification body.
- *
- * Shopify drops the delivery and retries if we take too long, so this is
- * bounded and best-effort: a slow or failing profit query costs the extra
- * line, never the notification itself. The newly inserted order is already
- * in shopify_orders only after the next sync, so this reflects profit as of
- * the last sync plus whatever else landed today.
- */
+/** This store's profit so far today (the engine's "lucro"), or null when the
+ *  store has no cost settings or the lookup is slow. */
 async function todayProfit(tenantId: string, tz: string): Promise<number | null> {
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: tz })
+  const today = todayInTz(tz)
   try {
-    const summary = await Promise.race([
-      getProfitSummary(tenantId, today, today),
+    const pnl = await Promise.race([
+      computeStorePnL(tenantId, { from: today, to: today }),
       new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 2000)),
     ])
-    return summary.configured ? summary.netProfit : null
+    return pnl && pnl.configured ? pnl.totals.operatingProfit : null
   } catch (err) {
-    console.warn('[webhook] profit lookup skipped:', (err as Error).message)
+    console.warn('[webhook] lucro do dia não calculado:', (err as Error).message)
     return null
   }
 }
 
 export async function POST(req: Request) {
-  // Raw body is required for HMAC — read as text before parsing.
+  // Raw body is required for the HMAC — read as text before parsing.
   const rawBody = await req.text()
+  const shopDomain = req.headers.get('x-shopify-shop-domain')
+  const topic = req.headers.get('x-shopify-topic')
+  const tenant = shopDomain ? await findTenant(shopDomain) : null
 
-  if (!verify(req, rawBody)) {
-    console.warn('[webhook] rejected: bad signature')
+  const ok = verifyWebhook({
+    rawBody,
+    hmacHeader: req.headers.get('x-shopify-hmac-sha256'),
+    urlToken: new URL(req.url).searchParams.get('token'),
+    expectedToken: process.env.SHOPIFY_WEBHOOK_TOKEN ?? null,
+    secrets: [process.env.SHOPIFY_CLIENT_SECRET, tenant?.client_secret],
+  })
+  if (!ok) {
+    console.warn('[webhook] recusado: assinatura inválida', shopDomain ?? '')
     return new Response('Unauthorized', { status: 401 })
   }
-
-  const shopDomain = req.headers.get('x-shopify-shop-domain')
   if (!shopDomain) return new Response('Missing shop domain', { status: 400 })
+  // Unknown or archived store, or a topic we do not handle: acknowledge so
+  // Shopify does not retry forever.
+  if (!tenant || tenant.archived) return new Response('OK', { status: 200 })
+  if (topic && !isOrderTopic(topic)) return new Response('OK', { status: 200 })
 
   let order: Record<string, unknown>
   try {
@@ -99,35 +100,32 @@ export async function POST(req: Request) {
   } catch {
     return new Response('Bad JSON', { status: 400 })
   }
+  const orderId = String(order.id ?? '')
+  if (!orderId) return new Response('OK', { status: 200 })
 
-  // Resolve the store. Unknown domains are acknowledged (200) so Shopify
-  // doesn't retry forever on a store we no longer track.
-  const tenants = await query<{
-    id: string; shop_name: string | null; shopify_domain: string; timezone: string | null
-  }>(
-    `SELECT id, shop_name, shopify_domain, COALESCE(timezone, 'UTC') AS timezone
-     FROM tenants WHERE shopify_domain = $1 LIMIT 1`,
-    [shopDomain]
-  )
-  const tenant = tenants[0]
-  if (!tenant) {
-    console.warn('[webhook] unknown shop:', shopDomain)
-    return new Response('OK', { status: 200 })
+  // 1. The analytics row, for every topic.
+  let usdTotal: number | null = null
+  try {
+    const w = await upsertOrderFromWebhook(tenant.id, order)
+    usdTotal = w.usdTotal
+    if (!w.written) console.warn(`[webhook] ${tenant.shopify_domain} ${orderId}: não gravado — ${w.reason}`)
+  } catch (err) {
+    // The collector will write it on its next pass; the push still goes out.
+    console.error(`[webhook] ${tenant.shopify_domain} ${orderId}: falha ao gravar o pedido`, err)
   }
+  if (topic && topic !== 'orders/create') return new Response('OK', { status: 200 })
 
-  const orderId  = String(order.id ?? '')
-  const total    = Number(order.total_price ?? 0)
-  const currency = String(order.currency ?? 'USD')
-  const lineItems = Array.isArray(order.line_items) ? order.line_items : []
+  // 2. orders/create: live feed + sale push, once per order.
+  const total = Number(order.total_price ?? 0)
+  const currency = String(order.currency ?? 'USD').toUpperCase()
+  const lineItems = Array.isArray(order.line_items) ? order.line_items as Record<string, unknown>[] : []
   const shipping = order.shipping_address as Record<string, unknown> | null
   const customer = order.customer as Record<string, unknown> | null
-  const country  = (shipping?.country_code as string) ?? null
-  const custName = customer
-    ? [customer.first_name, customer.last_name].filter(Boolean).join(' ') || null
-    : null
+  const country = (shipping?.country_code as string) ?? null
+  const custName = customer ? [customer.first_name, customer.last_name].filter(Boolean).join(' ') || null : null
 
-  // Persist first, then notify. ON CONFLICT DO NOTHING makes redelivered
-  // webhooks idempotent — and tells us whether to send a notification.
+  // ON CONFLICT DO NOTHING makes a redelivery idempotent and tells us whether
+  // this is the first time we see the order (only then do we notify).
   const inserted = await query<{ id: string }>(
     `INSERT INTO live_orders
        (tenant_id, order_id, order_number, total_price, currency,
@@ -136,51 +134,43 @@ export async function POST(req: Request) {
      ON CONFLICT (tenant_id, order_id) DO NOTHING
      RETURNING id::text AS id`,
     [
-      tenant.id, orderId,
-      order.name ? String(order.name) : null,
-      total, currency, country, custName,
-      JSON.stringify(lineItems.map((li) => {
-        const item = li as Record<string, unknown>
-        return { title: item.title, quantity: item.quantity, price: item.price }
-      })),
+      tenant.id, orderId, order.name ? String(order.name) : null, total, currency, country, custName,
+      JSON.stringify(lineItems.map(item => ({ title: item.title, quantity: item.quantity, price: item.price }))),
       order.created_at ? new Date(String(order.created_at)) : new Date(),
-    ]
+    ],
   )
-
-  // Duplicate delivery — already notified for this order.
   if (inserted.length === 0) return new Response('OK', { status: 200 })
 
   const storeName = tenant.shop_name ?? tenant.shopify_domain.replace('.myshopify.com', '')
-  const units = lineItems.reduce((s, li) => s + Number((li as Record<string, unknown>).quantity ?? 0), 0)
-  const firstItem = lineItems[0] as Record<string, unknown> | undefined
-  const itemLabel = firstItem
-    ? `${units}× ${String(firstItem.title ?? 'item')}${lineItems.length > 1 ? ` +${lineItems.length - 1}` : ''}`
+  const units = lineItems.reduce((s, li) => s + Number(li.quantity ?? 0), 0)
+  const first = lineItems[0]
+  const itemLabel = first
+    ? `${units}× ${String(first.title ?? 'item')}${lineItems.length > 1 ? ` +${lineItems.length - 1}` : ''}`
     : `${units} item(s)`
+  const orderLabel = order.name ? String(order.name) : `#${order.order_number ?? orderId}`
 
-  // Shopify's order name already carries the "#": fall back to building one.
-  const orderLabel = order.name
-    ? String(order.name)
-    : `#${order.order_number ?? orderId}`
+  // Dollars first for a store that bills in another currency; local amount after.
+  if (usdTotal === null && currency !== 'USD') {
+    const day = localDay(order.created_at)
+    const rate = day ? await usdRate(currency, day).catch(() => null) : null
+    usdTotal = rate ? total * rate : null
+  }
+  const amount = currency === 'USD' ? money(total, 'USD')
+    : usdTotal !== null ? `${money(usdTotal, 'USD')} (${money(total, currency)})` : money(total, currency)
 
-  const profit = await todayProfit(tenant.id, tenant.timezone ?? 'UTC')
-
+  const profit = await todayProfit(tenant.id, tenant.timezone)
   try {
     await sendPushToAll({
-      title: `💰 ${money(total, currency)} · ${orderLabel} — ${storeName}`,
-      body: [
-        profit !== null ? `Lucro hoje: ${compactUsd(profit)}` : null,
-        itemLabel,
-        country,
-      ].filter(Boolean).join(' · '),
-      url: '/m',
+      kind: 'sale',
+      title: `💰 ${amount} · ${orderLabel} — ${storeName}`,
+      body: [profit !== null ? `Lucro hoje: ${compactUsd(profit)}` : null, itemLabel, country].filter(Boolean).join(' · '),
+      url: `/m?loja=${encodeURIComponent(tenant.id)}`,
       tag: `order-${tenant.id}-${orderId}`,
-      data: { tenantId: tenant.id, orderId, total, currency, profitToday: profit },
+      data: { tenantId: tenant.id, orderId, total, currency, totalUsd: usdTotal, profitToday: profit },
     })
   } catch (err) {
-    // Never fail the webhook because a push failed — Shopify would retry and
-    // we'd double-insert nothing but would keep hammering this endpoint.
-    console.error('[webhook] push failed:', err)
+    // Never fail the webhook because a push failed: Shopify would retry.
+    console.error('[webhook] push falhou:', err)
   }
-
   return new Response('OK', { status: 200 })
 }
