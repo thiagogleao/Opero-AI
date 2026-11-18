@@ -1,106 +1,67 @@
 import { Suspense } from 'react'
-import { auth } from '@clerk/nextjs/server'
-import { redirect } from 'next/navigation'
-import { getTenant, getTenantsByUserId, toStoreOptions } from '@/lib/tenant'
-import { getActiveTenantId } from '@/lib/activeStore'
-import { getTenantTimezone } from '@/lib/queries'
-import { accountStores } from '@/lib/accountOverview'
-import {
-  getCoverage, getCreativeAttribution, getSourceBreakdown, getJourneyPage,
-  type Model,
-} from '@/lib/attribution'
-import AttributionView from '@/components/AttributionView'
-import StoreSwitcher from '@/components/StoreSwitcher'
-import TimeframeSelector from '@/components/TimeframeSelector'
-import Sidebar from '@/components/Sidebar'
+import type { Metadata } from 'next'
+import Link from 'next/link'
+import { ALL_STORES, getPageContext, type SearchParams } from '@/lib/views/page'
+import { AppShell, PageHeader, PeriodNote } from '@/components/shell'
+import { Callout, EmptyState, SkeletonBlock } from '@/components/ui'
+import { AttributionReportSection, JourneySection } from '@/components/attribution/AttributionSections'
+import { MODEL_KEY, modelFromParam } from '@/components/attribution/model'
 
-export const revalidate = 0
+/**
+ * /attribution — what Meta says it sold against what the store really sold,
+ * ad by ad, and the path behind every order (Shopify's own journey record).
+ *
+ * One store at a time (scope 'store': "Todas" in the picker opens the
+ * overview). URL state: loja/periodo/de/ate/parte through getPageContext, plus
+ * ?modelo=primeiro|ultimo|dividido for the credit model.
+ */
 
-function dateInTz(d: Date, tz: string): string {
-  return d.toLocaleDateString('en-CA', { timeZone: tz })
-}
+export const metadata: Metadata = { title: 'Atribuição' }
+export const dynamic = 'force-dynamic'
 
-interface Props {
-  searchParams: Promise<{ from?: string; to?: string; model?: string }>
-}
-
-export default async function AttributionPage({ searchParams }: Props) {
-  const { userId } = await auth()
-  if (!userId) redirect('/sign-in')
-
-  let tenantId: string
-  try { tenantId = await getActiveTenantId(userId) } catch { redirect('/onboarding') }
-  const tenant = await getTenant(tenantId)
-  if (!tenant?.onboarded) redirect('/onboarding')
-
-  let stores: Awaited<ReturnType<typeof getTenantsByUserId>> = []
-  try { stores = await getTenantsByUserId(userId) } catch { /* switcher can be empty */ }
-
-  let tz = 'UTC'
-  try { tz = await getTenantTimezone(tenantId) } catch { /* UTC */ }
-
+export default async function AttributionPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
   const sp = await searchParams
-  const now = new Date()
-  const valid = (s?: string) => Boolean(s && /^\d{4}-\d{2}-\d{2}$/.test(s))
-  const dateTo   = valid(sp.to)   ? sp.to!   : dateInTz(now, tz)
-  const dateFrom = valid(sp.from) ? sp.from! : dateInTz(new Date(now.getTime() - 29 * 86400000), tz)
+  const ctx = await getPageContext(sp, { scope: 'store' })
+  const model = modelFromParam(sp[MODEL_KEY])
+  const store = ctx.store
 
-  const model: Model =
-    sp.model === 'last' || sp.model === 'linear' || sp.model === 'first' ? sp.model : 'first'
+  if (!store) {
+    return (
+      <AppShell ctx={ctx}>
+        <PageHeader ctx={ctx} title="Atribuição" sub="Nenhuma loja ligada ao seu acesso" />
+        <EmptyState icon="store" title="Nenhuma loja para mostrar">
+          Quando uma loja estiver ligada à sua conta, o caminho de cada venda aparece aqui.
+        </EmptyState>
+      </AppShell>
+    )
+  }
 
-  // One section failing should cost that section, not the page. Before this,
-  // any single query throwing took the whole screen down with it.
-  const fallbackCoverage = { orders: 0, withJourney: 0, withAd: 0, pct: 0, attributablePct: 0 }
-  const [coverage, creatives, sources, journeyPage] = await Promise.all([
-    getCoverage(tenantId, dateFrom, dateTo)
-      .catch(e => { console.error('[attribution] coverage', e); return fallbackCoverage }),
-    getCreativeAttribution(tenantId, dateFrom, dateTo, model)
-      .catch(e => { console.error('[attribution] creatives', e); return [] }),
-    getSourceBreakdown(tenantId, dateFrom, dateTo)
-      .catch(e => { console.error('[attribution] sources', e); return [] }),
-    getJourneyPage(tenantId, dateFrom, dateTo, { limit: 30 })
-      .catch(e => { console.error('[attribution] journeys', e); return { orders: [], total: 0, hasMore: false } }),
-  ])
-
+  // Remount the streamed parts when the store, window or model changes, so
+  // the skeleton shows instead of the previous store's numbers.
+  const key = `${store.id}:${ctx.range.from}:${ctx.range.to}:${model}`
+  // Arriving with "Todas" (a sidebar link from an all-stores page): this page
+  // reads one store at a time, so say which one instead of switching silently.
+  const lojaParam = Array.isArray(sp.loja) ? sp.loja[0] : sp.loja
+  const fromAll = lojaParam === ALL_STORES
   return (
-    <div style={{ display: 'flex', minHeight: '100vh', backgroundColor: 'var(--bg)' }}>
-      <Sidebar active="/attribution" />
-
-      <main style={{ marginLeft: 56, flex: 1, padding: '28px 32px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-          <div>
-            <h1 style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-primary)', letterSpacing: '-0.4px' }}>
-              Atribuição
-            </h1>
-            <p style={{ color: 'var(--text-faint)', fontSize: 13, marginTop: 3 }}>
-              O caminho que cada venda percorreu, pelo registro da própria Shopify
-              {' · '}{dateFrom} → {dateTo}
-            </p>
-          </div>
-
-          <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-            <Suspense>
-              <TimeframeSelector from={dateFrom} to={dateTo} />
-            </Suspense>
-            <StoreSwitcher
-              stores={toStoreOptions(stores)}
-              activeStoreId={tenantId}
-              showOverview={accountStores(stores).length > 1}
-            />
-          </div>
-        </div>
-
-        <AttributionView
-          coverage={coverage}
-          creatives={creatives}
-          sources={sources}
-          journeys={journeyPage.orders}
-          journeyTotal={journeyPage.total}
-          model={model}
-          dateFrom={dateFrom}
-          dateTo={dateTo}
-        />
-      </main>
-    </div>
+    <AppShell ctx={ctx}>
+      <PageHeader
+        ctx={ctx}
+        sub={<><b>Atribuição</b> · {ctx.periodLabel} · <span className="num">{ctx.rangeLabel}</span></>}
+      />
+      {fromAll && (
+        <Callout tone="neu" icon="store" title={`Mostrando a ${store.name}`}>
+          A atribuição compara o Meta com a Shopify uma loja por vez. Escolha outra no seletor de loja, ou
+          veja todas juntas em <Link href={ctx.hrefWith('/overview', { loja: ALL_STORES })}>Todas as lojas</Link>.
+        </Callout>
+      )}
+      <PeriodNote ctx={ctx} />
+      <Suspense key={`r:${key}`} fallback={<SkeletonBlock height={260} lines={3} />}>
+        <AttributionReportSection ctx={ctx} model={model} />
+      </Suspense>
+      <Suspense key={`j:${store.id}:${ctx.range.from}:${ctx.range.to}`} fallback={<SkeletonBlock height={200} lines={4} />}>
+        <JourneySection ctx={ctx} />
+      </Suspense>
+    </AppShell>
   )
 }
