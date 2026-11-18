@@ -7,7 +7,7 @@ import { Icon, StatusDot } from '@/components/ui'
 import { formatRangeLabel, formatRelativeTime } from '@/lib/format'
 import type { MobileResponse, MobileStoreOption } from '@/lib/views/mobile'
 import { ALL, PERIOD_MAIN, periodShort, type Selection } from '../_lib/selection'
-import { refreshProgress, skippedText, SOURCE_LABEL } from '../_lib/refreshProgress'
+import { refreshOutcome, refreshProgress, skippedText, SOURCE_LABEL } from '../_lib/refreshProgress'
 import type { RefreshRun } from '../_lib/useMobileData'
 import { SoundIcon } from './Sheet'
 import { splitName } from './Home'
@@ -120,15 +120,18 @@ export function StoreChips({ stores, archived, sel, pendingKey, onPick }: {
 
 // ─── Period bar ───────────────────────────────────────────────────────────────
 
-export function PeriodBar({ sel, today, onPick, onMore }: {
+export function PeriodBar({ sel, today, shown, onPick, onMore }: {
   sel: Selection | null
   today: string | undefined
+  /** The range of the answer on screen when it answers this selection: the
+   *  button then names exactly the dates the numbers use. */
+  shown?: { from: string; to: string } | null
   onPick: (p: Selection['periodo']) => void
   onMore: () => void
 }) {
   const inMain = !!sel && (PERIOD_MAIN as string[]).includes(sel.periodo)
   const moreLabel = !sel || inMain ? 'Mais'
-    : sel.periodo === 'custom' && sel.de && sel.ate ? formatRangeLabel({ from: sel.de, to: sel.ate }, today) : periodShort(sel.periodo)
+    : sel.periodo === 'custom' && sel.de && sel.ate ? formatRangeLabel(shown ?? { from: sel.de, to: sel.ate }, today) : periodShort(sel.periodo)
   return (
     <div className={s.periods} role="group" aria-label="Período">
       {PERIOD_MAIN.map(p => (
@@ -169,7 +172,7 @@ export function RefreshStrip({ run, onClose, onRetry }: { run: RefreshRun; onClo
   if (run.phase === 'error') {
     return (
       <Strip tone="neg" icon="alert" onClose={onClose}>
-        Não deu para atualizar: {run.message}. <button type="button" className={s.linkBtn} onClick={onRetry}>Tentar de novo</button>
+        {run.lostTrack ? 'Parou de acompanhar a atualização' : 'Não deu para atualizar'}: {run.message}.{run.retryable && <> <button type="button" className={s.linkBtn} onClick={onRetry}>Tentar de novo</button></>}
       </Strip>
     )
   }
@@ -195,12 +198,18 @@ export function RefreshStrip({ run, onClose, onRetry }: { run: RefreshRun; onClo
       </Strip>
     )
   }
+  if (p.total === 0) {
+    return (
+      <Strip tone="ok" icon="check" onClose={onClose}>
+        {run.message ?? 'Nada para buscar agora'}
+        {skipped && <small>{skipped}</small>}
+      </Strip>
+    )
+  }
+  const out = refreshOutcome(p, names, run.stores.length, run.gaveUpAfterMin)
   return (
-    <Strip tone={p.failed.length ? 'warn' : 'ok'} icon={p.failed.length ? 'alert' : 'check'} onClose={onClose}>
-      {p.total === 0 ? (run.message ?? 'Nada para buscar agora') : p.failed.length
-        ? `Atualizado, com falha em: ${p.failed.map(l => `${l.name} (${SOURCE_LABEL[l.source]})`).join(', ')}. Os números dessas lojas podem estar atrasados.`
-        : `${names} ${run.stores.length === 1 ? 'atualizada' : 'atualizadas'} · números recarregados.`}
-      {run.message && p.total > 0 && <small>{run.message}</small>}
+    <Strip tone={out.tone} icon={out.tone === 'ok' ? 'check' : 'alert'} onClose={onClose}>
+      {out.text}
       {skipped && <small>{skipped}</small>}
     </Strip>
   )

@@ -10,7 +10,7 @@
 
 import { useState } from 'react'
 import {
-  Avatar, Badge, Block, BreakdownLedger, Callout, Chip, EmptyState, Icon, Money, VerdictCard, VerdictChips,
+  Avatar, Badge, Block, BreakdownLedger, Button, Callout, Chip, EmptyState, Icon, Money, VerdictCard, VerdictChips,
 } from '@/components/ui'
 import { DailyProfitBars, DailyProfitLegend, IntradayCurve, IntradayLegend } from '@/components/charts'
 import {
@@ -18,10 +18,14 @@ import {
   formatTimeInTz, formatWeekdayDate, partialLabel, plural, tzCity,
 } from '@/lib/format'
 import { minutesIntoDay, todayInTz } from '@/lib/engine/dates'
-import { periodPhrase, roasSummary, storeStatus, type Verdict } from '@/lib/views/verdict'
+import { judgedStores, periodPhrase, storeRoas, storeStatus, type RoasSummary, type Verdict } from '@/lib/views/verdict'
 import type { MobileResponse } from '@/lib/views/mobile'
-import type { LiveOrderItem, PortfolioStoreRow } from '@/lib/views/portfolio'
+import type { IntradayAside, LiveOrderItem, PortfolioStoreRow } from '@/lib/views/portfolio'
+import { LIVE_FEED_SIZE } from '@/lib/views/portfolioLimits'
 import { clockDiffers, tzOffsetMinutes } from '../_lib/selection'
+import { noSpendLine, pairNotes, type SharedAds } from '../_lib/sharedAds'
+import { dueByLabel, feedLine } from '../_lib/labels'
+import { NetBars, NetBarsLegend } from './NetBars'
 import s from '../m.module.css'
 
 type Data = MobileResponse
@@ -113,6 +117,35 @@ export function VerdictBlock({ data, v }: { data: Data; v: Verdict }) {
   )
 }
 
+// ─── Shared ad accounts (CAMP HALLOW on EPOCH's account) ──────────────────────
+
+/** The pair notes under the verdict, from the answer on screen (its stores,
+ *  its range): Todas names every pair; one store the pairs it is in. */
+export function SharedAdsNotes({ data, shared, onAll }: { data: Data; shared: SharedAds; onAll: () => void }) {
+  if (!shared.pairs.length || !data.stores.length) return null
+  const all = isAllAnswer(data)
+  const ordersOf = (id: string) => data.stores.find(r => r.id === id)?.totals.orders ?? null
+  const notes = pairNotes(shared, { all, storeId: all ? null : data.stores[0].id }, data.rangeLabel, ordersOf)
+  if (!notes.length) return null
+  return (
+    <div className={s.stack} role="region" aria-label="Contas de anúncio compartilhadas">
+      {notes.map(n => (
+        <Callout key={n.key} tone={n.tone} icon="swap" title={n.title}>
+          {n.body}
+          {!all && <> <Button size="sm" variant="ghost" icon="arrowRight" onClick={onAll}>Ver as lojas juntas</Button></>}
+        </Callout>
+      ))}
+    </div>
+  )
+}
+
+/** "ROAS 1,95× · empate 1,53×" for a store row, on the store's ad channel
+ *  (lib/views/adChannel), named when it is not Meta. */
+function rowRoas(r: RoasSummary): string {
+  const name = r.channel === 'shop' ? 'ROAS Shopify' : r.channel === 'both' ? 'ROAS dos anúncios' : 'ROAS'
+  return r.text.replace(/^ROAS/, name).replace(/ → .*$/, '')
+}
+
 // ─── Day curve (single-day windows) ───────────────────────────────────────────
 
 export function DayBlock({ data }: { data: Data }) {
@@ -140,17 +173,28 @@ export function DayBlock({ data }: { data: Data }) {
     ? { value: cmpRows.reduce((sum, r) => sum + r.comparison.totals.operatingProfit, 0), label: 'ontem até esta hora' }
     : null
   const tzLabel = one ? dayOfLabel(one.timezone) : null
-  const unconfigured = rows.filter(r => !r.configured && active(r))
+  // No store on the curve has cost settings (Glooty alone): the curve is
+  // revenue − ads, and every word around it must say so.
+  const netOnly = rows.length > 0 && rows.every(r => !r.configured)
+  const unconfigured = netOnly ? rows.filter(active) : []
+  // In a sum, a store without costs is out of the curve as it is out of the
+  // verdict (lib/views/portfolio unconfiguredStores): folded in as revenue −
+  // ads, it ended the curve $64 under the verdict on 14 nov.
+  const leftOut = day.unconfiguredStores.filter(asideActive)
   const title = data.period === 'today' || running ? 'Como o dia está andando' : `Como foi ${formatDate(day.day, data.anchorToday)}`
   // No sale and no spend on the curve's stores: a flat line on a "$0 $0 $1"
   // axis is the fake $0 the design forbids.
   const quiet = day.points.length > 0 && rows.length > 0 && rows.every(r => !active(r))
+  const what = netOnly ? 'Vendas − anúncios acumuladas hora a hora' : 'Lucro acumulado hora a hora'
 
   return (
     <Block
       title={title}
-      howTo={quiet || day.points.length === 0 ? undefined : reference ? 'Lucro acumulado hora a hora; o tracejado é o lucro de ontem até esta hora.' : 'Lucro acumulado hora a hora.'}
-      info="Cada venda entra com a sua margem na hora em que aconteceu; anúncios e custos fixos do dia são rateados pelas horas. A curva é uma estimativa; o valor da última hora é exato."
+      howTo={quiet || day.points.length === 0 ? undefined
+        : reference ? `${what}; o tracejado é ${netOnly ? 'o mesmo número' : 'o lucro'} de ontem até esta hora.` : `${what}.`}
+      info={netOnly
+        ? 'Cada venda entra com o seu valor na hora em que aconteceu; os anúncios do dia são rateados pelas horas. Não é lucro: a loja não tem custos de produto, frete e taxas configurados.'
+        : 'Cada venda entra com a sua margem na hora em que aconteceu; anúncios e custos fixos do dia são rateados pelas horas. A curva é uma estimativa; o valor da última hora é exato.'}
       infoLabel="Como a curva é feita"
     >
       {day.points.length === 0 ? (
@@ -170,14 +214,25 @@ export function DayBlock({ data }: { data: Data }) {
               tzNote={tzLabel ? ` · ${tzCity(one!.timezone)}` : ''}
               width={340}
               height={200}
-              ariaLabel={`Lucro acumulado hora a hora em ${formatDate(day.day, data.anchorToday)}${one ? ` na ${one.name}` : ''}`}
+              ariaLabel={`${what} em ${formatDate(day.day, data.anchorToday)}${one ? ` na ${one.name}` : ''}${netOnly ? ': sem custos configurados, não é lucro' : ''}`}
             />
           </div>
-          <IntradayLegend reference={reference?.label} now={nowMinutes !== null} />
+          {netOnly ? (
+            // IntradayLegend says "lucro acumulado" (components/charts): its
+            // words do not fit a curve without costs.
+            <div className={s.netLegend}>
+              <span><i className={s.netLgPos} />vendas − anúncios acumuladas</span>
+              <span><i className={s.netLgNeg} />abaixo de zero</span>
+              {reference && <span>tracejado: {reference.label}</span>}
+            </div>
+          ) : (
+            <IntradayLegend reference={reference?.label} now={nowMinutes !== null} />
+          )}
           <p className={s.note}>
             {day.peak && day.peak.profit > 0 && <>Pico de <b>{formatMoney(day.peak.profit)}</b> às {String(day.peak.hour).padStart(2, '0')}h. </>}
-            {day.greenSince !== null && day.greenSince > 0 && <>No azul desde as {String(day.greenSince).padStart(2, '0')}h. </>}
-            {day.greenSince === null && day.closing < 0 && <>Ainda abaixo de zero. </>}
+            {day.greenSince !== null && day.greenSince > 0 && <>{netOnly ? 'Acima de zero' : 'No azul'} desde as {String(day.greenSince).padStart(2, '0')}h. </>}
+            {/* "Ainda" only while the day runs: a closed day (Glooty, 14 nov) ended there. */}
+            {day.greenSince === null && day.closing < 0 && <>{running ? 'Ainda abaixo de zero. ' : 'Fechou abaixo de zero. '}</>}
             {!one && 'Hora h é a hora h do dia de cada loja.'}
           </p>
           {clocksApart && (
@@ -190,10 +245,11 @@ export function DayBlock({ data }: { data: Data }) {
             </p>
           )}
           {unconfigured.length > 0 && (
-            <p className={s.note}>{unconfigured.map(r => r.name).join(' e ')} {unconfigured.length > 1 ? 'entram' : 'entra'} na curva como vendas − anúncios (sem custos configurados).</p>
+            <p className={s.note}>Sem custos configurados: a curva acima de zero não quer dizer lucro.</p>
           )}
         </div>
       )}
+      {leftOut.length > 0 && <LeftOutNote stores={leftOut} running={running} />}
       {day.closedStores.map(c => (
         <Callout key={c.storeId} tone="info" icon="clock" title={`${c.name}: dia de ${tzCity(c.timezone)} já fechado`}>
           Fora da curva. {formatDate(day.day, data.anchorToday)} inteiro em {tzCity(c.timezone)}: {plural(c.orders, 'pedido', 'pedidos')},{' '}
@@ -210,46 +266,97 @@ export function DayBlock({ data }: { data: Data }) {
   )
 }
 
+const asideActive = (a: IntradayAside) => a.orders > 0 || a.revenue > 0 || a.adSpend > 0
+
+/** "Glooty fica fora da curva…": a store without costs, beside the summed
+ *  curve with its revenue − ads in words, never inside it as profit. */
+function LeftOutNote({ stores, running }: { stores: IntradayAside[]; running: boolean }) {
+  return (
+    <p className={s.note} style={{ marginTop: 8 }}>
+      {joinNames(stores.map(a => a.name))} {stores.length > 1 ? 'ficam' : 'fica'} fora da curva, como do número do topo: sem custos configurados.
+      {stores.map(a => (
+        <span key={a.storeId}>
+          {' '}{stores.length > 1 ? `${a.name}: v` : 'V'}endas {formatMoney(a.revenue)} − anúncios {formatMoney(a.adSpend)} ={' '}
+          <Money value={a.revenue - a.adSpend} />{running ? ' até agora' : ''}, antes do custo dos produtos.
+        </span>
+      ))}
+    </p>
+  )
+}
+
 // ─── Daily bars (several days) ────────────────────────────────────────────────
 
 export function DailyBlock({ data }: { data: Data }) {
   if (data.range.from === data.range.to) return null
   const partialDay = data.range.to >= data.anchorToday ? data.anchorToday : undefined
   const minutes = minutesIntoDay(data.anchorTimezone, new Date(data.generatedAt))
-  const unconfigured = data.stores.filter(r => !r.configured && active(r))
+  // The bars follow the verdict above them: in a sum, a store without costs
+  // is left out (its revenue − ads is not profit), so the bars add up to the
+  // big number. A store judged alone without costs is drawn as revenue − ads.
+  const days = data.dailyJudged
+  const { judged, excluded } = judgedStores(data.stores)
+  const leftOut = excluded.filter(active)
+  // Every store the bars are made of lacks cost settings (Glooty alone): the
+  // bars are revenue − ads, so nothing on this block may call them profit —
+  // not the title, not the ⓘ, not the legend, not the bar colour.
+  const netOnly = judged.length > 0 && judged.every(r => !r.configured)
+  const title = netOnly ? 'Vendas − anúncios por dia' : 'Lucro real por dia'
   // A window with no sale and no spend at all (an archived store, a store
   // that had not opened yet) drew a flat chart on a "$0 $0 $1 $1" axis.
-  const empty = data.daily.every(d => d.orders === 0 && d.revenue === 0 && d.metaSpend === 0 && d.shopSpend === 0 && d.operatingProfit === 0)
+  const empty = days.every(d => d.orders === 0 && d.revenue === 0 && d.metaSpend === 0 && d.shopSpend === 0 && d.operatingProfit === 0)
   if (empty) {
     return (
-      <Block title="Lucro real por dia">
+      <Block title={title}>
         <EmptyState compact icon="clock" title={`Nenhuma venda e nenhum gasto em ${data.rangeLabel}`} />
       </Block>
     )
   }
+  const names = joinNames(judged.map(r => r.name))
   return (
     <Block
-      title="Lucro real por dia"
-      howTo="Barra acima da linha do zero = dia no lucro; toque numa barra para ver o dia."
-      info="Vendas menos todos os custos do dia, no fuso de cada loja. Reembolsos e chargebacks ficam fora das barras: entram no resultado de caixa."
+      title={title}
+      howTo={netOnly
+        ? 'Azul = vendeu mais do que gastou em anúncios; coral = gastou mais do que vendeu. Toque numa barra para ver o dia.'
+        : 'Barra acima da linha do zero = dia no lucro; toque numa barra para ver o dia.'}
+      info={netOnly
+        ? `Vendas menos Anúncios Meta e Anúncios Shopify de cada dia, no fuso da loja. Não é lucro: ${names} ${judged.length > 1 ? 'não têm' : 'não tem'} custos de produto, frete e taxas configurados, e eles ainda saem dessas vendas.`
+        : 'Vendas menos todos os custos do dia, no fuso de cada loja. Reembolsos e chargebacks ficam fora das barras: entram no resultado de caixa.'}
     >
       <div className={s.chartWrap}>
-        <DailyProfitBars
-          days={data.daily.map(d => ({ date: d.date, profit: d.operatingProfit, revenue: d.revenue, metaSpend: d.metaSpend, shopSpend: d.shopSpend, orders: d.orders }))}
-          partialDate={partialDay}
-          partialNote={partialDay ? partialLabel(minutes) : undefined}
-          today={data.anchorToday}
-          width={340}
-          height={210}
-          ariaLabel={`Lucro real por dia, ${data.rangeLabel}`}
-        />
+        {netOnly ? (
+          <NetBars
+            days={days.map(d => ({ date: d.date, value: d.revenue - d.adSpend, revenue: d.revenue, metaSpend: d.metaSpend, shopSpend: d.shopSpend, orders: d.orders }))}
+            partialDate={partialDay}
+            partialNote={partialDay ? partialLabel(minutes) : undefined}
+            today={data.anchorToday}
+            ariaLabel={`Vendas menos anúncios por dia, ${data.rangeLabel}: sem custos configurados, não é lucro`}
+          />
+        ) : (
+          <DailyProfitBars
+            days={days.map(d => ({ date: d.date, profit: d.operatingProfit, revenue: d.revenue, metaSpend: d.metaSpend, shopSpend: d.shopSpend, orders: d.orders }))}
+            partialDate={partialDay}
+            partialNote={partialDay ? partialLabel(minutes) : undefined}
+            today={data.anchorToday}
+            width={340}
+            height={210}
+            ariaLabel={`Lucro real por dia, ${data.rangeLabel}`}
+          />
+        )}
       </div>
-      <DailyProfitLegend partial={!!partialDay} selected={false} />
-      {unconfigured.length > 0 && (
-        <p className={s.note} style={{ marginTop: 8 }}>{unconfigured.map(r => r.name).join(' e ')} {unconfigured.length > 1 ? 'entram' : 'entra'} nas barras como vendas − anúncios (sem custos configurados).</p>
+      {netOnly ? <NetBarsLegend partial={!!partialDay} /> : <DailyProfitLegend partial={!!partialDay} selected={false} />}
+      {leftOut.length > 0 && (
+        <p className={s.note} style={{ marginTop: 8 }}>{leftOut.map(r => r.name).join(' e ')} {leftOut.length > 1 ? 'ficam' : 'fica'} fora das barras, como do número do topo: sem custos configurados.</p>
+      )}
+      {netOnly && (
+        <p className={s.note} style={{ marginTop: 8 }}>Sem custos configurados, uma barra azul não quer dizer lucro: o produto, o frete e as taxas ainda não saíram.</p>
       )}
     </Block>
   )
+}
+
+/** "MOKOO e Glooty", "MOKOO, EPOCH e Glooty". */
+function joinNames(names: string[]): string {
+  return names.length <= 1 ? names.join('') : `${names.slice(0, -1).join(', ')} e ${names[names.length - 1]}`
 }
 
 // ─── What needs attention (several stores) ────────────────────────────────────
@@ -262,7 +369,8 @@ export function Attention({ data }: { data: Data }) {
     const chip = storeStatus(r, { singleDay })
     if (isAllAnswer(data) && chip.code === 'prejuizo' && r.totals.adSpend > 0) {
       const t = r.totals
-      const roas = t.roas !== null ? ` ${roasSummary(t.roas, r.configured ? t.breakEvenRoas : null).text}.` : ''
+      const sr = storeRoas(t, r.configured)
+      const roas = sr ? ` ${sr.text.replace(/^ROAS/, sr.label ?? 'ROAS')}.` : ''
       items.push({
         key: `loss-${r.id}`, tone: 'neg',
         // "está no prejuízo ontem" read wrong: a closed window already happened.
@@ -300,7 +408,7 @@ export function Attention({ data }: { data: Data }) {
 
 // ─── Store list ───────────────────────────────────────────────────────────────
 
-export function StoreList({ data, onPick }: { data: Data; onPick: (id: string) => void }) {
+export function StoreList({ data, shared, onPick }: { data: Data; shared: SharedAds; onPick: (id: string) => void }) {
   if (data.stores.length < 2) return null
   const singleDay = data.range.from === data.range.to
   const running = singleDay && data.range.to === data.anchorToday
@@ -318,6 +426,8 @@ export function StoreList({ data, onPick }: { data: Data; onPick: (id: string) =
           const chip = storeStatus(r, { singleDay })
           const on = active(r)
           const dayLabel = dayOfLabel(r.timezone)
+          const sr = t.orders > 0 ? storeRoas(t, r.configured) : null
+          const pairBadges = shared.badges[r.id] ?? []
           return (
             <li key={r.id}>
               <button type="button" className={`${s.row} ${s.rowBtn}`} onClick={() => onPick(r.id)} aria-label={`Abrir ${r.name}`}>
@@ -331,15 +441,18 @@ export function StoreList({ data, onPick }: { data: Data; onPick: (id: string) =
                     {/* No sale: "ROAS 0,00× · empate desconhecido" said nothing; the money
                         already spent does. */}
                     {t.orders === 0 && t.adSpend > 0 && <> · <b>{formatMoney(t.adSpend)}</b> em anúncios</>}
-                    {/* ROAS is store revenue ÷ Meta spend: only meaningful where Meta is the
-                        main spend (Dumpling sells through Shop Campaigns and read "109×"). */}
-                    {t.orders > 0 && t.metaSpend > 0 && t.metaSpend >= t.shopSpend && t.roas !== null && <><br />{roasSummary(t.roas, r.configured ? t.breakEvenRoas : null).text.replace(/ → .*$/, '')}</>}
+                    {/* ROAS on the store's ad channel (lib/views/adChannel), as the Resumo and
+                        the verdict: Dumpling sells through Shop Campaigns and read "109×" on
+                        its $56 of Meta. */}
+                    {sr && <><br />{rowRoas(sr)}</>}
                     {t.orders > 0 && t.shopSpend > 0 && <><br />Anúncios Shopify {formatMoney(t.shopSpend)}{t.metaSpend > 0 && t.metaSpend < t.shopSpend ? ` · Meta ${formatMoney(t.metaSpend)}` : ''}</>}
-                    {t.adSpend === 0 && on && <><br />sem anúncios</>}
+                    {/* CAMP HALLOW read "sem anúncios" while its ads ran on EPOCH's account. */}
+                    {t.adSpend === 0 && on && <><br />{noSpendLine(shared, r.id, t.orders)}</>}
                   </span>
-                  {(dayLabel || r.badges.some(b => b.tone === 'warn' && b.code !== 'sem_custos')) && (
+                  {(dayLabel || pairBadges.length > 0 || r.badges.some(b => b.tone === 'warn' && b.code !== 'sem_custos')) && (
                     <span className={s.rowTags}>
                       {dayLabel && <Badge tone="info" icon="clock">{dayLabel}{r.dayClosed ? ' · encerrado' : ''}</Badge>}
+                      {pairBadges.map(b => <Badge key={b.label} tone="info" icon="swap" title={b.detail}>{b.label}</Badge>)}
                       {r.badges.filter(b => b.code === 'sync_atrasado' || b.code === 'sync_falhando').map(b => (
                         <Badge key={b.code} tone="warn" icon="alert" title={b.detail}>{b.label}</Badge>
                       ))}
@@ -420,8 +533,57 @@ function rateTone(rate: number): 'neg' | 'warn' | 'pos' {
   return rate >= CB_LIMIT ? 'neg' : rate >= CB_WARN ? 'warn' : 'pos'
 }
 
-export function ChargebackBlock({ data }: { data: Data }) {
+/** Disputes listed before "Mostrar as outras N". */
+const DUE_SHOWN = 4
+
+/** "5 da EPOCH ®️, 3 da CAMP HALLOW e 1 da MOKOO". */
+function awaitingSplit(list: { name: string; count: number }[]): string {
+  return joinNames(list.map(a => `${formatCount(a.count)} da ${a.name}`))
+}
+
+export function ChargebackBlock({ data, deviceTz, now }: { data: Data; deviceTz: string; now: number }) {
+  const [allDue, setAllDue] = useState(false)
   const h = data.chargebackHealth
+  // Deadlines are instants: shown on this phone's clock, with the hour.
+  const at = new Date(now || data.generatedAt)
+  const several = data.stores.length > 1
+  // The server sends every dispute still in time (not the first 5): the
+  // heading counts them all, so 4 lines never read as the whole to-do list.
+  const due = h?.dueSoon ?? []
+  const shownDue = allDue ? due : due.slice(0, DUE_SHOWN)
+  const dueBlock = h && (due.length > 0 || h.overdue > 0) ? (
+    <>
+      {due.length > 0 && (
+        <>
+          <b>{plural(due.length, 'disputa espera', 'disputas esperam')} resposta e ainda {due.length === 1 ? 'está' : 'estão'} no prazo</b>
+          {several && h.awaitingByStore.length > 1 && <> ({awaitingSplit(h.awaitingByStore)})</>}.{' '}
+          {due.length > shownDue.length ? `As ${shownDue.length} de prazo mais curto` : due.length === 1 ? 'Prazo' : 'Prazos'} no horário de {tzCity(deviceTz)}:
+          {shownDue.map(d => {
+            // Never the UTC date: "2026-11-22 04:00:00+00" is 01h00 on the
+            // 22nd in Brasília and was shown as "até 22 nov", as if the
+            // whole 22nd were still available.
+            const dueAt = d.dueBy ? dueByLabel(d.dueBy, deviceTz, at) : null
+            return (
+              <span key={`${d.storeId}|${d.externalId}`} style={{ display: 'block' }}>
+                {d.currency === 'USD' ? formatMoney(d.amount) : `${d.currency} ${Math.round(d.amount)}`} · {REASON[d.reason] ?? d.reason}
+                {several ? ` · ${d.store}` : ''}{dueAt ? ` · ${dueAt}` : ''}
+              </span>
+            )
+          })}
+          {due.length > DUE_SHOWN && (
+            <button type="button" className={s.linkBtn} onClick={() => setAllDue(v => !v)} aria-expanded={allDue}>
+              {allDue ? `Mostrar só as ${DUE_SHOWN} mais urgentes` : `Mostrar ${due.length - DUE_SHOWN === 1 ? 'a outra' : `as outras ${due.length - DUE_SHOWN}`}`}
+            </button>
+          )}
+        </>
+      )}
+      {h.overdue > 0 && (
+        <span style={{ display: 'block' }}>
+          {plural(h.overdue, 'disputa', 'disputas')} sem resposta já {h.overdue === 1 ? 'passou' : 'passaram'} do prazo.
+        </span>
+      )}
+    </>
+  ) : null
   return (
     <Block
       title="Chargebacks · últimos 90 dias"
@@ -432,7 +594,11 @@ export function ChargebackBlock({ data }: { data: Data }) {
       {!h ? (
         <EmptyState compact icon="alert" title="Não foi possível ler os chargebacks agora">Os outros números não dependem disso.</EmptyState>
       ) : h.byStore.length === 0 ? (
-        <EmptyState compact icon="check" title="Nenhuma disputa nos últimos 90 dias" />
+        <>
+          <EmptyState compact icon="check" title="Nenhuma disputa nos últimos 90 dias" />
+          {/* A dispute opened before the 90 days can still be waiting. */}
+          {dueBlock && <p className={s.note} style={{ marginTop: 8 }}>{dueBlock}</p>}
+        </>
       ) : (
         <>
           <ul className={s.list}>
@@ -464,17 +630,7 @@ export function ChargebackBlock({ data }: { data: Data }) {
           <div style={{ padding: '10px 16px 14px', borderTop: '1px solid var(--line)' }} className={s.note}>
             {h.byStore.length > 1 && <>Somando as lojas: {formatPct(h.rate, { digits: 2 })} ({formatCount(h.count)} de {formatCount(h.orders)}), mas o limite vale por loja. </>}
             {formatCount(h.lost)} perdidas · {formatCount(h.won)} ganhas{h.lost + h.won > 0 && ` (${formatPct((h.won / (h.lost + h.won)) * 100, { digits: 0 })} de vitória)`} · {formatMoney(h.fees)} em taxas.
-            {h.dueSoon.length > 0 && (
-              <>
-                <br /><b>Ainda dá para responder:</b>
-                {h.dueSoon.slice(0, 4).map(d => (
-                  <span key={d.externalId} style={{ display: 'block' }}>
-                    {d.currency === 'USD' ? formatMoney(d.amount) : `${d.currency} ${Math.round(d.amount)}`} · {REASON[d.reason] ?? d.reason}
-                    {data.stores.length > 1 ? ` · ${d.store}` : ''}{d.dueBy ? ` · até ${formatDate(d.dueBy.slice(0, 10), data.anchorToday)}` : ''}
-                  </span>
-                ))}
-              </>
-            )}
+            {dueBlock && <><br />{dueBlock}</>}
           </div>
         </>
       )}
@@ -495,10 +651,17 @@ export function LiveFeed({ data, now, deviceTz }: { data: Data; now: number; dev
   const several = data.stores.length > 1
   const items = all ? data.liveFeed : data.liveFeed.slice(0, 12)
   const noLive = data.freshness.storesWithoutLiveFeed
+  // One store on another clock: the whole screen (banner, "parcial · até",
+  // the curve) is on the store's clock, so the sale times are too, and the
+  // line above the list says which clock that is.
+  const storeTz = !isAllAnswer(data) && data.stores.length === 1 ? data.stores[0].timezone : null
+  const clockTz = storeTz && now && clockDiffers(storeTz, deviceTz, new Date(now)) ? storeTz : deviceTz
   return (
     <Block
       title={<span className={s.live}>Vendas ao vivo</span>}
-      howTo="As mais recentes primeiro. Cada venda nova aparece em segundos."
+      howTo={clockTz !== deviceTz
+        ? `As mais recentes primeiro, no horário de ${tzCity(clockTz)}, como o resto da tela. Cada venda nova aparece em segundos.`
+        : 'As mais recentes primeiro. Cada venda nova aparece em segundos.'}
       flush={items.length > 0}
       footer={noLive.length > 0
         ? `${noLive.map(n => n.name).join(', ')} ${noLive.length > 1 ? 'não avisam' : 'não avisa'} vendas na hora: os pedidos aparecem com a sincronização, até 10 minutos depois.`
@@ -511,15 +674,17 @@ export function LiveFeed({ data, now, deviceTz }: { data: Data; now: number; dev
           <ul className={s.list}>
             {items.map(o => {
               const at = o.placedAt ?? o.receivedAt
-              const units = o.items.reduce((sum, i) => sum + (i.quantity ?? 0), 0)
-              const first = o.items[0]?.title ?? 'Pedido'
+              const line = feedLine(o.items)
               return (
                 <li key={`${o.storeId}|${o.orderId}`}>
                   <div className={s.feedRow}>
-                    <span className={s.feedTime}>{formatTimeInTz(at, deviceTz)}<small>{now ? formatRelativeTime(at, new Date(now)) : ''}</small></span>
+                    <span className={s.feedTime}>{formatTimeInTz(at, clockTz)}<small>{now ? formatRelativeTime(at, new Date(now)) : ''}</small></span>
                     <span className={s.feedTitle}>
-                      {units > 1 ? `${units}× ` : ''}{first}{o.items.length > 1 ? ` +${o.items.length - 1}` : ''}
-                      <small>{[several ? o.store : null, o.country, o.orderNumber, o.source === 'sync' ? 'via sincronização' : null].filter(Boolean).join(' · ')}</small>
+                      <span className={s.feedHead}>
+                        <span className={s.feedName}>{line.name}</span>
+                        {line.more && <span className={s.feedMore}>{line.more}</span>}
+                      </span>
+                      <small>{[line.units, several ? o.store : null, o.country, o.orderNumber, o.source === 'sync' ? 'via sincronização' : null].filter(Boolean).join(' · ')}</small>
                     </span>
                     <span className="num pos">{orderTotal(o)}</span>
                   </div>
@@ -529,7 +694,9 @@ export function LiveFeed({ data, now, deviceTz }: { data: Data; now: number; dev
           </ul>
           {data.liveFeed.length > 12 && (
             <button type="button" className={s.moreBtn} onClick={() => setAll(v => !v)}>
-              {all ? 'Mostrar menos' : `Mostrar todas (${data.liveFeed.length})`}
+              {/* The feed stops at LIVE_FEED_SIZE sales: "todas (40)" claimed a
+                  completeness the server never sends. */}
+              {all ? 'Mostrar menos' : data.liveFeed.length >= LIVE_FEED_SIZE ? `Mostrar as ${data.liveFeed.length} mais recentes` : `Mostrar mais ${data.liveFeed.length - 12}`}
             </button>
           )}
         </>

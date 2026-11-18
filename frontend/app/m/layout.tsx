@@ -1,7 +1,9 @@
 import type { Metadata, Viewport } from 'next'
 
 export const metadata: Metadata = {
-  title: 'Opero',
+  // Absolute: the root layout's '%s · Opero' template turned 'Opero' into
+  // 'Opero · Opero' in the tab, history and bookmarks of the phone app.
+  title: { absolute: 'Opero' },
   description: 'Lucro real e vendas das lojas, em tempo real',
   // Linked from /m only: the desktop site is not an installable app.
   manifest: '/m/manifest.webmanifest',

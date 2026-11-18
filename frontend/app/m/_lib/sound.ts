@@ -9,6 +9,10 @@
  *    locks, and only a tap may resume it. The old code listened for ONE tap;
  *    after the first lock the chime was gone until a reload. Now, while sound
  *    is on, every tap and every return to the foreground tries to resume.
+ *
+ * The context is created only inside a gesture (or once the page has had
+ * one): created on load, it starts suspended and Chrome logs "The
+ * AudioContext was not allowed to start" on every visit with sound on.
  */
 
 type WebkitWindow = Window & { webkitAudioContext?: typeof AudioContext }
@@ -30,38 +34,58 @@ function ensureContext(): AudioContext | null {
   return ctx
 }
 
-function resume() {
+/** Whether the page has had a user gesture (sticky activation): only then may
+ *  a context start without one in hand. Unknown (old Safari) counts as no. */
+function pageActivated(): boolean {
+  try { return !!(navigator as Navigator & { userActivation?: { hasBeenActive: boolean } }).userActivation?.hasBeenActive } catch { return false }
+}
+
+/** Resume the context; create it only when `create` (inside a gesture). */
+function wake(create: boolean) {
   if (!enabled) return
-  const c = ensureContext()
+  const c = create ? ensureContext() : ctx
   // 'interrupted' is Safari's state after a call or a lock.
   if (c && c.state !== 'running') void c.resume().catch(() => {})
 }
 
+const onGesture = () => wake(true)
+
 function onVisible() {
-  if (document.visibilityState === 'visible') resume()
+  // Coming back is not a gesture: resume what exists, never create.
+  if (document.visibilityState === 'visible') wake(false)
 }
 
 function arm() {
   if (armed) return
   armed = true
-  window.addEventListener('pointerdown', resume, { passive: true })
-  window.addEventListener('touchend', resume, { passive: true })
-  window.addEventListener('keydown', resume)
+  window.addEventListener('pointerdown', onGesture, { passive: true })
+  window.addEventListener('touchend', onGesture, { passive: true })
+  window.addEventListener('keydown', onGesture)
   document.addEventListener('visibilitychange', onVisible)
 }
 
 function disarm() {
   if (!armed) return
   armed = false
-  window.removeEventListener('pointerdown', resume)
-  window.removeEventListener('touchend', resume)
-  window.removeEventListener('keydown', resume)
+  window.removeEventListener('pointerdown', onGesture)
+  window.removeEventListener('touchend', onGesture)
+  window.removeEventListener('keydown', onGesture)
   document.removeEventListener('visibilitychange', onVisible)
 }
 
 /** Whether Web Audio exists at all on this device. */
 export function soundSupported(): boolean {
   return typeof window !== 'undefined' && !!(window.AudioContext ?? (window as WebkitWindow).webkitAudioContext)
+}
+
+/**
+ * On page load, with the saved preference: mark the chime on and wait for the
+ * first tap to create the context (no gesture here, so none is created).
+ */
+export function restoreSound(on: boolean) {
+  enabled = on
+  if (on) arm()
+  else disarm()
 }
 
 /**
@@ -72,7 +96,7 @@ export function setSoundEnabled(on: boolean) {
   enabled = on
   if (on) {
     arm()
-    resume()
+    wake(true)
   } else {
     disarm()
     if (ctx && ctx.state === 'running') void ctx.suspend().catch(() => {})
@@ -115,9 +139,11 @@ function ring(c: AudioContext, volume: number) {
 
 /** Ring once — only when the owner turned sound on. */
 export function playChaChing(volume = 0.5) {
-  if (!enabled || !ctx) return
-  if (ctx.state === 'running') { ring(ctx, volume); return }
-  const c = ctx
+  if (!enabled) return
+  // No tap yet on this visit: a context made now could not start anyway.
+  const c = ctx ?? (pageActivated() ? ensureContext() : null)
+  if (!c) return
+  if (c.state === 'running') { ring(c, volume); return }
   void c.resume().then(() => { if (enabled && c.state === 'running') ring(c, volume) }).catch(() => {})
 }
 

@@ -6,9 +6,11 @@ import type { ProductReport, ProductRow } from '../../data/products'
 import type { CountryReport, CountryRow } from '../../data/countries'
 import type { CustomerLtv, CustomerSplit } from '../../data/customers'
 import type { PnL } from '../../engine/pnl'
-import { DEFAULT_THRESHOLDS, type CampaignDecision } from '../../campaignSignal'
+import { decideCampaign, DEFAULT_THRESHOLDS, type CampaignDecision } from '../../campaignSignal'
+import { creativeVerdict } from '../../creativeSignal'
+import { eachDay } from '../../engine/dates'
 import {
-  DetailQueryError, mergeCampaigns, mergeCountries, mergeCreatives, mergeCustomers, mergeProducts, parseDetailQuery, perStore, ptReason,
+  DetailQueryError, mergeCampaigns, mergeCountries, mergeCreatives, mergeCustomers, mergeProducts, parseDetailQuery, perStore,
 } from '../mobileDetail'
 
 const ref = (id: string, tz = 'America/Belem'): StoreRef => ({
@@ -47,6 +49,10 @@ describe('parseDetailQuery', () => {
     expect(() => q('section=campanhas&period=ever')).toThrow('Período inválido')
     expect(() => q('section=campanhas&period=custom&from=2026-11-31&to=2026-12-01')).toThrow('Data inválida')
     try { q('section=x') } catch (e) { expect((e as DetailQueryError).status).toBe(400) }
+  })
+  it('a range wholly before 2000 is a 400 (as /api/mobile); a long or older one passes and is cut when priced', () => {
+    expect(() => q('section=produtos&period=custom&from=1990-01-01&to=1995-01-01')).toThrow('Escolha datas a partir de 1 jan 2000')
+    expect(q('section=produtos&period=custom&from=1990-01-01&to=2026-11-17')).toMatchObject({ from: '1990-01-01', to: '2026-11-17' })
   })
 })
 
@@ -127,6 +133,28 @@ describe('mergeCampaigns', () => {
     expect(m.campaigns.map(c => c.name)).toEqual(['c4', 'c3'])
     expect(m.totalCampaigns).toBe(5)
     expect(m.totals.spend).toBe(150)
+    expect(m.unsynced).toEqual({ spend: 0, ads: 0, stores: [] })
+  })
+  it('the unsynced-ads bucket is not a campaign: out of the list and the count, kept in the money (Glooty, $438 of $545)', () => {
+    const bucket = (spend: number, ads: { adId: string; spend: number }[], running: boolean): CampaignRow => ({
+      ...campaign('x', spend, 0, null, null), campaignId: null, name: 'Anúncios ainda não sincronizados', running,
+      unsynced: true, unsyncedAds: ads.map(a => ({ ...a, name: `Anúncio sem nome (id ${a.adId})` })),
+    })
+    const m = mergeCampaigns([
+      { store: GLOOTY, value: campaignReport(GLOOTY, [
+        bucket(438.04, [{ adId: '1', spend: 400 }, { adId: '2', spend: 38.04 }, { adId: '3', spend: 0 }], false),
+        campaign('jeans', 53.87, 0, null, null), campaign('sutia', 37.98, 0, null, null), campaign('bra', 15.3, 0, null, null),
+      ], { configured: false, breakEvenRoas: null }) },
+      { store: MOKOO, value: campaignReport(MOKOO, [campaign('a', 100, 300, 20, 'manter'), bucket(4.47, [{ adId: '9', spend: 4.47 }], true)]) },
+    ])
+    expect(m.campaigns.map(c => c.name)).not.toContain('Anúncios ainda não sincronizados')
+    expect(m.totalCampaigns).toBe(4)
+    expect(m.unsynced).toEqual({
+      spend: 442.51, ads: 3,
+      stores: [{ storeId: 'glooty', store: 'GLOOTY', spend: 438.04, ads: 2 }, { storeId: 'mokoo', store: 'MOKOO', spend: 4.47, ads: 1 }],
+    })
+    // The money still covers every ad: the bucket's spend is in the totals.
+    expect(m.totals.spend).toBeCloseTo(438.04 + 53.87 + 37.98 + 15.3 + 100 + 4.47, 2)
   })
 })
 
@@ -237,19 +265,21 @@ describe('mergeCountries', () => {
   })
 })
 
-describe('ptReason', () => {
-  it("rewrites the signal modules' English numbers the pt-BR way", () => {
-    expect(ptReason('ROAS 0.96x com $419 gastos — abaixo de 80% do empate (1.29x)')).toBe('ROAS 0,96× com $419 gastos — abaixo de 80% do empate (1,29×)')
-    expect(ptReason('Abaixo do empate (1.34x), ainda com pouco gasto para cortar ($1234 de $150)')).toBe('Abaixo do empate (1,34×), ainda com pouco gasto para cortar ($1.234 de $150)')
-    expect(ptReason('Pouco volume para julgar: 5 pedidos e $1,234 em 7 dias')).toBe('Pouco volume para julgar: 5 pedidos e $1.234 em 7 dias')
-    expect(ptReason('Margem de -50% em 7 dias — está queimando dinheiro')).toBe('Margem de −50% em 7 dias — está queimando dinheiro')
-    expect(ptReason('Entre -10% e 0% de margem')).toBe('Entre −10% e 0% de margem')
-    expect(ptReason('Frequência 3.2 no período — o público já viu demais')).toBe('Frequência 3,2 no período — o público já viu demais')
-  })
-  it('leaves text that is already pt-BR alone', () => {
-    for (const t of ['ROAS 1,95× · empate 1,58×', 'Gasto $1.234 em 7 dias', 'CBO - EPOCH 1936 - USA', 'Margem de 14%, abaixo dos 20% para escalar', 'Pausado — sem recomendação']) {
-      expect(ptReason(t)).toBe(t)
-    }
+describe('decision texts reach the phone in pt-BR', () => {
+  // ptReason used to rewrite "ROAS 0.96x", "$1,234" and "-10%" here; the
+  // signal modules now write pt-BR themselves and the texts pass through.
+  it('campaign reasons, notes and rules, and creative reasons, as the signal modules wrote them', () => {
+    const real = decideCampaign({
+      days: eachDay('2026-11-10', '2026-11-16').map(date => ({ date, spend: 1500, revenue: 0, purchases: 0 })),
+      window: { from: '2026-11-10', to: '2026-11-16' }, contributionRate: 0.4, status: 'ACTIVE',
+    })
+    const row = { ...campaign('cut', 10500, 0, -10500, 'cortar'), decision: real }
+    const m = mergeCampaigns([{ store: MOKOO, value: campaignReport(MOKOO, [row]) }])
+    expect(m.campaigns[0].reason).toBe('$10.500 em 7 dias sem nenhuma venda atribuída pelo Meta')
+    expect(m.rules.observar).toBe('Entre −10% e 0% de margem, ou pouco volume para julgar (menos de 10 pedidos ou $150).')
+    const verdict = creativeVerdict({ spend: 419, roas: 0.96, purchases: 2, breakEven: 1.29, frequency: null, running: true })
+    const c = mergeCreatives([{ store: MOKOO, value: creativesReport(MOKOO, [{ ...creative('k', 419, 'kill', -100), verdict }], 1.29) }])
+    expect(c.creatives[0].reason).toBe('ROAS 0,96× com $419 gastos — abaixo de 80% do empate (1,29×)')
   })
 })
 

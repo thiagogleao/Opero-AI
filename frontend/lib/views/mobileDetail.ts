@@ -20,7 +20,7 @@
 
 import type { StoreRef } from '../access'
 import {
-  anchorTz, formatRange, isIsoDate, isPeriod, resolveRange, safeTz, todayInTz,
+  anchorTz, formatRange, isIsoDate, isPeriod, safeTz, todayInTz,
   type DateRange, type Period,
 } from '../engine/dates'
 import { getCampaignReport, type CampaignReport } from '../data/campaigns'
@@ -36,7 +36,7 @@ import {
   type CampaignAction, type ScaleThresholds, type TrendArrow,
 } from '../campaignSignal'
 import { SIGNAL_LABEL, signalRank, type Signal } from '../creativeSignal'
-import { formatMoney } from '../format'
+import { resolvePortfolioWindow, tooEarlyRangeError } from './portfolioLimits'
 
 // ─── Request ──────────────────────────────────────────────────────────────────
 
@@ -76,6 +76,8 @@ export function parseDetailQuery(sp: URLSearchParams): DetailQuery {
   if ((from && !isIsoDate(from)) || (to && !isIsoDate(to))) throw new DetailQueryError('Data inválida')
   const custom = period === 'custom'
   if (custom && !(from && to)) throw new DetailQueryError('Escolha a data inicial e a final')
+  const early = custom ? tooEarlyRangeError(from, to) : null
+  if (early) throw new DetailQueryError(early)
   return { section, period, from: custom ? from : null, to: custom ? to : null, store: sp.get('store') }
 }
 
@@ -124,8 +126,6 @@ export interface MobileCampaign {
   name: string
   status: string | null
   running: boolean
-  /** The "Anúncios ainda não sincronizados" row. */
-  unsynced: boolean
   spend: number
   purchaseValue: number
   purchases: number
@@ -171,10 +171,22 @@ export interface CampaignStoreNote {
 export interface CampaignsDetail extends DetailBase {
   section: 'campanhas'
   /** Money burning first (Cortar), then room to grow (Escalar), Manter,
-   *  Observar, no action; bigger spend first within each. */
+   *  Observar, no action; bigger spend first within each. Real campaigns
+   *  only: the "Anúncios ainda não sincronizados" bucket is in `unsynced`. */
   campaigns: MobileCampaign[]
-  /** Campaigns before the phone's cut. */
+  /** Campaigns before the phone's cut (the bucket is not one). */
   totalCampaigns: number
+  /** Spend of ads the sync has not tied to a campaign yet (lib/data/campaigns'
+   *  unsynced row): a bucket, not a campaign, so it has no status, no ROAS
+   *  gauge and no place in the count — the desktop lists it as "sem
+   *  campanha". Its spend IS in `totals`. */
+  unsynced: {
+    spend: number
+    /** Ads in the bucket that spent in the window. */
+    ads: number
+    /** Per store, biggest first; only stores whose bucket spent. */
+    stores: { storeId: string; store: string; spend: number; ads: number }[]
+  }
   totals: {
     spend: number
     purchaseValue: number
@@ -333,27 +345,14 @@ const ratio = (a: number, b: number): number | null => (b > 0 ? a / b : null)
 const pct = (a: number, b: number): number | null => (b > 0 ? (a / b) * 100 : null)
 const emptyActions = (): Record<CampaignAction, number> => ({ escalar: 0, manter: 0, cortar: 0, observar: 0 })
 
+// The decision texts (campaign reasons, notes and rules, creative reasons)
+// arrive from lib/campaignSignal and lib/creativeSignal already pt-BR, through
+// lib/format, so they are shown as they are.
 export interface Loaded<T> { store: StoreRef; value: T }
-
-/**
- * The decision texts come from lib/campaignSignal and lib/creativeSignal,
- * which write numbers the English way ("ROAS 0.96x", "$1,234", "$1234",
- * "-16%"). Every other number on the phone is pt-BR, and the same row shows
- * "ROAS 0,96×" right under the reason, so the texts are rewritten here. A
- * text already in pt-BR passes through unchanged, so this becomes a no-op once
- * those modules format with lib/format. Pure.
- */
-export function ptReason(text: string): string {
-  return text
-    .replace(/(\d+)\.(\d+)x\b/g, '$1,$2×')
-    .replace(/\$(\d{1,3}(?:,\d{3})+)(?![\d,])/g, (_, n: string) => formatMoney(Number(n.replace(/,/g, ''))))
-    .replace(/\$(\d{4,})(?![\d.,])/g, (_, n: string) => formatMoney(Number(n)))
-    .replace(/(Frequência \d+)\.(\d)/g, '$1,$2')
-    .replace(/(^|[\s(])-(\d)/g, '$1\u2212$2')
-}
 
 export function mergeCampaigns(loaded: Loaded<CampaignReport>[], limit = DETAIL_LIMIT.campanhas): Omit<CampaignsDetail, keyof DetailBase | 'section'> {
   const rows: MobileCampaign[] = []
+  const buckets = new Map<string, { storeId: string; store: string; spend: number; ads: number }>()
   const totals = { spend: 0, purchaseValue: 0, purchases: 0, estimatedProfit: 0, priced: 0, unpricedSpend: 0, actions: emptyActions() }
   const windows = new Map<string, { range: DateRange; stores: string[] }>()
   const storeNotes: CampaignStoreNote[] = []
@@ -380,16 +379,27 @@ export function mergeCampaigns(loaded: Loaded<CampaignReport>[], limit = DETAIL_
       totals.purchases += c.purchases
       if (c.estimatedProfit !== null) { totals.estimatedProfit += c.estimatedProfit; totals.priced++ } else totals.unpricedSpend += c.spend
       if (c.decision.action) totals.actions[c.decision.action]++
+      if (c.unsynced) {
+        // Not a campaign: its "running" flag means nothing and its ROAS has no
+        // campaign behind it. It read "ativa · ROAS 0,00×" (MOKOO, $4,47) and
+        // "pausada" for 80% of Glooty's week ($438 of $545). One line per
+        // store (a store with two ad accounts has two buckets).
+        const b = buckets.get(store.id) ?? { storeId: store.id, store: store.name, spend: 0, ads: 0 }
+        b.spend += c.spend
+        b.ads += c.unsyncedAds.filter(a => a.spend >= 0.005).length
+        buckets.set(store.id, b)
+        continue
+      }
       rows.push({
         key: `${store.id}:${c.campaignId ?? `sem-id:${c.name}`}`,
         storeId: store.id, store: store.name,
-        campaignId: c.campaignId, name: c.name, status: c.status, running: c.running, unsynced: c.unsynced,
+        campaignId: c.campaignId, name: c.name, status: c.status, running: c.running,
         spend: c.spend, purchaseValue: c.purchaseValue, purchases: c.purchases, roas: c.roas, cpa: c.cpa,
         estimatedProfit: c.estimatedProfit, margin: c.margin,
         breakEvenRoas: c.shared ? null : r.breakEvenRoas,
         action: c.decision.action,
         actionLabel: c.decision.action ? ACTION_LABEL[c.decision.action] : null,
-        reason: ptReason(c.decision.reason), notes: c.decision.notes.map(ptReason),
+        reason: c.decision.reason, notes: c.decision.notes,
         trend: c.decision.trend, trendLabel: c.decision.trend ? TREND_ARROW_LABEL[c.decision.trend] : null,
         trendChange: c.decision.trendChange,
         decisionWindow: c.decision.window,
@@ -400,9 +410,18 @@ export function mergeCampaigns(loaded: Loaded<CampaignReport>[], limit = DETAIL_
   }
 
   rows.sort((a, b) => actionRank(a.action) - actionRank(b.action) || b.spend - a.spend)
+  const unsynced = [...buckets.values()]
+    .map(b => ({ ...b, spend: round2(b.spend) }))
+    .filter(b => b.spend >= 0.005)
+    .sort((a, b) => b.spend - a.spend)
   return {
     campaigns: rows.slice(0, limit),
     totalCampaigns: rows.length,
+    unsynced: {
+      spend: round2(unsynced.reduce((s, b) => s + b.spend, 0)),
+      ads: unsynced.reduce((s, b) => s + b.ads, 0),
+      stores: unsynced,
+    },
     totals: {
       spend: round2(totals.spend), purchaseValue: round2(totals.purchaseValue), purchases: totals.purchases,
       roas: ratio(totals.purchaseValue, totals.spend),
@@ -410,7 +429,7 @@ export function mergeCampaigns(loaded: Loaded<CampaignReport>[], limit = DETAIL_
       unpricedSpend: round2(totals.unpricedSpend),
       actions: totals.actions,
     },
-    rules: Object.fromEntries(Object.entries(describeThresholds(thresholds)).map(([k, v]) => [k, ptReason(v)])) as Record<CampaignAction, string>,
+    rules: describeThresholds(thresholds),
     formula,
     decisionWindows: [...windows.values()].map(w => ({ range: w.range, label: formatRange(w.range), stores: w.stores })),
     storeNotes,
@@ -437,7 +456,7 @@ export function mergeCreatives(loaded: Loaded<CreativesReport>[], limit = DETAIL
         estimatedProfit: c.estimatedProfit,
         breakEvenRoas: c.shared ? null : r.breakEvenRoas,
         signal: c.verdict.signal, signalLabel: c.verdict.signal ? SIGNAL_LABEL[c.verdict.signal] : null,
-        reason: ptReason(c.verdict.reason),
+        reason: c.verdict.reason,
         video: c.video ? {
           playRate: c.video.playRate, retention25: c.video.retention25, retention50: c.video.retention50,
           retention75: c.video.retention75, retention100: c.video.retention100,
@@ -689,7 +708,9 @@ export async function buildMobileDetail(
 ): Promise<MobileDetailResponse> {
   const now = ctx.now ?? new Date()
   const anchor = anchorTz(stores.map(s => s.timezone))
-  const range = resolveRange(q.period, anchor, q.from, q.to, now)
+  // The headline's window, cut the same way (at most 366 days, nothing before
+  // 2000): a tab never prices other dates than the numbers above it.
+  const { range } = resolvePortfolioWindow(q.period, anchor, q.from, q.to, now)
   const base = (configured: (s: StoreRef) => boolean | null, ok: StoreRef[], failed: StoreRef[]): DetailBase => ({
     request: { section: q.section, store: q.storeKey, period: q.period, from: q.from, to: q.to },
     generatedAt: now.toISOString(),

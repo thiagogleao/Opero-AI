@@ -4,11 +4,12 @@
  * Detail tabs (campanhas, criativos, produtos, países, clientes), fetched from
  * GET /api/mobile/detail when a tab is open, refetched when the store or the
  * period changes, with loading, error-and-retry and empty states. A tab never
- * shows another selection's list as if it were this one's: an answer for an
- * old selection is dimmed under "Carregando…".
+ * shows another selection's list as if it were this one's: the same tab's
+ * answer for the previous selection is dimmed under "Carregando…"; another
+ * tab's answer is never shown under this one (a skeleton is).
  */
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Block, Button, Callout, Chip, EmptyState, ErrorState, Money, RoasGauge, Skeleton,
 } from '@/components/ui'
@@ -44,7 +45,9 @@ export function DetailTabs({ sel, aba, onTab, forceSignal, pollSignal, homeRange
 }) {
   const d = useDetail(aba, sel, forceSignal, pollSignal, homeRange)
   const current = d.data && d.dataKey === d.key ? d.data : null
-  const stale = d.data && d.dataKey !== d.key ? d.data : null
+  // Only this tab's list for the previous store or period is "da seleção
+  // anterior"; the Clientes block under Campanhas was neither.
+  const stale = d.data && d.dataKey !== d.key && d.data.section === aba ? d.data : null
   const error = d.error && d.errorKey === d.key ? d.error : null
   const loading = d.loadingKey === d.key && d.key !== null
   const label = TABS.find(t => t.key === aba)?.label
@@ -52,14 +55,14 @@ export function DetailTabs({ sel, aba, onTab, forceSignal, pollSignal, homeRange
   return (
     <section aria-label="Detalhes" className={s.stack}>
       <div className={s.secLabel}>Detalhes<span>{aba ? `${label} · ${scopeName}` : 'toque numa aba para abrir'}</span></div>
-      <div className={s.tabs} role="tablist" aria-label="Detalhes">
+      <TabRow aba={aba}>
         {TABS.map(t => (
           <button key={t.key} type="button" role="tab" className={s.tab} aria-selected={aba === t.key} aria-controls="m-detail-panel"
             onClick={() => onTab(aba === t.key ? null : t.key)}>
             {t.label}
           </button>
         ))}
-      </div>
+      </TabRow>
       {aba && (
         <div id="m-detail-panel" role="tabpanel" aria-busy={loading || undefined} className={s.stack}>
           {error && !current ? (
@@ -94,6 +97,55 @@ export function DetailTabs({ sel, aba, onTab, forceSignal, pollSignal, homeRange
         </div>
       )}
     </section>
+  )
+}
+
+/**
+ * The tab row. On a phone too narrow for the five tabs it scrolls; data-more
+ * says which edge still hides tabs (the CSS fades that edge) and the open tab
+ * is scrolled into view.
+ */
+function TabRow({ aba, children }: { aba: DetailSection | null; children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const update = () => {
+      const left = el.scrollLeft > 2
+      const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 2
+      el.dataset.more = left && right ? 'both' : left ? 'left' : right ? 'right' : 'none'
+    }
+    update()
+    el.addEventListener('scroll', update, { passive: true })
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null
+    ro?.observe(el)
+    return () => { el.removeEventListener('scroll', update); ro?.disconnect() }
+  }, [])
+  useEffect(() => {
+    const el = ref.current
+    const on = el?.querySelector<HTMLElement>('[aria-selected="true"]')
+    if (!el || !on || el.scrollWidth <= el.clientWidth) return
+    const l = on.offsetLeft - el.offsetLeft
+    if (l < el.scrollLeft || l + on.offsetWidth > el.scrollLeft + el.clientWidth) el.scrollTo({ left: l - 24, behavior: 'smooth' })
+  }, [aba])
+  return <div ref={ref} className={s.tabs} role="tablist" aria-label="Detalhes" data-more="none">{children}</div>
+}
+
+/** "Mostrar todos (25)" only when the list is the whole thing; a list the
+ *  server cut at DETAIL_LIMIT says how many it shows and of how many. */
+function MoreButton({ more, shown, total, female, onlyNote }: {
+  more: ReturnType<typeof useMore>; shown: number; total: number; female?: boolean; onlyNote: string
+}) {
+  const cut = total > shown
+  return (
+    <>
+      {more.needed && (
+        <button type="button" className={s.moreBtn} onClick={more.toggle}>
+          {more.all ? 'Mostrar menos' : cut ? `Mostrar ${female ? 'as' : 'os'} ${shown} primeir${female ? 'as' : 'os'}` : `Mostrar tod${female ? 'as' : 'os'} (${shown})`}
+        </button>
+      )}
+      {cut && (!more.needed || more.all) && <p className={s.note} style={{ padding: '0 16px 12px' }}>{onlyNote}</p>}
+    </>
   )
 }
 
@@ -154,6 +206,7 @@ function Campaigns({ d }: { d: CampaignsDetail }) {
   const t = d.totals
   const windows = d.decisionWindows.map(w => `${w.label}${d.decisionWindows.length > 1 ? ` (${w.stores.join(', ')})` : ''}`).join('; ')
   const gaps = d.storeNotes.filter(n => n.metaVsStoreRevenueGap !== null && Math.abs(n.metaVsStoreRevenueGap) >= 10)
+  const bucket = <UnsyncedLine u={d.unsynced} several={several} total={t.spend} />
   return (
     <Block
       title={`Campanhas · ${formatCount(d.totalCampaigns)}`}
@@ -164,7 +217,10 @@ function Campaigns({ d }: { d: CampaignsDetail }) {
       footer={gaps.length ? gaps.map(g => `${g.store}: o Meta credita ${formatPct(Math.abs(g.metaVsStoreRevenueGap!), { digits: 0 })} ${g.metaVsStoreRevenueGap! > 0 ? 'mais' : 'menos'} vendas do que a loja registrou.`).join(' ') : undefined}
     >
       {d.campaigns.length === 0 ? (
-        <EmptyState compact icon="camp" title="Nenhuma campanha com gasto no período" />
+        <>
+          <EmptyState compact icon="camp" title="Nenhuma campanha com gasto no período" />
+          {bucket}
+        </>
       ) : (
         <>
           <div style={{ padding: '0 16px 12px' }} className={s.metrics}>
@@ -173,6 +229,7 @@ function Campaigns({ d }: { d: CampaignsDetail }) {
             <span>Lucro estimado <b><Money value={t.estimatedProfit} tone="auto" /></b></span>
             {t.unpricedSpend > 0 && <span>Sem margem para estimar <b>{formatMoney(t.unpricedSpend)}</b></span>}
           </div>
+          {bucket}
           <ul className={s.list} style={{ borderTop: '1px solid var(--line)' }}>
             {d.campaigns.slice(0, more.limit).map(c => (
               <li key={c.key} className={`${s.row} ${s.rowNoAvatar}`}>
@@ -183,7 +240,7 @@ function Campaigns({ d }: { d: CampaignsDetail }) {
                     {c.trendLabel && c.trend !== 'estavel' ? ` · ${c.trendLabel.toLowerCase()}${c.trendChange !== null ? ` (${formatPct(c.trendChange, { digits: 0, sign: true })} no ROAS)` : ''}` : ''}
                   </span>
                   <p className={s.reason}>{c.shared ?? c.reason}</p>
-                  {c.spend > 0 && c.roas !== null && <div style={{ marginTop: 6 }}><RoasGauge roas={c.roas} breakEven={c.breakEvenRoas} size="mini" paused={!c.running} /></div>}
+                  {c.spend > 0 && c.roas !== null && <div style={{ marginTop: 6 }}><RoasGauge roas={c.roas} breakEven={c.breakEvenRoas} configured={d.storeNotes.find(n => n.storeId === c.storeId)?.configured} reason={c.shared ? 'other_store' : null} size="mini" paused={!c.running} /></div>}
                   <span className={s.metrics}>
                     <span>Gasto <b>{formatMoney(c.spend)}</b></span>
                     <span>{plural(c.purchases, 'compra', 'compras')}</span>
@@ -204,11 +261,29 @@ function Campaigns({ d }: { d: CampaignsDetail }) {
               </li>
             ))}
           </ul>
-          {more.needed && <button type="button" className={s.moreBtn} onClick={more.toggle}>{more.all ? 'Mostrar menos' : `Mostrar todas (${d.campaigns.length})`}</button>}
-          {d.totalCampaigns > d.campaigns.length && <p className={s.note} style={{ padding: '0 16px 12px' }}>Mostrando as {d.campaigns.length} primeiras de {d.totalCampaigns}; os totais acima incluem todas.</p>}
+          <MoreButton more={more} shown={d.campaigns.length} total={d.totalCampaigns} female
+            onlyNote={`Mostrando as ${d.campaigns.length} primeiras de ${formatCount(d.totalCampaigns)}: as que pedem ação e as de maior gasto. Os totais acima incluem todas.`} />
         </>
       )}
     </Block>
+  )
+}
+
+/**
+ * Ads the sync has not tied to a campaign yet: one line, never a campaign row
+ * (no "ativa/pausada", no ROAS gauge, not in the count). The desktop table
+ * calls the same bucket "sem campanha".
+ */
+function UnsyncedLine({ u, several, total }: { u: CampaignsDetail['unsynced']; several: boolean; total: number }) {
+  if (!(u.spend >= 0.005)) return null
+  const share = total > 0 ? (u.spend / total) * 100 : null
+  return (
+    <p className={s.note} style={{ padding: '0 16px 12px' }}>
+      <b>{formatMoney(u.spend)}</b> em anúncios ainda não ligados a uma campanha
+      {share !== null && share >= 10 ? ` (${formatPct(share, { digits: 0 })} do gasto)` : ''}
+      {several && u.stores.length > 0 ? `: ${u.stores.map(b => `${b.store} ${formatMoney(b.spend)}`).join(', ')}` : ''}.
+      {' '}A sincronização com o Meta ainda não trouxe o nome nem a campanha {u.ads === 1 ? 'desse anúncio' : 'desses anúncios'}; o gasto já está no total.
+    </p>
   )
 }
 
@@ -254,7 +329,8 @@ function Creatives({ d }: { d: CreativesDetail }) {
               </li>
             ))}
           </ul>
-          {more.needed && <button type="button" className={s.moreBtn} onClick={more.toggle}>{more.all ? 'Mostrar menos' : `Mostrar todos (${d.creatives.length})`}</button>}
+          <MoreButton more={more} shown={d.creatives.length} total={d.totalCreatives}
+            onlyNote={`Mostrando os ${d.creatives.length} primeiros de ${formatCount(d.totalCreatives)}: primeiro os que pedem ação, depois os de maior gasto.`} />
         </>
       )}
     </Block>
@@ -302,7 +378,8 @@ function Products({ d }: { d: ProductsDetail }) {
               </li>
             ))}
           </ul>
-          {more.needed && <button type="button" className={s.moreBtn} onClick={more.toggle}>{more.all ? 'Mostrar menos' : `Mostrar todos (${d.products.length})`}</button>}
+          <MoreButton more={more} shown={d.products.length} total={d.totalProducts}
+            onlyNote={`Mostrando os ${d.products.length} que mais venderam, de ${formatCount(d.totalProducts)} produtos com venda no período.`} />
         </>
       )}
     </Block>
@@ -388,10 +465,10 @@ function Customers({ d }: { d: CustomersDetail }) {
           </p>
           {d.ltv && d.ltv.customers > 0 && (
             <div>
-              <div className={s.secLabel} style={{ padding: '6px 0 6px' }}>Histórico completo<span>{formatCount(d.ltv.customers)} clientes</span></div>
+              <div className={s.secLabel} style={{ padding: '6px 0 6px' }}>Histórico completo<span>{plural(d.ltv.customers, 'cliente', 'clientes')}</span></div>
               <div className={s.kpis}>
                 <div className={s.pairCell}><small>Valor médio por cliente</small><b>{formatMoney(d.ltv.avgLtv)}</b><em>{d.ltv.avgOrders !== null ? `${d.ltv.avgOrders.toFixed(2).replace('.', ',')} pedidos em média` : ''}</em></div>
-                <div className={s.pairCell}><small>Compraram mais de uma vez</small><b>{formatPct(d.ltv.repeatCustomerPct)}</b><em>{formatCount(d.ltv.repeatCustomers)} clientes</em></div>
+                <div className={s.pairCell}><small>Compraram mais de uma vez</small><b>{formatPct(d.ltv.repeatCustomerPct)}</b><em>{plural(d.ltv.repeatCustomers, 'cliente', 'clientes')}</em></div>
               </div>
               <div style={{ marginTop: 10 }}>
                 <HorizontalBars

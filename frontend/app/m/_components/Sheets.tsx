@@ -11,7 +11,9 @@ import { formatDate, formatRangeLabel, formatTimeInTz } from '@/lib/format'
 import { resolveRange, type Period } from '@/lib/engine/dates'
 import type { AlertConfig, AlertsGetResponse, AlertsTestResponse } from '@/lib/alerts'
 import type { MobileStoreOption } from '@/lib/views/mobile'
-import { PERIOD_MAIN, PERIOD_MORE, periodLabel, type Selection } from '../_lib/selection'
+import { MAX_WINDOW_DAYS, MIN_WINDOW_DATE, MIN_WINDOW_LABEL } from '@/lib/views/portfolioLimits'
+import { customRange, PERIOD_MAIN, PERIOD_MORE, periodLabel, type Selection } from '../_lib/selection'
+import { alertRowTitle } from '../_lib/labels'
 import type { usePush } from '../_lib/usePush'
 import { Sheet, SoundIcon, Switch } from './Sheet'
 import s from '../sheet.module.css'
@@ -30,7 +32,8 @@ export function PeriodSheet({ sel, tz, now, onPick, onClose }: {
   const today = resolveRange('today', tz, null, null, at).to
   const [de, setDe] = useState(sel.periodo === 'custom' ? sel.de ?? '' : '')
   const [ate, setAte] = useState(sel.periodo === 'custom' ? sel.ate ?? '' : '')
-  const complete = !!de && !!ate
+  // Exactly what "Aplicar datas" will apply (null until both dates are set).
+  const range = customRange(de, ate, today)
   const preview = (p: Period) => (now ? formatRangeLabel(resolveRange(p, tz, null, null, at), today) : '')
 
   return (
@@ -47,19 +50,29 @@ export function PeriodSheet({ sel, tz, now, onPick, onClose }: {
         <div className={s.groupTitle}>Escolher datas</div>
         <div className={s.dates}>
           <label>De
-            <input type="date" className={`${s.input} ${s.dateInput}`} value={de} max={today} onChange={e => setDe(e.target.value)} />
+            <input type="date" className={`${s.input} ${s.dateInput}`} value={de} min={MIN_WINDOW_DATE} max={today} onChange={e => setDe(e.target.value)} />
           </label>
           <label>Até
-            <input type="date" className={`${s.input} ${s.dateInput}`} value={ate} max={today} onChange={e => setAte(e.target.value)} />
+            <input type="date" className={`${s.input} ${s.dateInput}`} value={ate} min={MIN_WINDOW_DATE} max={today} onChange={e => setAte(e.target.value)} />
           </label>
         </div>
-        <p className={s.lede} style={{ marginTop: 8 }}>
-          {complete ? `Mostrar ${formatRangeLabel(de <= ate ? { from: de, to: ate } : { from: ate, to: de }, today)}.` : 'Escolha as duas datas: até lá, o período atual continua na tela.'}
-        </p>
-        <Button variant="primary" disabled={!complete}
+        {range && !range.ok ? (
+          <p className={`${s.msg} ${s.msgErr}`} style={{ padding: 0, marginTop: 8 }} role="alert">{range.error}.</p>
+        ) : (
+          <p className={s.lede} style={{ marginTop: 8 }}>
+            {range?.ok
+              ? `Mostrar ${formatRangeLabel({ from: range.from, to: range.to }, today)}${[
+                range.cut === 'long' ? `só os últimos ${MAX_WINDOW_DAYS} dias, o máximo de uma vez` : null,
+                range.cut === 'floor' ? `a partir de ${MIN_WINDOW_LABEL}, nada antes disso entra` : null,
+                range.clamped ? 'até hoje: o resto ainda não aconteceu' : null,
+              ].filter(Boolean).map(t => ` (${t})`).join('')}.`
+              : 'Escolha as duas datas: até lá, o período atual continua na tela.'}
+          </p>
+        )}
+        <Button variant="primary" disabled={!range?.ok}
           onClick={() => {
-            const [a, b] = de <= ate ? [de, ate] : [ate, de]
-            onPick({ periodo: 'custom', de: a, ate: b > today ? today : b })
+            if (!range?.ok) return
+            onPick({ periodo: 'custom', de: range.from, ate: range.to })
             onClose()
           }}>
           Aplicar datas
@@ -237,11 +250,6 @@ function parseNum(raw: string, spec: NumSpec): number | string {
   return v
 }
 
-const KIND_LABEL: Record<string, string> = {
-  roas_drop: 'ROAS abaixo do empate', spend_no_sales: 'Gasto sem vendas', margin_drop: 'Margem baixa',
-  spend_spike: 'Gasto acima da média', daily_summary: 'Resumo do dia',
-}
-
 export function AlertsSheet({ onClose }: { onClose: () => void }) {
   const [data, setData] = useState<AlertsGetResponse | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -389,14 +397,17 @@ export function AlertsSheet({ onClose }: { onClose: () => void }) {
             {testMsg && <p className={`${s.msg} ${testMsg.ok ? s.msgOk : s.msgErr}`} style={{ padding: 0 }} role="status">{testMsg.text}</p>}
           </div>
           <div className={s.group}>
-            <div className={s.groupTitle}>Enviados nas últimas 24 h</div>
+            {/* A row is an alert the server fired (its once-a-day claim), not a
+                delivery receipt: with no device subscribed nobody got it, and
+                "Enviados" under "Nenhum aparelho inscrito" contradicted itself. */}
+            <div className={s.groupTitle}>Disparados nas últimas 24 h{data.devices === 0 && data.recent.length > 0 ? ' (nenhum entregue)' : ''}</div>
             {data.recent.length === 0 ? (
-              <EmptyState compact title="Nenhum alerta enviado" />
+              <EmptyState compact title="Nenhum alerta disparado" />
             ) : (
               <ul className={`${s.box} ${s.recent}`}>
                 {data.recent.map((r, i) => (
                   <li key={`${r.kind}-${r.storeId}-${r.sentAt}-${i}`}>
-                    {r.title ?? KIND_LABEL[r.kind] ?? r.kind}
+                    {alertRowTitle(r.kind, r.title)}
                     <small>{[r.store ?? (r.storeId ? null : 'Todas as lojas'), `${formatDate(r.day)} · ${formatTimeInTz(r.sentAt, 'America/Sao_Paulo')}`].filter(Boolean).join(' · ')}</small>
                   </li>
                 ))}

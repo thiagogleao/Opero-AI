@@ -19,6 +19,7 @@ import type { MobileResponse } from '@/lib/views/mobile'
 import type { DetailSection, MobileDetailResponse } from '@/lib/views/mobileDetail'
 import type { RefreshResponse, RefreshStatusResponse } from '@/lib/views/refresh'
 import { apiQuery, echoMatches, selectionKey, type Selection } from './selection'
+import { afterFailedStatus, STATUS_GIVE_UP_MS } from './refreshProgress'
 
 export const POLL_MS = 45_000
 
@@ -236,14 +237,22 @@ export interface RefreshRun {
   status: RefreshStatusResponse | null
   message: string | null
   startedAt: number | null
+  /** The phone stopped watching after this many minutes with runs unfinished
+   *  (null: it watched to the end). */
+  gaveUpAfterMin: number | null
+  /** False when another tap cannot help (the server does not sync at all). */
+  retryable: boolean
+  /** The error came while watching (the runs were launched and may still
+   *  finish): the strip says it stopped following, not that nothing happened. */
+  lostTrack: boolean
 }
 
 const STATUS_POLL_MS = 4_000
-/** Collectors are killed after 10 min; stop watching a little before. */
-const STATUS_GIVE_UP_MS = 8 * 60_000
+export { STATUS_GIVE_UP_MS }
+const IDLE_RUN: RefreshRun = { phase: 'idle', stores: [], launched: [], skipped: [], status: null, message: null, startedAt: null, gaveUpAfterMin: null, retryable: true, lostTrack: false }
 
 export function useRefresh(onFinished: () => void) {
-  const [run, setRun] = useState<RefreshRun>({ phase: 'idle', stores: [], launched: [], skipped: [], status: null, message: null, startedAt: null })
+  const [run, setRun] = useState<RefreshRun>(IDLE_RUN)
   const doneRef = useRef(onFinished)
   const ctrlRef = useRef<AbortController | null>(null)
 
@@ -256,7 +265,7 @@ export function useRefresh(onFinished: () => void) {
     const ctrl = new AbortController()
     ctrlRef.current = ctrl
     const startedAt = Date.now()
-    setRun({ phase: 'starting', stores: [], launched: [], skipped: [], status: null, message: null, startedAt })
+    setRun({ ...IDLE_RUN, phase: 'starting', startedAt })
     try {
       const res = await fetch('/api/mobile/refresh', {
         method: 'POST', signal: ctrl.signal, credentials: 'same-origin',
@@ -264,7 +273,8 @@ export function useRefresh(onFinished: () => void) {
       })
       if (!res.ok) {
         const e = await errorOf(res)
-        setRun(r => ({ ...r, phase: 'error', message: e.message }))
+        // 503: this server does not run collectors; tapping again changes nothing.
+        setRun(r => ({ ...r, phase: 'error', message: e.message, retryable: res.status !== 503 }))
         return
       }
       const plan = await res.json() as RefreshResponse
@@ -275,17 +285,38 @@ export function useRefresh(onFinished: () => void) {
       }
       setRun(r => ({ ...r, phase: 'running', stores: plan.stores, launched: plan.launched, skipped: plan.skipped }))
       const ids = plan.stores.map(s => s.id).join(',')
+      const gaveUpAfterMin = Math.round(STATUS_GIVE_UP_MS / 60_000)
+      let failures = 0
+      // Whether a launched run had finished at the last good read: a give-up
+      // after failed reads reloads the numbers only then, like the timeout.
+      let someFinished = false
       while (!ctrl.signal.aborted) {
         await new Promise(r => setTimeout(r, STATUS_POLL_MS))
         if (ctrl.signal.aborted) return
         const st = await fetch(`/api/mobile/refresh?store=${encodeURIComponent(ids)}&since=${encodeURIComponent(plan.requestedAt)}`, {
           signal: ctrl.signal, cache: 'no-store', credentials: 'same-origin',
         })
-        if (!st.ok) continue
+        if (!st.ok) {
+          // A failed read is still judged against the clock (afterFailedStatus):
+          // `continue` here spun forever with "Atualizar" disabled.
+          failures += 1
+          const e = await errorOf(st)
+          const step = afterFailedStatus(e.kind === 'network' ? 'server' : e.kind, e.message, failures, Date.now() - startedAt)
+          if (step.do === 'wait') continue
+          if (step.do === 'giveUp') {
+            setRun(r => ({ ...r, phase: 'done', gaveUpAfterMin }))
+            if (someFinished) doneRef.current()
+            return
+          }
+          setRun(r => ({ ...r, phase: 'error', message: step.message, retryable: step.retryable, lostTrack: true }))
+          return
+        }
+        failures = 0
         const status = await st.json() as RefreshStatusResponse
         const launchedKeys = new Set(plan.launched.map(l => `${l.storeId}:${l.source}`))
         const mine = status.runs.filter(r => launchedKeys.has(`${r.storeId}:${r.source}`))
         const finished = mine.length === launchedKeys.size && mine.every(r => r.status !== null && r.status !== 'running')
+        someFinished = mine.some(r => r.status !== null && r.status !== 'running')
         setRun(r => ({ ...r, status }))
         if (finished) {
           setRun(r => ({ ...r, phase: 'done', status }))
@@ -293,14 +324,16 @@ export function useRefresh(onFinished: () => void) {
           return
         }
         if (Date.now() - startedAt > STATUS_GIVE_UP_MS) {
-          setRun(r => ({ ...r, phase: 'done', status, message: 'Algumas sincronizações ainda rodam em segundo plano' }))
-          doneRef.current()
+          // Say how far the runs got (refreshOutcome); reload the numbers only
+          // if something actually finished.
+          setRun(r => ({ ...r, phase: 'done', status, gaveUpAfterMin }))
+          if (someFinished) doneRef.current()
           return
         }
       }
     } catch (err) {
       if (isAbort(err)) return
-      setRun(r => ({ ...r, phase: 'error', message: 'Sem conexão com o servidor' }))
+      setRun(r => ({ ...r, phase: 'error', message: 'Sem conexão com o servidor', lostTrack: r.phase === 'running' }))
     }
   }, [])
 

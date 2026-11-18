@@ -9,8 +9,9 @@
  * nothing — a slow answer, a poll, an "Atualizar" — may move it back.
  */
 
-import { isIsoDate, isPeriod, PERIODS, type Period } from '@/lib/engine/dates'
+import { anchorTz, formatRange, isIsoDate, isPeriod, PERIODS, REFERENCE_TZ, type Period } from '@/lib/engine/dates'
 import type { DetailSection } from '@/lib/views/mobileDetail'
+import { fitCustomRange, MIN_WINDOW_DATE, tooEarlyRangeError, type RangeCut } from '@/lib/views/portfolioLimits'
 
 export const ALL = 'todas'
 export const DEFAULT_PERIOD: Period = 'today'
@@ -49,6 +50,9 @@ function periodOf(r: Raw): Pick<Selection, 'periodo' | 'de' | 'ate'> | null {
   // otherwise silently become "today" somewhere down the line.
   if (!isIsoDate(r.de) || !isIsoDate(r.ate)) return null
   const [de, ate] = r.de <= r.ate ? [r.de, r.ate] : [r.ate, r.de]
+  // Wholly before the first date anything is priced from (portfolioLimits):
+  // malformed, as on the desktop (lib/views/page parsePageParams).
+  if (ate < MIN_WINDOW_DATE) return null
   return { periodo: 'custom', de, ate }
 }
 
@@ -71,14 +75,59 @@ export function rawFromStorage(json: string | null): Raw {
 /**
  * The view to open: each field from the URL when it is valid there, else from
  * storage, else the default (Todas · Hoje). `knownStore` says whether an id is
- * one the owner may open (active or archived).
+ * one the owner may open (active or archived). With `todayOf` (the selected
+ * store's today, selectionTz) a custom range is read the way the server will
+ * read it (clampSelection), so the period button never names dates the
+ * numbers do not use.
  */
-export function resolveView(url: Raw, stored: Raw, knownStore: (id: string) => boolean): ViewState {
+export function resolveView(
+  url: Raw, stored: Raw, knownStore: (id: string) => boolean, todayOf?: (loja: string) => string,
+): ViewState {
   const lojaOk = (v: unknown): v is string => typeof v === 'string' && (v === ALL || knownStore(v))
   const loja = lojaOk(url.loja) ? url.loja : lojaOk(stored.loja) ? stored.loja : ALL
   const period = periodOf(url) ?? periodOf(stored) ?? { periodo: DEFAULT_PERIOD, de: null, ate: null }
   const aba = isTab(url.aba) ? url.aba : url.aba === undefined && isTab(stored.aba) ? stored.aba : null
-  return { sel: { loja, ...period }, aba }
+  const sel: Selection = { loja, ...period }
+  return { sel: todayOf ? clampSelection(sel, todayOf(loja)) : sel, aba }
+}
+
+/** A store as the phone's selection needs it. */
+export interface StoreClock { id: string; timezone: string }
+
+/**
+ * The calendar a selection is read on: the store's own timezone, or for Todas
+ * the anchor of the active stores — lib/engine/dates anchorTz, the rule
+ * buildPortfolio resolves the window with (Brasília for several stores).
+ */
+export function selectionTz(loja: string, active: readonly StoreClock[], archived: readonly StoreClock[] = []): string {
+  if (loja === ALL) return anchorTz(active.map(s => s.timezone))
+  return [...active, ...archived].find(s => s.id === loja)?.timezone || REFERENCE_TZ
+}
+
+/**
+ * A custom range as the server will price it (lib/views/portfolioLimits
+ * fitCustomRange: ordered, never past the selected store's today, never before
+ * 1 jan 2000, at most the last 366 days). The server echoes the dates as sent,
+ * so a deep link to 25–30 nov or Tokyo's "tomorrow" carried over to a
+ * Brazilian store showed "25–30 nov" on the button over numbers for 18 nov,
+ * and 1990–2026 would have named 37 years over the last one. A range that
+ * starts after today has nothing of its own to show and becomes "Hoje" (what
+ * the server would answer, under its real name). Returns `sel` itself when
+ * nothing changes.
+ */
+export function clampSelection(sel: Selection, today: string): Selection {
+  if (sel.periodo !== 'custom' || !sel.de || !sel.ate) return sel
+  const [de, ate] = sel.de <= sel.ate ? [sel.de, sel.ate] : [sel.ate, sel.de]
+  if (de > today) return { ...sel, periodo: 'today', de: null, ate: null }
+  const r = fitCustomRange(de, ate, today)
+  return r.from === sel.de && r.to === sel.ate ? sel : { ...sel, de: r.from, ate: r.to }
+}
+
+/** "MOKOO · 3–12 nov", "Todas · Hoje": a selection in words. A custom period
+ *  names its dates ("Escolher datas" is the action, not the period). */
+export function selectionPeriodLabel(sel: Pick<Selection, 'periodo' | 'de' | 'ate'>, today?: string): string {
+  if (sel.periodo === 'custom') return sel.de && sel.ate ? formatRange({ from: sel.de, to: sel.ate }, today) : 'datas escolhidas'
+  return periodLabel(sel.periodo)
 }
 
 export const selectionKey = (s: Selection) => `${s.loja}|${s.periodo}|${s.de ?? ''}|${s.ate ?? ''}`
@@ -116,6 +165,36 @@ export function toSearch(v: ViewState): string {
 
 export function toStorage(v: ViewState): string {
   return JSON.stringify({ loja: v.sel.loja, periodo: v.sel.periodo, de: v.sel.de, ate: v.sel.ate, aba: v.aba })
+}
+
+export type CustomRange =
+  | {
+    ok: true; from: string; to: string
+    /** the end was in the future and is now today */
+    clamped: boolean
+    /** longer than the 366 days priced at once ('long', only the last ones
+     *  kept) or starting before 1 jan 2000 ('floor') */
+    cut: RangeCut
+  }
+  | { ok: false; error: string }
+
+/**
+ * "Escolher datas": the range that will be applied, exactly. Ordered first,
+ * then checked against today (the store's): a start after today is refused,
+ * an end after today becomes today; then the server's limits
+ * (portfolioLimits): nothing before 1 jan 2000, at most the last 366 days.
+ * Ordering after clamping only the end produced "25–18 nov" (iOS Safari does
+ * not enforce the inputs' max or min), which the server read as 18 nov and a
+ * reload turned into "18–25 nov".
+ */
+export function customRange(de: string, ate: string, today: string): CustomRange | null {
+  if (!isIsoDate(de) || !isIsoDate(ate)) return null
+  const [from, to] = de <= ate ? [de, ate] : [ate, de]
+  if (from > today) return { ok: false, error: 'A data inicial não pode passar de hoje' }
+  const early = tooEarlyRangeError(from, to)
+  if (early) return { ok: false, error: early }
+  const r = fitCustomRange(from, to, today)
+  return { ok: true, from: r.from, to: r.to, clamped: to > today, cut: r.cut }
 }
 
 export const PERIOD_MAIN: Period[] = ['today', 'yesterday', '7d', '30d']

@@ -163,11 +163,17 @@
 .thumb { width: 44px; height: 44px; border-radius: 8px; object-fit: cover; background: var(--card-2); border: 1px solid var(--line); display: block; }
 .rowThumb { grid-template-columns: 44px minmax(0, 1fr) auto; }
 
-.feedRow { display: grid; grid-template-columns: 46px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px 16px; border-top: 1px solid var(--line); }
+/* 52px fits "há 59 min" at 10.5px on one line; it wrapped to "há 33 / min"
+   in 46px and those rows grew taller than the rest. */
+.feedRow { display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px 16px; border-top: 1px solid var(--line); }
 .list > li:first-child > .feedRow { border-top: 0; }
-.feedTime { font: 500 12.5px var(--mono); color: var(--tx-2); font-variant-numeric: tabular-nums; }
-.feedTime small { display: block; font: 400 10.5px var(--sans); color: var(--tx-3); }
-.feedTitle { font-size: 13px; font-weight: 500; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.feedTime { font: 500 12.5px var(--mono); color: var(--tx-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.feedTime small { display: block; font: 400 10.5px var(--sans); color: var(--tx-3); white-space: nowrap; }
+.feedTitle { min-width: 0; font-size: 13px; font-weight: 500; line-height: 1.3; }
+/* The product name may be cut; "+N produtos" never is. */
+.feedHead { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.feedName { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.feedMore { flex: none; font-size: 12px; font-weight: 400; color: var(--tx-2); white-space: nowrap; }
 .feedTitle small { display: block; font-size: 11.5px; color: var(--tx-3); font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .live { display: inline-flex; align-items: center; gap: 7px; }
 .live::before {
@@ -183,11 +189,17 @@
 .moreBtn { width: 100%; padding: 11px; font-size: 13px; color: var(--tx-2); border-top: 1px solid var(--line); }
 
 /* ── Detail tabs ────────────────────────────────────────────────────────── */
-.tabs { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; padding: 2px 0 4px; }
+/* The five tabs fit from 375 px and grow to fill wider rows. Narrower, the
+   row scrolls and the edge with more tabs fades (data-more, set by
+   DetailTabs), so a cut-off "Clientes" reads as a row that goes on. */
+.tabs { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; padding: 2px 0 4px; }
 .tabs::-webkit-scrollbar { display: none; }
+.tabs[data-more='right'] { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); }
+.tabs[data-more='left'] { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 36px), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 36px), transparent); }
+.tabs[data-more='both'] { -webkit-mask-image: linear-gradient(to right, transparent, #000 36px, #000 calc(100% - 36px), transparent); mask-image: linear-gradient(to right, transparent, #000 36px, #000 calc(100% - 36px), transparent); }
 .tab {
-  flex: none; height: 34px; padding: 0 14px; border-radius: var(--r-pill);
-  border: 1px solid var(--line-2); background: var(--card); color: var(--tx-2); font-size: 13px; font-weight: 500;
+  flex: 1 0 auto; height: 34px; padding: 0 6px; border-radius: var(--r-pill);
+  border: 1px solid var(--line-2); background: var(--card); color: var(--tx-2); font-size: 12.5px; font-weight: 500;
 }
 .tab[aria-selected='true'] { background: var(--tx); color: var(--bg); border-color: var(--tx); font-weight: 600; }
 .tabMeta { display: flex; justify-content: space-between; gap: 8px; font-size: 11.5px; color: var(--tx-3); padding: 0 2px; }
@@ -199,6 +211,32 @@
 .swNew { background: var(--c-meta); }
 .swRet { background: var(--c-profit); }
 .swGuest { background: var(--tx-4); }
+
+/* ── Revenue − ads bars (NetBars: stores without costs) ─────────────────── */
+/* Steel blue above zero, never the profit green: without product costs a
+   positive day is not profit. Coral below zero is a loss either way. */
+.netSvg { display: block; width: 100%; height: auto; overflow: visible; font-family: var(--mono); font-size: 11px; fill: var(--tx-3); }
+.netGrid { stroke: var(--grid); stroke-width: 1; }
+.netZero { stroke: var(--zero); stroke-width: 1.25; }
+.netMonthSep { stroke: var(--line-2); stroke-width: 1; }
+.netSans { font-family: var(--sans); }
+.netTx2 { fill: var(--tx-2); }
+.netStrong { fill: var(--tx); font-weight: 500; paint-order: stroke; stroke: var(--card); stroke-width: 4px; stroke-linejoin: round; }
+.netBarPos { fill: var(--neu); }
+.netBarNeg { fill: var(--neg-m); }
+.netBarPartial { stroke: rgba(127, 178, 238, .8); stroke-width: 1.2; stroke-dasharray: 3 2; }
+.netHatchBg { fill: rgba(127, 178, 238, .06); }
+.netHatchLine { stroke: rgba(127, 178, 238, .6); stroke-width: 1.6; }
+.netCol { cursor: default; outline: none; }
+.netCol .netHit { fill: transparent; }
+.netCol:hover .netBar, .netCol[data-active] .netBar { opacity: .78; }
+.netCol:focus-visible .netHit { stroke: var(--info); stroke-width: 1.5; fill: rgba(127, 178, 238, .06); }
+.netLegend { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; font-size: 12px; color: var(--tx-2); margin-top: 6px; }
+.netLegend span { display: inline-flex; align-items: center; gap: 6px; }
+.netLegend i { width: 10px; height: 10px; border-radius: 2px; display: block; flex: none; }
+.netLgPos { background: var(--neu); }
+.netLgNeg { background: var(--neg-m); }
+.netLgPartial { border: 1px solid rgba(127, 178, 238, .7); background-image: repeating-linear-gradient(135deg, rgba(127, 178, 238, .6) 0 1.5px, transparent 1.5px 4px); }
 
 /* ── Footer and gates ───────────────────────────────────────────────────── */
 .footer { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 22px 18px 4px; font-size: 12px; color: var(--tx-3); text-align: center; }

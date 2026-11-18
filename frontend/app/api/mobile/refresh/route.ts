@@ -1,43 +1,20 @@
-import { spawn } from 'child_process'
-import path from 'path'
 import { mobileAuthOk, unauthorized } from '@/lib/mobileAuth'
 import { listStores, type StoreRef } from '@/lib/access'
 import { selectStores, StoreSelectionError } from '@/lib/views/mobile'
+import { laneBusy, launch, syncAllowed } from '@/lib/sync/jobs'
 import {
-  planRefresh, recentStarts, runsSince, storesWithAds,
-  type PlannedLaunch, type RefreshResponse, type RefreshStatusResponse,
+  planRefresh, recentStarts, runsSince, storesWithAds, syncDisabledReason,
+  type RefreshResponse, type RefreshStatusResponse,
 } from '@/lib/views/refresh'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-const PROJECT_ROOT = path.resolve(process.cwd(), '..')
-const PYTHON = process.env.PYTHON_BIN || 'python3'
-const SCRIPT = path.join(PROJECT_ROOT, 'collect_recent.py')
-const SYNC_TIMEOUT_MS = 10 * 60 * 1000
-
-// This process's own launches, so two taps a second apart do not both spawn
-// before the first run has written its sync_runs row.
-const launchedAt = new Map<string, number>()
-
-function spawnCollector(l: PlannedLaunch) {
-  try {
-    const args = [SCRIPT, '--source', l.source, '--date-from', l.dateFrom, '--date-to', l.dateTo, '--tenant', l.storeId]
-    if (l.mode) args.push('--mode', l.mode)
-    const proc = spawn(PYTHON, args, {
-      cwd: PROJECT_ROOT,
-      env: { ...process.env, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' },
-      shell: false,
-      stdio: 'ignore',
-    })
-    const killTimer = setTimeout(() => proc.kill('SIGTERM'), SYNC_TIMEOUT_MS)
-    proc.on('exit', () => clearTimeout(killTimer))
-    proc.on('error', err => console.error(`[mobile/refresh] ${l.source} ${l.storeId} failed to start:`, err))
-    proc.unref()
-    console.log(`[mobile/refresh] spawned ${l.source} tenant=${l.storeId} ${l.dateFrom}..${l.dateTo}`)
-  } catch (err) {
-    console.error(`[mobile/refresh] failed to spawn ${l.source}:`, err)
-  }
+/** 503 when this server does not run collectors (a local run, a read-only
+ *  database): the phone says so instead of showing a sync that never runs. */
+function disabled(): Response {
+  const error = syncDisabledReason(process.env) ?? 'Sincronização desligada neste servidor'
+  return Response.json({ error }, { status: 503 })
 }
 
 /** Active stores named by `store` (query) or `stores` (JSON body); 'all' or
@@ -53,10 +30,14 @@ async function resolveTargets(param: string | null): Promise<StoreRef[]> {
  * Refresh the stores on screen: POST /api/mobile/refresh?store=<id[,id]|all>
  * (or a JSON body { stores: [...] }). Starts a Shopify and a Meta (quick)
  * collection per store unless one started in the last two minutes, and says
- * exactly what it started and what it skipped.
+ * exactly what it started and what it skipped. 503 when this server does not
+ * run collectors (DATABASE_READ_ONLY=1 or AUTO_SYNC_DISABLED=1).
  */
 export async function POST(req: Request) {
   if (!(await mobileAuthOk(req))) return unauthorized()
+  // Before anything else: nothing below may plan, let alone start, a
+  // collector on a server that must not write.
+  if (!syncAllowed()) return disabled()
 
   const body = await req.json().catch(() => null) as { stores?: unknown } | null
   const fromBody = Array.isArray(body?.stores) ? body.stores.filter((x): x is string => typeof x === 'string').join(',') : null
@@ -75,24 +56,29 @@ export async function POST(req: Request) {
   const ids = targets.map(t => t.id)
   const [withAds, recent] = await Promise.all([storesWithAds(ids), recentStarts(ids)])
   const now = new Date()
-  for (const [k, at] of launchedAt) {
-    if (!recent.has(k) || recent.get(k)! < at) recent.set(k, at)
-  }
+  // Lanes alive in this process: a second tap before the first run has
+  // written its sync_runs row is "em andamento", not a second process.
+  const busy = new Set(targets.flatMap(t => (['shopify', 'facebook'] as const)
+    .filter(source => laneBusy(t.id, source)).map(source => `${t.id}:${source}`)))
   const plan = planRefresh(
-    targets.map(t => ({ id: t.id, name: t.name, timezone: t.timezone, hasAds: withAds.has(t.id) })), recent, now)
+    targets.map(t => ({ id: t.id, name: t.name, timezone: t.timezone, hasAds: withAds.has(t.id) })), recent, now, busy)
 
+  // The job runner caps and spaces the processes, captures their output and
+  // folds this request into a job already waiting for the same lane.
+  const launched: RefreshResponse['launched'] = []
   for (const l of plan.launch) {
-    launchedAt.set(`${l.storeId}:${l.source}`, now.getTime() + l.delayMs)
-    if (l.delayMs > 0) setTimeout(() => spawnCollector(l), l.delayMs)
-    else spawnCollector(l)
+    const state = launch({
+      tenantId: l.storeId, lane: l.source, mode: l.mode, from: l.dateFrom, to: l.dateTo,
+      reason: 'atualizar (celular)', label: l.name,
+    })
+    if (state === 'disabled') return disabled()
+    launched.push({ storeId: l.storeId, name: l.name, source: l.source, state })
   }
-  // Keep the map from growing with stale keys.
-  for (const [k, at] of launchedAt) if (now.getTime() - at > 60 * 60_000) launchedAt.delete(k)
 
   const res: RefreshResponse = {
     requestedAt: now.toISOString(),
     stores: targets.map(t => ({ id: t.id, name: t.name })),
-    launched: plan.launch.map(l => ({ storeId: l.storeId, name: l.name, source: l.source, startsInSeconds: Math.round(l.delayMs / 1000) })),
+    launched,
     skipped: plan.skipped,
   }
   return Response.json(res)

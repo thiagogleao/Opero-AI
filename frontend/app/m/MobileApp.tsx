@@ -17,16 +17,18 @@ import { buildVerdict, verdictInputFromPortfolio } from '@/lib/views/verdict'
 import type { MobileStoreOption } from '@/lib/views/mobile'
 import type { DetailSection } from '@/lib/views/mobileDetail'
 import { formatTimeInTz } from '@/lib/format'
-import { REFERENCE_TZ } from '@/lib/engine/dates'
-import { ALL, periodLabel, selectionKey, type Selection } from './_lib/selection'
+import { REFERENCE_TZ, todayInTz } from '@/lib/engine/dates'
+import { ALL, periodLabel, selectionKey, selectionPeriodLabel, selectionTz, type Selection } from './_lib/selection'
 import { applyUrl, configureStores, getServerView, getView, persistCurrent, setView, subscribeView } from './_lib/viewStore'
 import { useMobileData, useNow, useRefresh } from './_lib/useMobileData'
 import { diffFeed, inScope, type FeedBaseline } from './_lib/feed'
-import { getSoundPref, playChaChing, setSoundPref, subscribeSoundPref, setSoundEnabled } from './_lib/sound'
+import { refreshOutcome, refreshProgress } from './_lib/refreshProgress'
+import { getSoundPref, playChaChing, restoreSound, setSoundPref, subscribeSoundPref } from './_lib/sound'
 import { usePush } from './_lib/usePush'
+import { NO_SHARED_ADS, type SharedAds } from './_lib/sharedAds'
 import { Header, PeriodBar, RefreshStrip, StoreChips, Strip } from './_components/Top'
 import {
-  Attention, ChargebackBlock, ClockBanner, DailyBlock, DayBlock, LiveFeed, RefundsBlock, StoreList, VerdictBlock,
+  Attention, ChargebackBlock, ClockBanner, DailyBlock, DayBlock, LiveFeed, RefundsBlock, SharedAdsNotes, StoreList, VerdictBlock,
 } from './_components/Home'
 import { DetailTabs } from './_components/Details'
 import { AlertsSheet, PeriodSheet, SettingsSheet } from './_components/Sheets'
@@ -34,8 +36,20 @@ import s from './m.module.css'
 
 type SheetName = 'period' | 'settings' | 'alerts' | null
 
-export default function MobileApp({ stores, archived }: { stores: MobileStoreOption[]; archived: MobileStoreOption[] }) {
-  configureStores([...stores, ...archived].map(x => x.id))
+export default function MobileApp({ stores, archived, sharedAds }: {
+  stores: MobileStoreOption[]; archived: MobileStoreOption[]
+  /** Shared ad-account pairs, streamed by page.tsx (never rejects). */
+  sharedAds: Promise<SharedAds>
+}) {
+  configureStores(stores, archived)
+  // Until the pairing arrives the screen simply has no pair note; it never
+  // holds the numbers back.
+  const [shared, setShared] = useState<SharedAds>(NO_SHARED_ADS)
+  useEffect(() => {
+    let live = true
+    sharedAds.then(v => { if (live) setShared(v) }, () => {})
+    return () => { live = false }
+  }, [sharedAds])
   const view = useSyncExternalStore(subscribeView, getView, getServerView)
   const sel = view?.sel ?? null
   const selKey = sel ? selectionKey(sel) : null
@@ -58,7 +72,8 @@ export default function MobileApp({ stores, archived }: { stores: MobileStoreOpt
     // the server rendered (plain /m) and would drop ?loja=&periodo=.
     const t = setTimeout(persistCurrent, 0)
     if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js').catch(() => {})
-    if (getSoundPref()) setSoundEnabled(true)
+    // Not setSoundEnabled: no gesture here, so the context waits for the first tap.
+    restoreSound(getSoundPref())
     return () => clearTimeout(t)
   }, [])
 
@@ -132,11 +147,16 @@ export default function MobileApp({ stores, archived }: { stores: MobileStoreOpt
   }, [stores, activeIds])
   const refreshing = refresh.run.phase === 'starting' || refresh.run.phase === 'running'
   const { dismiss } = refresh
+  // Only a refresh that really finished clean goes away by itself; a failure
+  // or runs that never ended stay until the owner closes them.
   useEffect(() => {
-    if (refresh.run.phase !== 'done' || refresh.run.status?.runs.some(r => r.status === 'error')) return
+    const r = refresh.run
+    if (r.phase !== 'done') return
+    const p = refreshProgress(r.launched, r.status)
+    if (p.total > 0 && !refreshOutcome(p, '', r.stores.length, r.gaveUpAfterMin).autoDismiss) return
     const t = setTimeout(dismiss, 8000)
     return () => clearTimeout(t)
-  }, [refresh.run.phase, refresh.run.status, dismiss])
+  }, [refresh.run, dismiss])
 
   // ── A store that disappeared (archived elsewhere): say so, go to Todas ───
   const storeGone = home.error?.kind === 'store' && home.errorKey === selKey
@@ -159,8 +179,17 @@ export default function MobileApp({ stores, archived }: { stores: MobileStoreOpt
     [data],
   )
   const scopeName = sel ? (sel.loja === ALL ? 'Todas as lojas' : nameOf(sel.loja)) : ''
-  const pendingName = sel ? `${sel.loja === ALL ? 'Todas' : nameOf(sel.loja)} · ${sel.periodo === 'custom' ? 'datas escolhidas' : periodLabel(sel.periodo)}` : ''
-  const shownName = data ? `${data.request.store === 'all' ? 'Todas' : data.stores[0]?.name ?? ''} · ${periodLabel(data.period)}` : ''
+  // The selection's own calendar (the store's timezone, or Brasília for
+  // Todas), never the previous answer's: while another store loads or after
+  // it failed, `data` is still Hibikura's and its Tokyo clock built the period
+  // sheet (Tokyo's "today" offered for a Brazilian store).
+  const selTz = sel ? selectionTz(sel.loja, stores, archived) : REFERENCE_TZ
+  const selToday = now ? todayInTz(selTz, new Date(now)) : undefined
+  // A custom period is named by its dates: "Escolher datas" is the action.
+  const pendingName = sel ? `${sel.loja === ALL ? 'Todas' : nameOf(sel.loja)} · ${selectionPeriodLabel(sel, selToday)}` : ''
+  const shownName = data
+    ? `${data.request.store === 'all' ? 'Todas' : data.stores[0]?.name ?? ''} · ${data.period === 'custom' ? data.rangeLabel : periodLabel(data.period)}`
+    : ''
   const singleTz = data && data.request.store !== 'all' && data.stores.length === 1 ? data.stores[0].timezone : null
   const pushAlert = push.status === 'nao_inscrito' || push.status === 'bloqueado' || push.status === 'sem_chave'
 
@@ -189,10 +218,20 @@ export default function MobileApp({ stores, archived }: { stores: MobileStoreOpt
         settingsAlert={pushAlert}
       />
       <StoreChips stores={stores} archived={archived} sel={sel} pendingKey={loadingThis && !fresh ? sel?.loja ?? null : null} onPick={pickStore} />
-      <PeriodBar sel={sel} today={data?.anchorToday} onPick={periodo => pick({ periodo, de: null, ate: null })} onMore={() => setSheet('period')} />
+      <PeriodBar
+        sel={sel}
+        today={data?.anchorToday ?? selToday}
+        // The dates the numbers on screen use, once they answer this selection.
+        shown={fresh && data && data.period === 'custom' ? data.range : null}
+        onPick={periodo => pick({ periodo, de: null, ate: null })}
+        onMore={() => setSheet('period')}
+      />
 
       <RefreshStrip run={refresh.run} onClose={refresh.dismiss} onRetry={() => void refresh.start(onScreen())} />
-      {notice && <Strip tone="warn" icon="alert" onClose={() => setNotice(null)}>{notice}</Strip>}
+      {/* The server cut a custom range (more than 366 days, or before 2000):
+          the button already names the dates used; this says why. */}
+      {fresh && data?.rangeNote && <Strip tone="info" icon="info">{data.rangeNote}</Strip>}
+      {notice &&<Strip tone="warn" icon="alert" onClose={() => setNotice(null)}>{notice}</Strip>}
 
       {sel && !fresh && !error && (
         <Strip tone="info" spin>
@@ -234,10 +273,11 @@ export default function MobileApp({ stores, archived }: { stores: MobileStoreOpt
           ) : (
             <>
               <VerdictBlock data={data} v={verdict} />
+              <SharedAdsNotes data={data} shared={shared} onAll={() => pickStore(ALL)} />
               <DayBlock data={data} />
               <DailyBlock data={data} />
               <Attention data={data} />
-              <StoreList data={data} onPick={pickStore} />
+              <StoreList data={data} shared={shared} onPick={pickStore} />
               <LiveFeed data={data} now={now} deviceTz={deviceTz} />
             </>
           )}
@@ -250,7 +290,7 @@ export default function MobileApp({ stores, archived }: { stores: MobileStoreOpt
           {data && fresh && verdict && (
             <>
               <RefundsBlock data={data} />
-              <ChargebackBlock data={data} />
+              <ChargebackBlock data={data} deviceTz={deviceTz} now={now} />
             </>
           )}
         </div>
@@ -266,7 +306,7 @@ export default function MobileApp({ stores, archived }: { stores: MobileStoreOpt
       {sheet === 'period' && sel && (
         <PeriodSheet
           sel={sel}
-          tz={singleTz ?? (sel.loja !== ALL ? [...stores, ...archived].find(x => x.id === sel.loja)?.timezone ?? REFERENCE_TZ : REFERENCE_TZ)}
+          tz={selTz}
           now={now}
           onPick={p => pick(p)}
           onClose={() => setSheet(null)}

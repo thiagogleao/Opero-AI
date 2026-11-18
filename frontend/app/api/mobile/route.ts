@@ -2,6 +2,7 @@ import { mobileAuthOk, unauthorized } from '@/lib/mobileAuth'
 import { listStores } from '@/lib/access'
 import { isIsoDate, isPeriod } from '@/lib/engine/dates'
 import { PortfolioInputError } from '@/lib/views/portfolio'
+import { tooEarlyRangeError } from '@/lib/views/portfolioLimits'
 import {
   portfolioOnce, selectStores, StoreSelectionError, toOption, type MobileResponse,
 } from '@/lib/views/mobile'
@@ -39,6 +40,10 @@ export async function GET(req: Request) {
   if (period === 'custom' && !(from && to)) {
     return Response.json({ error: 'Escolha a data inicial e a final' }, { status: 400 })
   }
+  // Longer or older ranges are cut by buildPortfolio (rangeNote); one that
+  // ends before anything is priced has nothing to cut down to.
+  const early = period === 'custom' ? tooEarlyRangeError(from, to) : null
+  if (early) return Response.json({ error: early }, { status: 400 })
 
   try {
     const visible = await listStores({ kind: 'owner' }, { includeArchived: true })

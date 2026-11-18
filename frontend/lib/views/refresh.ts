@@ -3,9 +3,15 @@
  *
  * Only the stores on screen are refreshed (the owner's decision), archived
  * stores never are, and a store/source whose sync started in the last two
- * minutes — by the scheduler, another tap or another device — is not started
- * again: collect_recent.py would exit on its lock anyway, and each spawn is a
- * Python process on the same container as the web server.
+ * minutes — by the scheduler, another tap or another device — or is running
+ * in this process is not started again: collect_recent.py would exit on its
+ * lock anyway, and each spawn is a Python process on the same container as
+ * the web server.
+ *
+ * This module only DECIDES. Starting is lib/sync/jobs launch(), the one
+ * guarded place that spawns collectors: the phone route used to spawn its own
+ * and so ignored DATABASE_READ_ONLY / AUTO_SYNC_DISABLED, which let a laptop
+ * pointed at production run the collectors against it.
  */
 
 import { query } from '../db'
@@ -15,7 +21,6 @@ import type { StoreRef } from '../access'
 export type RefreshSource = 'shopify' | 'facebook'
 
 export const REFRESH_DEBOUNCE_MS = 2 * 60_000
-export const REFRESH_STAGGER_MS = 4_000
 
 export interface RefreshTarget {
   id: string
@@ -31,17 +36,17 @@ export interface PlannedLaunch {
   source: RefreshSource
   dateFrom: string
   dateTo: string
-  mode: 'quick' | null
-  /** Started this long after the request, so stores do not hit Shopify and
-   *  Meta at the same instant. */
-  delayMs: number
+  /** Spacing between processes is the job runner's (lib/sync/jobs). */
+  mode: 'refresh' | 'quick'
 }
 
 export interface SkippedLaunch {
   storeId: string
   name: string
   source: RefreshSource
-  reason: 'recente' | 'sem_conta_de_anuncio'
+  /** recente: started in the last 2 min; em_andamento: a collector of this
+   *  store/source is running or waiting in this server right now. */
+  reason: 'recente' | 'em_andamento' | 'sem_conta_de_anuncio'
   /** When a new refresh of this store/source will be accepted. */
   retryInSeconds: number | null
 }
@@ -53,25 +58,27 @@ export interface RefreshPlan {
 
 /**
  * Decide what to start. Pure.
- * @param lastStarts newest known start per `${storeId}:${source}` (ms epoch),
- *                   from sync_runs and from this process's own launches.
+ * @param lastStarts newest known start per `${storeId}:${source}` (ms epoch), from sync_runs.
+ * @param busy       `${storeId}:${source}` lanes with a job running or queued in this process.
  */
 export function planRefresh(
   targets: readonly RefreshTarget[], lastStarts: ReadonlyMap<string, number>, now: Date,
-  staggerMs = REFRESH_STAGGER_MS,
+  busy: ReadonlySet<string> = new Set(),
 ): RefreshPlan {
   const launch: PlannedLaunch[] = []
   const skipped: SkippedLaunch[] = []
-  let slot = 0
   for (const t of targets) {
     const today = todayInTz(safeTz(t.timezone), now)
     // Two days back: today is open, and yesterday's late orders and ad spend
     // are often incomplete at the previous sync (same window as the scheduler).
     const dateFrom = shiftDate(today, -2)
-    let launchedHere = false
     for (const source of ['shopify', 'facebook'] as const) {
       if (source === 'facebook' && !t.hasAds) {
         skipped.push({ storeId: t.id, name: t.name, source, reason: 'sem_conta_de_anuncio', retryInSeconds: null })
+        continue
+      }
+      if (busy.has(`${t.id}:${source}`)) {
+        skipped.push({ storeId: t.id, name: t.name, source, reason: 'em_andamento', retryInSeconds: null })
         continue
       }
       const last = lastStarts.get(`${t.id}:${source}`)
@@ -83,15 +90,20 @@ export function planRefresh(
         })
         continue
       }
-      launch.push({
-        storeId: t.id, name: t.name, source, dateFrom, dateTo: today,
-        mode: source === 'facebook' ? 'quick' : null, delayMs: slot * staggerMs,
-      })
-      launchedHere = true
+      launch.push({ storeId: t.id, name: t.name, source, dateFrom, dateTo: today, mode: source === 'facebook' ? 'quick' : 'refresh' })
     }
-    if (launchedHere) slot++
   }
   return { launch, skipped }
+}
+
+/**
+ * Why this server will not start collectors, or null when it will. Mirrors
+ * lib/sync/jobs syncAllowed(), with words for the phone.
+ */
+export function syncDisabledReason(env: Record<string, string | undefined>): string | null {
+  if (env.DATABASE_READ_ONLY === '1') return 'Sincronização desligada neste servidor (banco somente leitura)'
+  if (env.AUTO_SYNC_DISABLED === '1') return 'Sincronização desligada neste servidor'
+  return null
 }
 
 /** Stores with an ad account to collect. */
@@ -160,7 +172,9 @@ export interface RefreshResponse {
   requestedAt: string
   /** The stores this refresh is about. */
   stores: { id: string; name: string }[]
-  launched: { storeId: string; name: string; source: RefreshSource; startsInSeconds: number }[]
+  /** started: spawned now; queued: waits for a free slot or for the run of
+   *  this store/source to end; merged: folded into a job already waiting. */
+  launched: { storeId: string; name: string; source: RefreshSource; state: 'started' | 'queued' | 'merged' }[]
   skipped: SkippedLaunch[]
 }
 

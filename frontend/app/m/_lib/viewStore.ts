@@ -9,16 +9,34 @@
  * does, because nothing else writes here.
  */
 
-import { rawFromSearch, rawFromStorage, resolveView, STORAGE_KEY, toSearch, toStorage, type ViewState } from './selection'
+import { todayInTz } from '@/lib/engine/dates'
+import {
+  clampSelection, rawFromSearch, rawFromStorage, resolveView, selectionTz, STORAGE_KEY, toSearch, toStorage,
+  type StoreClock, type ViewState,
+} from './selection'
 
 let current: ViewState | null = null
 let knownStore: (id: string) => boolean = () => false
+/** Today on the calendar the selection is read on (selectionTz). */
+let todayOf: ((loja: string) => string) | undefined
 const listeners = new Set<() => void>()
 
-/** Which store ids may be opened (active and archived). Set before reading. */
-export function configureStores(ids: readonly string[]) {
-  const set = new Set(ids)
+/** Which stores may be opened (active and archived) and their clocks. Set
+ *  before reading. */
+export function configureStores(active: readonly StoreClock[], archived: readonly StoreClock[] = []) {
+  const set = new Set([...active, ...archived].map(s => s.id))
   knownStore = id => set.has(id)
+  todayOf = loja => todayInTz(selectionTz(loja, active, archived), new Date())
+}
+
+/** Every view that is stored goes through here: a custom range is clamped to
+ *  the selected store's today, so switching from Hibikura (whose "today" is
+ *  Brazil's tomorrow from noon on) to MOKOO or Todas cannot carry Tokyo's
+ *  date into a Brazilian calendar — on screen, in the URL or in storage. */
+function normalise(v: ViewState): ViewState {
+  if (!todayOf) return v
+  const sel = clampSelection(v.sel, todayOf(v.sel.loja))
+  return sel === v.sel ? v : { ...v, sel }
 }
 
 function storedRaw() {
@@ -38,7 +56,7 @@ function persist(v: ViewState) {
 
 export function getView(): ViewState | null {
   if (current === null && typeof window !== 'undefined') {
-    current = resolveView(rawFromSearch(window.location.search), storedRaw(), knownStore)
+    current = resolveView(rawFromSearch(window.location.search), storedRaw(), knownStore, todayOf)
   }
   return current
 }
@@ -51,8 +69,8 @@ export function subscribeView(cb: () => void): () => void {
 }
 
 export function setView(next: ViewState) {
-  current = next
-  persist(next)
+  current = normalise(next)
+  persist(current)
   for (const l of listeners) l()
 }
 
@@ -69,6 +87,6 @@ export function applyUrl(url: string) {
   try { u = new URL(url, window.location.origin) } catch { return }
   if (u.origin !== window.location.origin) return
   const base = getView()
-  const next = resolveView(rawFromSearch(u.search), base ? JSON.parse(toStorage(base)) : storedRaw(), knownStore)
+  const next = resolveView(rawFromSearch(u.search), base ? JSON.parse(toStorage(base)) : storedRaw(), knownStore, todayOf)
   setView(next)
 }
