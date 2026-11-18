@@ -1,111 +1,139 @@
+/**
+ * Todas as lojas (/overview) — every active store of the viewer (owner: all of
+ * them; partner: their account's), one period.
+ *
+ * Calendar (owner's rule, bug O1): the window is resolved once on Brasília's
+ * clock and every store is read on those same dates in its OWN timezone, so a
+ * Brazilian store never reads zero because a Tokyo store was picked, and
+ * Hibikura's closed Tokyo day is named instead of hidden. Freshness is per
+ * store and per source (bug O4). A row opens that store's Resumo by a plain
+ * link that keeps the period (bug O5): no POST, nothing to get stuck on.
+ *
+ * Data: lib/views/portfolio buildPortfolio (one engine pass for the window,
+ * one for the comparison) → the verdict and the ledger; the store table and the
+ * archived section stream in <Suspense>.
+ */
+
 import { Suspense } from 'react'
-import { auth } from '@clerk/nextjs/server'
-import { redirect } from 'next/navigation'
-import { getTenantsByUserId, toStoreOptions } from '@/lib/tenant'
-import { getActiveTenantId } from '@/lib/activeStore'
-import { getTenantTimezone } from '@/lib/queries'
-import { accountStores, getAccountOverview } from '@/lib/accountOverview'
-import AccountOverview from '@/components/AccountOverview'
-import StoreSwitcher from '@/components/StoreSwitcher'
-import ExportButton from '@/components/ExportButton'
-import TimeframeSelector from '@/components/TimeframeSelector'
-import Sidebar from '@/components/Sidebar'
-import RefreshButton from '@/components/RefreshButton'
-import AutoSync from '@/components/AutoSync'
+import type { Metadata } from 'next'
+import { getPageContext, type PageContext, type SearchParams } from '@/lib/views/page'
+import { buildPortfolio, type PortfolioView } from '@/lib/views/portfolio'
+import { buildVerdict, verdictInputFromPortfolio } from '@/lib/views/verdict'
+import { listStores } from '@/lib/access'
+import { formatMoney, plural } from '@/lib/format'
+import type { SharedAdAccount } from '@/lib/attributionModels'
+import { AppShell, PageHeader, PeriodNote } from '@/components/shell'
+import { BreakdownLedger, ButtonLink, Callout, Card, EmptyState, ErrorState, SkeletonBlock, VerdictCard } from '@/components/ui'
+import { StoresTable } from '@/components/portfolio/StoresTable'
+import { ProfitShare } from '@/components/portfolio/ProfitShare'
+import { loadSharedInWindow, loadSharedPairs, SHARED_LOOKBACK_DAYS } from '@/components/portfolio/data'
+import { pairOrdersIn, pairsMixedIn } from '@/components/portfolio/model'
+import { ARCHIVED_PARAM, ArchivedClosed, ArchivedList } from '@/components/portfolio/ArchivedSection'
+import s from '@/components/portfolio/portfolio.module.css'
 
-export const revalidate = 0
+export const metadata: Metadata = { title: 'Todas as lojas' }
+export const dynamic = 'force-dynamic'
 
-/** Returns YYYY-MM-DD in the given IANA timezone. */
-function dateInTz(d: Date, tz: string): string {
-  return d.toLocaleDateString('en-CA', { timeZone: tz })
+/** For a custom window the default sub line repeated the range ("1–12 nov ·
+ *  1–12 nov"): name it once. */
+function customSub(ctx: PageContext) {
+  if (ctx.period !== 'custom') return undefined
+  return <><b>Período escolhido</b> · <span className="num">{ctx.rangeLabel}</span> · {ctx.selected.length} lojas</>
 }
 
-interface Props {
-  searchParams: Promise<{ from?: string; to?: string; days?: string }>
-}
-
-export default async function AccountOverviewPage({ searchParams }: Props) {
-  const { userId } = await auth()
-  if (!userId) redirect('/sign-in')
-
-  let tenants: Awaited<ReturnType<typeof getTenantsByUserId>>
-  try {
-    tenants = await getTenantsByUserId(userId)
-  } catch {
-    redirect('/onboarding')
-  }
-
-  const stores = accountStores(tenants)
-  // The account view only means anything with more than one store.
-  if (stores.length < 2) redirect('/')
-
-  const activeId = await getActiveTenantId(userId)
-  let tz = 'UTC'
-  try { tz = await getTenantTimezone(activeId) } catch { /* UTC is fine */ }
-
+export default async function OverviewPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
   const sp = await searchParams
-  const now = new Date()
-  const todayISO = dateInTz(now, tz)
+  const ctx = await getPageContext(sp, { scope: 'all' })
+  const showArchived = sp[ARCHIVED_PARAM] === '1'
+  const archived = (await listStores(ctx.viewer, { includeArchived: true }).catch(() => [])).filter(st => st.archived)
 
-  let dateFrom: string
-  let dateTo: string
-  if (sp.from && sp.to && /^\d{4}-\d{2}-\d{2}$/.test(sp.from) && /^\d{4}-\d{2}-\d{2}$/.test(sp.to)) {
-    dateFrom = sp.from
-    dateTo   = sp.to
-  } else if (sp.days) {
-    const days = Math.min(Math.max(Number(sp.days) || 1, 1), 730)
-    dateFrom = dateInTz(new Date(now.getTime() - (days - 1) * 86400000), tz)
-    dateTo   = todayISO
-  } else {
-    // The point of this page is "how is the account doing today".
-    dateFrom = todayISO
-    dateTo   = todayISO
+  if (!ctx.selected.length) {
+    return (
+      <AppShell ctx={ctx}>
+        <PageHeader ctx={ctx} title="Todas as lojas" code={null} sub={customSub(ctx)} />
+        <Card>
+          <EmptyState icon="store" title="Nenhuma loja ativa nesta conta"
+            action={<ButtonLink href="/onboarding" variant="primary" icon="arrowRight">Conectar uma loja Shopify</ButtonLink>}>
+            Quando houver lojas conectadas, o resultado de cada uma aparece aqui.
+          </EmptyState>
+        </Card>
+        {archived.length > 0 && (showArchived ? <Suspense fallback={<SkeletonBlock height={80} lines={1} />}><ArchivedList ctx={ctx} /></Suspense> : <ArchivedClosed ctx={ctx} stores={archived} />)}
+      </AppShell>
+    )
   }
 
-  const days = Math.round(
-    (new Date(dateTo).getTime() - new Date(dateFrom).getTime()) / 86400000
-  ) + 1
+  let view: PortfolioView
+  let shared: SharedAdAccount[]
+  let sharedNow: SharedAdAccount[] | null
+  try {
+    ;[view, shared, sharedNow] = await Promise.all([
+      buildPortfolio(ctx.selected, ctx.period, ctx.params.de, ctx.params.ate, ctx.now,
+        { liveFeed: false, chargebackHealth: false, freshness: false }),
+      loadSharedPairs(ctx.selected, ctx.timezone, ctx.now),
+      loadSharedInWindow(ctx.selected, ctx.range),
+    ])
+  } catch (err) {
+    console.error('[overview] portfolio', err)
+    return (
+      <AppShell ctx={ctx}>
+        <PageHeader ctx={ctx} title="Todas as lojas" code={null} sub={customSub(ctx)} />
+        <Card>
+          <ErrorState title="Os números das lojas não carregaram"
+            action={<ButtonLink href={ctx.hrefWith('/overview')} icon="refresh">Tentar de novo</ButtonLink>}>
+            Nada foi alterado. Costuma ser uma falha passageira na leitura do banco.
+          </ErrorState>
+        </Card>
+      </AppShell>
+    )
+  }
 
-  const data = await getAccountOverview(stores, dateFrom, dateTo)
-
-  const lastSync = data.lastSyncIso
-    ? new Date(data.lastSyncIso).toLocaleString('pt-BR', { timeZone: tz })
-    : 'Nunca'
+  const v = buildVerdict(verdictInputFromPortfolio(view, { subject: 'Suas lojas', split: ctx.split }))
+  const mixed = pairsMixedIn(shared, sharedNow)
+  const judged = v.storeCount - v.excluded.length
+  const sold = v.totals.revenue > 0
+  const ledgerSub = !sold
+    ? `Nenhuma venda em ${ctx.rangeLabel}${v.excluded.length ? ` nas ${plural(judged, 'loja', 'lojas')} com custos` : ''}`
+    : v.excluded.length
+      ? `De cada $1,00 vendido em ${ctx.rangeLabel} nas ${plural(judged, 'loja', 'lojas')} com custos`
+      : `De cada $1,00 vendido em ${ctx.rangeLabel}${v.storeCount > 1 ? `, somando ${plural(v.storeCount, 'loja', 'lojas')}` : ''}`
 
   return (
-    <div style={{ display: 'flex', minHeight: '100vh', backgroundColor: 'var(--bg)' }}>
-      <Sidebar active="/" />
+    <AppShell ctx={ctx}>
+      <div className={s.page}>
+        <PageHeader ctx={ctx} title="Todas as lojas" code={null} sub={customSub(ctx)} />
+        <PeriodNote ctx={ctx} />
 
-      <main style={{ marginLeft: 56, flex: 1, padding: '28px 32px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-          <div>
-            <h1 style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-primary)', letterSpacing: '-0.4px' }}>
-              Visão geral da conta
-            </h1>
-            <p style={{ color: 'var(--text-faint)', fontSize: 13, marginTop: 3 }}>
-              {dateFrom === dateTo ? dateFrom : `${dateFrom} → ${dateTo} · ${days} dias`}
-              {' · '}{stores.length} lojas · Última sync: {lastSync}
-            </p>
-          </div>
+        <VerdictCard
+          verdict={v}
+          // Only pairs that mixed THIS window mark a store's profit as inflated or deflated.
+          footer={<ProfitShare view={view} verdict={v} part={ctx.part} shared={mixed} />}
+          aside={
+            <BreakdownLedger pnl={v.totals} configured={v.basis !== 'revenue_minus_ads'} split={ctx.split}
+              bar={sold} title="Para onde foi cada dólar" sub={ledgerSub} />
+          }
+        />
 
-          <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-            <AutoSync lastSyncIso={data.lastSyncIso} />
-            <RefreshButton />
-            <Suspense>
-              <TimeframeSelector from={dateFrom} to={dateTo} />
-            </Suspense>
-            <ExportButton stores={toStoreOptions(stores)} />
-            <StoreSwitcher
-              stores={toStoreOptions(stores)}
-              activeStoreId={activeId}
-              showOverview
-              overviewActive
-            />
-          </div>
-        </div>
+        {shared.map(p => {
+          const now = pairOrdersIn(sharedNow, p)
+          return (
+            <Callout key={`${p.adStoreId}-${p.salesStoreId}`} tone={now === 0 ? 'info' : 'warn'} icon="swap" title={`${p.salesStoreName} ${now === 0 ? 'vendia' : 'vende'} com anúncios pagos pela ${p.adStoreName}`}>
+              Nos últimos {SHARED_LOOKBACK_DAYS} dias, {plural(p.orders, 'pedido', 'pedidos')} da {p.salesStoreName} ({formatMoney(p.revenue)}) vieram de anúncios
+              da conta da {p.adStoreName}.{' '}
+              {now === 0
+                ? <>Em {ctx.rangeLabel}, nenhum pedido rastreado: o resultado deste período não está misturado. Para períodos anteriores, some as duas lojas.</>
+                : <>{now !== null && <>Em {ctx.rangeLabel}, {plural(now, 'pedido', 'pedidos')}. </>}O gasto fica na {p.adStoreName} e a venda na {p.salesStoreName}: o lucro de uma parece maior e o da outra menor do que é. Some as duas para julgar.</>}
+            </Callout>
+          )
+        })}
 
-        <AccountOverview data={data} days={days} />
-      </main>
-    </div>
+        <Suspense fallback={<SkeletonBlock height={320} lines={2} />}>
+          <StoresTable ctx={ctx} view={view} verdict={v} shared={shared} sharedNow={sharedNow} />
+        </Suspense>
+
+        {archived.length > 0 && (showArchived
+          ? <Suspense fallback={<SkeletonBlock height={80} lines={1} />}><ArchivedList ctx={ctx} /></Suspense>
+          : <ArchivedClosed ctx={ctx} stores={archived} />)}
+      </div>
+    </AppShell>
   )
 }

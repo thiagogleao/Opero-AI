@@ -1,0 +1,143 @@
+/**
+ * CampaignsBlock — the biggest campaigns of the period by spend, each with the
+ * ONE action every screen shows (Escalar / Manter / Cortar / Observar, from
+ * lib/campaignSignal via lib/data/campaigns) and a link to /campaigns keeping
+ * loja and periodo. Async server component; streams in <Suspense>.
+ *
+ * Money columns cover the page's window; the action is judged on the last 7
+ * closed days, as on the campaigns page — the block says so.
+ */
+
+import Link from 'next/link'
+import type { PageContext } from '@/lib/views/page'
+import type { StoreSummary } from '@/lib/views/store'
+import { empateGap, loadCampaignSummary } from '@/lib/views/store'
+import type { CampaignRow } from '@/lib/data/campaigns'
+import { ACTION_LABEL, type CampaignAction, type CampaignDecision } from '@/lib/campaignSignal'
+import { formatMoney, formatPct, formatRangeLabel, formatRoas, plural } from '@/lib/format'
+import { Badge, Block, DataTable, EmptyState, ErrorState, Icon, Money, type ChipTone, type IconName } from '@/components/ui'
+import { RoasVsEmpate } from './RoasVsEmpate'
+import s from './dashboard.module.css'
+
+const ACTION_STYLE: Record<CampaignAction, { tone: ChipTone; icon: IconName }> = {
+  escalar: { tone: 'pos', icon: 'up' },
+  manter: { tone: 'info', icon: 'check' },
+  cortar: { tone: 'neg', icon: 'down' },
+  observar: { tone: 'neu', icon: 'ring' },
+}
+
+const BASIS_LABEL: Partial<Record<CampaignDecision['basis'], string>> = {
+  pausada: 'pausada',
+  conta_compartilhada: 'conta compartilhada',
+  nao_sincronizada: 'não sincronizada',
+  sem_custos: 'sem custos',
+  sem_margem: 'sem margem',
+  sem_gasto: 'sem gasto',
+  volume: 'pouco volume',
+}
+
+/** The campaign's action as a badge, or the reason it has none. */
+export function ActionBadge({ decision }: { decision: CampaignDecision }) {
+  if (decision.action) {
+    const st = ACTION_STYLE[decision.action]
+    return <Badge tone={st.tone} icon={st.icon}>{ACTION_LABEL[decision.action]}</Badge>
+  }
+  return <Badge tone="mut">{BASIS_LABEL[decision.basis] ?? 'sem ação'}</Badge>
+}
+
+function status(c: CampaignRow): string {
+  if (c.unsynced) return `${plural(c.unsyncedAds.length, 'anúncio', 'anúncios')} sem campanha no catálogo`
+  const st = c.running ? 'ativa' : c.status ? 'pausada' : 'status desconhecido'
+  return `${st} · ${plural(Math.round(c.purchases), 'compra atribuída', 'compras atribuídas')}`
+}
+
+export async function CampaignsBlock({ ctx, summary, storeNames }: {
+  ctx: PageContext; summary: StoreSummary; storeNames: ReadonlyMap<string, string>
+}) {
+  const title = 'Campanhas no Meta'
+  let data
+  try {
+    data = await loadCampaignSummary(summary.store, ctx.range, storeNames, ctx.now)
+  } catch (err) {
+    console.error('[resumo] campaigns', err)
+    return <Block title={title}><ErrorState compact /></Block>
+  }
+  const { report, highlights: h } = data
+  const be = report.configured ? report.breakEvenRoas : null
+  // The report prices the page's window, the same one as summary.pnl.
+  const gap = empateGap(report.configured, be, summary.pnl.totals)
+  const decided = formatRangeLabel(report.decisionWindow, ctx.today)
+  const link = ctx.hrefWith('/campaigns')
+  const elsewhere = report.billedElsewhere
+
+  if (!h.top.length) {
+    return (
+      <Block title={title} howTo={`Campanhas com gasto em ${ctx.rangeLabel}.`}>
+        <EmptyState compact icon="camp" title={`Nenhuma campanha com gasto em ${ctx.rangeLabel}`}
+          action={<Link className={s.link} href={link}>Abrir Campanhas <Icon name="arrowRight" size={12} /></Link>}>
+          {elsewhere.length
+            ? <>Os anúncios desta loja rodaram na conta de outra: {elsewhere.map(e => <span key={e.campaignId}><b>{e.name}</b> ({formatMoney(e.spend)} na {e.billedStoreName}) </span>)}. O gasto está nas contas da {elsewhere[0].billedStoreName}; some as duas lojas para julgar.</>
+            : 'Esta loja não teve gasto no Meta neste período.'}
+        </EmptyState>
+      </Block>
+    )
+  }
+
+  const attributed = h.attributedShare
+  return (
+    <Block
+      title={title}
+      howTo={<>{h.top.length === 1 ? 'A campanha que mais gastou' : `As ${h.top.length} campanhas que mais gastaram`} em {ctx.rangeLabel}. A ação é julgada nos últimos 7 dias fechados ({decided}), como na página Campanhas; o ROAS é comparado com o empate da loja{be ? ` (${formatRoas(be)})` : ''}.</>}
+      info={report.formula}
+      actions={<Link className={s.link} href={link}>Ver {h.withSpend > h.top.length ? `as ${h.withSpend} campanhas` : 'campanhas'} <Icon name="arrowRight" size={12} /></Link>}
+      flush
+      footer={
+        <div className={s.footLinks}>
+          <span>
+            {attributed !== null && attributed > 100
+              // Hibikura's day: $1.259 credited against $1.245 sold read "(101%)"
+              // as if it were a share; it is Meta counting more than happened.
+              ? <>O Meta atribui <b>{formatMoney(report.storeRevenue * (attributed / 100))}</b> às campanhas desta loja, mais do que os <b>{formatMoney(report.storeRevenue)}</b> que ela vendeu: a atribuição do Meta não fecha com os pedidos. </>
+              : attributed !== null
+                ? <>O Meta atribui <b>{formatMoney(report.storeRevenue * (attributed / 100))}</b> das <b>{formatMoney(report.storeRevenue)}</b> em vendas ({formatPct(attributed, { digits: 0 })}) às campanhas desta loja. </>
+                : null}
+            Use a ação para comparar campanhas entre si; a loja se julga pelo lucro real.
+            {h.rest.count > 0 && <> Mais {plural(h.rest.count, 'campanha', 'campanhas')} com <b>{formatMoney(h.rest.spend)}</b> de gasto.</>}
+          </span>
+        </div>
+      }
+    >
+      <DataTable
+        caption={`Campanhas da ${summary.store.name} em ${ctx.rangeLabel}, por gasto`}
+        dense
+        columns={[
+          { key: 'name', label: 'Campanha' },
+          { key: 'spend', label: 'Gasto', numeric: true },
+          { key: 'value', label: 'Vendas atribuídas', numeric: true, info: 'O valor que o Meta credita à campanha (compras fantasma acima de $20.000 por anúncio-dia descartadas).' },
+          { key: 'roas', label: 'ROAS × empate', info: 'Vendas atribuídas ÷ gasto, contra o empate da loja (receita ÷ contribuição).' },
+          { key: 'profit', label: `Lucro estimado${ctx.split ? ' (sua parte)' : ''}`, numeric: true, info: report.formula },
+          { key: 'action', label: 'Ação · últimos 7 dias' },
+        ]}
+        rows={h.top.map(c => ({
+          key: c.campaignId ?? `unsynced-${c.name}`,
+          tone: c.running ? undefined : 'mut',
+          cells: {
+            name: <span className={s.campName}><b title={c.name}>{c.name}</b><small>{status(c)}</small></span>,
+            spend: <Money value={c.spend} />,
+            value: <Money value={c.purchaseValue} tone="none" />,
+            roas: c.spend > 0 && c.roas !== null
+              ? <RoasVsEmpate roas={c.roas} breakEven={c.shared ? null : be} gap={c.shared ? 'shared' : gap} size="mini" paused={!c.running && !c.unsynced} />
+              : <span className="mut">—</span>,
+            profit: c.estimatedProfit === null ? <span className="mut">—</span> : <Money value={ctx.part(c.estimatedProfit)} sign tone="auto" />,
+            action: (
+              <span className={s.actionCell}>
+                <ActionBadge decision={c.decision} />
+                <span className={s.reason}>{c.shared ? c.shared.note : c.decision.reason}</span>
+              </span>
+            ),
+          },
+        }))}
+      />
+    </Block>
+  )
+}

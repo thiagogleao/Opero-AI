@@ -1,0 +1,45 @@
+/* Todas as lojas (/overview) */
+
+.page { display: flex; flex-direction: column; gap: var(--s4); }
+
+.store { display: inline-flex; gap: var(--s3); align-items: flex-start; min-width: 200px; max-width: 250px; vertical-align: top; }
+.storeText { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.storeName { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.storeName b { font-weight: 600; font-size: 13.5px; }
+.storeSub { font-size: 11.5px; color: var(--tx-3); }
+.badges { display: flex; flex-wrap: wrap; gap: 4px; }
+
+.money { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; white-space: nowrap; }
+.money small { font-size: 11.5px; color: var(--tx-3); white-space: normal; max-width: 120px; text-align: right; line-height: 1.35; }
+.money small b { font-family: var(--mono); font-weight: 500; color: var(--tx-2); white-space: nowrap; }
+
+.channels { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--tx-3); white-space: nowrap; align-items: flex-end; }
+.channels b { font-family: var(--mono); font-weight: 500; color: var(--tx); }
+
+.roas { display: flex; flex-direction: column; gap: 4px; min-width: 150px; max-width: 190px; }
+.roasExtra { font-size: 11.5px; color: var(--tx-3); }
+.roasExtra b { font-family: var(--mono); font-weight: 500; color: var(--tx-2); }
+.none { font-size: 12px; color: var(--tx-3); max-width: 170px; white-space: normal; display: inline-block; }
+
+
+.spark { width: 100px; display: inline-block; }
+.sparkNone { font-size: 11px; color: var(--tx-4); max-width: 120px; white-space: normal; line-height: 1.35; }
+
+.foot { display: flex; flex-direction: column; gap: 2px; }
+.foot small { font-size: 11.5px; color: var(--tx-3); white-space: normal; }
+
+.notes { display: flex; flex-direction: column; gap: var(--s2); }
+
+.archHead { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s4); align-items: center; justify-content: space-between; }
+.archList { display: flex; flex-direction: column; }
+.archRow {
+  display: grid; grid-template-columns: minmax(0, 1.4fr) repeat(4, minmax(0, 1fr)) auto; gap: var(--s4);
+  align-items: center; padding: var(--s3) 0; border-top: 1px solid var(--line);
+}
+.archRow:first-child { border-top: 0; }
+.archCell { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.archCell small { font-size: 11.5px; color: var(--tx-3); }
+.archCell .num { font-size: 14px; }
+@media (max-width: 1100px) { .archRow { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+.archLink { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; color: var(--info); text-decoration: none; white-space: nowrap; }
+.archLink:hover { text-decoration: underline; }
