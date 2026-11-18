@@ -14,6 +14,7 @@ import type { StoreRef } from '@/lib/access'
 import { formatDate, formatMoney, formatRangeLabel, plural } from '@/lib/format'
 import { Block, ButtonLink, EmptyState, ErrorState, Icon, Money, Pct } from '@/components/ui'
 import { loadArchived } from './data'
+import { storeDayOf } from './model'
 import s from './portfolio.module.css'
 
 export const ARCHIVED_PARAM = 'arquivadas'
@@ -56,12 +57,14 @@ export async function ArchivedList({ ctx }: { ctx: PageContext }) {
               ? ctx.hrefWith('/', { loja: a.store.id, periodo: 'custom', de: a.span.from, ate: a.span.to })
               : ctx.hrefWith('/', { loja: a.store.id })
             const result = t ? (a.configured ? t.operatingProfit : t.revenue - t.adSpend) : null
+            // The store's own day, as Ajustes → Lojas prints it (archivedAt is a UTC instant).
+            const archivedOn = storeDayOf(a.archivedAt, a.store.timezone)
             return (
               <div key={a.store.id} className={s.archRow}>
                 <div className={s.archCell}>
                   <b>{a.store.name}</b>
                   <small>
-                    {a.archivedAt ? `arquivada em ${formatDate(a.archivedAt.slice(0, 10), ctx.today)}` : 'arquivada'}
+                    {archivedOn ? `arquivada em ${formatDate(archivedOn, ctx.today)}` : 'arquivada'}
                     {a.span ? ` · histórico de ${formatRangeLabel(a.span, ctx.today)}` : ' · sem vendas registradas'}
                   </small>
                 </div>

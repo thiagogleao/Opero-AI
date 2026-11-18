@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { sumPnL, type CountryPnL, type DayPnL, type PnL, type PnLLines, type ProductPnL } from '../../engine/pnl'
 import { comparisonRange } from '../../engine/dates'
 import {
-  adChannelOf, campaignHighlights, channelRoas, chargebackLevel, chartSeries, comparisonPlan, dueInTz, empateGap, ledgerAdCents, storeKpis, topCountries, topProducts, trailRanges,
+  adChannelOf, campaignHighlights, channelRoas, chargebackLevel, chartSeries, chartValue, comparisonPlan, dueInTz, empateGap, kpiDays, ledgerAdCents, seriesIdle, storeKpis, topCountries, topProducts, trailRanges, windowDaysSinceStart,
   CHARGEBACK_LIMIT_PCT, TRAIL_DAYS,
 } from '../store'
 import type { CampaignRow } from '../../data/campaigns'
@@ -83,6 +83,97 @@ describe('storeKpis', () => {
     expect(k.shopDays).toBe(2)
     expect(k.previous?.revenue).toBe(19281)
     expect(k.previous?.metaRoas).toBeCloseTo(19281 / 10289, 6)
+  })
+
+  it('averages a closed window over all its days, from the totals', () => {
+    const daily = ['10', '11', '12', '13', '14', '15', '16'].map(d => day(`2026-11-${d}`, { revenue: 1, orders: 1 }))
+    const span = kpiDays(range, daily, { firstOrderDate: '2026-04-11', runningDay: null })
+    const k = storeKpis(t, null, true, range, daily, span)
+    expect(k.avgRange).toBeNull()
+    expect(k.avgDays).toBe(7)
+    expect(k.revenuePerDay).toBeCloseTo(10942 / 7, 6)
+    expect(k.ordersPerDay).toBeCloseTo(134 / 7, 6)
+    expect(k.metaPerDay).toBeCloseTo(5624 / 7, 6)
+    // No span at all: the same, as before.
+    expect(storeKpis(t, null, true, range).revenuePerDay).toBeCloseTo(10942 / 7, 6)
+  })
+
+  it('averages a store that started inside the window over its own closed days', () => {
+    // Hibikura, Este mês on 18 nov (running): it sold from 7 nov. The page
+    // divided by 18 ("$490 por dia") next to a chart counting from 7 nov.
+    const mtd = { from: '2026-11-01', to: '2026-11-18' }
+    const daily = [
+      ...['01', '02', '03', '04', '05', '06'].map(d => day(`2026-11-${d}`)),
+      day('2026-11-07', { revenue: 95.63, orders: 2 }),
+      day('2026-11-08', { revenue: 239.25, orders: 2, metaSpend: 165.26 }),
+      day('2026-11-09', { revenue: 88.38, orders: 1, metaSpend: 279.67 }),
+      day('2026-11-10', { revenue: 492.93, orders: 6, metaSpend: 282.07 }),
+      day('2026-11-11', { revenue: 442.56, orders: 6, metaSpend: 424.92 }),
+      day('2026-11-12', { revenue: 544.91, orders: 8, metaSpend: 405.58 }),
+      day('2026-11-13', { revenue: 802.26, orders: 11, metaSpend: 500.8 }),
+      day('2026-11-14', { revenue: 673.51, orders: 9, metaSpend: 318.3 }),
+      day('2026-11-15', { revenue: 1314.58, orders: 16, metaSpend: 868.96 }),
+      day('2026-11-16', { revenue: 743.94, orders: 9, metaSpend: 517.88 }),
+      day('2026-11-17', { revenue: 1596.21, orders: 18, metaSpend: 600.02 }),
+      day('2026-11-18', { revenue: 120, orders: 2, metaSpend: 90 }),
+    ]
+    const totals = sumPnL(daily)
+    const span = kpiDays(mtd, daily, { firstOrderDate: '2026-11-07', runningDay: '2026-11-18' })
+    expect(span).toEqual({ startedOn: '2026-11-07', avg: { from: '2026-11-07', to: '2026-11-17' }, avgDays: 11, spanDays: 12 })
+    const k = storeKpis(totals, null, true, mtd, daily, span)
+    const closed = daily.filter(d => d.date >= '2026-11-07' && d.date <= '2026-11-17')
+    expect(k.avgRange).toEqual({ from: '2026-11-07', to: '2026-11-17' })
+    expect(k.revenuePerDay).toBeCloseTo(closed.reduce((a, d) => a + d.revenue, 0) / 11, 6)
+    expect(k.revenuePerDay).toBeCloseTo(7034.16 / 11, 2)
+    expect(k.ordersPerDay).toBeCloseTo(88 / 11, 6)
+    expect(k.metaPerDay).toBeCloseTo(closed.reduce((a, d) => a + d.metaSpend, 0) / 11, 6)
+    expect(k.startedOn).toBe('2026-11-07')
+    expect(k.spanDays).toBe(12)
+  })
+})
+
+describe('kpiDays', () => {
+  const mtd = { from: '2026-11-01', to: '2026-11-18' }
+  const quiet = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => day(`2026-11-${String(from + i).padStart(2, '0')}`))
+
+  it('starts on the first ad when the ads came before the first sale (Glooty: ads 4 nov, sale 6 nov)', () => {
+    const daily = [...quiet(1, 3), day('2026-11-04', { metaSpend: 74.48 }), day('2026-11-05', { metaSpend: 155.99 }),
+      day('2026-11-06', { revenue: 403.71, orders: 4, metaSpend: 267.99 }), ...quiet(7, 18)]
+    const r = kpiDays(mtd, daily, { firstOrderDate: '2026-11-06', runningDay: '2026-11-18' })
+    expect(r).toEqual({ startedOn: '2026-11-04', avg: { from: '2026-11-04', to: '2026-11-17' }, avgDays: 14, spanDays: 15 })
+  })
+
+  it('agrees with the chart line: activity in the days before the window means the store existed', () => {
+    const daily = [...quiet(1, 6), day('2026-11-07', { revenue: 90, orders: 1 }), ...quiet(8, 10)]
+    const range = { from: '2026-11-01', to: '2026-11-10' }
+    const before = [day('2026-10-25', { metaSpend: 40 }), day('2026-10-26')]
+    const r = kpiDays(range, daily, { firstOrderDate: '2026-11-07', before, runningDay: null })
+    expect(r).toEqual({ startedOn: null, avg: range, avgDays: 10, spanDays: 10 })
+    // The chart's own rule on the same days keeps every window day too.
+    expect(windowDaysSinceStart(chartSeries(before, daily, []), '2026-11-07').startedOn).toBeNull()
+  })
+
+  it('leaves only the running day out of an established store (MOKOO, Este mês)', () => {
+    const daily = quiet(1, 18).map(d => ({ ...d, revenue: 100, orders: 1 }))
+    expect(kpiDays(mtd, daily, { firstOrderDate: '2026-04-11', runningDay: '2026-11-18' }))
+      .toEqual({ startedOn: null, avg: { from: '2026-11-01', to: '2026-11-17' }, avgDays: 17, spanDays: 18 })
+  })
+
+  it('has no closed day to average on the first day of a window that is running', () => {
+    const today = { from: '2026-11-18', to: '2026-11-18' }
+    expect(kpiDays(today, [day('2026-11-18', { revenue: 50, orders: 1 })], { firstOrderDate: '2026-04-11', runningDay: '2026-11-18' }))
+      .toEqual({ startedOn: null, avg: null, avgDays: 0, spanDays: 1 })
+  })
+
+  it('ignores a running day outside the window and a window before the first sale', () => {
+    const week = { from: '2026-11-10', to: '2026-11-16' }
+    const daily = Array.from({ length: 7 }, (_, i) => day(`2026-11-${10 + i}`, { revenue: 10, orders: 1 }))
+    expect(kpiDays(week, daily, { firstOrderDate: '2026-04-11', runningDay: '2026-11-17' }).avg).toEqual(week)
+    // Hibikura in October: nothing in the window, first sale after it.
+    const october = { from: '2026-10-01', to: '2026-10-31' }
+    const r = kpiDays(october, [day('2026-10-01'), day('2026-10-31')], { firstOrderDate: '2026-11-07', runningDay: null })
+    expect(r.avgDays).toBe(0)
+    expect(r.spanDays).toBe(0)
   })
 })
 
@@ -197,6 +288,89 @@ describe('trailRanges / chartSeries', () => {
   })
 })
 
+describe('windowDaysSinceStart', () => {
+  // Hibikura, Este mês (1–17 nov closed): no order or spend before 7 nov.
+  const hibikura = () => chartSeries(
+    [day('2026-10-31')],
+    [
+      ...['01', '02', '03', '04', '05', '06'].map(d => day(`2026-11-${d}`)),
+      day('2026-11-07', { revenue: 95.63, orders: 2 }),
+      day('2026-11-08', { revenue: 239.25, orders: 2, metaSpend: 165.26 }),
+      day('2026-11-09', { revenue: 88.38, orders: 1, metaSpend: 279.67 }),
+    ],
+    [],
+  )
+
+  it('leaves out the window days before the store existed', () => {
+    const r = windowDaysSinceStart(hibikura(), '2026-11-07')
+    expect(r.days.map(d => d.date)).toEqual(['2026-11-07', '2026-11-08', '2026-11-09'])
+    expect(r.startedOn).toBe('2026-11-07')
+  })
+
+  it('falls back on the first day with activity when the first order is unknown', () => {
+    expect(windowDaysSinceStart(hibikura(), null).startedOn).toBe('2026-11-07')
+  })
+
+  it('counts ads that ran before the first sale: they are real losses', () => {
+    const s = chartSeries([], [day('2026-11-05'), day('2026-11-06', { metaSpend: 40 }), day('2026-11-07', { revenue: 90, orders: 1 })], [])
+    const r = windowDaysSinceStart(s, '2026-11-07')
+    expect(r.days.map(d => d.date)).toEqual(['2026-11-06', '2026-11-07'])
+    expect(r.startedOn).toBe('2026-11-06')
+  })
+
+  it('keeps quiet days after the start: the store existed and sold nothing', () => {
+    // CAMP HALLOW in November: last sale 30 out, every window day empty.
+    const s = chartSeries([day('2026-10-30', { revenue: 120, orders: 2 })], [day('2026-11-01'), day('2026-11-02')], [])
+    expect(windowDaysSinceStart(s, '2026-06-01')).toEqual({ days: s.filter(d => d.inWindow), startedOn: null })
+    // A first order long before the window wins over 30 quiet days of context.
+    const quiet = chartSeries([], [day('2026-11-01'), day('2026-11-02', { revenue: 50, orders: 1 })], [])
+    expect(windowDaysSinceStart(quiet, '2026-06-01').days).toHaveLength(2)
+    // Nothing known and nothing active: every window day stays.
+    expect(windowDaysSinceStart(chartSeries([], [day('2026-11-01'), day('2026-11-02')], []), null).days).toHaveLength(2)
+  })
+})
+
+describe('chartValue', () => {
+  // Glooty 7 nov: $60,95 of sales, $650 of Meta.
+  const [d] = chartSeries([], [day('2026-11-07', { revenue: 60.95, metaSpend: 650, orders: 1 })], [])
+
+  it('draws profit with cost settings and revenue − ads without', () => {
+    expect(chartValue(d, true)).toBeCloseTo(d.profit, 6)
+    expect(chartValue(d, false)).toBeCloseTo(60.95 - 650, 6)
+  })
+
+  it('halves BOTH kinds in the split view, as the verdict does', () => {
+    // The chart of a store without costs drew the whole store under a
+    // "(sua parte)" title: verdict −$904, band −$1.807 (Glooty, Este mês).
+    expect(chartValue(d, false, 0.5)).toBeCloseTo((60.95 - 650) / 2, 6)
+    expect(chartValue(d, true, 0.5)).toBeCloseTo(d.profit / 2, 6)
+    // The band total is the sum of what is drawn.
+    const days = chartSeries([], [
+      day('2026-11-01', { revenue: 100, metaSpend: 300 }), day('2026-11-02', { revenue: 0, metaSpend: 1507 }),
+    ], [])
+    expect(days.reduce((a, x) => a + chartValue(x, false, 0.5), 0)).toBeCloseTo(-1707 / 2, 6)
+  })
+})
+
+describe('seriesIdle', () => {
+  it('is true when no day sold, spent or cost anything (Hibikura in October)', () => {
+    const october = chartSeries([day('2026-09-30')], [day('2026-10-01'), day('2026-10-02'), day('2026-10-31')], [])
+    expect(seriesIdle(october, true)).toBe(true)
+    expect(seriesIdle(october, false)).toBe(true)
+  })
+
+  it('is false as soon as one day has a sale, an ad or a fixed cost', () => {
+    expect(seriesIdle(chartSeries([], [day('2026-10-01'), day('2026-10-02', { metaSpend: 3 })], []), false)).toBe(false)
+    expect(seriesIdle(chartSeries([], [day('2026-10-01', { revenue: 20, orders: 1 })], []), true)).toBe(false)
+    // A fixed cost on an empty day is a real loss: still drawn with costs set.
+    const fixed = chartSeries([], [day('2026-10-01', { fixedCosts: 5 })], [])
+    expect(seriesIdle(fixed, true)).toBe(false)
+    // Context drawn before an empty window keeps the chart (window idle, series not).
+    const ctx = chartSeries([day('2026-09-30', { revenue: 9, orders: 1 })], [day('2026-10-01')], [])
+    expect(seriesIdle(ctx, true)).toBe(false)
+  })
+})
+
 describe('chargebackLevel', () => {
   it('reads none / ok / watch / over against Shopify Payments line', () => {
     expect(chargebackLevel({ count: 0, rate: 0 })).toBe('none')
@@ -229,6 +403,40 @@ describe('campaignHighlights', () => {
 
   it('has no attributed share without store revenue', () => {
     expect(campaignHighlights({ storeRevenue: 0, campaigns: [] }).attributedShare).toBeNull()
+  })
+
+  it('never counts the unsynced-ads bucket as a campaign, and names its spend apart', () => {
+    // MOKOO 11–17 nov: six campaigns plus $4,47 of ads not yet tied to one.
+    // The Resumo said "Ver as 7 campanhas" and "Mais 2 campanhas com $254"
+    // over a campaigns page whose tab reads "Campanhas 6".
+    const unsynced = {
+      ...camp('Anúncios ainda não sincronizados', 4.47, 0, null), campaignId: null, unsynced: true,
+      unsyncedAds: [{ adId: '1', name: 'x', spend: 4.47 }, { adId: '2', name: 'y', spend: 0 }],
+    } as CampaignRow
+    const h = campaignHighlights({
+      storeRevenue: 11058,
+      campaigns: [
+        camp('a', 2000, 3000, 'manter'), camp('b', 1500, 2000, 'cortar'), camp('c', 1200, 1800, 'manter'),
+        camp('d', 700, 900, 'observar'), camp('e', 277, 400, null), camp('CATÁLOGO', 250, 496, null),
+        unsynced,
+      ],
+    })
+    expect(h.top.map(c => c.name)).toEqual(['a', 'b', 'c', 'd', 'e'])
+    expect(h.withSpend).toBe(6)
+    expect(h.listed).toBe(6)
+    expect(h.rest).toEqual({ count: 1, spend: 250 })
+    expect(h.unsynced).toEqual({ spend: 4.47, ads: 1 })
+    // The money still adds up: top + rest + unsynced = every row's spend.
+    const all = 2000 + 1500 + 1200 + 700 + 277 + 250 + 4.47
+    expect(h.top.reduce((s, c) => s + c.spend, 0) + h.rest.spend + h.unsynced.spend).toBeCloseTo(all, 6)
+  })
+
+  it('keeps a big unsynced bucket out of the top five (Glooty, $445)', () => {
+    const big = { ...camp('Anúncios ainda não sincronizados', 445, 0, null), campaignId: null, unsynced: true, unsyncedAds: [] } as CampaignRow
+    const h = campaignHighlights({ storeRevenue: 1118, campaigns: [big, camp('a', 300, 0, null), camp('b', 10, 0, null)] })
+    expect(h.top.map(c => c.name)).toEqual(['a', 'b'])
+    expect(h.listed).toBe(2)
+    expect(h.unsynced.spend).toBe(445)
   })
 })
 

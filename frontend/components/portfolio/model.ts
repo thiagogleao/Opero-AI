@@ -11,13 +11,17 @@
  *   freshnessCell(f, now)   the "atualizado há 4 min" cell, with the same
  *                           thresholds as the top bar (lib/sync/plan)
  *   trailRange(range)       the days behind each row's sparkline
+ *   idleReasons(idle, rng)  why an idle store is out of the total (its day
+ *                           has not begun, it had not sold yet, or quiet)
+ *   storeDayOf(at, tz)      a database instant on the store's own calendar
  */
 
 import type { PnL } from '@/lib/engine/pnl'
 import { daysBetween, shiftDate, todayInTz, type DateRange } from '@/lib/engine/dates'
 import type { SharedAdAccount } from '@/lib/attributionModels'
-import { formatRelativeTime, plural } from '@/lib/format'
+import { formatDate, formatRelativeTime, plural } from '@/lib/format'
 import { adChannelOf, channelRoas, type AdChannel } from '@/lib/views/store'
+import { isIdle, judgedStores } from '@/lib/views/verdict'
 
 // ─── The money of a row ──────────────────────────────────────────────────────
 
@@ -34,6 +38,69 @@ export function rowResult(row: { configured: boolean; totals: PnL }): RowResult 
   if (t.orders === 0 && t.revenue <= 0 && t.adSpend <= 0) return { kind: 'none', value: null }
   if (!row.configured) return { kind: 'revenue_minus_ads', value: t.revenue - t.adSpend }
   return { kind: 'profit', value: t.operatingProfit }
+}
+
+export interface CashHit {
+  /** "2 chargebacks", "1 reembolso e 2 chargebacks"; null when no count came
+   *  with the money (then the cell says "reembolsos e chargebacks"). */
+  what: string | null
+  /** Negative: what left the cash (refunded margin + chargebacks + fees).
+   *  NOT halved: halve at render with ctx.part. */
+  amount: number
+}
+
+/**
+ * Money that left a row with no sale: refunds and chargebacks of older orders
+ * arrive whether or not the store sold in the window (CAMP HALLOW, 11–17 nov:
+ * 0 orders, 0 spend, 2 chargebacks, −$342,63). The row read only "— sem
+ * vendas" while the page's ledger and total counted the hit; the Resumo's
+ * verdict says "Mas chegaram 2 chargebacks: −$343 no caixa" (lib/views/verdict,
+ * same noSales rule), and the row now says the same thing.
+ */
+export function noSalesCashHit(t: Pick<PnL, 'orders' | 'revenue' | 'adjustments' | 'refundCount' | 'chargebackCount'>): CashHit | null {
+  if (t.orders > 0 || t.revenue > 0 || !(t.adjustments >= 0.005)) return null
+  const what = [
+    t.refundCount > 0 ? plural(t.refundCount, 'reembolso', 'reembolsos') : null,
+    t.chargebackCount > 0 ? plural(t.chargebackCount, 'chargeback', 'chargebacks') : null,
+  ].filter((x): x is string => x !== null)
+  return { what: what.length ? what.join(' e ') : null, amount: -t.adjustments }
+}
+
+/**
+ * Which stores the verdict's amount is made of, so the ledger subtitle and
+ * the table's total row count the same stores as the verdict's "4 lojas na
+ * soma": stores with costs (lib/views/verdict judgedStores) minus the ones
+ * with nothing in the window (isIdle). On "Hoje" at 05h the ledger said "nas 6
+ * lojas com custos" and the total "6 de 7 lojas" next to "4 lojas na soma".
+ */
+export function sumMembers<T extends { configured: boolean; totals: PnL }>(stores: readonly T[]): { summed: T[]; idle: T[]; excluded: T[] } {
+  const { judged, excluded } = judgedStores(stores)
+  const idle = stores.length > 1 ? judged.filter(s => isIdle(s.totals)) : []
+  return { summed: judged.filter(s => !idle.includes(s)), idle, excluded }
+}
+
+/**
+ * Why each idle store (sumMembers().idle) had nothing in the window, by the
+ * verdict's rule (lib/views/verdict, the notes under "Todas"), so the total
+ * row and the verdict above it say the same thing:
+ *   notStarted  its own day has not begun yet (dayState not_started);
+ *   notYet      its first sale came after the window ("Hibikura ainda não
+ *               vendia no mês passado") — the total row called it "sem
+ *               movimento", like a store that stopped selling;
+ *   quiet       it existed and nothing happened.
+ */
+export function idleReasons<T extends { dayState: string; firstOrderDate: string | null }>(
+  idle: readonly T[], range: DateRange,
+): { notStarted: T[]; notYet: T[]; quiet: T[] } {
+  const notStarted = idle.filter(s => s.dayState === 'not_started')
+  const notYet = idle.filter(s => notSellingYet(s, range))
+  return { notStarted, notYet, quiet: idle.filter(s => !notStarted.includes(s) && !notYet.includes(s)) }
+}
+
+/** The store's first sale came after the window (and its day has begun):
+ *  the verdict's "ainda não vendia". */
+export function notSellingYet(s: { dayState: string; firstOrderDate: string | null }, range: DateRange): boolean {
+  return s.dayState !== 'not_started' && !!s.firstOrderDate && range.to < s.firstOrderDate
 }
 
 /** Sort value for the profit column: unconfigured and idle rows sort last,
@@ -176,9 +243,74 @@ export function freshnessCell(f: { shopify: LaneLike | null; facebook: LaneLike 
  * order placed at 23h50 on the 17th.
  */
 export function lastSaleDate(lastOrderAt: string | null | undefined, timezone: string): string | null {
-  if (!lastOrderAt) return null
-  const at = new Date(lastOrderAt)
-  return Number.isNaN(at.getTime()) ? null : todayInTz(timezone, at)
+  return storeDayOf(lastOrderAt, timezone)
+}
+
+/**
+ * The store's own calendar day of an instant from the database (null when
+ * missing or unparseable) — the rule of Ajustes → Lojas (components/settings
+ * storeDay), so both screens name the same day. "Lojas arquivadas" sliced the
+ * ISO string: a store archived at 22h on 10 nov in São Paulo (01h UTC on the
+ * 11th) read "arquivada em 11 nov" here and "10 nov" in Ajustes.
+ */
+export function storeDayOf(at: string | null | undefined, timezone: string): string | null {
+  if (!at) return null
+  const d = new Date(at)
+  return Number.isNaN(d.getTime()) ? null : todayInTz(timezone, d)
+}
+
+// ─── A store that stopped selling ────────────────────────────────────────────
+
+/** Fewer quiet days than this is an ordinary slow day, not news. */
+export const QUIET_AFTER_DAYS = 2
+
+export interface QuietInput {
+  range: DateRange
+  /** The store's today. */
+  today: string
+  /** Last kept order and last day with ad spend, on the store's calendar. */
+  lastSaleDate: string | null
+  lastAdDate: string | null
+  /** State of the store's order and Meta reading (laneState), null when absent. */
+  ordersLane: FreshState | null
+  metaLane: FreshState | null
+}
+
+export interface QuietNote {
+  /** warn when the order reading itself is late: the silence may be ours. */
+  tone: 'info' | 'warn'
+  title: string
+  lines: string[]
+}
+
+/**
+ * What to say when a store has stopped selling (Glooty: last order 10 nov,
+ * ads off after 15 nov). Days without orders read like a broken sync unless
+ * the page says when the last sale was and whether the order reading is
+ * current — on a window with no orders, and on a longer one whose sales
+ * stopped before its end (Glooty's 30 days: 14 orders, none after 10 nov).
+ * Only about the present (the window reaches yesterday or today) and only
+ * after QUIET_AFTER_DAYS without a sale.
+ */
+export function quietNote(i: QuietInput): QuietNote | null {
+  if (!i.lastSaleDate || i.range.to < shiftDate(i.today, -1)) return null
+  const days = daysBetween(i.lastSaleDate, i.today) - 1
+  if (days < QUIET_AFTER_DAYS) return null
+  const lines: string[] = []
+  const late = i.ordersLane === 'stale' || i.ordersLane === 'failing'
+  if (i.ordersLane === 'ok') lines.push('Os pedidos da Shopify estão sendo lidos normalmente: a loja não recebeu pedidos desde então. Não é falha de sincronização.')
+  else if (late) lines.push('A leitura dos pedidos da Shopify está atrasada: pode haver vendas que ainda não chegaram aqui.')
+  if (i.lastAdDate) {
+    const last = formatDate(i.lastAdDate, i.today)
+    if (i.lastAdDate >= shiftDate(i.today, -1)) lines.push(`Os anúncios continuam gastando (último gasto em ${last}) sem trazer pedidos.`)
+    else if (i.metaLane === 'ok') lines.push(`Anúncios parados: o último gasto foi em ${last}.`)
+    else lines.push(`O último gasto em anúncios registrado foi em ${last}.`)
+  }
+  return {
+    tone: late ? 'warn' : 'info',
+    title: `Última venda em ${formatDate(i.lastSaleDate, i.today)}, há ${plural(days, 'dia', 'dias')}`,
+    lines,
+  }
 }
 
 // ─── The row's link ──────────────────────────────────────────────────────────

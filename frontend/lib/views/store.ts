@@ -24,7 +24,7 @@
  * Everything here is the window the page context resolved (lib/views/page),
  * passed in, never re-derived.
  *
- * Pure helpers (comparisonPlan, trailRanges, chartSeries, storeKpis,
+ * Pure helpers (comparisonPlan, trailRanges, chartSeries, windowDaysSinceStart, kpiDays, storeKpis,
  * topProducts, topCountries, campaignHighlights, chargebackLevel) are tested in
  * __tests__/store.test.ts.
  */
@@ -39,8 +39,9 @@ import { daysBetween, minutesIntoDay, safeTz, shiftDate, todayInTz, type Compari
 import { getChargebackHealth, type ChargebackHealth } from '../adjustments'
 import { getCampaignReport, type CampaignReport, type CampaignRow } from '../data/campaigns'
 import type { CampaignAction } from '../campaignSignal'
+import { adChannelOf, channelRoas, type AdChannel } from './adChannel'
 import {
-  assemblePortfolio,
+  assemblePortfolio, loadFirstOrderDates,
   type PortfolioStoreInput, type PortfolioStoreRow, type PortfolioView, type StoreComparison,
 } from './portfolio'
 
@@ -135,10 +136,19 @@ export interface StoreSummary {
  * window plus the comparison. `win` must be the page context's window.
  */
 export async function loadStoreSummary(store: PortfolioStoreInput, win: StoreWindow, now: Date): Promise<StoreSummary> {
-  const [current, compared, sellsIn] = await Promise.all([
+  // The first sale, so the verdict reads a window before the store existed
+  // as such (and the chart line and the KPI averages count days from it).
+  // Optional: a failed read leaves the row's firstOrderDate null, as before.
+  const firstOrders = loadFirstOrderDates([store.id])
+    .catch(err => { console.error('[resumo] first order', err); return new Map<string, string>() })
+  const [current, compared, sellsIn, firstOrderDates, daysBefore] = await Promise.all([
     computePnL([store.id], win.range, { products: true, countries: true }, now),
     loadStoreComparison(store, win.range, win.comparison, now),
     loadSaleCurrency(store.id).catch(() => null),
+    firstOrders,
+    // Alongside the window's pass, not after it: only a store that started
+    // inside the window pays for it.
+    firstOrders.then(m => loadDaysBeforeIfNeeded(store.id, win.range, m.get(store.id) ?? null, now)),
   ])
   const pnl = current.get(store.id)
   if (!pnl) throw new Error(`Loja ${store.id} não encontrada no motor`)
@@ -147,16 +157,44 @@ export async function loadStoreSummary(store: PortfolioStoreInput, win: StoreWin
     anchorTimezone: safeTz(store.timezone), now,
     current, compared: new Map([[store.id, compared]]),
     chargebackHealth: null, liveFeed: [], liveCovered: new Set([store.id]), syncRows: null,
+    firstOrderDates,
   })
   const row = view.stores[0]
   const prev = compared.totals
   const previous = prev.orders > 0 || prev.adSpend > 0 ? prev : null
+  const days = kpiDays(win.range, pnl.daily, {
+    firstOrderDate: firstOrderDates.get(store.id) ?? null,
+    before: daysBefore,
+    runningDay: pnl.partial ? todayInTz(safeTz(store.timezone), now) : null,
+  })
   return {
     store, view, row, pnl, previous,
-    kpis: storeKpis(pnl.totals, previous, pnl.configured, win.range, pnl.daily),
+    kpis: storeKpis(pnl.totals, previous, pnl.configured, win.range, pnl.daily, days),
     products: topProducts(pnl.products ?? [], pnl.totals.revenue),
     countries: topCountries(pnl.countries ?? [], pnl.totals.revenue),
     sellsIn,
+  }
+}
+
+/**
+ * The 30 days before the window (the chart's context, trailRanges().before),
+ * read only when they can move the store's start: its first sale is after the
+ * window's first day, or unknown. Ads that ran in those days mean the store
+ * already existed on the window's quiet first days, as the chart counts them
+ * (windowDaysSinceStart). Such a store pays one more engine pass (~350 ms,
+ * run alongside the window's); every store that sold before the window, none.
+ * A failed read leaves the start to the window alone.
+ */
+async function loadDaysBeforeIfNeeded(
+  storeId: string, range: DateRange, firstOrderDate: string | null, now: Date,
+): Promise<DayPnL[]> {
+  if (firstOrderDate && firstOrderDate <= range.from) return []
+  const before = { from: shiftDate(range.from, -TRAIL_DAYS), to: shiftDate(range.from, -1) }
+  try {
+    return (await computePnL([storeId], before, {}, now)).get(storeId)?.daily ?? []
+  } catch (err) {
+    console.error('[resumo] days before the window', storeId, err)
+    return []
   }
 }
 
@@ -173,8 +211,24 @@ async function loadSaleCurrency(storeId: string): Promise<string | null> {
 // ─── KPIs ────────────────────────────────────────────────────────────────────
 
 export interface StoreKpis {
+  /** Days in the window. */
   days: number
+  /** Days the per-day averages divide by (kpiDays): the window's closed days
+   *  from the store's start on. Below 2 the page shows no average. */
+  avgDays: number
+  /** Those days when they are not the whole window — the store started inside
+   *  it, or its last day is still running — so the note names them ("por dia
+   *  em 7–17 nov"); null when they are the window. */
+  avgRange: DateRange | null
+  /** The store's start, when the window has days before it (Hibikura, Este
+   *  mês: 7 nov); else null. */
+  startedOn: string | null
+  /** Window days from the store's start on, the running day included: the
+   *  "de N dias" of the Shopify ads note. */
+  spanDays: number
   revenue: number
+  /** Revenue of the avgDays ÷ avgDays. */
+  revenuePerDay: number
   orders: number
   /** Revenue ÷ orders. */
   aov: number | null
@@ -217,32 +271,11 @@ export interface StoreKpis {
 
 const per = (a: number, b: number): number | null => (b > 0 ? a / b : null)
 
-export type AdChannel = 'meta' | 'shop' | 'both'
-
-/** Below this share of the ad spend, a second channel is a side cost (MOKOO's
- *  $226 of Shopify ads next to $5.624 of Meta) and the ROAS stays the Meta
- *  ROAS the owner reads everywhere; above it, the sales are no longer Meta's
- *  alone and the ROAS is measured on both channels together. */
-export const MINOR_CHANNEL_SHARE = 0.1
-
-/** The ad spend a ROAS should be measured on (see StoreKpis.roasChannel). */
-export function adChannelOf(t: Pick<PnL, 'metaSpend' | 'shopSpend'>): AdChannel | null {
-  const total = t.metaSpend + t.shopSpend
-  if (!(total > 0)) return null
-  if (t.shopSpend <= 0 || t.shopSpend < total * MINOR_CHANNEL_SHARE) return t.metaSpend > 0 ? 'meta' : 'shop'
-  if (t.metaSpend <= 0 || t.metaSpend < total * MINOR_CHANNEL_SHARE) return 'shop'
-  return 'both'
-}
-
-export function channelRoas(t: Pick<PnL, 'revenue' | 'metaSpend' | 'shopSpend'>): number | null {
-  const ch = adChannelOf(t)
-  // A minor second channel is left out of the ratio, as the owner reads the
-  // Meta ROAS; it is still in the profit.
-  const spend = ch === 'both' ? t.metaSpend + t.shopSpend : ch === 'meta' ? t.metaSpend : ch === 'shop' ? t.shopSpend : 0
-  return spend > 0 ? t.revenue / spend : null
-}
-
-export const CHANNEL_LABEL: Record<AdChannel, string> = { meta: 'Meta', shop: 'Anúncios Shopify', both: 'Meta + Shopify' }
+// The ad channel of a ROAS (adChannelOf, channelRoas, MINOR_CHANNEL_SHARE,
+// CHANNEL_LABEL) lives in the pure ./adChannel, shared with the verdict, the
+// overview and the AI card (client code that cannot import this module).
+// Re-exported so existing imports from lib/views/store keep working.
+export { adChannelOf, channelRoas, CHANNEL_LABEL, MINOR_CHANNEL_SHARE, type AdChannel } from './adChannel'
 
 /**
  * Why a CONFIGURED store has no break-even in a window. The engine returns
@@ -293,21 +326,76 @@ export function ledgerAdCents(t: PnL, configured: boolean): { meta: number | nul
   return { meta: at('meta'), shop: at('shop') }
 }
 
-export function storeKpis(t: PnL, prev: PnL | null, configured: boolean, range: DateRange, daily: DayPnL[] = []): StoreKpis {
+/** Which window days the KPI averages divide by (kpiDays). */
+export interface KpiDays {
+  startedOn: string | null
+  /** First and last day averaged; null when no day is (window idle before
+   *  the start, or only the running day). */
+  avg: DateRange | null
+  avgDays: number
+  spanDays: number
+}
+
+/**
+ * The days behind "por dia" on the Resumo, by the rule the daily chart's
+ * summary line already follows (windowDaysSinceStart), so the KPIs and the
+ * chart judge the same days:
+ *  - from the store's start: its first kept order or its first day with any
+ *    activity (ads before the first sale are real days of the store), the 30
+ *    days before the window included when the caller read them. Hibikura,
+ *    Este mês: the KPIs divided by 18 days next to a chart that said "desde
+ *    que a loja começou (7 nov)" — $490 a day instead of about $734;
+ *  - without the running day: its sales so far are a fraction of a day (the
+ *    chart leaves it out of "8 de 11 dias no lucro" for the same reason). At
+ *    01h on the 2nd, "Este mês" halved the first day's average.
+ * spanDays keeps the running day: it counts days, it averages nothing.
+ */
+export function kpiDays(
+  range: DateRange, daily: readonly DayPnL[],
+  opts: { firstOrderDate: string | null; before?: readonly DayPnL[]; runningDay: string | null },
+): KpiDays {
+  const since = windowDaysSinceStart(chartSeries([...(opts.before ?? [])], [...daily], []), opts.firstOrderDate)
+  const start = since.startedOn ?? range.from
+  const running = opts.runningDay && opts.runningDay >= range.from && opts.runningDay <= range.to ? opts.runningDay : null
+  const lastClosed = running ? shiftDate(running, -1) : range.to
+  const avgDays = start <= lastClosed ? daysBetween(start, lastClosed) : 0
+  return {
+    startedOn: since.startedOn,
+    avg: avgDays > 0 ? { from: start, to: lastClosed } : null,
+    avgDays,
+    spanDays: start <= range.to ? daysBetween(start, range.to) : 0,
+  }
+}
+
+export function storeKpis(t: PnL, prev: PnL | null, configured: boolean, range: DateRange, daily: DayPnL[] = [], span?: KpiDays): StoreKpis {
   const days = daysBetween(range.from, range.to)
+  // Without a span (tests, callers that do not know the start): the whole
+  // window, as before.
+  const sp: KpiDays = span ?? { startedOn: null, avg: range, avgDays: days, spanDays: days }
+  const whole = !!sp.avg && sp.avg.from === range.from && sp.avg.to === range.to
+  // The averaged days' own sums (the engine's daily rows add up to the
+  // totals); the totals themselves when the days are the whole window.
+  const avgRows = whole || !sp.avg ? [] : daily.filter(d => d.date >= sp.avg!.from && d.date <= sp.avg!.to)
+  const avgSum = (k: 'revenue' | 'orders' | 'metaSpend') => (whole ? t[k] : avgRows.reduce((a, d) => a + d[k], 0))
+  const avgPer = (k: 'revenue' | 'orders' | 'metaSpend') => (sp.avgDays > 0 ? avgSum(k) / sp.avgDays : 0)
   return {
     days,
+    avgDays: sp.avgDays,
+    avgRange: whole ? null : sp.avg,
+    startedOn: sp.startedOn,
+    spanDays: sp.spanDays,
     revenue: t.revenue,
+    revenuePerDay: avgPer('revenue'),
     orders: t.orders,
     aov: per(t.revenue, t.orders),
-    ordersPerDay: t.orders / Math.max(1, days),
+    ordersPerDay: avgPer('orders'),
     metaRoas: t.metaSpend > 0 ? t.roas : null,
     roasChannel: adChannelOf(t),
     channelRoas: channelRoas(t),
     breakEven: configured ? t.breakEvenRoas : null,
     metaSpend: t.metaSpend,
     metaCents: t.revenue > 0 ? (t.metaSpend / t.revenue) * 100 : null,
-    metaPerDay: t.metaSpend / Math.max(1, days),
+    metaPerDay: avgPer('metaSpend'),
     shopSpend: t.shopSpend,
     shopCents: t.revenue > 0 ? (t.shopSpend / t.revenue) * 100 : null,
     shopDays: daily.filter(d => d.shopSpend > 0).length,
@@ -439,7 +527,31 @@ const chartDay = (d: DayPnL, inWindow: boolean): ChartDay => ({
   shopSpend: d.shopSpend, orders: d.orders, inWindow,
 })
 
-const idle = (d: ChartDay) => d.orders === 0 && d.revenue === 0 && d.metaSpend === 0 && d.shopSpend === 0
+/** No sale, no order and no ad spend (a ChartDay or an engine DayPnL). */
+const idle = (d: Pick<ChartDay, 'orders' | 'revenue' | 'metaSpend' | 'shopSpend'>) => d.orders === 0 && d.revenue === 0 && d.metaSpend === 0 && d.shopSpend === 0
+
+/**
+ * What the daily chart draws for a day: profit with cost settings, revenue −
+ * ads without, times the viewer's share (ctx.splitFactor). The verdict halves
+ * both in the split view (lib/views/verdict: amount = result × k), so the bars
+ * and the band total under a "(sua parte)" title must too — the chart of a
+ * store without costs used to draw the whole store (Glooty, Este mês: verdict
+ * −$904, band −$1.807). One function for both kinds of chart, so they cannot
+ * drift apart again.
+ */
+export function chartValue(d: ChartDay, configured: boolean, share = 1): number {
+  return (configured ? d.profit : d.revenue - d.metaSpend - d.shopSpend) * share
+}
+
+/**
+ * Nothing to draw: no sale, no spend and a zero value on every day of the
+ * series (a month before the store opened, Hibikura in October). The chart's
+ * axis then spans $0–$1 and printed "$0 $0 $0 $0 $1 $1 $1". Fixed costs on an
+ * idle day are a real loss and still draw.
+ */
+export function seriesIdle(series: ChartDay[], configured: boolean): boolean {
+  return series.every(d => idle(d) && chartValue(d, configured) === 0)
+}
 
 /**
  * Before + window + after, oldest first, each date once. Context days before
@@ -460,6 +572,31 @@ export function chartSeries(before: DayPnL[], window: DayPnL[], after: DayPnL[])
   out.sort((a, b) => a.date.localeCompare(b.date))
   const firstActive = out.findIndex(d => d.inWindow || !idle(d))
   return firstActive > 0 ? out.slice(firstActive) : out
+}
+
+/**
+ * The window's days the chart's summary line judges ("8 de 11 dias no lucro"):
+ * none from before the store existed. chartSeries keeps every window day, so
+ * Hibikura's "Este mês" counted 1–6 nov (no order, no spend: the store opened
+ * on 7 nov) as days not in profit and read "8 de 17". The store starts on its
+ * first kept order (lib/views/portfolio loadFirstOrderDates) or on the first
+ * day of the series with any activity, whichever is earlier — ads that ran
+ * before the first sale are real losses and count. Without a known first order
+ * (the read failed) the series alone decides, on the same 30 days of context
+ * chartSeries uses. An idle day after the start counts: the store existed and
+ * sold nothing.
+ *
+ * Takes the whole series (context days with activity also prove the store
+ * existed) and returns its window days; `startedOn` is set only when window
+ * days were left out, so the line can say so.
+ */
+export function windowDaysSinceStart(series: readonly ChartDay[], firstOrderDate: string | null): { days: ChartDay[]; startedOn: string | null } {
+  const window = series.filter(d => d.inWindow)
+  const firstActive = series.find(d => !idle(d))?.date ?? null
+  const start = [firstOrderDate, firstActive].filter((x): x is string => !!x).sort()[0] ?? null
+  if (!start) return { days: window, startedOn: null }
+  const kept = window.filter(d => d.date >= start || !idle(d))
+  return { days: kept, startedOn: kept.length < window.length ? start : null }
 }
 
 export interface ProfitTrail {
@@ -543,17 +680,30 @@ export async function loadChargebacks(storeId: string): Promise<ChargebackBlock>
 // ─── Campaigns ───────────────────────────────────────────────────────────────
 
 export interface CampaignHighlights {
+  /** The biggest campaigns by spend (the unsynced-ads bucket is not one). */
   top: CampaignRow[]
+  /** Campaigns with spend after the top ones. */
   rest: { count: number; spend: number }
   /** Campaigns with spend in the window. */
   withSpend: number
+  /** Campaigns the campaigns page lists — its tab count (lib/data/campaigns
+   *  campaignTotals: every row but the unsynced bucket). */
+  listed: number
+  /** Spend of ads the sync has not tied to a campaign yet (the "Anúncios ainda
+   *  não sincronizados" row): named on its own, never counted as a campaign. */
+  unsynced: { spend: number; ads: number }
   actions: Record<CampaignAction, number>
   /** Meta purchase value of the store's own campaigns ÷ store revenue, %. */
   attributedShare: number | null
 }
 
 export function campaignHighlights(report: Pick<CampaignReport, 'campaigns' | 'storeRevenue'>, n = TOP_N): CampaignHighlights {
-  const spent = report.campaigns.filter(c => c.spend > 0).sort((a, b) => b.spend - a.spend)
+  // The unsynced row is a bucket of ads, not a campaign: counting it made the
+  // Resumo say "Ver as 7 campanhas" over a campaigns page that lists 6, and it
+  // took one of the five "campanhas que mais gastaram" (Glooty, $445).
+  const campaigns = report.campaigns.filter(c => !c.unsynced)
+  const buckets = report.campaigns.filter(c => c.unsynced)
+  const spent = campaigns.filter(c => c.spend > 0).sort((a, b) => b.spend - a.spend)
   const top = spent.slice(0, n)
   const rest = spent.slice(n)
   const actions: Record<CampaignAction, number> = { escalar: 0, manter: 0, cortar: 0, observar: 0 }
@@ -563,6 +713,11 @@ export function campaignHighlights(report: Pick<CampaignReport, 'campaigns' | 's
     top,
     rest: { count: rest.length, spend: rest.reduce((s, c) => s + c.spend, 0) },
     withSpend: spent.length,
+    listed: campaigns.length,
+    unsynced: {
+      spend: buckets.reduce((s, c) => s + c.spend, 0),
+      ads: buckets.reduce((s, c) => s + (c.unsyncedAds ?? []).filter(a => a.spend >= 0.005).length, 0),
+    },
     actions,
     attributedShare: report.storeRevenue > 0 ? (own / report.storeRevenue) * 100 : null,
   }

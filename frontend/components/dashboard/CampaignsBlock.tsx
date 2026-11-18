@@ -46,7 +46,6 @@ export function ActionBadge({ decision }: { decision: CampaignDecision }) {
 }
 
 function status(c: CampaignRow): string {
-  if (c.unsynced) return `${plural(c.unsyncedAds.length, 'anúncio', 'anúncios')} sem campanha no catálogo`
   const st = c.running ? 'ativa' : c.status ? 'pausada' : 'status desconhecido'
   return `${st} · ${plural(Math.round(c.purchases), 'compra atribuída', 'compras atribuídas')}`
 }
@@ -70,6 +69,12 @@ export async function CampaignsBlock({ ctx, summary, storeNames }: {
   const link = ctx.hrefWith('/campaigns')
   const elsewhere = report.billedElsewhere
 
+  // Ads the sync has not tied to a campaign: their spend is named apart, so
+  // the counts here equal the campaigns page's and the money still adds up.
+  const unsyncedLine = h.unsynced.spend > 0 && (
+    <>{formatMoney(h.unsynced.spend)} em {plural(Math.max(1, h.unsynced.ads), 'anúncio', 'anúncios')} que a sincronização ainda não ligou a uma campanha (linha &ldquo;Anúncios ainda não sincronizados&rdquo; em Campanhas).</>
+  )
+
   if (!h.top.length) {
     return (
       <Block title={title} howTo={`Campanhas com gasto em ${ctx.rangeLabel}.`}>
@@ -77,7 +82,9 @@ export async function CampaignsBlock({ ctx, summary, storeNames }: {
           action={<Link className={s.link} href={link}>Abrir Campanhas <Icon name="arrowRight" size={12} /></Link>}>
           {elsewhere.length
             ? <>Os anúncios desta loja rodaram na conta de outra: {elsewhere.map(e => <span key={e.campaignId}><b>{e.name}</b> ({formatMoney(e.spend)} na {e.billedStoreName}) </span>)}. O gasto está nas contas da {elsewhere[0].billedStoreName}; some as duas lojas para julgar.</>
-            : 'Esta loja não teve gasto no Meta neste período.'}
+            : unsyncedLine
+              ? <>O gasto do período está todo em anúncios ainda sem campanha: {unsyncedLine}</>
+              : 'Esta loja não teve gasto no Meta neste período.'}
         </EmptyState>
       </Block>
     )
@@ -89,7 +96,8 @@ export async function CampaignsBlock({ ctx, summary, storeNames }: {
       title={title}
       howTo={<>{h.top.length === 1 ? 'A campanha que mais gastou' : `As ${h.top.length} campanhas que mais gastaram`} em {ctx.rangeLabel}. A ação é julgada nos últimos 7 dias fechados ({decided}), como na página Campanhas; o ROAS é comparado com o empate da loja{be ? ` (${formatRoas(be)})` : ''}.</>}
       info={report.formula}
-      actions={<Link className={s.link} href={link}>Ver {h.withSpend > h.top.length ? `as ${h.withSpend} campanhas` : 'campanhas'} <Icon name="arrowRight" size={12} /></Link>}
+      // The number the linked page shows on its tab ("Campanhas 6").
+      actions={<Link className={s.link} href={link}>Ver {h.listed > h.top.length ? `as ${h.listed} campanhas` : 'campanhas'} <Icon name="arrowRight" size={12} /></Link>}
       flush
       footer={
         <div className={s.footLinks}>
@@ -103,6 +111,7 @@ export async function CampaignsBlock({ ctx, summary, storeNames }: {
                 : null}
             Use a ação para comparar campanhas entre si; a loja se julga pelo lucro real.
             {h.rest.count > 0 && <> Mais {plural(h.rest.count, 'campanha', 'campanhas')} com <b>{formatMoney(h.rest.spend)}</b> de gasto.</>}
+            {unsyncedLine && <> Fora das campanhas: {unsyncedLine}</>}
           </span>
         </div>
       }
@@ -119,14 +128,14 @@ export async function CampaignsBlock({ ctx, summary, storeNames }: {
           { key: 'action', label: 'Ação · últimos 7 dias' },
         ]}
         rows={h.top.map(c => ({
-          key: c.campaignId ?? `unsynced-${c.name}`,
+          key: c.campaignId ?? c.name,
           tone: c.running ? undefined : 'mut',
           cells: {
             name: <span className={s.campName}><b title={c.name}>{c.name}</b><small>{status(c)}</small></span>,
             spend: <Money value={c.spend} />,
             value: <Money value={c.purchaseValue} tone="none" />,
             roas: c.spend > 0 && c.roas !== null
-              ? <RoasVsEmpate roas={c.roas} breakEven={c.shared ? null : be} gap={c.shared ? 'shared' : gap} size="mini" paused={!c.running && !c.unsynced} />
+              ? <RoasVsEmpate roas={c.roas} breakEven={c.shared ? null : be} gap={c.shared ? 'shared' : gap} size="mini" paused={!c.running} />
               : <span className="mut">—</span>,
             profit: c.estimatedProfit === null ? <span className="mut">—</span> : <Money value={ctx.part(c.estimatedProfit)} sign tone="auto" />,
             action: (

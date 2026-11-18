@@ -16,8 +16,8 @@
  */
 
 import { Suspense } from 'react'
-import type { Metadata } from 'next'
-import { getPageContext, type PageContext, type SearchParams } from '@/lib/views/page'
+import Link from 'next/link'
+import { ALL_STORES, getPageContext, pageMetadata, type PageContext, type SearchParams } from '@/lib/views/page'
 import type { StoreRef } from '@/lib/access'
 import { empateGap, loadStoreSummary, type StoreSummary } from '@/lib/views/store'
 import { buildVerdict, verdictInputFromPortfolio } from '@/lib/views/verdict'
@@ -31,12 +31,15 @@ import { CampaignsBlock } from '@/components/dashboard/CampaignsBlock'
 import { TopCountries, TopProducts } from '@/components/dashboard/TopLists'
 import { RefundsBlock } from '@/components/dashboard/RefundsBlock'
 import { SharedAccountNote } from '@/components/dashboard/SharedAccountNote'
+import { QuietStoreNote } from '@/components/dashboard/QuietStoreNote'
 import s from '@/components/dashboard/dashboard.module.css'
 
 // Absolute: the root layout's "%s · Opero" template only reaches child
 // segments, and this page sits in the layout's own segment (the tab read
-// "Resumo" while every other page read "… · Opero").
-export const metadata: Metadata = { title: { absolute: 'Resumo · Opero' } }
+// "Resumo" while every other page read "… · Opero"). generateMetadata, not a
+// static title: it 404s on a ?loja the viewer cannot see, so that tab reads
+// "Página não encontrada · Opero" over the not-found card instead of "Resumo".
+export const generateMetadata = pageMetadata({ absolute: 'Resumo · Opero' }, { scope: 'store' })
 
 /** The code pill, unless the store's name already carries it ("Dumpling
  *  Squishy · 8jcp3a" read "… 8jcp3a 8jcp3a"). */
@@ -53,9 +56,32 @@ function customSub(ctx: PageContext) {
 }
 export const dynamic = 'force-dynamic'
 
+/**
+ * The URL asked for "Todas" (a sidebar link from an all-stores page) and this
+ * page reads one store at a time: getPageContext then shows the store the
+ * browser last picked, which may have been chosen in another tab. Say which
+ * one, as Atribuição does, instead of switching silently. Not for a one-store
+ * partner, who has no "Todas" to come from.
+ */
+function cameFromAll(sp: SearchParams, ctx: PageContext): boolean {
+  const loja = Array.isArray(sp.loja) ? sp.loja[0] : sp.loja
+  return loja?.trim() === ALL_STORES && ctx.scope === 'store' && ctx.allowAll && !!ctx.store
+}
+
+function FromAllNote({ ctx, store }: { ctx: PageContext; store: StoreRef }) {
+  return (
+    <Callout tone="neu" icon="store" title={`Mostrando a ${store.name}`}>
+      O Resumo mostra uma loja por vez. Escolha outra no seletor de loja, ou veja todas juntas
+      em <Link href={ctx.hrefWith('/overview', { loja: ALL_STORES })}>Todas as lojas</Link>.
+    </Callout>
+  )
+}
+
 export default async function ResumoPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
-  const ctx = await getPageContext(searchParams, { scope: 'store' })
+  const sp = await searchParams
+  const ctx = await getPageContext(sp, { scope: 'store' })
   const store = ctx.store
+  const fromAll = cameFromAll(sp, ctx)
 
   if (!store) {
     return (
@@ -79,6 +105,7 @@ export default async function ResumoPage({ searchParams }: { searchParams: Promi
     return (
       <AppShell ctx={ctx}>
         <PageHeader ctx={ctx} code={headerCode(ctx, store)} sub={customSub(ctx)} />
+        {fromAll && <FromAllNote ctx={ctx} store={store} />}
         <Card>
           <ErrorState title="Os números desta loja não carregaram"
             action={<ButtonLink href={ctx.hrefWith('/')} icon="refresh">Tentar de novo</ButtonLink>}>
@@ -108,6 +135,7 @@ export default async function ResumoPage({ searchParams }: { searchParams: Promi
             </Chip>
           )}
         />
+        {fromAll && <FromAllNote ctx={ctx} store={store} />}
         <PeriodNote ctx={ctx} />
         {!configured && (
           <Callout tone="warn" title="Custos não configurados">
@@ -118,16 +146,21 @@ export default async function ResumoPage({ searchParams }: { searchParams: Promi
         <Suspense fallback={null}>
           <SharedAccountNote ctx={ctx} store={store} />
         </Suspense>
+        {/* No orders and a last sale days old: when it last sold and whether the
+            order reading is current, so a quiet store does not read as a broken sync. */}
+        <Suspense fallback={null}>
+          <QuietStoreNote ctx={ctx} store={store} summary={summary} />
+        </Suspense>
 
         <VerdictCard
           verdict={v}
           headingLevel="h2"
-          // The verdict's ROAS box divides revenue by Meta spend only; when Shopify
-          // ads carry real spend that would credit Meta with their sales, so the
-          // box is left out and the KPI below measures the right spend. Without
-          // sales, or without a break-even for a store that has costs, the box
-          // would read "0,00× · custos não configurados" (wrong for EPOCH at 03h);
-          // the sentence above already says what happened and the KPI says why.
+          // The verdict's ROAS box (components/ui/VerdictCard) still words it as
+          // "ROAS da loja" and "Cada $1 no Meta trouxe…", so it is shown only when
+          // the store's ad channel IS Meta; for Shopify ads or both the KPI below
+          // names the right channel. Without sales or without a break-even the
+          // sentence above already says what happened and the KPI says why, so
+          // the box would only repeat it.
           roas={summary.kpis.roasChannel === 'meta' && sold
             && !empateGap(configured, summary.kpis.breakEven, summary.pnl.totals)}
           aside={

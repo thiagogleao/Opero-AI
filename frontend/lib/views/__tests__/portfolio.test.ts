@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest'
 import { sumPnL, type DayPnL, type HourPoint, type PnL, type PnLLines, type StorePnL } from '../../engine/pnl'
 import { comparisonRange } from '../../engine/dates'
 import {
-  assemblePortfolio, badgesFor, combineHealth, combineIntraday, dayStateOf, greenSinceOf, storeFreshness,
-  type PortfolioStoreInput, type StoreComparison, type SyncRow,
+  assemblePortfolio, badgesFor, combineHealth, combineIntraday, dayStateOf, greenSinceOf, sourceFreshness, storeFreshness,
+  STALE_AFTER_MINUTES, type PortfolioStoreInput, type StoreComparison, type SyncRow,
 } from '../portfolio'
+import { STALE_AFTER_MIN, staleness } from '../../sync/plan'
+import { buildVerdict, verdictInputFromPortfolio } from '../verdict'
 
 // 2026-11-17 15:45 in Belém/São Paulo = 18:45 UTC = 2026-11-18 03:45 in Tokyo.
 const NOW = new Date('2026-11-17T18:45:00Z')
@@ -78,6 +80,30 @@ describe('storeFreshness', () => {
     expect(f.ads).toBeNull()
     expect(storeFreshness('other', rows, true, NOW).stale).toBe(false)
   })
+  it('uses the top bar thresholds (lib/sync/plan): amber is late, red with a failed run is failing', () => {
+    const at = (min: number, source: 'shopify' | 'facebook', status = 'success'): SyncRow =>
+      ({ tenant_id: 's', source, last_success: new Date(NOW.getTime() - min * 60000), last_started: NOW, last_status: status })
+    const one = (r: SyncRow) => sourceFreshness(r.source as 'shopify' | 'facebook', r, NOW)
+    // Orders: amber at 20 min, red at 60 (the phone used 30: 25 min was "fine" here and late on the desktop).
+    expect(one(at(19, 'shopify')).stale).toBe(false)
+    expect(one(at(20, 'shopify')).stale).toBe(true)
+    expect(one(at(25, 'shopify')).stale).toBe(true)
+    expect(one(at(25, 'shopify', 'error')).failing).toBe(false) // amber, not red
+    expect(one(at(60, 'shopify', 'error')).failing).toBe(true)
+    expect(one(at(60, 'shopify', 'partial')).failing).toBe(true)
+    expect(one(at(90, 'shopify', 'success')).failing).toBe(false)
+    // Meta: amber at 45, red at 120 (the phone used 90).
+    expect(one(at(44, 'facebook')).stale).toBe(false)
+    expect(one(at(45, 'facebook')).stale).toBe(true)
+    expect(one(at(100, 'facebook', 'error')).failing).toBe(false)
+    expect(one(at(120, 'facebook', 'error')).failing).toBe(true)
+    expect(STALE_AFTER_MINUTES).toEqual({ shopify: STALE_AFTER_MIN.shopify[0], facebook: STALE_AFTER_MIN.facebook[0] })
+    for (const min of [5, 19, 20, 44, 45, 59, 60, 119, 120, 600]) {
+      for (const source of ['shopify', 'facebook'] as const) {
+        expect(one(at(min, source)).stale, `${source} ${min}`).toBe(staleness(source, new Date(NOW.getTime() - min * 60000), NOW) !== 'ok')
+      }
+    }
+  })
   it('turns into badges', () => {
     const f = storeFreshness('late', [
       { tenant_id: 'late', source: 'shopify', last_success: null, last_started: NOW, last_status: 'error' },
@@ -126,15 +152,69 @@ describe('assemblePortfolio', () => {
     expect(view.daily[0].operatingProfit).toBeCloseTo(view.totals.operatingProfit, 6)
     expect(view.daily[0].cashResult).toBeCloseTo(view.totals.cashResult, 6)
   })
+  it('the judged daily series follows the verdict: Glooty (no costs) is out, so the bars add up to its amount', () => {
+    const v = buildVerdict(verdictInputFromPortfolio(view))
+    expect(view.dailyJudged).toHaveLength(1)
+    expect(view.dailyJudged[0].operatingProfit).toBeCloseTo(v.amount!, 6)
+    expect(view.dailyJudged[0].operatingProfit).toBeCloseTo((1000 - 400 - 300) + (1596 - 600 - 400), 6)
+    expect(view.dailyJudged[0].metaSpend).toBe(700)
+    // With every store configured (or none), it is the same series.
+    const mokooOnly = assemblePortfolio({
+      stores: [stores[0]], period: 'today', range, comparison: cmp, anchorTimezone: 'America/Sao_Paulo', now: NOW,
+      current, compared, chargebackHealth: null, liveFeed: [], liveCovered: new Set(), syncRows: null,
+    })
+    expect(mokooOnly.dailyJudged).toBe(mokooOnly.daily)
+  })
   it('plots only stores whose day is running and reports the closed one apart', () => {
     const i = view.intraday!
-    expect(i.stores.map(s => s.storeId)).toEqual(['mokoo', 'glooty'])
+    // Glooty has no costs: out of the summed curve, as out of the verdict.
+    expect(i.stores.map(s => s.storeId)).toEqual(['mokoo'])
     expect(i.closedStores.map(s => s.storeId)).toEqual(['hibikura'])
-    expect(i.closing).toBe(300 - 120)
-    expect(i.configured).toBe(false)
+    expect(i.unconfiguredStores.map(s => s.storeId)).toEqual(['glooty'])
+    expect(i.unconfiguredStores[0]).toMatchObject({ revenue: 0, adSpend: 120, operatingProfit: -120 })
+    expect(i.closing).toBe(300)
+    expect(i.configured).toBe(true)
     const hib = view.stores.find(s => s.id === 'hibikura')!
     expect(hib.dayClosed).toBe(true)
     expect(hib.badges.map(b => b.code)).toContain('dia_encerrado')
+  })
+  it('a summed past day ends the curve at the verdict amount (14 nov: $1.298 under $1.362)', () => {
+    const day = { from: '2026-11-14', to: '2026-11-14' }
+    const dcmp = comparisonRange('custom', day, 'America/Sao_Paulo', NOW)
+    const cur = new Map<string, StorePnL>([
+      ['mokoo', store('mokoo', 'America/Belem', { '2026-11-14': { revenue: 1000, orders: 10, cogs: 400, metaSpend: 300 } }, { hourly: hours([-50, 120, 250, 300]) })],
+      ['glooty', store('glooty', 'America/Belem', { '2026-11-14': { revenue: 0, orders: 0, metaSpend: 64 } }, { configured: false, hourly: hours([-20, -40, -64, -64]) })],
+      ['hibikura', store('hibikura', 'Asia/Tokyo', { '2026-11-14': { revenue: 900, orders: 9, cogs: 300, metaSpend: 200 } }, { hourly: hours([10, 200, 380, 400]) })],
+    ])
+    const cmpd = new Map<string, StoreComparison>(['mokoo', 'glooty', 'hibikura'].map(id => [id, { included: true, range: { from: dcmp.from, to: dcmp.to }, cutoffMinutes: null, totals: pnl() }]))
+    const v14 = assemblePortfolio({
+      stores, period: 'custom', range: day, comparison: dcmp, anchorTimezone: 'America/Sao_Paulo', now: NOW,
+      current: cur, compared: cmpd, chargebackHealth: null, liveFeed: [], liveCovered: new Set(), syncRows: null,
+    })
+    const verdict = buildVerdict(verdictInputFromPortfolio(v14))
+    const i = v14.intraday!
+    expect(i.stores.map(s => s.storeId)).toEqual(['mokoo', 'hibikura'])
+    expect(i.points[i.points.length - 1].cumProfit).toBeCloseTo(verdict.amount!, 6)
+    expect(i.closing).toBeCloseTo(v14.dailyJudged[0].operatingProfit, 6)
+    // The peak is never above what the judged stores really made.
+    expect(i.peak!.profit).toBe(700)
+    expect(i.unconfiguredStores.map(s => s.name)).toEqual(['Glooty'])
+    // Only configured stores, or only unconfigured ones: nothing is left out.
+    const onlyGlooty = assemblePortfolio({
+      stores: [stores[1]], period: 'custom', range: day, comparison: dcmp, anchorTimezone: 'America/Belem', now: NOW,
+      current: cur, compared: cmpd, chargebackHealth: null, liveFeed: [], liveCovered: new Set(), syncRows: null,
+    })
+    expect(onlyGlooty.intraday!.stores.map(s => s.storeId)).toEqual(['glooty'])
+    expect(onlyGlooty.intraday!.unconfiguredStores).toEqual([])
+    expect(onlyGlooty.intraday!.configured).toBe(false)
+  })
+  it('carries the range note when buildPortfolio cut the window, null otherwise', () => {
+    expect(view.rangeNote).toBeNull()
+    const cut = assemblePortfolio({
+      stores: [stores[0]], period: 'custom', range, comparison: cmp, anchorTimezone: 'America/Sao_Paulo', now: NOW,
+      current, compared, chargebackHealth: null, liveFeed: [], liveCovered: new Set(), syncRows: null, rangeNote: 'O período pedido passa de 366 dias…',
+    })
+    expect(cut.rangeNote).toBe('O período pedido passa de 366 dias…')
   })
   it('compares only the stores that have something to compare with', () => {
     expect(view.comparison.totals.revenue).toBe(800 + 744)
@@ -156,6 +236,40 @@ describe('assemblePortfolio', () => {
   })
 })
 
+describe('assemblePortfolio · first order (Hibikura opened on 7 nov)', () => {
+  // 2026-11-18 in Tokyo; the first kept order is 2026-11-07 on Tokyo's calendar.
+  const now = new Date('2026-11-18T05:00:00Z')
+  const hibikura: PortfolioStoreInput = { id: 'hib', name: 'Hibikura', timezone: 'Asia/Tokyo' }
+  const firstOrderDates = new Map([['hib', '2026-11-07']])
+  const viewFor = (period: 'lastmonth' | '30d', range: { from: string; to: string }, days: Record<string, Partial<PnLLines>>, first?: ReadonlyMap<string, string>) => {
+    const cmp = comparisonRange(period, range, 'Asia/Tokyo', now)
+    return assemblePortfolio({
+      stores: [hibikura], period, range, comparison: cmp, anchorTimezone: 'Asia/Tokyo', now,
+      current: new Map([['hib', store('hib', 'Asia/Tokyo', days)]]),
+      compared: new Map([['hib', { included: true, range: { from: cmp.from, to: cmp.to }, cutoffMinutes: null, totals: pnl() }]]),
+      chargebackHealth: null, liveFeed: [], liveCovered: new Set(['hib']), syncRows: null, firstOrderDates: first,
+    })
+  }
+
+  it('puts the first order on the row, null when it was not loaded', () => {
+    const oct = { from: '2026-10-01', to: '2026-10-31' }
+    expect(viewFor('lastmonth', oct, { '2026-10-01': {} }, firstOrderDates).stores[0].firstOrderDate).toBe('2026-11-07')
+    expect(viewFor('lastmonth', oct, { '2026-10-01': {} }).stores[0].firstOrderDate).toBeNull()
+  })
+  it('October reads "começou a vender em 7 nov", not "não teve vendas no mês passado"', () => {
+    const v = buildVerdict(verdictInputFromPortfolio(viewFor('lastmonth', { from: '2026-10-01', to: '2026-10-31' }, { '2026-10-01': {} }, firstOrderDates)))
+    expect(v.headline).toBe('A Hibikura começou a vender em 7 nov — não há dados de outubro.')
+    expect(v.chips.map(c => c.label)).toContain('Vende desde 7 nov')
+    expect(v.headline).not.toMatch(/não teve vendas/)
+  })
+  it('30 days that start before the first order carry the note', () => {
+    const v = buildVerdict(verdictInputFromPortfolio(viewFor('30d', { from: '2026-10-19', to: '2026-11-17' }, {
+      '2026-11-07': { revenue: 3000, orders: 40, cogs: 900, metaSpend: 1200 },
+    }, firstOrderDates)))
+    expect(v.notes.map(n => n.text)).toContain('A Hibikura só começou a vender em 7 nov: o período tem dias antes disso.')
+  })
+})
+
 describe('combineHealth', () => {
   it('recomputes the rate from summed counts and keeps each store apart', () => {
     const h = (count: number, orders: number) => ({
@@ -170,5 +284,34 @@ describe('combineHealth', () => {
     expect(out.count).toBe(5)
     expect(out.rate).toBeCloseTo((5 / 1050) * 100, 6)
     expect(out.byStore.map(s => s.storeId)).toEqual(['a', 'b'])
+  })
+  it('lists every dispute still in time, counted per store, never cut at 5 (12 waited, 4 were shown)', () => {
+    const d = (id: string, dueBy: string | null) => ({ externalId: id, amount: 30, currency: 'USD', reason: 'fraudulent', dueBy })
+    const h = (n: number) => ({
+      count: n, orders: 100, rate: n, amount: 0, fees: 0, open: n, lost: 0, won: 0,
+      // getChargebackHealth's own list stops at 5.
+      dueSoon: Array.from({ length: Math.min(n, 5) }, (_, k) => d(`x${k}`, '2026-11-20 00:00:00+00')), hasData: n > 0,
+    })
+    const epochList = ['22', '26', '28', '30', '25'].map((day, k) => d(`e${k}`, `2026-${day === '25' ? '12' : '11'}-${day} 04:00:00+00`))
+    const out = combineHealth([
+      { store: { id: 'epoch', name: 'EPOCH', timezone: 'UTC' }, health: h(6), awaiting: { list: epochList, overdue: 1 } },
+      { store: { id: 'camp', name: 'CAMP HALLOW', timezone: 'UTC' }, health: h(3), awaiting: { list: [d('c0', '2026-11-19 23:00:00+00'), d('c1', '2026-11-29 23:00:00+00'), d('c2', null)], overdue: 0 } },
+      { store: { id: 'mokoo', name: 'MOKOO', timezone: 'UTC' }, health: h(1), awaiting: { list: [d('m0', '2026-12-03 04:00:00+00')], overdue: 0 } },
+      // Not loaded: falls back to the store's own (cut) list.
+      { store: { id: 'dump', name: 'Dumpling', timezone: 'UTC' }, health: h(2) },
+    ])
+    expect(out.dueSoon).toHaveLength(5 + 3 + 1 + 2)
+    expect(out.dueSoon[0].externalId).toBe('c0')
+    expect(out.dueSoon.map(x => x.externalId)).toContain('e4') // EPOCH's 25 dez, the fifth
+    expect(out.dueSoon.map(x => x.externalId)).toContain('m0')
+    expect(out.dueSoon[out.dueSoon.length - 1].externalId).toBe('c2') // no deadline: last
+    expect(out.awaitingByStore).toEqual([
+      { storeId: 'epoch', name: 'EPOCH', count: 5 },
+      { storeId: 'camp', name: 'CAMP HALLOW', count: 3 },
+      { storeId: 'dump', name: 'Dumpling', count: 2 },
+      { storeId: 'mokoo', name: 'MOKOO', count: 1 },
+    ])
+    expect(out.awaitingByStore.reduce((a, x) => a + x.count, 0)).toBe(out.dueSoon.length)
+    expect(out.overdue).toBe(1)
   })
 })

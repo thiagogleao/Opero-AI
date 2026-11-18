@@ -5,14 +5,16 @@
  * it loads the context days itself and streams in <Suspense>.
  *
  * A store without cost settings gets NetSalesBars (revenue − ads, never called
- * profit) and no intraday curve.
+ * profit) and no intraday curve. In the partner split (?parte=50) both charts
+ * draw the viewer's share, like the verdict above them; a series with no sale,
+ * no spend and no cost on any day is said in words instead of drawn.
  */
 
 import type { PageContext } from '@/lib/views/page'
 import type { StoreSummary } from '@/lib/views/store'
-import { chartSeries, loadProfitTrail, TRAIL_DAYS } from '@/lib/views/store'
-import { formatClock, formatMoney, formatRangeLabel, formatWeekdayDate, plural, tzCity, dayOfLabel } from '@/lib/format'
-import { Block, ErrorState } from '@/components/ui'
+import { chartSeries, chartValue, loadProfitTrail, seriesIdle, TRAIL_DAYS, windowDaysSinceStart } from '@/lib/views/store'
+import { formatClock, formatDate, formatMoney, formatRangeLabel, formatWeekdayDate, plural, tzCity, dayOfLabel } from '@/lib/format'
+import { Block, EmptyState, ErrorState } from '@/components/ui'
 import { DailyProfitBars, DailyProfitLegend, IntradayCurve, IntradayLegend } from '@/components/charts'
 import { NetSalesBars, NetSalesLegend } from './NetSalesBars'
 import s from './dashboard.module.css'
@@ -45,20 +47,37 @@ export async function ProfitChartBlock({ ctx, summary }: { ctx: PageContext; sum
   const partialDate = series.some(d => d.date === ctx.today) && (ctx.partial || trail.after.length) ? ctx.today : null
   const partialNote = `parcial · até ${formatClock(ctx.minutesIntoDay)}`
   const name = summary.store.name
-  const inWindow = series.filter(d => d.inWindow && d.date !== partialDate)
+  // The summary line judges closed window days from the store's start on:
+  // Hibikura's "Este mês" read "8 de 17" with 1–6 nov, before its first sale.
+  const since = windowDaysSinceStart(series, summary.row.firstOrderDate)
+  const inWindow = since.days.filter(d => d.date !== partialDate)
   const before = series.filter(d => !d.inWindow && d.date < ctx.range.from)
   const sumBefore = before.reduce((a, d) => a + d.profit, 0)
   const windowIdle = series.filter(d => d.inWindow).every(d => d.orders === 0 && d.revenue === 0 && d.metaSpend === 0 && d.shopSpend === 0)
   const single = ctx.range.from === ctx.range.to
   const half = ctx.split ? ' (sua parte)' : ''
+
+  // Nothing at all to draw (Hibikura and Glooty in October, before either
+  // store sold): the bars sat on a $0–$1 axis printed "$0 $0 $0 $0 $1 $1 $1".
+  // Say it in words, as the phone does. Context days with activity, or fixed
+  // costs on an empty day, still draw the chart.
+  if (seriesIdle(series, configured)) {
+    return (
+      <Block title={`${title}${half}`}>
+        <EmptyState compact icon="clock" title={`Nenhuma venda e nenhum gasto em ${ctx.rangeLabel}`} />
+      </Block>
+    )
+  }
   // The band's label ("16 nov · $239") starts at the band and printed past the
   // chart's right edge when the window is one of the last bars ("Ontem": x
   // 942–1014 of 1000). Then the band keeps its shading without a label: the
   // window's total is the verdict's headline. A non-empty blank selectedLabel
   // suppresses both the range and the sum in DailyProfitBars.
   const band = ctx.range
+  // Both charts draw the viewer's share (lib/views/store chartValue): the
+  // verdict halves revenue − ads as well as profit in the split view.
   const bandSum = series.filter(d => d.inWindow)
-    .reduce((a, d) => a + (configured ? ctx.part(d.profit) : d.revenue - d.metaSpend - d.shopSpend), 0)
+    .reduce((a, d) => a + chartValue(d, configured, ctx.splitFactor), 0)
   const bandLabel = bandLabelFits(series, `${formatRangeLabel(ctx.range, ctx.today)} · ${formatMoney(bandSum)}`) ? undefined : ' '
 
   const footer = configured ? (
@@ -70,7 +89,7 @@ export async function ProfitChartBlock({ ctx, summary }: { ctx: PageContext; sum
             const best = inWindow.reduce((a, b) => (b.profit > a.profit ? b : a))
             const worst = inWindow.reduce((a, b) => (b.profit < a.profit ? b : a))
             return <>
-              No período: <b>{inWindow.filter(d => d.profit > 0).length} de {inWindow.length}</b> dias no lucro · melhor {formatWeekdayDate(best.date, ctx.today)}, <b>{formatMoney(ctx.part(best.profit))}</b>
+              No período{since.startedOn ? `, desde que a loja começou (${formatDate(since.startedOn, ctx.today)})` : ''}: <b>{inWindow.filter(d => d.profit > 0).length} de {inWindow.length}</b> dias no lucro · melhor {formatWeekdayDate(best.date, ctx.today)}, <b>{formatMoney(ctx.part(best.profit))}</b>
               {' '}· pior {formatWeekdayDate(worst.date, ctx.today)}, <b className={worst.profit < 0 ? 'neg' : undefined}>{formatMoney(ctx.part(worst.profit))}</b>
             </>
           })()}
@@ -92,13 +111,19 @@ export async function ProfitChartBlock({ ctx, summary }: { ctx: PageContext; sum
   // store started, so "com os 30 dias antes" over a chart that begins on the
   // window's first day (MOKOO from 1 jan, Glooty's first weeks) promised bars
   // that are not there.
+  // One day reads "com o dia antes dele", not "com os 1 dia" (Glooty, 5–10 nov).
   const context = before.length === 0
     ? ''
-    : before.length < TRAIL_DAYS
-      ? `, com os ${plural(before.length, 'dia', 'dias')} antes dele desde que a loja começou`
-      : `, com os ${TRAIL_DAYS} dias antes dele para comparar`
+    : before.length === 1
+      ? ', com o dia antes dele, quando a loja começou'
+      : before.length < TRAIL_DAYS
+        ? `, com os ${plural(before.length, 'dia', 'dias')} antes dele desde que a loja começou`
+        : `, com os ${TRAIL_DAYS} dias antes dele para comparar`
   const city = dayOfLabel(ctx.timezone) ? tzCity(ctx.timezone) : null
-  const showCurve = configured && single && (summary.pnl.hourly?.length ?? 0) > 0
+  // A day with nothing in it (CAMP HALLOW today) drew a flat line on a $0–$1
+  // axis labelled "$0 $0 $1 $1 $1"; the footer already says "Sem vendas nem
+  // anúncios no período".
+  const showCurve = configured && single && !windowIdle && (summary.pnl.hourly?.length ?? 0) > 0
   const refLabel = ctx.range.from === ctx.today ? 'ontem inteiro' : 'dia anterior inteiro'
 
   return (
@@ -116,7 +141,7 @@ export async function ProfitChartBlock({ ctx, summary }: { ctx: PageContext; sum
     >
       {configured ? (
         <DailyProfitBars
-          days={series.map(d => ({ date: d.date, profit: ctx.part(d.profit), revenue: d.revenue, metaSpend: d.metaSpend, shopSpend: d.shopSpend, orders: d.orders }))}
+          days={series.map(d => ({ date: d.date, profit: chartValue(d, true, ctx.splitFactor), revenue: d.revenue, metaSpend: d.metaSpend, shopSpend: d.shopSpend, orders: d.orders }))}
           selected={band}
           selectedLabel={bandLabel}
           partialDate={partialDate}
@@ -126,7 +151,8 @@ export async function ProfitChartBlock({ ctx, summary }: { ctx: PageContext; sum
         />
       ) : (
         <NetSalesBars
-          days={series.map(d => ({ date: d.date, value: d.revenue - d.metaSpend - d.shopSpend, revenue: d.revenue, adSpend: d.metaSpend + d.shopSpend, orders: d.orders }))}
+          days={series.map(d => ({ date: d.date, value: chartValue(d, false), revenue: d.revenue, adSpend: d.metaSpend + d.shopSpend, orders: d.orders }))}
+          share={ctx.splitFactor}
           selected={band}
           selectedLabel={bandLabel}
           partialDate={partialDate}

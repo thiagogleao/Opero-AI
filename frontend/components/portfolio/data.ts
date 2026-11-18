@@ -6,6 +6,8 @@
  *   loadRowExtras     per store: the sparkline days, freshness per source
  *                     (lib/sync/status — the same reading as the top bar),
  *                     shared ad-account pairs and the selling currency
+ *   loadLastActivity  per store: the last kept sale and the last day with ad
+ *                     spend (a store that stopped selling, not a broken sync)
  *   loadArchived      archived stores' whole history, only when the section
  *                     is opened
  *
@@ -15,7 +17,7 @@
 
 import 'server-only'
 import { query } from '@/lib/db'
-import { computePnL, type PnL } from '@/lib/engine/pnl'
+import { computePnL, KEPT_ORDER_SQL, type PnL } from '@/lib/engine/pnl'
 import { shiftDate, todayInTz, type DateRange } from '@/lib/engine/dates'
 import { getSharedAdAccounts } from '@/lib/attribution'
 import type { SharedAdAccount } from '@/lib/attributionModels'
@@ -43,6 +45,46 @@ export interface RowExtras {
   /** The pairs counted inside the window; null when that read failed. */
   sharedNow: SharedAdAccount[] | null
   currencies: Map<string, string>
+  lastActivity: Map<string, LastActivity>
+}
+
+export interface LastActivity {
+  /** The newest order that still counts (not refunded or voided), ISO. */
+  lastSaleAt: string | null
+  /** The newest day with Meta or Shopify ad spend, on the ad account's calendar. */
+  lastAdDate: string | null
+}
+
+/**
+ * When each store last sold and last spent on ads. A window with no orders
+ * says nothing about whether the store stopped selling or the sync stopped
+ * reading: Glooty's last order was on 10 nov and its ads stopped after 15 nov,
+ * and the pages say so with these dates. Refunded and voided orders are not
+ * sales (lib/sync/runs lastOrders counts them: it watches the collector).
+ */
+export async function loadLastActivity(ids: readonly string[]): Promise<Map<string, LastActivity>> {
+  const out = new Map<string, LastActivity>()
+  if (!ids.length) return out
+  const list = [...ids]
+  const [sales, meta, shop] = await Promise.all([
+    query<{ tenant_id: string; last: Date | null }>(
+      `SELECT o.tenant_id, MAX(o.created_at) AS last
+         FROM shopify_orders o
+        WHERE o.tenant_id = ANY($1::text[]) AND ${KEPT_ORDER_SQL}
+        GROUP BY 1`, [list]),
+    query<{ tenant_id: string; last: string | null }>(
+      `SELECT tenant_id, MAX(date)::text AS last FROM fb_ad_daily_metrics
+        WHERE tenant_id = ANY($1::text[]) AND spend > 0 GROUP BY 1`, [list]),
+    query<{ tenant_id: string; last: string | null }>(
+      `SELECT tenant_id, MAX(date)::text AS last FROM shop_campaign_daily
+        WHERE tenant_id = ANY($1::text[]) AND spend > 0 GROUP BY 1`, [list]).catch(() => []),
+  ])
+  for (const id of list) {
+    const sale = sales.find(r => r.tenant_id === id)?.last
+    const ads = [meta, shop].map(rows => rows.find(r => r.tenant_id === id)?.last ?? null).filter((d): d is string => !!d).sort()
+    out.set(id, { lastSaleAt: sale ? new Date(sale).toISOString() : null, lastAdDate: ads[ads.length - 1] ?? null })
+  }
+  return out
 }
 
 /**
@@ -100,10 +142,11 @@ export async function loadRowExtras(
 ): Promise<RowExtras> {
   const ids = stores.map(s => s.id)
   const tr = trailRange(range)
-  const [pnl, fresh, currencies] = await Promise.all([
+  const [pnl, fresh, currencies, lastActivity] = await Promise.all([
     computePnL(ids, tr, {}, now).catch(err => { console.error('[overview] trail', err); return null }),
     getFreshness(ids, now).catch(err => { console.error('[overview] freshness', err); return [] as StoreFreshness[] }),
     loadCurrencies(ids).catch(err => { console.error('[overview] currencies', err); return new Map<string, string>() }),
+    loadLastActivity(ids).catch(err => { console.error('[overview] last activity', err); return new Map<string, LastActivity>() }),
   ])
   const trail = new Map<string, TrailPoint[]>()
   for (const id of ids) {
@@ -113,7 +156,7 @@ export async function loadRowExtras(
   return {
     trailRange: tr, trail,
     freshness: new Map(fresh.map(f => [f.storeId, f])),
-    shared, sharedNow, currencies,
+    shared, sharedNow, currencies, lastActivity,
   }
 }
 

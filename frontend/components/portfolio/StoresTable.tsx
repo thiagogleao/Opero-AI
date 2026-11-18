@@ -25,7 +25,7 @@ import { empateGap } from '@/lib/views/store'
 import { RoasVsEmpate } from '@/components/dashboard/RoasVsEmpate'
 import type { SharedAdAccount } from '@/lib/attributionModels'
 import { loadRowExtras, type RowExtras } from './data'
-import { adChannels, freshnessCell, lastSaleDate, pairOrdersIn, resultSortValue, resumoLinkOverrides, rowResult, sharedAccountBadges } from './model'
+import { adChannels, freshnessCell, idleReasons, lastSaleDate, noSalesCashHit, notSellingYet, pairOrdersIn, resultSortValue, resumoLinkOverrides, rowResult, sharedAccountBadges, sumMembers } from './model'
 import s from './portfolio.module.css'
 
 function StoreCell({ ctx, row, extras }: { ctx: PageContext; row: PortfolioStoreRow; extras: RowExtras }) {
@@ -58,14 +58,38 @@ function StoreCell({ ctx, row, extras }: { ctx: PageContext; row: PortfolioStore
   )
 }
 
+/** "2 chargebacks: −$343 no caixa" under a row with no sale (model noSalesCashHit). */
+function CashHitLine({ ctx, row }: { ctx: PageContext; row: PortfolioStoreRow }) {
+  const hit = noSalesCashHit(row.totals)
+  if (!hit) return null
+  return (
+    <small title="Reembolsos e chargebacks de pedidos anteriores, que chegaram neste período: saem do resultado de caixa, não do lucro.">
+      {hit.what ?? 'reembolsos e chargebacks'}: <b className="neg">{formatMoney(ctx.part(hit.amount))}</b> no caixa
+    </small>
+  )
+}
+
 function ResultCell({ ctx, row, extras }: { ctx: PageContext; row: PortfolioStoreRow; extras: RowExtras }) {
   const r = rowResult(row)
+  // A row without orders says when the store last sold (Glooty: 10 nov), so a
+  // store that stopped selling is not read as a sync that stopped reading.
+  const last = row.totals.orders === 0 ? lastSaleDate(extras.lastActivity.get(row.id)?.lastSaleAt, row.timezone) : null
+  // A store that had not made its first sale yet (Hibikura, Mês passado) read
+  // "sem vendas · última 18 nov", a sale after the window, as if it had
+  // stopped: say when it started, as the verdict does.
+  const lastText = row.totals.orders === 0 && row.firstOrderDate && notSellingYet(row, ctx.range)
+    ? `ainda não vendia · 1ª venda em ${formatDate(row.firstOrderDate, ctx.today)}`
+    : last ? `sem vendas · última ${formatDate(last, ctx.today)}` : 'sem vendas'
+  // In a narrow table the sparkline column is hidden and the same bars sit
+  // under the result (portfolio.module.css, container query).
+  const trail = <TrailCell ctx={ctx} row={row} extras={extras} inline />
   if (r.kind === 'none') {
-    const last = lastSaleDate(extras.freshness.get(row.id)?.lastOrderAt, row.timezone)
     return (
       <span className={s.money}>
         <span className="num mut">—</span>
-        <small>sem vendas{last ? ` · última ${formatDate(last, ctx.today)}` : ''}</small>
+        <small>{lastText}</small>
+        <CashHitLine ctx={ctx} row={row} />
+        {trail}
       </span>
     )
   }
@@ -74,6 +98,9 @@ function ResultCell({ ctx, row, extras }: { ctx: PageContext; row: PortfolioStor
       <span className={s.money}>
         <span className="num mut">—</span>
         <small>receita − anúncios: <b className={r.value! < 0 ? 'neg' : undefined}>{formatMoney(ctx.part(r.value!))}</b></small>
+        {row.totals.orders === 0 && <small>{lastText}</small>}
+        <CashHitLine ctx={ctx} row={row} />
+        {trail}
       </span>
     )
   }
@@ -83,20 +110,40 @@ function ResultCell({ ctx, row, extras }: { ctx: PageContext; row: PortfolioStor
     <span className={s.money}>
       <Money value={ctx.part(r.value!)} tone="auto" />
       <Delta current={ctx.part(r.value!)} previous={prev} />
+      <CashHitLine ctx={ctx} row={row} />
+      {trail}
     </span>
   )
 }
 
-function TrailCell({ ctx, row, extras }: { ctx: PageContext; row: PortfolioStoreRow; extras: RowExtras }) {
+/** Revenue, and in a narrow table the margin under it (its column is hidden). */
+function RevenueCell({ row }: { row: PortfolioStoreRow }) {
+  const t = row.totals
+  return (
+    <span className={s.revenue}>
+      <Money value={t.revenue} />
+      {row.configured && t.margin !== null && (
+        <small className={s.inlineMargin}>margem <Pct value={t.margin} tone={t.margin < 0 ? 'neg' : 'none'} /></small>
+      )}
+    </span>
+  )
+}
+
+/** The sparkline cell; `inline` is its copy under the result in a narrow
+ *  table, which draws the bars only (the result cell already says why a row
+ *  has none: sem vendas, custos não configurados). */
+function TrailCell({ ctx, row, extras, inline = false }: { ctx: PageContext; row: PortfolioStoreRow; extras: RowExtras; inline?: boolean }) {
   const pts = extras.trail.get(row.id)
-  if (!pts?.length) return <span className={s.sparkNone}>—</span>
-  if (!row.configured) return <span className={s.sparkNone}>sem série de lucro até configurar custos</span>
-  if (pts.every(p => p.revenue === 0 && p.adSpend === 0)) return <span className={s.sparkNone}>sem movimento em {extras.trail.get(row.id)!.length} dias</span>
+  const none = !pts?.length ? '—'
+    : !row.configured ? 'sem série de lucro até configurar custos'
+    : pts.every(p => p.revenue === 0 && p.adSpend === 0) ? `sem movimento em ${pts.length} dias`
+    : null
+  if (none !== null || !pts) return inline ? null : <span className={s.sparkNone}>{none}</span>
   const values = pts.map(p => ctx.part(p.profit))
   const days = pts.filter(p => p.date >= ctx.range.from && p.date <= ctx.range.to).length
   const sum = values.reduce((a, b) => a + b, 0)
   return (
-    <span className={s.spark}>
+    <span className={inline ? `${s.spark} ${s.inlineTrail}` : s.spark}>
       <MiniBars
         values={values}
         width={100}
@@ -162,14 +209,16 @@ export async function StoresTable({ ctx, view, verdict, shared, sharedNow }: {
     return {
       key: row.id,
       href: ctx.hrefWith('/', resumoLinkOverrides(row, ctx)),
-      tone: r.kind === 'none' ? 'mut' : undefined,
+      // Greyed only when nothing happened: a row whose chargebacks took money
+      // out (noSalesCashHit) is news, not an idle store.
+      tone: r.kind === 'none' && !noSalesCashHit(t) ? 'mut' : undefined,
       cells: {
         store: <StoreCell ctx={ctx} row={row} extras={extras} />,
         result: <ResultCell ctx={ctx} row={row} extras={extras} />,
-        trail: <TrailCell ctx={ctx} row={row} extras={extras} />,
-        revenue: <Money value={t.revenue} />,
+        trail: <span className={s.colTrail}><TrailCell ctx={ctx} row={row} extras={extras} /></span>,
+        revenue: <RevenueCell row={row} />,
         orders: <Count value={t.orders} />,
-        margin: row.configured && t.margin !== null ? <Pct value={t.margin} tone={t.margin < 0 ? 'neg' : 'none'} /> : <span className="mut">—</span>,
+        margin: <span className={s.colMargin}>{row.configured && t.margin !== null ? <Pct value={t.margin} tone={t.margin < 0 ? 'neg' : 'none'} /> : <span className="mut">—</span>}</span>,
         ads: <AdsCell row={row} />,
         roas: <RoasCell row={row} extras={extras} />,
       },
@@ -187,13 +236,22 @@ export async function StoresTable({ ctx, view, verdict, shared, sharedNow }: {
   // Stores whose own day is not Brasília's right now (see model resumoLinkOverrides).
   const shifted = view.stores.filter(r => r.storeToday !== ctx.today).map(r => r.name)
   const vt = verdict.totals
-  const judged = verdict.storeCount - verdict.excluded.length
+  // Counted like the verdict ("4 lojas na soma"): stores with costs that had
+  // something in the window; the rest are named, not counted.
+  const members = sumMembers(view.stores)
   const excluded = verdict.excluded.map(e => e.name)
+  // Named the way the verdict's notes name them: a store that had not made its
+  // first sale yet is not a store with "sem movimento".
+  const idle = idleReasons(members.idle, ctx.range)
+  const names = (rows: PortfolioStoreRow[]) => rows.map(r => r.name).join(', ')
   const footer = view.stores.length > 1 ? {
     store: (
       <span className={s.foot}>
-        <b>Total · {judged} de {plural(verdict.storeCount, 'loja', 'lojas')}</b>
+        <b>Total · {members.summed.length} de {plural(verdict.storeCount, 'loja', 'lojas')}</b>
         {excluded.length > 0 && <small>{excluded.join(', ')} {excluded.length === 1 ? 'fica' : 'ficam'} fora: sem custos configurados</small>}
+        {idle.notStarted.length > 0 && <small>{names(idle.notStarted)}: o dia ainda não começou no fuso {idle.notStarted.length === 1 ? 'dela' : 'delas'}</small>}
+        {idle.notYet.length > 0 && <small>{names(idle.notYet)}: ainda não {idle.notYet.length === 1 ? 'vendia' : 'vendiam'} no período</small>}
+        {idle.quiet.length > 0 && <small>{names(idle.quiet)}: sem movimento no período</small>}
       </span>
     ),
     result: (
@@ -202,9 +260,15 @@ export async function StoresTable({ ctx, view, verdict, shared, sharedNow }: {
         <small>{verdict.basis === 'profit' ? `lucro real${ctx.split ? ' · sua parte' : ''}` : verdict.basis === 'revenue_minus_ads' ? 'receita − anúncios' : 'sem vendas'}</small>
       </span>
     ),
-    revenue: <Money value={vt.revenue} />,
+    trail: <span className={s.colTrail} />,
+    revenue: (
+      <span className={s.revenue}>
+        <Money value={vt.revenue} />
+        {verdict.basis === 'profit' && vt.margin !== null && <small className={s.inlineMargin}>margem <Pct value={vt.margin} /></small>}
+      </span>
+    ),
     orders: <Count value={vt.orders} />,
-    margin: verdict.basis === 'profit' && vt.margin !== null ? <Pct value={vt.margin} /> : <span className="mut">—</span>,
+    margin: <span className={s.colMargin}>{verdict.basis === 'profit' && vt.margin !== null ? <Pct value={vt.margin} /> : <span className="mut">—</span>}</span>,
     ads: (
       <span className={s.channels}>
         {vt.metaSpend > 0 && <span>Meta <b>{formatMoney(vt.metaSpend)}</b></span>}
@@ -222,23 +286,28 @@ export async function StoresTable({ ctx, view, verdict, shared, sharedNow }: {
         (receita ÷ contribuição). A coluna Atualizado mostra a fonte mais antiga da loja: pedidos ou Meta.</>}
       flush
     >
-      <DataTable
-        caption={`Lojas em ${ctx.rangeLabel}, com lucro, receita, pedidos, margem, anúncios e ROAS`}
-        initialSort={{ key: 'result', dir: 'desc' }}
-        columns={[
-          { key: 'store', label: 'Loja', sortable: true, info: 'Ao lado da cidade: a última leitura bem-sucedida da fonte mais antiga da loja (pedidos ou Meta). Âmbar: atrasada; coral: a última tentativa falhou.' },
-          { key: 'result', label: `Lucro${ctx.split ? ' (sua parte)' : ''}`, numeric: true, sortable: true, info: `Lucro real no período e a variação ${ctx.comparisonText}. Sem custos configurados: receita − anúncios, fora do total.` },
-          { key: 'trail', label: `Lucro por dia`, info: `Lucro real de cada dia em ${formatRangeLabel(extras.trailRange, ctx.today)}, na escala de cada loja. A parte sombreada é o período escolhido.` },
-          { key: 'revenue', label: 'Receita', numeric: true, sortable: true },
-          { key: 'orders', label: 'Pedidos', numeric: true, sortable: true },
-          { key: 'margin', label: 'Margem', numeric: true, sortable: true },
-          { key: 'ads', label: 'Anúncios', numeric: true, sortable: true },
-          { key: 'roas', label: 'ROAS × empate', info: 'Receita da loja ÷ gasto em anúncios, contra o empate da própria loja (receita ÷ contribuição). Mede o canal que carrega o gasto; com Meta e Shopify gastando de verdade, os dois somados (“Anúncios”). Um canal com menos de 10% do gasto entra só no lucro.' },
-        ]}
-        rows={rows}
-        footer={footer}
-        empty={<EmptyState compact title="Nenhuma loja ativa" />}
-      />
+      {/* A size container: below the table's natural width (~1100px) the
+          sparkline and margin columns fold into the result and revenue cells,
+          so ROAS × empate stays on screen (1024px: 906px of box; 1280: 982). */}
+      <div className={s.tableBox}>
+        <DataTable
+          caption={`Lojas em ${ctx.rangeLabel}, com lucro, receita, pedidos, margem, anúncios e ROAS`}
+          initialSort={{ key: 'result', dir: 'desc' }}
+          columns={[
+            { key: 'store', label: 'Loja', sortable: true, info: 'Ao lado da cidade: a última leitura bem-sucedida da fonte mais antiga da loja (pedidos ou Meta). Âmbar: atrasada; coral: a última tentativa falhou.' },
+            { key: 'result', label: `Lucro${ctx.split ? ' (sua parte)' : ''}`, numeric: true, sortable: true, info: `Lucro real no período e a variação ${ctx.comparisonText}. Sem custos configurados: receita − anúncios, fora do total.` },
+            { key: 'trail', label: <span className={s.colTrail}>Lucro por dia</span>, info: `Lucro real de cada dia em ${formatRangeLabel(extras.trailRange, ctx.today)}, na escala de cada loja. A parte sombreada é o período escolhido.` },
+            { key: 'revenue', label: 'Receita', numeric: true, sortable: true },
+            { key: 'orders', label: 'Pedidos', numeric: true, sortable: true },
+            { key: 'margin', label: <span className={s.colMargin}>Margem</span>, numeric: true, sortable: true },
+            { key: 'ads', label: 'Anúncios', numeric: true, sortable: true },
+            { key: 'roas', label: 'ROAS × empate', info: 'Receita da loja ÷ gasto em anúncios, contra o empate da própria loja (receita ÷ contribuição). Mede o canal que carrega o gasto; com Meta e Shopify gastando de verdade, os dois somados (“Anúncios”). Um canal com menos de 10% do gasto entra só no lucro.' },
+          ]}
+          rows={rows}
+          footer={footer}
+          empty={<EmptyState compact title="Nenhuma loja ativa" />}
+        />
+      </div>
     </Block>
   )
 }

@@ -26,12 +26,16 @@ import {
   type HourPoint, type PnL, type StorePnL,
 } from '../engine/pnl'
 import {
-  anchorTz, comparisonRange, eachDay, formatRange, minutesIntoDay, resolveRange, safeTz, shiftDate,
+  anchorTz, comparisonRange, eachDay, formatRange, minutesIntoDay, safeTz, shiftDate,
   todayInTz, isIsoDate,
   type Comparison, type DateRange, type Period,
 } from '../engine/dates'
 import { getChargebackHealth, type ChargebackHealth } from '../adjustments'
 import type { StoreRef } from '../access'
+import { STALE_AFTER_MIN, staleness } from '../sync/plan'
+import { LIVE_FEED_SIZE, resolvePortfolioWindow } from './portfolioLimits'
+// verdict imports only types from this module, so this is no import cycle.
+import { judgedStores } from './verdict'
 
 // ─── Types (the API contract) ─────────────────────────────────────────────────
 
@@ -78,7 +82,8 @@ export interface SourceFreshness {
   ageMinutes: number | null
   /** Older than the source's cadence allows (STALE_AFTER_MINUTES). */
   stale: boolean
-  /** Stale AND the latest run ended in error. */
+  /** Past the red threshold (lib/sync/plan) and the latest run ended in error
+   *  or partial — the top bar's "falhando". */
   failing: boolean
 }
 
@@ -126,6 +131,10 @@ export interface PortfolioStoreRow {
   comparison: StoreComparison
   badges: StoreBadge[]
   freshness: StoreFreshness
+  /** The store's first kept order on its own calendar (YYYY-MM-DD), null when
+   *  unknown (no order yet, or not loaded). A window before it is "the store
+   *  did not sell yet", not a dead month (lib/views/verdict reads it). */
+  firstOrderDate: string | null
 }
 
 export interface PortfolioComparison extends DateRange {
@@ -185,6 +194,9 @@ export interface IntradayAside {
   storeToday: string
   revenue: number
   orders: number
+  /** Meta + Shopify ads (for a store without costs, operatingProfit is
+   *  revenue minus this). */
+  adSpend: number
   operatingProfit: number
 }
 
@@ -194,10 +206,15 @@ export interface PortfolioIntraday {
   stores: IntradayStoreSeries[]
   /** In the totals but not on the curve: their day is already over. */
   closedStores: IntradayAside[]
+  /** Left out of a summed curve, as out of the verdict and dailyJudged
+   *  (lib/views/verdict judgedStores): no cost settings, so their revenue − ads
+   *  is not profit. Shown beside the curve, never folded into it. */
+  unconfiguredStores: IntradayAside[]
   /** Not on the curve: their day has not begun. */
   notStartedStores: IntradayAside[]
   peak: { hour: number; profit: number } | null
-  /** Equals the sum of the plotted stores' operatingProfit. */
+  /** Equals the sum of the plotted stores' operatingProfit (the judged
+   *  stores whose day is running or complete). */
   closing: number
   /** Hour from which the curve stayed at or above zero through the close;
    *  null when it closes below zero. */
@@ -238,11 +255,28 @@ export interface StoreAdjustments {
   adjustments: number
 }
 
+export type AwaitingDispute = ChargebackHealth['dueSoon'][number]
+
+/** One store's disputes waiting for evidence (loadAwaiting). */
+export interface StoreAwaiting {
+  /** Deadline not passed yet (or unknown), soonest first: every one of them. */
+  list: AwaitingDispute[]
+  /** Still "needs_response" but the deadline already passed. */
+  overdue: number
+}
+
 /** Ninety-day dispute health. The rate that matters to Shopify Payments is
  *  per store (each store is its own merchant account), hence `byStore`. */
 export interface PortfolioChargebackHealth extends ChargebackHealth {
   byStore: { storeId: string; name: string; count: number; orders: number; rate: number; open: number; amount: number }[]
-  dueSoon: (ChargebackHealth['dueSoon'][number] & { storeId: string; store: string })[]
+  /** Every dispute that can still be answered, soonest deadline first: the
+   *  whole list, not the first rows (getChargebackHealth reads 5 per store,
+   *  and the phone showed 4 of 12 under a heading that read as the to-do list). */
+  dueSoon: (AwaitingDispute & { storeId: string; store: string })[]
+  /** dueSoon counted per store, most first; its sum is dueSoon.length. */
+  awaitingByStore: { storeId: string; name: string; count: number }[]
+  /** Disputes still waiting for evidence whose deadline already passed. */
+  overdue: number
 }
 
 export interface PortfolioFreshness {
@@ -261,6 +295,10 @@ export interface PortfolioView {
    *  in its own timezone. */
   range: DateRange
   rangeLabel: string
+  /** Set when a custom range was cut to fit (portfolioLimits: longer than
+   *  MAX_WINDOW_DAYS, or starting before MIN_WINDOW_DATE): one sentence saying
+   *  what is shown. Null otherwise. */
+  rangeNote: string | null
   /** The store's own timezone for one store, America/Sao_Paulo for several. */
   anchorTimezone: string
   anchorToday: string
@@ -271,7 +309,13 @@ export interface PortfolioView {
   configured: boolean
   unconfiguredStoreIds: string[]
   comparison: PortfolioComparison
+  /** Every store, summed by date (revenue − ads for a store without costs). */
   daily: PortfolioDay[]
+  /** The same days for the stores the verdict sums (lib/views/verdict
+   *  judgedStores): when some stores of several have no cost settings, only
+   *  the configured ones, so bars drawn under the verdict add up to its
+   *  amount instead of mixing in revenue − ads. Otherwise equal to `daily`. */
+  dailyJudged: PortfolioDay[]
   /** Only for single-day windows. */
   intraday: PortfolioIntraday | null
   stores: PortfolioStoreRow[]
@@ -295,10 +339,14 @@ export class PortfolioInputError extends Error {}
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────────
 
-/** Three missed cycles of each source (Shopify every 10 min, Meta about every
- *  30): past this the number on screen is old enough to say so. */
-export const STALE_AFTER_MINUTES: Record<SyncSource, number> = { shopify: 30, facebook: 90 }
-export const LIVE_FEED_SIZE = 40
+/** When a source is late: the thresholds of lib/sync/plan STALE_AFTER_MIN,
+ *  the same the desktop top bar judges with (lib/sync/status), so a store is
+ *  never "atrasada" on the phone and current on the desktop, or the reverse.
+ *  Amber there = stale here; red with a failed last run = failing. */
+export const STALE_AFTER_MINUTES: Record<SyncSource, number> = {
+  shopify: STALE_AFTER_MIN.shopify[0], facebook: STALE_AFTER_MIN.facebook[0],
+}
+export { LIVE_FEED_SIZE }
 
 const CITY: Record<string, string> = {
   'Asia/Tokyo': 'Tóquio', 'America/Sao_Paulo': 'São Paulo', 'America/Belem': 'Belém',
@@ -335,11 +383,15 @@ const iso = (v: Date | string | null | undefined): string | null => {
 export function sourceFreshness(source: SyncSource, row: SyncRow | undefined, now: Date): SourceFreshness {
   const lastSuccessAt = iso(row?.last_success)
   const ageMinutes = lastSuccessAt ? Math.max(0, Math.round((now.getTime() - Date.parse(lastSuccessAt)) / 60000)) : null
-  const stale = ageMinutes === null || ageMinutes > STALE_AFTER_MINUTES[source]
+  // Judged on the exact age, like the top bar (the rounded minutes are for
+  // display). No success in the 7 days read is late, not unknown: the store
+  // is synced and nothing arrived.
+  const level = lastSuccessAt ? staleness(source, new Date(lastSuccessAt), now) : 'red'
+  const stale = level === 'amber' || level === 'red'
   const lastStatus = row?.last_status ?? null
   return {
     source, lastSuccessAt, lastAttemptAt: iso(row?.last_started), lastStatus, ageMinutes,
-    stale, failing: stale && lastStatus === 'error',
+    stale, failing: level === 'red' && (lastStatus === 'error' || lastStatus === 'partial'),
   }
 }
 
@@ -460,19 +512,28 @@ export function combineIntraday(series: IntradayStoreSeries[]): IntradayPoint[] 
 /** Several stores' 90-day dispute health, summed. The rate is recomputed from
  *  the summed counts: averaging rates would let a store with four orders weigh
  *  as much as one with four thousand. */
-export function combineHealth(each: { store: PortfolioStoreInput; health: ChargebackHealth }[]): PortfolioChargebackHealth {
-  const sum = { count: 0, orders: 0, amount: 0, fees: 0, open: 0, lost: 0, won: 0 }
-  for (const { health: h } of each) {
+export function combineHealth(
+  each: { store: PortfolioStoreInput; health: ChargebackHealth; awaiting?: StoreAwaiting }[],
+): PortfolioChargebackHealth {
+  const sum = { count: 0, orders: 0, amount: 0, fees: 0, open: 0, lost: 0, won: 0, overdue: 0 }
+  for (const { health: h, awaiting } of each) {
     sum.count += h.count; sum.orders += h.orders; sum.amount += h.amount; sum.fees += h.fees
     sum.open += h.open; sum.lost += h.lost; sum.won += h.won
+    sum.overdue += awaiting?.overdue ?? 0
   }
+  // The complete list when it was loaded; health.dueSoon (5 rows per store)
+  // only as a fallback for callers that did not load it.
+  const listOf = (e: (typeof each)[number]) => e.awaiting?.list ?? e.health.dueSoon
   return {
     ...sum,
     rate: sum.orders > 0 ? (sum.count / sum.orders) * 100 : 0,
     dueSoon: each
-      .flatMap(({ store, health }) => health.dueSoon.map(d => ({ ...d, storeId: store.id, store: store.name })))
-      .sort((a, b) => (a.dueBy ?? '9999').localeCompare(b.dueBy ?? '9999'))
-      .slice(0, 5),
+      .flatMap(e => listOf(e).map(d => ({ ...d, storeId: e.store.id, store: e.store.name })))
+      .sort((a, b) => (a.dueBy ?? '9999').localeCompare(b.dueBy ?? '9999')),
+    awaitingByStore: each
+      .map(e => ({ storeId: e.store.id, name: e.store.name, count: listOf(e).length }))
+      .filter(a => a.count > 0)
+      .sort((a, b) => b.count - a.count),
     hasData: each.some(e => e.health.hasData),
     byStore: each
       .filter(e => e.health.count > 0)
@@ -501,6 +562,12 @@ export interface PortfolioInputs {
   /** Null when freshness was not loaded (or failed): every store then reads
    *  as unknown rather than as stale. */
   syncRows: SyncRow[] | null
+  /** Each store's first kept order on its own calendar (loadFirstOrderDates).
+   *  Optional: without it every row's firstOrderDate is null and the verdict
+   *  reads a window before the store opened as "sem vendas". */
+  firstOrderDates?: ReadonlyMap<string, string>
+  /** rangeCutNote of the window, when buildPortfolio had to cut it. */
+  rangeNote?: string | null
 }
 
 const presentOnly = <T>(x: T | undefined): x is T => x !== undefined
@@ -529,6 +596,7 @@ export function assemblePortfolio(i: PortfolioInputs): PortfolioView {
       configured: p.configured, partial: p.partial,
       dayState, dayClosed: dayState === 'closed', storeToday, minutesCovered: p.minutesCovered,
       totals: p.totals, comparison, badges: [], freshness,
+      firstOrderDate: i.firstOrderDates?.get(s.id) ?? null,
     }
     row.badges = badgesFor(row, i.range)
     rows.push(row)
@@ -540,21 +608,27 @@ export function assemblePortfolio(i: PortfolioInputs): PortfolioView {
 
   // Daily: the same per-store days, summed by date. Every date is present, so
   // a day with spend and no sales still pulls the line down.
-  const daily = eachDay(i.range.from, i.range.to).map(date => {
-    const lines = rows.map(r => pnlOf.get(r.id)!.daily.find(d => d.date === date)).filter(presentOnly)
+  const dailyOf = (list: PortfolioStoreRow[]) => eachDay(i.range.from, i.range.to).map(date => {
+    const lines = list.map(r => pnlOf.get(r.id)!.daily.find(d => d.date === date)).filter(presentOnly)
     return dayPoint(date, sumPnL(lines))
   })
+  const daily = dailyOf(rows)
+  const { judged } = judgedStores(rows)
+  const dailyJudged = judged.length === rows.length ? daily : dailyOf(judged)
 
   let intraday: PortfolioIntraday | null = null
   if (i.range.from === i.range.to) {
     const aside = (r: PortfolioStoreRow): IntradayAside => ({
       storeId: r.id, name: r.name, timezone: r.timezone, storeToday: r.storeToday,
-      revenue: r.totals.revenue, orders: r.totals.orders, operatingProfit: r.totals.operatingProfit,
+      revenue: r.totals.revenue, orders: r.totals.orders, adSpend: r.totals.adSpend, operatingProfit: r.totals.operatingProfit,
     })
     // The owner chose "each store on its own day": a store whose day already
     // closed is reported beside the curve, never folded into hours it did not
-    // live through.
-    const plotted = rows.filter(r => r.dayState === 'running' || r.dayState === 'complete')
+    // live through. And the curve sums the stores the verdict sums: a store
+    // without costs entered it as revenue − ads, so on 14 nov it ended at
+    // $1.298 (peak $1.312) under a verdict and ledger of $1.362.
+    const judgedIds = new Set(judged.map(r => r.id))
+    const plotted = rows.filter(r => judgedIds.has(r.id) && (r.dayState === 'running' || r.dayState === 'complete'))
     const series: IntradayStoreSeries[] = plotted.map(r => {
       const points = pnlOf.get(r.id)!.hourly ?? []
       return { storeId: r.id, name: r.name, timezone: r.timezone, hoursCovered: points.length, points }
@@ -566,8 +640,9 @@ export function assemblePortfolio(i: PortfolioInputs): PortfolioView {
       day: i.range.from,
       points,
       stores: series,
-      closedStores: rows.filter(r => r.dayState === 'closed').map(aside),
-      notStartedStores: rows.filter(r => r.dayState === 'not_started').map(aside),
+      closedStores: rows.filter(r => judgedIds.has(r.id) && r.dayState === 'closed').map(aside),
+      notStartedStores: rows.filter(r => judgedIds.has(r.id) && r.dayState === 'not_started').map(aside),
+      unconfiguredStores: rows.filter(r => !judgedIds.has(r.id)).map(aside),
       peak,
       closing: points.length ? points[points.length - 1].cumProfit : 0,
       greenSince: greenSinceOf(points),
@@ -596,6 +671,7 @@ export function assemblePortfolio(i: PortfolioInputs): PortfolioView {
     period: i.period,
     range: i.range,
     rangeLabel: formatRange(i.range, anchorToday),
+    rangeNote: i.rangeNote ?? null,
     anchorTimezone: i.anchorTimezone,
     anchorToday,
     storeIds: rows.map(r => r.id),
@@ -608,6 +684,7 @@ export function assemblePortfolio(i: PortfolioInputs): PortfolioView {
       totals: comparisonTotals,
     },
     daily,
+    dailyJudged,
     intraday,
     stores: rows,
     adjustmentsByStore,
@@ -780,9 +857,66 @@ async function loadSyncRows(ids: string[]): Promise<SyncRow[]> {
       GROUP BY 1, 2`, [ids])
 }
 
+/**
+ * Each store's first kept order, as a date on the store's own calendar — the
+ * same timezone and the same "kept" rule the engine dates orders with
+ * (lib/engine/pnl loadOrders), so "começou a vender em 7 nov" is the first day
+ * the engine has a sale on. Stores with no order are absent. Exported for
+ * one-store callers that assemble the view themselves (lib/views/store).
+ */
+export async function loadFirstOrderDates(ids: readonly string[]): Promise<Map<string, string>> {
+  if (!ids.length) return new Map()
+  // MIN(created_at) first, then the conversion: the date is monotonic in the
+  // instant, and the plain MIN can walk the (tenant_id, created_at) index.
+  const rows = await query<{ tenant_id: string; d: string | null }>(
+    `SELECT o.tenant_id,
+            (MIN(o.created_at) AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date::text AS d
+       FROM shopify_orders o
+       JOIN tenants t ON t.id = o.tenant_id
+      WHERE o.tenant_id = ANY($1::text[])
+        AND ${KEPT_ORDER_SQL}
+      GROUP BY o.tenant_id, t.timezone`, [[...ids]])
+  return new Map(rows.filter(r => isIsoDate(r.d)).map(r => [r.tenant_id, r.d as string]))
+}
+
+/**
+ * Every chargeback of these stores still waiting for evidence ("needs_response"),
+ * split into the ones that can still be answered (deadline ahead or unknown,
+ * soonest first) and a count of those whose deadline passed. One query for all
+ * stores; getChargebackHealth's dueSoon stops at 5 rows per store, which hid
+ * EPOCH's fifth dispute and, after the cross-store cut, MOKOO's.
+ */
+async function loadAwaiting(ids: readonly string[]): Promise<Map<string, StoreAwaiting>> {
+  const out = new Map<string, StoreAwaiting>(ids.map(id => [id, { list: [], overdue: 0 }]))
+  if (!ids.length) return out
+  const rows = await query<{
+    tenant_id: string; external_id: string; amount: number; currency: string | null; reason: string | null
+    due: string | null; overdue: boolean
+  }>(
+    `SELECT tenant_id, external_id, amount::float8 AS amount, currency, reason,
+            evidence_due_by::text AS due,
+            (evidence_due_by IS NOT NULL AND evidence_due_by <= now()) AS overdue
+       FROM order_adjustments
+      WHERE tenant_id = ANY($1::text[]) AND kind = 'chargeback' AND status = 'needs_response'
+      ORDER BY evidence_due_by NULLS LAST, external_id`, [[...ids]])
+  for (const r of rows) {
+    const a = out.get(r.tenant_id)
+    if (!a) continue
+    if (r.overdue) { a.overdue += 1; continue }
+    a.list.push({
+      externalId: r.external_id, amount: Number(r.amount) || 0, currency: r.currency || 'USD',
+      reason: r.reason ?? 'general', dueBy: r.due,
+    })
+  }
+  return out
+}
+
 async function loadHealth(stores: readonly PortfolioStoreInput[]): Promise<PortfolioChargebackHealth> {
-  const each = await Promise.all(stores.map(async store => ({ store, health: await getChargebackHealth(store.id) })))
-  return combineHealth(each)
+  const [each, awaiting] = await Promise.all([
+    Promise.all(stores.map(async store => ({ store, health: await getChargebackHealth(store.id) }))),
+    loadAwaiting(stores.map(s => s.id)),
+  ])
+  return combineHealth(each.map(e => ({ ...e, awaiting: awaiting.get(e.store.id) })))
 }
 
 /**
@@ -807,15 +941,17 @@ export async function buildPortfolio(
   const unique = [...new Map(stores.map(s => [s.id, s])).values()]
   const ids = unique.map(s => s.id)
   const anchor = anchorTz(unique.map(s => s.timezone))
-  const range = resolveRange(period, anchor, from, to, now)
-  const cmp = comparisonRange(period, range, anchor, now)
   const anchorToday = todayInTz(anchor, now)
+  // A custom range is cut the way the desktop pages cut it (portfolioLimits):
+  // ?from=1990-01-01 priced 13.470 days per store, plus a 1953–1989 comparison.
+  const { range, note: rangeNote } = resolvePortfolioWindow(period, anchor, from, to, now)
+  const cmp = comparisonRange(period, range, anchor, now)
   const nameOf = new Map(unique.map(s => [s.id, s.name]))
   // Archived stores are not selling: no feed, and no "missing webhook" noise.
   const feedIds = unique.filter(s => !s.archived).map(s => s.id)
 
   const noFeed = { items: [] as LiveOrderItem[], covered: new Set<string>(ids) }
-  const [current, compared, chargebackHealth, feed, syncRows] = await Promise.all([
+  const [current, compared, chargebackHealth, feed, syncRows, firstOrderDates] = await Promise.all([
     computePnL(ids, range, {}, now),
     ids.length ? loadComparison(unique, range, cmp, anchorToday, now) : Promise.resolve(new Map<string, StoreComparison>()),
     // These blocks are context, not the P&L: a failure must not blank the screen.
@@ -830,11 +966,14 @@ export async function buildPortfolio(
     want.freshness
       ? loadSyncRows(ids).catch(err => { console.error('[portfolio] sync runs', err); return null })
       : Promise.resolve(null),
+    // Wording only ("começou a vender em 7 nov"): without it the verdict
+    // falls back to "sem vendas", never to wrong numbers.
+    loadFirstOrderDates(ids).catch(err => { console.error('[portfolio] first orders', err); return new Map<string, string>() }),
   ])
 
   return assemblePortfolio({
     stores: unique, period, range, comparison: cmp, anchorTimezone: anchor, now,
     current, compared, chargebackHealth,
-    liveFeed: feed.items, liveCovered: feed.covered, syncRows,
+    liveFeed: feed.items, liveCovered: feed.covered, syncRows, firstOrderDates, rangeNote,
   })
 }

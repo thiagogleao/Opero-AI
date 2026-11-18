@@ -90,6 +90,10 @@
 .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
 .lgNeu { background: var(--neu); opacity: .75; }
 .lgNeg { background: var(--neg-m); }
+/* The viewport minus the page (2 × 14px) and block (2 × 20px) padding on a
+   phone, plus a margin for a desktop scrollbar: a percentage cannot cap an
+   intrinsic width, a viewport unit can. */
+.netLegend { max-width: calc(100vw - 88px); }
 
 .stack { display: flex; flex-direction: column; gap: var(--s4); }
 .intraday { margin-top: var(--s4); padding-top: var(--s4); border-top: 1px solid var(--line); }

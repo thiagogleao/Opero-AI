@@ -10,7 +10,7 @@
 import type { ReactNode } from 'react'
 import type { PageContext } from '@/lib/views/page'
 import { CHANNEL_LABEL, empateGap, ledgerAdCents, type StoreSummary } from '@/lib/views/store'
-import { formatCents, formatCount, formatMoney, formatNumber, formatRoas, plural } from '@/lib/format'
+import { formatCents, formatCount, formatDate, formatMoney, formatNumber, formatRangeLabel, formatRoas, plural } from '@/lib/format'
 import { Count, Delta, Icon, KpiCard, Money, Pct, Roas } from '@/components/ui'
 import { MiniBars, Sparkline } from '@/components/charts'
 import { RoasVsEmpate } from './RoasVsEmpate'
@@ -35,6 +35,18 @@ function SpendShare({ cents, ledgerCents }: { cents: number | null; ledgerCents:
  *  100%"), so the delta is left out. */
 const underADollar = (cur: number, prev: number) => Math.max(Math.abs(cur), Math.abs(prev)) < 1
 
+/**
+ * The days behind a "por dia" (lib/views/store kpiDays): " em média" when they
+ * are the whole window, else the days themselves — " em 7–17 nov" for
+ * Hibikura's Este mês, which started on 7 nov and whose 18 nov is still
+ * running — so an average never reads as total ÷ window.
+ */
+function perDayDays(k: StoreSummary['kpis'], today: string): ReactNode {
+  return k.avgRange ? <> em <span className="num">{formatRangeLabel(k.avgRange, today)}</span></> : ' em média'
+}
+
+const PER_DAY_INFO = 'Média por dia: só os dias fechados desde que a loja começou (a primeira venda ou o primeiro anúncio, o que veio antes); o dia de hoje, ainda em andamento, fica de fora.'
+
 function NotConfigured({ children }: { children: ReactNode }) {
   return <span className={s.cfg}><Icon name="sliders" size={12} />{children}</span>
 }
@@ -49,6 +61,8 @@ export function StoreKpis({ ctx, summary }: { ctx: PageContext; summary: StoreSu
   const noOrders = k.orders === 0
   const lc = ledgerAdCents(summary.pnl.totals, configured)
   const gap = empateGap(configured, k.breakEven, summary.pnl.totals)
+  // Two closed days at least: one day's "average" is just that day.
+  const perDay = k.avgDays > 1
 
   return (
     <div className={s.kpis}>
@@ -57,28 +71,29 @@ export function StoreKpis({ ctx, summary }: { ctx: PageContext; summary: StoreSu
         value={<Money value={k.revenue} />}
         note={noOrders
           ? 'nenhum pedido no período'
-          : k.days > 1
-            ? <span className={s.kpiNote}><b>{formatMoney(k.revenue / k.days)}</b> por dia em média</span>
+          : perDay
+            ? <span className={s.kpiNote}><b>{formatMoney(k.revenuePerDay)}</b> por dia{perDayDays(k, ctx.today)}</span>
             : 'pedidos pagos, impostos incluídos'}
         spark={multiDay ? <Sparkline values={daily.map(d => d.revenue)} ariaLabel="Receita por dia" /> : undefined}
         delta={p && !(k.revenue === 0 && p.revenue === 0) && <Delta current={k.revenue} previous={p?.revenue ?? null} label={vs} goodWhen="neutral" showPrevious />}
         info={<>Total pago pelos clientes nos pedidos não reembolsados nem cancelados, com impostos e frete, nas datas do fuso da loja.
-          Um pedido reembolsado por inteiro sai do dia em que foi feito. Vendas em outra moeda entram convertidas em dólar.</>}
+          Um pedido reembolsado por inteiro sai do dia em que foi feito. Vendas em outra moeda entram convertidas em dólar. {PER_DAY_INFO}</>}
       />
       <KpiCard
         label="Pedidos e ticket"
         value={<Count value={k.orders} />}
         note={noOrders ? 'nenhum pedido no período' : (
-          <span className={s.kpiNote}>ticket médio <b>{formatMoney(k.aov)}</b>{k.days > 1 && <> · <b>{k.ordersPerDay < 10 ? formatNumber(k.ordersPerDay, 1) : formatCount(k.ordersPerDay)}</b> por dia</>}</span>
+          <span className={s.kpiNote}>ticket médio <b>{formatMoney(k.aov)}</b>{perDay && <> · <b>{k.ordersPerDay < 10 ? formatNumber(k.ordersPerDay, 1) : formatCount(k.ordersPerDay)}</b> por dia{perDayDays(k, ctx.today)}</>}</span>
         )}
         spark={multiDay ? <MiniBars values={daily.map(d => d.orders)} color="neu" width={0} height={30} ariaLabel="Pedidos por dia" /> : undefined}
         delta={p && !(k.orders === 0 && p.orders === 0) && <Delta current={k.orders} previous={p?.orders ?? null} label={vs} kind="count" goodWhen="neutral" showPrevious />}
-        info="Pedidos pagos no período (reembolsados e cancelados não entram). Ticket médio = receita ÷ pedidos."
+        info={`Pedidos pagos no período (reembolsados e cancelados não entram). Ticket médio = receita ÷ pedidos. ${PER_DAY_INFO}`}
       />
       <KpiCard
         wide
-        swatch={k.roasChannel === 'shop' ? 'shop' : 'meta'}
-        label={k.roasChannel === 'both' ? 'ROAS dos anúncios (Meta + Shopify) × empate' : k.roasChannel === 'shop' ? 'ROAS dos Anúncios Shopify × empate' : 'ROAS do Meta × empate'}
+        swatch={k.roasChannel === 'shop' ? 'shop' : k.roasChannel ? 'meta' : undefined}
+        // No spend at all: no channel to name ("ROAS do Meta" over a store with no ads).
+        label={k.roasChannel === 'both' ? 'ROAS dos anúncios (Meta + Shopify) × empate' : k.roasChannel === 'shop' ? 'ROAS dos Anúncios Shopify × empate' : k.roasChannel === 'meta' ? 'ROAS do Meta × empate' : 'ROAS × empate'}
         value={k.channelRoas === null ? <span className="mut">—</span> : <Roas value={k.channelRoas} />}
         note={k.channelRoas === null || !k.roasChannel
           ? 'sem gasto em anúncios no período'
@@ -105,18 +120,18 @@ export function StoreKpis({ ctx, summary }: { ctx: PageContext; summary: StoreSu
         label="Anúncios Meta"
         value={<Money value={k.metaSpend} />}
         note={k.metaSpend > 0
-          ? <span className={s.kpiNote}><SpendShare cents={k.metaCents} ledgerCents={lc.meta} />{k.days > 1 && <> · <b>{formatMoney(k.metaPerDay)}</b>/dia</>}</span>
+          ? <span className={s.kpiNote}><SpendShare cents={k.metaCents} ledgerCents={lc.meta} />{perDay && <> · <b>{formatMoney(k.metaPerDay)}</b>/dia{k.avgRange && perDayDays(k, ctx.today)}</>}</span>
           : 'nenhum gasto no Meta no período'}
         spark={multiDay && k.metaSpend > 0 ? <Sparkline values={daily.map(d => d.metaSpend)} tone="meta" ariaLabel="Gasto no Meta por dia" /> : undefined}
         delta={!p || underADollar(k.metaSpend, p.metaSpend) ? undefined : <Delta current={k.metaSpend} previous={p?.metaSpend ?? null} label={vs} goodWhen="neutral" showPrevious />}
-        info="Gasto em Facebook e Instagram das contas de anúncio da loja, dia a dia. Uma conta desligada deixa de ser coletada, mas o gasto que já teve continua nas contas."
+        info={`Gasto em Facebook e Instagram das contas de anúncio da loja, dia a dia. Uma conta desligada deixa de ser coletada, mas o gasto que já teve continua nas contas. ${PER_DAY_INFO}`}
       />
       <KpiCard
         swatch="shop"
         label="Anúncios Shopify"
         value={<Money value={k.shopSpend} />}
         note={k.shopSpend > 0
-          ? <span className={s.kpiNote}><SpendShare cents={k.shopCents} ledgerCents={lc.shop} />{k.days > 1 && <> · <b>{k.shopDays}</b> de {k.days} dias com gasto</>}</span>
+          ? <span className={s.kpiNote}><SpendShare cents={k.shopCents} ledgerCents={lc.shop} />{k.spanDays > 1 && <> · <b>{k.shopDays}</b> de {k.spanDays} dias com gasto{k.startedOn && <> desde <span className="num">{formatDate(k.startedOn, ctx.today)}</span></>}</>}</span>
           : 'nenhum gasto com Shop Campaigns'}
         spark={multiDay && k.shopSpend > 0 ? <MiniBars values={daily.map(d => d.shopSpend)} color="shop" width={0} height={30} ariaLabel="Anúncios Shopify por dia" /> : undefined}
         delta={!p || underADollar(k.shopSpend, p.shopSpend) ? undefined : <Delta current={k.shopSpend} previous={p?.shopSpend ?? null} label={vs} goodWhen="neutral" showPrevious />}

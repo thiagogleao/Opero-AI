@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { sumPnL, type PnL, type PnLLines } from '@/lib/engine/pnl'
 import type { SharedAdAccount } from '@/lib/attributionModels'
-import { adChannels, freshnessCell, laneState, lastSaleDate, pairOrdersIn, pairsMixedIn, resultSortValue, resumoLinkOverrides, rowResult, sharedAccountBadges, trailRange } from '../model'
+import { adChannels, freshnessCell, idleReasons, laneState, lastSaleDate, noSalesCashHit, notSellingYet, pairOrdersIn, pairsMixedIn, quietNote, resultSortValue, sumMembers, resumoLinkOverrides, rowResult, sharedAccountBadges, storeDayOf, trailRange, type QuietInput } from '../model'
 
 const pnl = (over: Partial<PnLLines> = {}): PnL => sumPnL([{ ...sumPnL([]), ...over }])
 const NOW = new Date('2026-11-18T01:30:00Z')
@@ -28,6 +28,30 @@ describe('rowResult', () => {
   it('ads without a sale are a loss, not "sem vendas"', () => {
     const r = rowResult({ configured: true, totals: pnl({ metaSpend: 25 }) })
     expect(r).toEqual({ kind: 'profit', value: -25 })
+  })
+})
+
+describe('noSalesCashHit', () => {
+  it('names the chargebacks of a row with no sale (CAMP HALLOW, 11–17 nov)', () => {
+    const t = pnl({ chargebacks: 312.63, chargebackFees: 30, chargebackCount: 2 })
+    expect(rowResult({ configured: true, totals: t }).kind).toBe('none')
+    const hit = noSalesCashHit(t)
+    expect(hit?.what).toBe('2 chargebacks')
+    expect(hit?.amount).toBeCloseTo(-342.63, 6)
+  })
+
+  it('names refunds and chargebacks together', () => {
+    expect(noSalesCashHit(pnl({ refunds: 20, refundCount: 1, chargebacks: 50, chargebackCount: 3 }))?.what).toBe('1 reembolso e 3 chargebacks')
+  })
+
+  it('keeps the money when no count came with it', () => {
+    expect(noSalesCashHit(pnl({ chargebackFees: 15 }))).toEqual({ what: null, amount: -15 })
+  })
+
+  it('says nothing when the store sold, or when nothing left the cash', () => {
+    expect(noSalesCashHit(pnl({ revenue: 80, orders: 1, chargebacks: 50, chargebackCount: 1 }))).toBeNull()
+    expect(noSalesCashHit(pnl())).toBeNull()
+    expect(noSalesCashHit(pnl({ metaSpend: 25 }))).toBeNull()
   })
 })
 
@@ -151,5 +175,111 @@ describe('lastSaleDate', () => {
   it('is null without an order or with a bad timestamp', () => {
     expect(lastSaleDate(null, 'America/Belem')).toBeNull()
     expect(lastSaleDate('nope', 'America/Belem')).toBeNull()
+  })
+})
+
+describe('quietNote', () => {
+  // Glooty on 18 nov: last order 10 nov, last ad spend 15 nov, readings current.
+  const glooty: QuietInput = {
+    range: { from: '2026-11-11', to: '2026-11-17' }, today: '2026-11-18',
+    lastSaleDate: '2026-11-10', lastAdDate: '2026-11-15', ordersLane: 'ok', metaLane: 'ok',
+  }
+
+  it('says when the store last sold, that the order reading is current and that the ads stopped', () => {
+    const n = quietNote(glooty)!
+    expect(n.tone).toBe('info')
+    expect(n.title).toBe('Última venda em 10 nov, há 8 dias')
+    expect(n.lines.join(' ')).toContain('Não é falha de sincronização')
+    expect(n.lines.join(' ')).toContain('Anúncios parados: o último gasto foi em 15 nov.')
+  })
+
+  it('works on "Hoje" too', () => {
+    expect(quietNote({ ...glooty, range: { from: '2026-11-18', to: '2026-11-18' } })?.title).toBe('Última venda em 10 nov, há 8 dias')
+  })
+
+  it('warns, without blaming the store, when the order reading is late', () => {
+    const n = quietNote({ ...glooty, ordersLane: 'failing' })!
+    expect(n.tone).toBe('warn')
+    expect(n.lines[0]).toContain('pode haver vendas que ainda não chegaram')
+    expect(n.lines.join(' ')).not.toContain('Não é falha')
+  })
+
+  it('does not call the ads stopped while the Meta reading is late, and says when they still spend', () => {
+    expect(quietNote({ ...glooty, metaLane: 'stale' })!.lines.join(' ')).toContain('O último gasto em anúncios registrado foi em 15 nov.')
+    expect(quietNote({ ...glooty, lastAdDate: '2026-11-17' })!.lines.join(' ')).toContain('continuam gastando')
+    expect(quietNote({ ...glooty, lastAdDate: null })!.lines).toHaveLength(1)
+  })
+
+  it('also speaks on a longer window whose sales stopped before its end (Glooty 30 dias)', () => {
+    expect(quietNote({ ...glooty, range: { from: '2026-10-19', to: '2026-11-17' } })?.title).toBe('Última venda em 10 nov, há 8 dias')
+  })
+
+  it('stays silent when the last sale is recent or the window is in the past', () => {
+    expect(quietNote({ ...glooty, lastSaleDate: '2026-11-17', range: { from: '2026-11-18', to: '2026-11-18' } })).toBeNull()
+    expect(quietNote({ ...glooty, lastSaleDate: '2026-11-17' })).toBeNull()
+    expect(quietNote({ ...glooty, lastSaleDate: null })).toBeNull()
+    // 1–5 nov, whatever happened since: not about the present.
+    expect(quietNote({ ...glooty, range: { from: '2026-11-01', to: '2026-11-05' } })).toBeNull()
+  })
+})
+
+describe('sumMembers', () => {
+  it('counts the stores the verdict sums: with costs and with something in the window', () => {
+    const stores = [
+      { id: 'hibikura', configured: true, totals: pnl({ revenue: 1448, orders: 20, metaSpend: 611 }) },
+      { id: 'epoch', configured: true, totals: pnl({ metaSpend: 196 }) },
+      { id: 'camp', configured: true, totals: pnl() },
+      { id: 'glooty', configured: false, totals: pnl() },
+    ]
+    const m = sumMembers(stores)
+    expect(m.summed.map(s => s.id)).toEqual(['hibikura', 'epoch'])
+    expect(m.idle.map(s => s.id)).toEqual(['camp'])
+    expect(m.excluded.map(s => s.id)).toEqual(['glooty'])
+  })
+
+  it('never calls a lone store idle', () => {
+    expect(sumMembers([{ id: 'camp', configured: true, totals: pnl() }]).summed).toHaveLength(1)
+  })
+})
+
+describe('idleReasons', () => {
+  const lastMonth = { from: '2026-10-01', to: '2026-10-31' }
+  it('names a store that had not sold yet apart from one that stopped, as the verdict does', () => {
+    const idle = [
+      { name: 'Hibikura', dayState: 'complete', firstOrderDate: '2026-11-07' },
+      { name: 'CAMP HALLOW', dayState: 'complete', firstOrderDate: '2026-07-24' },
+      { name: 'Nova', dayState: 'complete', firstOrderDate: null },
+    ]
+    const r = idleReasons(idle, lastMonth)
+    expect(r.notYet.map(s => s.name)).toEqual(['Hibikura'])
+    expect(r.quiet.map(s => s.name)).toEqual(['CAMP HALLOW', 'Nova'])
+    expect(r.notStarted).toEqual([])
+  })
+
+  it('a store whose own day has not begun is neither', () => {
+    const today = { from: '2026-11-19', to: '2026-11-19' }
+    const r = idleReasons([{ name: 'EPOCH', dayState: 'not_started', firstOrderDate: '2026-12-01' }], today)
+    expect(r.notStarted.map(s => s.name)).toEqual(['EPOCH'])
+    expect(r.notYet).toEqual([])
+    expect(r.quiet).toEqual([])
+  })
+
+  it('a first sale inside the window is not "ainda não vendia"', () => {
+    const mtd = { from: '2026-11-01', to: '2026-11-18' }
+    expect(idleReasons([{ name: 'X', dayState: 'running', firstOrderDate: '2026-11-18' }], mtd).quiet).toHaveLength(1)
+    // The row cell uses the same rule ("ainda não vendia · 1ª venda em 7 nov").
+    expect(notSellingYet({ dayState: 'complete', firstOrderDate: '2026-11-07' }, lastMonth)).toBe(true)
+    expect(notSellingYet({ dayState: 'complete', firstOrderDate: '2026-11-07' }, mtd)).toBe(false)
+  })
+})
+
+describe('storeDayOf', () => {
+  it('names the store\'s own day of an archive, as Ajustes does (not the UTC date)', () => {
+    // 22h on 10 nov in São Paulo = 01h UTC on the 11th.
+    expect(storeDayOf('2026-11-11T01:00:00.000Z', 'America/Sao_Paulo')).toBe('2026-11-10')
+    expect(storeDayOf('2026-11-10T12:02:25.443Z', 'America/Sao_Paulo')).toBe('2026-11-10')
+    expect(storeDayOf('2026-11-10T23:00:00.000Z', 'Asia/Tokyo')).toBe('2026-11-11')
+    expect(storeDayOf(null, 'America/Sao_Paulo')).toBeNull()
+    expect(storeDayOf('not a date', 'America/Sao_Paulo')).toBeNull()
   })
 })

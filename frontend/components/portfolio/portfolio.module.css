@@ -12,6 +12,8 @@
 .money { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; white-space: nowrap; }
 .money small { font-size: 11.5px; color: var(--tx-3); white-space: normal; max-width: 120px; text-align: right; line-height: 1.35; }
 .money small b { font-family: var(--mono); font-weight: 500; color: var(--tx-2); white-space: nowrap; }
+/* The rule above outranks the global .neg; a loss in a note stays coral. */
+.money small b:global(.neg) { color: var(--neg); }
 
 .channels { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--tx-3); white-space: nowrap; align-items: flex-end; }
 .channels b { font-family: var(--mono); font-weight: 500; color: var(--tx); }
@@ -24,6 +26,32 @@
 
 .spark { width: 100px; display: inline-block; }
 .sparkNone { font-size: 11px; color: var(--tx-4); max-width: 120px; white-space: normal; line-height: 1.35; }
+
+.revenue { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+
+/* ── Narrow table ──
+   The table needs ~1100px; at 1024 the box is 906px and at 1280 it is 982,
+   so ROAS × empate — the decision column — started off-screen behind a
+   scrollbar that only showed under the totals row. Below that width the
+   "Lucro por dia" sparkline moves under the result and the margin under the
+   revenue; their columns hide. DataTable takes no class per column, so a
+   marker class inside the header and every cell (footer included) picks the
+   column, whatever its position. */
+.tableBox { container-type: inline-size; min-width: 0; }
+/* Headers may wrap: the table only uses that when it is short of room (one
+   pixel over at 1440 with "Lucro (sua parte)"), instead of a scrollbar. */
+.tableBox th { white-space: normal; }
+.colTrail, .colMargin { display: contents; }
+.inlineTrail, .inlineMargin { display: none; }
+.inlineMargin { font-size: 11.5px; color: var(--tx-3); font-family: var(--sans); white-space: nowrap; }
+@container (max-width: 1119px) {
+  .tableBox th:has(.colTrail), .tableBox td:has(.colTrail),
+  .tableBox th:has(.colMargin), .tableBox td:has(.colMargin) { display: none; }
+  .inlineTrail { display: block; margin-top: 3px; }
+  .inlineMargin { display: block; }
+  /* Room for a long change ("▲ subiu $9.103 a mais", Este mês at 1024). */
+  .store { min-width: 180px; max-width: 220px; }
+}
 
 .foot { display: flex; flex-direction: column; gap: 2px; }
 .foot small { font-size: 11.5px; color: var(--tx-3); white-space: normal; }

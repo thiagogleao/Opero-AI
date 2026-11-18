@@ -27,7 +27,7 @@ import { BreakdownLedger, ButtonLink, Callout, Card, EmptyState, ErrorState, Ske
 import { StoresTable } from '@/components/portfolio/StoresTable'
 import { ProfitShare } from '@/components/portfolio/ProfitShare'
 import { loadSharedInWindow, loadSharedPairs, SHARED_LOOKBACK_DAYS } from '@/components/portfolio/data'
-import { pairOrdersIn, pairsMixedIn } from '@/components/portfolio/model'
+import { pairOrdersIn, pairsMixedIn, sumMembers } from '@/components/portfolio/model'
 import { ARCHIVED_PARAM, ArchivedClosed, ArchivedList } from '@/components/portfolio/ArchivedSection'
 import s from '@/components/portfolio/portfolio.module.css'
 
@@ -89,13 +89,14 @@ export default async function OverviewPage({ searchParams }: { searchParams: Pro
 
   const v = buildVerdict(verdictInputFromPortfolio(view, { subject: 'Suas lojas', split: ctx.split }))
   const mixed = pairsMixedIn(shared, sharedNow)
-  const judged = v.storeCount - v.excluded.length
   const sold = v.totals.revenue > 0
+  // The same stores as the verdict's "N lojas na soma": with costs, and with
+  // something in the window.
+  const { summed } = sumMembers(view.stores)
+  const withCosts = v.excluded.length ? ' com custos' : ''
   const ledgerSub = !sold
-    ? `Nenhuma venda em ${ctx.rangeLabel}${v.excluded.length ? ` nas ${plural(judged, 'loja', 'lojas')} com custos` : ''}`
-    : v.excluded.length
-      ? `De cada $1,00 vendido em ${ctx.rangeLabel} nas ${plural(judged, 'loja', 'lojas')} com custos`
-      : `De cada $1,00 vendido em ${ctx.rangeLabel}${v.storeCount > 1 ? `, somando ${plural(v.storeCount, 'loja', 'lojas')}` : ''}`
+    ? `Nenhuma venda em ${ctx.rangeLabel}${v.excluded.length ? ' nas lojas com custos' : ''}`
+    : `De cada $1,00 vendido em ${ctx.rangeLabel}${v.storeCount > 1 ? `, somando ${plural(summed.length, 'loja', 'lojas')}${withCosts}` : ''}`
 
   return (
     <AppShell ctx={ctx}>
