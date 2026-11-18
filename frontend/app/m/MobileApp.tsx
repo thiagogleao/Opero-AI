@@ -1,0 +1,307 @@
+'use client'
+
+/**
+ * Opero Mobile: the owner's phone screen.
+ *
+ * One selection (store + period, optionally an open tab) that only a tap
+ * changes, kept in the URL and in localStorage (_lib/viewStore). One answer at
+ * a time from GET /api/mobile, applied only when it echoes exactly what is on
+ * screen (_lib/useMobileData). While another selection loads, the old answer
+ * stays visible but dimmed under "Carregando …", so it is never read as the
+ * new store's numbers.
+ */
+
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { Button, EmptyState, ErrorState, Skeleton } from '@/components/ui'
+import { buildVerdict, verdictInputFromPortfolio } from '@/lib/views/verdict'
+import type { MobileStoreOption } from '@/lib/views/mobile'
+import type { DetailSection } from '@/lib/views/mobileDetail'
+import { formatTimeInTz } from '@/lib/format'
+import { REFERENCE_TZ } from '@/lib/engine/dates'
+import { ALL, periodLabel, selectionKey, type Selection } from './_lib/selection'
+import { applyUrl, configureStores, getServerView, getView, persistCurrent, setView, subscribeView } from './_lib/viewStore'
+import { useMobileData, useNow, useRefresh } from './_lib/useMobileData'
+import { diffFeed, inScope, type FeedBaseline } from './_lib/feed'
+import { getSoundPref, playChaChing, setSoundPref, subscribeSoundPref, setSoundEnabled } from './_lib/sound'
+import { usePush } from './_lib/usePush'
+import { Header, PeriodBar, RefreshStrip, StoreChips, Strip } from './_components/Top'
+import {
+  Attention, ChargebackBlock, ClockBanner, DailyBlock, DayBlock, LiveFeed, RefundsBlock, StoreList, VerdictBlock,
+} from './_components/Home'
+import { DetailTabs } from './_components/Details'
+import { AlertsSheet, PeriodSheet, SettingsSheet } from './_components/Sheets'
+import s from './m.module.css'
+
+type SheetName = 'period' | 'settings' | 'alerts' | null
+
+export default function MobileApp({ stores, archived }: { stores: MobileStoreOption[]; archived: MobileStoreOption[] }) {
+  configureStores([...stores, ...archived].map(x => x.id))
+  const view = useSyncExternalStore(subscribeView, getView, getServerView)
+  const sel = view?.sel ?? null
+  const selKey = sel ? selectionKey(sel) : null
+  const home = useMobileData(sel)
+  const now = useNow()
+  const push = usePush()
+  const soundOn = useSyncExternalStore(subscribeSoundPref, getSoundPref, () => false)
+  const [sheet, setSheet] = useState<SheetName>(null)
+  const [force, setForce] = useState(0)
+  const [notice, setNotice] = useState<string | null>(null)
+  const deviceTz = useMemo(() => (typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : REFERENCE_TZ), [])
+
+  const activeIds = useMemo(() => new Set(stores.map(x => x.id)), [stores])
+  const nameOf = useCallback((id: string) => (id === ALL ? 'Todas as lojas' : [...stores, ...archived].find(x => x.id === id)?.name ?? 'esta loja'), [stores, archived])
+
+  // The resolved view goes to the URL and storage once; the service worker
+  // is registered so pushes, taps and key rotation reach this page.
+  useEffect(() => {
+    // After the router's own mount effects, which rewrite the URL to the one
+    // the server rendered (plain /m) and would drop ?loja=&periodo=.
+    const t = setTimeout(persistCurrent, 0)
+    if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js').catch(() => {})
+    if (getSoundPref()) setSoundEnabled(true)
+    return () => clearTimeout(t)
+  }, [])
+
+  const pick = useCallback((patch: Partial<Selection>) => {
+    const v = getView()
+    if (!v) return
+    setNotice(null)
+    setView({ ...v, sel: { ...v.sel, ...patch } })
+  }, [])
+  const pickStore = useCallback((loja: string) => {
+    pick({ loja })
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }, [pick])
+  const pickTab = useCallback((aba: DetailSection | null) => {
+    const v = getView()
+    if (v) setView({ ...v, aba })
+  }, [])
+
+  // ── Sound: new sales of what is on screen, never on a switch ────────────
+  const baseline = useRef<FeedBaseline | null>(null)
+  const announced = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (!home.data || !home.dataKey) return
+    const { baseline: next, fresh } = diffFeed(baseline.current, home.dataKey, home.data.liveFeed, announced.current, Date.now())
+    baseline.current = next
+    if (fresh.length) {
+      for (const id of fresh) announced.current.add(id)
+      playChaChing()
+    }
+  }, [home.data, home.dataKey])
+
+  const loadRef = useRef(home.load)
+  useEffect(() => { loadRef.current = home.load }, [home.load])
+
+  // ── Service worker messages: a sale, another push, a tap to navigate ─────
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return
+    const onMessage = (e: MessageEvent) => {
+      const m = e.data as { type?: string; url?: string; payload?: { tenantId?: string; orderId?: string } } | null
+      if (!m?.type) return
+      if (m.type === 'navigate' && m.url) { applyUrl(m.url); return }
+      const v = getView()
+      if (m.type === 'sale') {
+        const storeId = m.payload?.tenantId
+        if (!v || !inScope(v.sel.loja, storeId, activeIds)) return
+        const id = `${storeId}|${m.payload?.orderId}`
+        if (m.payload?.orderId && !announced.current.has(id)) {
+          announced.current.add(id)
+          playChaChing()
+        }
+        loadRef.current('manual')
+      } else if (m.type === 'push') {
+        loadRef.current('poll')
+      }
+    }
+    navigator.serviceWorker.addEventListener('message', onMessage)
+    return () => navigator.serviceWorker.removeEventListener('message', onMessage)
+  }, [activeIds])
+
+  // ── Atualizar: only the stores on screen, real progress ─────────────────
+  const onRefreshed = useCallback(() => {
+    loadRef.current('manual')
+    setForce(f => f + 1)
+  }, [])
+  const refresh = useRefresh(onRefreshed)
+  const archivedSel = !!sel && archived.some(a => a.id === sel.loja)
+  const onScreen = useCallback(() => {
+    const v = getView()
+    if (!v) return []
+    return v.sel.loja === ALL ? stores.map(x => x.id) : activeIds.has(v.sel.loja) ? [v.sel.loja] : []
+  }, [stores, activeIds])
+  const refreshing = refresh.run.phase === 'starting' || refresh.run.phase === 'running'
+  const { dismiss } = refresh
+  useEffect(() => {
+    if (refresh.run.phase !== 'done' || refresh.run.status?.runs.some(r => r.status === 'error')) return
+    const t = setTimeout(dismiss, 8000)
+    return () => clearTimeout(t)
+  }, [refresh.run.phase, refresh.run.status, dismiss])
+
+  // ── A store that disappeared (archived elsewhere): say so, go to Todas ───
+  const storeGone = home.error?.kind === 'store' && home.errorKey === selKey
+  useEffect(() => {
+    if (!storeGone) return
+    const v = getView()
+    if (!v || v.sel.loja === ALL) return
+    const gone = nameOf(v.sel.loja)
+    setView({ ...v, sel: { ...v.sel, loja: ALL } })
+    setNotice(`${gone} não está mais disponível. Mostrando Todas.`)
+  }, [storeGone, nameOf])
+
+  // ── What is shown ───────────────────────────────────────────────────────
+  const data = home.data
+  const fresh = !!data && home.dataKey === selKey
+  const error = home.error && home.errorKey === selKey ? home.error : null
+  const loadingThis = home.loadingKey !== null && home.loadingKey === selKey
+  const verdict = useMemo(
+    () => (data ? buildVerdict(verdictInputFromPortfolio(data, { subject: data.request.store === 'all' ? 'Suas lojas' : undefined })) : null),
+    [data],
+  )
+  const scopeName = sel ? (sel.loja === ALL ? 'Todas as lojas' : nameOf(sel.loja)) : ''
+  const pendingName = sel ? `${sel.loja === ALL ? 'Todas' : nameOf(sel.loja)} · ${sel.periodo === 'custom' ? 'datas escolhidas' : periodLabel(sel.periodo)}` : ''
+  const shownName = data ? `${data.request.store === 'all' ? 'Todas' : data.stores[0]?.name ?? ''} · ${periodLabel(data.period)}` : ''
+  const singleTz = data && data.request.store !== 'all' && data.stores.length === 1 ? data.stores[0].timezone : null
+  const pushAlert = push.status === 'nao_inscrito' || push.status === 'bloqueado' || push.status === 'sem_chave'
+
+  if (error?.kind === 'session') {
+    return (
+      <div className={s.root}>
+        <div className={s.gate} role="alert">
+          <p>Sessão expirada neste aparelho</p>
+          <p>Abra o link de acesso de novo para ver as lojas.</p>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className={s.root}>
+      <Header
+        data={fresh ? data : null}
+        now={now}
+        soundOn={soundOn}
+        onSound={() => setSoundPref(!soundOn)}
+        onRefresh={() => void refresh.start(onScreen())}
+        refreshing={refreshing}
+        refreshDisabled={archivedSel}
+        onSettings={() => setSheet('settings')}
+        settingsAlert={pushAlert}
+      />
+      <StoreChips stores={stores} archived={archived} sel={sel} pendingKey={loadingThis && !fresh ? sel?.loja ?? null : null} onPick={pickStore} />
+      <PeriodBar sel={sel} today={data?.anchorToday} onPick={periodo => pick({ periodo, de: null, ate: null })} onMore={() => setSheet('period')} />
+
+      <RefreshStrip run={refresh.run} onClose={refresh.dismiss} onRetry={() => void refresh.start(onScreen())} />
+      {notice && <Strip tone="warn" icon="alert" onClose={() => setNotice(null)}>{notice}</Strip>}
+
+      {sel && !fresh && !error && (
+        <Strip tone="info" spin>
+          Carregando {pendingName}…
+          {data && <small>Os números apagados abaixo ainda são de {shownName}.</small>}
+        </Strip>
+      )}
+      {sel && error && (
+        fresh ? (
+          <Strip tone="warn" icon="alert" spin={loadingThis}>
+            Não atualizou: {error.message}. Números de {home.fetchedAt ? formatTimeInTz(new Date(home.fetchedAt), deviceTz) : '—'}.{' '}
+            {/* A retry gave no sign of life until it answered (a poll shows no "Carregando"). */}
+            {loadingThis
+              ? <span>Tentando de novo…</span>
+              : <button type="button" className={s.linkBtn} onClick={() => home.load('manual')}>Tentar de novo</button>}
+          </Strip>
+        ) : null
+      )}
+
+      {sel && error && !fresh ? (
+        <div className={s.content}>
+          <ErrorState
+            title={`Não foi possível carregar ${pendingName}`}
+            action={<Button icon="refresh" onClick={() => home.load('manual')}>Tentar de novo</Button>}
+          >
+            {error.message}. {data ? `Os números de ${shownName} foram tirados da tela para não serem lidos como desta seleção.` : ''}
+          </ErrorState>
+        </div>
+      ) : !data || !verdict ? (
+        <HomeSkeleton />
+      ) : (
+        // inert: the dimmed answer is another selection's, so its rows must not
+        // be focusable or tappable as if they were this one's.
+        <div className={`${s.content}${fresh ? '' : ` ${s.dim}`}`} aria-busy={!fresh || undefined} aria-hidden={!fresh || undefined} inert={!fresh || undefined}>
+          {archivedSel && fresh && <Strip tone="info" icon="info">Loja arquivada: fora de “Todas” e sem sincronização. Só o histórico.</Strip>}
+          {singleTz && <ClockBanner tz={singleTz} deviceTz={deviceTz} now={now} />}
+          {data.stores.length === 0 ? (
+            <EmptyState title="Nenhuma loja ativa" />
+          ) : (
+            <>
+              <VerdictBlock data={data} v={verdict} />
+              <DayBlock data={data} />
+              <DailyBlock data={data} />
+              <Attention data={data} />
+              <StoreList data={data} onPick={pickStore} />
+              <LiveFeed data={data} now={now} deviceTz={deviceTz} />
+            </>
+          )}
+        </div>
+      )}
+
+      {sel && (
+        <div className={s.content}>
+          <DetailTabs sel={sel} aba={view?.aba ?? null} onTab={pickTab} forceSignal={force} pollSignal={home.fetchedAt ?? 0} homeRange={fresh && data ? `${data.range.from}|${data.range.to}` : null} now={now} scopeName={scopeName} />
+          {data && fresh && verdict && (
+            <>
+              <RefundsBlock data={data} />
+              <ChargebackBlock data={data} />
+            </>
+          )}
+        </div>
+      )}
+
+      <footer className={s.footer}>
+        {fresh && home.fetchedAt && (
+          <span>Números de {formatTimeInTz(new Date(home.fetchedAt), deviceTz)} · atualizam sozinhos a cada 45 s com o app aberto.</span>
+        )}
+        <button type="button" className={s.linkBtn} onClick={() => setSheet('settings')}>Ajustes deste aparelho</button>
+      </footer>
+
+      {sheet === 'period' && sel && (
+        <PeriodSheet
+          sel={sel}
+          tz={singleTz ?? (sel.loja !== ALL ? [...stores, ...archived].find(x => x.id === sel.loja)?.timezone ?? REFERENCE_TZ : REFERENCE_TZ)}
+          now={now}
+          onPick={p => pick(p)}
+          onClose={() => setSheet(null)}
+        />
+      )}
+      {sheet === 'settings' && (
+        <SettingsSheet
+          push={push}
+          soundOn={soundOn}
+          onSound={setSoundPref}
+          archived={archived}
+          onOpenStore={pickStore}
+          onAlerts={() => setSheet('alerts')}
+          onClose={() => setSheet(null)}
+        />
+      )}
+      {sheet === 'alerts' && <AlertsSheet onClose={() => setSheet(null)} />}
+    </div>
+  )
+}
+
+function HomeSkeleton() {
+  return (
+    <div className={s.content} aria-busy="true" aria-label="Carregando">
+      <div style={{ background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 'var(--r-card)', padding: 16, display: 'grid', gap: 12 }}>
+        <Skeleton width={160} height={22} radius={11} />
+        <Skeleton width="92%" height={22} />
+        <Skeleton width="70%" height={22} />
+        <Skeleton width={180} height={40} />
+        <Skeleton height={56} radius={12} />
+      </div>
+      <div style={{ background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 'var(--r-card)', padding: 16 }}>
+        <Skeleton width={180} height={14} />
+        <Skeleton height={160} radius={10} style={{ marginTop: 14 }} />
+      </div>
+    </div>
+  )
+}

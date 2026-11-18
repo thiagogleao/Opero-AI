@@ -1,251 +1,45 @@
-import { query } from '@/lib/db'
-import { getCountryProfit, getProfitSummary } from '@/lib/profitCalc'
-import {
-  getProductMetrics, getCustomerSplit, getTopCreatives,
-  getCampaignMetrics, getCampaignDaily,
-} from '@/lib/queries'
-import { creativeSignal, SIGNAL_RANK, FALLBACK_BREAK_EVEN } from '@/lib/creativeSignal'
-import {
-  campaignSignal, campaignTrend, marginRateFromSummary,
-  CAMPAIGN_RANK, TREND_RANK,
-} from '@/lib/campaignSignal'
 import { mobileAuthOk, unauthorized } from '@/lib/mobileAuth'
-import { resolveRange, anchorTz, type Period } from '@/lib/mobileRange'
+import { listStores } from '@/lib/access'
+import { getAlertConfig } from '@/lib/alerts'
+import { selectStores, StoreSelectionError } from '@/lib/views/mobile'
+import {
+  DetailFailedError, DetailQueryError, mobileDetailOnce, parseDetailQuery,
+} from '@/lib/views/mobileDetail'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 /**
- * Detail sections for the mobile dashboard, fetched only when a tab is opened.
+ * The phone's detail tabs: GET /api/mobile/detail?section=&period=&store=&from=&to=
  *
- * Kept out of /api/mobile because each section costs a query per store, and the
- * headline numbers should not wait on a tab the user may never open.
+ *  section  campanhas | criativos | produtos | paises | clientes
+ *  period, store, from, to  exactly as GET /api/mobile (same presets, same
+ *           store selection, a custom period needs both dates).
+ *
+ * Answers with lib/views/mobileDetail.ts MobileDetailResponse, built on
+ * lib/data/* and echoing the request. Fetched only when a tab is opened, so
+ * the headline never waits on a tab nobody looks at.
+ *
+ * Owner only, like /api/mobile: these lists span every store.
  */
 export async function GET(req: Request) {
   if (!(await mobileAuthOk(req))) return unauthorized()
 
-  const { searchParams } = new URL(req.url)
-  const section = searchParams.get('section') ?? 'products'
-  const period  = (searchParams.get('period') ?? 'today') as Period
-  const storeId = searchParams.get('store')
-
-  const tenants = await query<{ id: string; timezone: string | null }>(
-    storeId && storeId !== 'all'
-      ? `SELECT id, timezone FROM tenants WHERE id = $1 AND shopify_access_token IS NOT NULL`
-      : `SELECT id, timezone FROM tenants WHERE shopify_access_token IS NOT NULL ORDER BY created_at`,
-    storeId && storeId !== 'all' ? [storeId] : []
-  )
-  const ids = tenants.map(t => t.id)
-
-  // Same window the headline numbers used: one store is read on its own clock.
-  const { from, to } = resolveRange(
-    period, anchorTz(tenants.map(t => t.timezone)),
-    searchParams.get('from'), searchParams.get('to')
-  )
-
-  // A single store's failure yields an empty contribution rather than a 500.
-  const gather = async <T>(fn: (id: string) => Promise<T[]>): Promise<T[]> => {
-    const parts = await Promise.all(ids.map(id =>
-      fn(id).catch(err => { console.error('[mobile/detail]', section, id, err); return [] as T[] })
-    ))
-    return parts.flat()
+  try {
+    const q = parseDetailQuery(new URL(req.url).searchParams)
+    const visible = await listStores({ kind: 'owner' }, { includeArchived: true })
+    const { key, stores } = selectStores(q.store, visible)
+    const cfg = await getAlertConfig()
+    const body = await mobileDetailOnce({ ...q, storeKey: key }, stores, {
+      thresholds: { minMargin: cfg.scaleAlerts.threshold },
+      storeNames: new Map(visible.map(s => [s.id, s.name])),
+    })
+    return Response.json(body, { headers: { 'Cache-Control': 'no-store' } })
+  } catch (err) {
+    if (err instanceof DetailQueryError) return Response.json({ error: err.message }, { status: 400 })
+    if (err instanceof StoreSelectionError) return Response.json({ error: err.message }, { status: err.status })
+    if (err instanceof DetailFailedError) return Response.json({ error: 'Nenhuma loja respondeu' }, { status: 500 })
+    console.error('[mobile/detail] failed', err)
+    return Response.json({ error: 'Falha ao carregar' }, { status: 500 })
   }
-
-  if (section === 'products') {
-    const rows = await gather(id => getProductMetrics(id, from, to))
-    // Merge the same product across clone stores — they sell the same catalog.
-    const merged = new Map<string, { title: string; units: number; orders: number; revenue: number }>()
-    for (const r of rows as { title: string; units: number; orders: number; revenue: number }[]) {
-      const key = r.title ?? 'Sem título'
-      const cur = merged.get(key) ?? { title: key, units: 0, orders: 0, revenue: 0 }
-      cur.units   += Number(r.units ?? 0)
-      cur.orders  += Number(r.orders ?? 0)
-      cur.revenue += Number(r.revenue ?? 0)
-      merged.set(key, cur)
-    }
-    const products = [...merged.values()]
-      .map(p => ({ ...p, aov: p.orders > 0 ? p.revenue / p.orders : 0 }))
-      .sort((a, b) => b.revenue - a.revenue)
-      .slice(0, 40)
-    return Response.json({ section, from, to, products })
-  }
-
-  if (section === 'countries') {
-    const rows = await gather(id => getCountryProfit(id, from, to))
-    const merged = new Map<string, {
-      country_code: string; revenue: number; orders: number; fbSpend: number; netProfit: number
-    }>()
-    for (const r of rows) {
-      const key = r.country_code || '??'
-      const cur = merged.get(key) ?? { country_code: key, revenue: 0, orders: 0, fbSpend: 0, netProfit: 0 }
-      cur.revenue   += Number(r.revenue ?? 0)
-      cur.orders    += Number(r.orders ?? 0)
-      cur.fbSpend   += Number(r.fbSpend ?? 0)
-      cur.netProfit += Number(r.netProfit ?? 0)
-      merged.set(key, cur)
-    }
-    const countries = [...merged.values()]
-      // Recompute ratios from summed totals, never average per-store ratios.
-      .map(c => ({
-        ...c,
-        margin: c.revenue > 0 ? (c.netProfit / c.revenue) * 100 : 0,
-        roas:   c.fbSpend > 0 ? c.revenue / c.fbSpend : null,
-      }))
-      .sort((a, b) => b.revenue - a.revenue)
-      .slice(0, 40)
-    return Response.json({ section, from, to, countries })
-  }
-
-  if (section === 'creatives') {
-    // Break-even ROAS is what decides whether an ad is winning, and it differs
-    // per store because each has its own costs. Ads are keyed per tenant in the
-    // metrics table (no ad_id spans two stores), so each one is judged against
-    // its own store's break-even and the list is merged afterwards.
-    const perStore = await Promise.all(ids.map(async id => {
-      try {
-        const [ads, summary] = await Promise.all([
-          getTopCreatives(id, from, to),
-          getProfitSummary(id, from, to).catch(() => null),
-        ])
-        const be = summary?.configured && summary.breakEvenRoas > 0
-          ? summary.breakEvenRoas
-          : FALLBACK_BREAK_EVEN
-        return ads.map(a => {
-          const spend    = Number(a.spend)
-          const roas     = Number(a.roas)
-          const freq     = Number(a.frequency)
-          const hookRate = a.hook_rate != null ? Number(a.hook_rate) : null
-          const signal   = creativeSignal({ spend, roas, frequency: freq, hookRate, breakEven: be })
-
-          return {
-            adId: a.ad_id,
-            name: a.name,
-            thumbnail: a.thumbnail_url,
-            spend, roas, ctr: Number(a.ctr), frequency: freq,
-            purchases: Number(a.purchases ?? 0),
-            revenue: Number(a.revenue),
-            hookRate,
-            holdRate100: a.hold_rate_100 != null ? Number(a.hold_rate_100) : null,
-            isVideo: Number(a.video_plays ?? 0) > 0,
-            breakEven: Math.round(be * 100) / 100,
-            signal,
-          }
-        })
-      } catch (err) {
-        console.error('[mobile/detail] creatives', id, err)
-        return []
-      }
-    }))
-
-
-    const creatives = perStore.flat()
-      // Problems first, then winners, and within each the biggest spend —
-      // money burning now is what deserves the top of a phone screen.
-      .sort((a, b) =>
-        SIGNAL_RANK[a.signal] - SIGNAL_RANK[b.signal]
-        || b.spend - a.spend
-      )
-      .slice(0, 30)
-
-    return Response.json({ section, from, to, creatives })
-  }
-
-  if (section === 'campaigns') {
-    // Like the creatives section, each store is judged against its own margin:
-    // a campaign is only profitable relative to what that store pays to
-    // deliver an order. Campaigns never span two stores, so the lists merge
-    // cleanly afterwards.
-    const perStore = await Promise.all(ids.map(async id => {
-      try {
-        const [totals, daily, summary] = await Promise.all([
-          getCampaignMetrics(id, from, to),
-          getCampaignDaily(id, from, to),
-          getProfitSummary(id, from, to).catch(() => null),
-        ])
-        const marginRate = summary ? marginRateFromSummary(summary) : 0
-
-        const byCampaign = new Map<string, typeof daily>()
-        for (const r of daily) {
-          const list = byCampaign.get(r.campaign_id)
-          if (list) list.push(r)
-          else byCampaign.set(r.campaign_id, [r])
-        }
-
-        return totals.map(c => {
-          const spend     = Number(c.spend)
-          const revenue   = Number(c.revenue)
-          const purchases = Number(c.purchases)
-          const r = campaignSignal({ spend, revenue, purchases, marginRate })
-          const dias = byCampaign.get(c.campaign_id) ?? []
-          const series = dias.map(d => {
-            const dr = campaignSignal({
-              spend: Number(d.spend), revenue: Number(d.revenue),
-              purchases: Number(d.purchases), marginRate,
-            })
-            return {
-              date: d.date,
-              spend: Math.round(Number(d.spend) * 100) / 100,
-              roas: Math.round(dr.roas * 100) / 100,
-              profit: marginRate > 0 ? Math.round(dr.profit * 100) / 100 : null,
-            }
-          })
-          const t = campaignTrend(
-            dias.map(d => ({ date: d.date, spend: Number(d.spend), revenue: Number(d.revenue) })),
-            to, marginRate
-          )
-          return {
-            trend: t.trend,
-            recentDays: t.recentDays,
-            recentRoas: t.recentRoas,
-            recentProfit: t.recentProfit,
-            baseRoas: t.baseRoas,
-            lift: t.lift,
-            campaignId: c.campaign_id,
-            name: c.campaign_name,
-            status: c.status,
-            spend, revenue, purchases,
-            roas:      Math.round(r.roas * 100) / 100,
-            breakEven: Math.round(r.breakEven * 100) / 100,
-            profit:    Math.round(r.profit * 100) / 100,
-            profitPct: Math.round(r.profitPct * 10) / 10,
-            cpa:       r.cpa !== null ? Math.round(r.cpa * 100) / 100 : null,
-            configured: marginRate > 0,
-            verdict:   r.verdict,
-            days: series.length,
-            daysProfitable: series.filter(d => d.profit !== null && d.profit > 0).length,
-            series,
-          }
-        })
-      } catch (err) {
-        console.error('[mobile/detail] campaigns', id, err)
-        return []
-      }
-    }))
-
-    const campaigns = perStore.flat()
-      // Losing money first, and inside that the ones that are moving: the phone
-      // screen leads with the campaign that costs something every hour it stays
-      // on, and right after it the one that just started paying for itself.
-      .sort((a, b) =>
-        CAMPAIGN_RANK[a.verdict] - CAMPAIGN_RANK[b.verdict]
-        || TREND_RANK[a.trend] - TREND_RANK[b.trend]
-        || b.spend - a.spend
-      )
-      .slice(0, 30)
-
-    return Response.json({ section, from, to, campaigns })
-  }
-
-  if (section === 'customers') {
-    const rows = await gather(id => getCustomerSplit(id, from, to))
-    const totals = rows.reduce((a, r) => ({
-      newCustomers:       a.newCustomers       + Number(r.new_customers ?? 0),
-      returningCustomers: a.returningCustomers + Number(r.returning_customers ?? 0),
-      newRevenue:         a.newRevenue         + Number(r.new_revenue ?? 0),
-      returningRevenue:   a.returningRevenue   + Number(r.returning_revenue ?? 0),
-    }), { newCustomers: 0, returningCustomers: 0, newRevenue: 0, returningRevenue: 0 })
-    return Response.json({ section, from, to, customers: totals })
-  }
-
-  return Response.json({ error: 'Unknown section' }, { status: 400 })
 }

@@ -4,7 +4,7 @@
  * is only useful with live data, and a stale cache would be worse than a
  * spinner. */
 
-const VERSION = 'opero-v2'
+const VERSION = 'opero-v3'
 
 self.addEventListener('install', () => {
   // Take over immediately so a redeploy doesn't leave an old worker handling push.
@@ -59,6 +59,24 @@ self.addEventListener('push', event => {
   ]))
 })
 
+/**
+ * Where a tap goes. Older scale alerts pointed at /campaigns, which needs a
+ * partner login and shows the cookie's store: they open the phone on the
+ * alert's store, campaigns tab, instead. The phone keeps the period it was on.
+ */
+function targetOf(data) {
+  const home = new URL('/m', self.location.origin)
+  let u
+  try { u = new URL(data.url || '/m', self.location.origin) } catch { return home.href }
+  if (u.origin !== self.location.origin) return home.href
+  if (u.pathname === '/campaigns' || u.pathname.startsWith('/campaigns/')) {
+    if (data.tenantId) home.searchParams.set('loja', String(data.tenantId))
+    home.searchParams.set('aba', 'campanhas')
+    return home.href
+  }
+  return u.href
+}
+
 /** Same-origin path of a client URL ('' when it cannot be parsed). */
 function pathOf(url) {
   try { return new URL(url).pathname } catch { return '' }
@@ -67,13 +85,10 @@ function pathOf(url) {
 self.addEventListener('notificationclick', event => {
   event.notification.close()
   const data = event.notification.data || {}
-  // The payload's URL, e.g. /m?loja=<id>: the store the alert is about. Only
-  // this app's own pages are opened, whatever a payload carries.
-  let target = new URL('/m', self.location.origin).href
-  try {
-    const u = new URL(data.url || '/m', self.location.origin)
-    if (u.origin === self.location.origin) target = u.href
-  } catch { /* malformed url: open the app */ }
+  // The payload's URL, e.g. /m?loja=<id>&aba=campanhas: the store (and tab)
+  // the alert is about. Only this app's own pages are opened, whatever a
+  // payload carries.
+  const target = targetOf(data)
 
   event.waitUntil((async () => {
     const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
