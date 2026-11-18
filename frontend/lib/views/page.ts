@@ -22,11 +22,12 @@
 
 import { notFound, redirect } from 'next/navigation'
 import { getViewer, listStores, resolveStore, type StoreRef, type Viewer } from '../access'
+import type { Metadata } from 'next'
 import {
-  anchorTz, comparisonRange, isIsoDate, isPeriod, minutesIntoDay, PERIODS, resolveRange, todayInTz,
-  type Comparison, type DateRange, type Period,
+  anchorTz, comparisonRange, daysBetween, isIsoDate, isPeriod, minutesIntoDay, PERIODS, resolveRange, shiftDate,
+  todayInTz, type Comparison, type DateRange, type Period,
 } from '../engine/dates'
-import { dayOfLabel, formatClock, formatRangeLabel, tzCity } from '../format'
+import { dayOfLabel, formatClock, formatDate, formatRangeLabel, tzCity } from '../format'
 import { comparisonText, periodPhrase, SPLIT_SHARE } from './verdict'
 
 export type SearchParams = Record<string, string | string[] | undefined>
@@ -35,6 +36,25 @@ export type SearchParams = Record<string, string | string[] | undefined>
 export const ALL_STORES = 'todas'
 /** Desktop default: 7 complete days ending yesterday. */
 export const DEFAULT_PERIOD: Period = '7d'
+
+/**
+ * Longest window a page prices: the same cap as the API routes
+ * (app/api/campaigns/window.ts MAX_WINDOW_DAYS). A longer custom range keeps
+ * its LAST 366 days and the page says so (PeriodWindow.rangeNote). Without it,
+ * ?de=1990-01-01 built a 30 MB Resumo in 18 s: 13,470 daily bars plus a
+ * 13,470-day comparison.
+ */
+export const MAX_WINDOW_DAYS = 366
+
+/**
+ * No page date before this one. No order of these stores is older (Shopify
+ * itself opened in 2006), and older years break plain-date arithmetic: Date.UTC
+ * reads years 0–99 as 19xx, and the comparison of a range starting in year 100
+ * began in year −1827 ('-001827-02', which SQL rejects; the text read
+ * "2 undefined 0"). A range that ends before it is ignored like a malformed
+ * date; one that starts before it starts here.
+ */
+export const MIN_PAGE_DATE = '2000-01-01'
 
 // ─── Pure parts (tested) ─────────────────────────────────────────────────────
 
@@ -58,6 +78,8 @@ const first = (v: string | string[] | undefined): string | null => {
  *  - unknown or missing periodo → the default;
  *  - de + ate (both real dates) without periodo → a custom range;
  *  - periodo=custom without both dates → the default (never a silent "today");
+ *  - a range wholly before MIN_PAGE_DATE counts as no dates (→ the default);
+ *    the length cap needs today, so resolvePeriodWindow applies it;
  *  - parte=50 → the partner split; anything else → off.
  */
 export function parsePageParams(sp: SearchParams, defaultPeriod: Period = DEFAULT_PERIOD): PageParams {
@@ -65,7 +87,7 @@ export function parsePageParams(sp: SearchParams, defaultPeriod: Period = DEFAUL
   const rawPeriod = first(sp.periodo)
   const de = first(sp.de)
   const ate = first(sp.ate)
-  const dates = isIsoDate(de) && isIsoDate(ate)
+  const dates = isIsoDate(de) && isIsoDate(ate) && (de >= MIN_PAGE_DATE || ate >= MIN_PAGE_DATE)
   let periodo: Period = isPeriod(rawPeriod) ? rawPeriod : defaultPeriod
   if (!rawPeriod && dates) periodo = 'custom'
   if (periodo === 'custom' && !dates) periodo = defaultPeriod
@@ -103,13 +125,31 @@ export interface PeriodWindow {
   minutesIntoDay: number
   /** "parcial · até 13h38" when partial, else null. */
   partialLabel: string | null
+  /** Set when the asked range was cut to fit (longer than MAX_WINDOW_DAYS, or
+   *  starting before MIN_PAGE_DATE): one sentence saying what is shown. */
+  rangeNote: string | null
 }
 
+/**
+ * The window a page shows. A custom range is cut to fit: it never starts
+ * before MIN_PAGE_DATE nor ends after today (resolveRange), and it keeps its
+ * last MAX_WINDOW_DAYS days — so a page never prices decades, and never sends
+ * SQL a date it cannot read. `rangeNote` says when that happened.
+ */
 export function resolvePeriodWindow(
   period: Period, de: string | null, ate: string | null, tz: string, now: Date = new Date(),
 ): PeriodWindow {
-  const range = resolveRange(period, tz, de, ate, now)
+  const floor = (d: string | null) => (d !== null && d < MIN_PAGE_DATE ? MIN_PAGE_DATE : d)
+  const floored = period === 'custom' && ((de !== null && de < MIN_PAGE_DATE) || (ate !== null && ate < MIN_PAGE_DATE))
+  let range = resolveRange(period, tz, floor(de), floor(ate), now)
   const today = todayInTz(tz, now)
+  let rangeNote: string | null = null
+  if (daysBetween(range.from, range.to) > MAX_WINDOW_DAYS) {
+    range = { from: shiftDate(range.to, -(MAX_WINDOW_DAYS - 1)), to: range.to }
+    rangeNote = `O período pedido passa de ${MAX_WINDOW_DAYS} dias, o máximo por página: aqui estão os últimos ${MAX_WINDOW_DAYS}, ${formatRangeLabel(range, today)}.`
+  } else if (floored) {
+    rangeNote = `Datas antes de ${formatDate(MIN_PAGE_DATE, today)} não entram: o período começa em ${formatDate(range.from, today)}.`
+  }
   const comparison = comparisonRange(period, range, tz, now)
   const partial = range.to >= today && range.from <= today
   const minutes = minutesIntoDay(tz, now)
@@ -124,6 +164,7 @@ export function resolvePeriodWindow(
     comparisonText: comparisonText(comparison, today),
     timezone: tz, today, partial, minutesIntoDay: minutes,
     partialLabel: partial ? `parcial · até ${formatClock(minutes)}` : null,
+    rangeNote,
   }
 }
 
@@ -295,5 +336,51 @@ export async function getPageContext(
     part: (v: number) => v * splitFactor,
     hrefWith: (path, overrides) => buildHref(path, params, overrides, defaultPeriod),
     now,
+  }
+}
+
+// ─── The tab title (and the 404 title) ───────────────────────────────────────
+
+export type RouteParams = Record<string, string | string[] | undefined>
+
+export interface PageMetadataOptions {
+  /** The page's getPageContext scope: 'all' ignores ?loja, so it never 404s on it. */
+  scope?: 'either' | 'store' | 'all'
+  /** Whatever else the page 404s on (a creative id, say): false → not found. */
+  exists?: (params: RouteParams, searchParams: SearchParams) => Promise<boolean>
+}
+
+/**
+ * generateMetadata for a page built on getPageContext:
+ *
+ *   export const generateMetadata = pageMetadata('Campanhas')
+ *   export const generateMetadata = pageMetadata({ absolute: 'Resumo · Opero' })
+ *   export const generateMetadata = pageMetadata('Criativo', { exists: async p => … })
+ *
+ * Why the 404 rule is repeated here: the root loading.tsx starts streaming
+ * before the page runs, so the page's own notFound() comes after its static
+ * <title> is out — "/?loja=bogus" kept "Resumo · Opero" over the "não
+ * encontramos" card. Next swaps in app/not-found's metadata ("Página não
+ * encontrada · Opero") only when generateMetadata itself throws notFound()
+ * (next/dist/lib/metadata/metadata.js, getNotFoundMetadata). The rule is the
+ * same as getPageContext's: a ?loja id the viewer cannot see (archived ones
+ * included, as there) is a 404; 'todas', no ?loja and no viewer (the page
+ * redirects to /sign-in) are not.
+ */
+export function pageMetadata(title: Metadata['title'], opts: PageMetadataOptions = {}) {
+  return async function generateMetadata(
+    { params, searchParams }: { params?: Promise<RouteParams>; searchParams: Promise<SearchParams> },
+  ): Promise<Metadata> {
+    const sp = await searchParams
+    const loja = first(sp.loja)
+    if ((opts.scope ?? 'either') !== 'all' && loja && loja !== ALL_STORES) {
+      const viewer = await getViewer()
+      if (viewer) {
+        const all = await listStores(viewer, { includeArchived: true })
+        if (!all.some(s => s.id === loja)) notFound()
+      }
+    }
+    if (opts.exists && !(await opts.exists((await params) ?? {}, sp))) notFound()
+    return { title }
   }
 }

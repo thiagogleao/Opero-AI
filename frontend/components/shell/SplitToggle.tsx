@@ -5,31 +5,38 @@
  * money results (profit, profit per order, cash result, refunds) everywhere
  * the page uses ctx.part(); margins, ROAS and break-even never change.
  * A real toggle button (aria-pressed) that navigates in a transition, so it
- * never locks itself after the first click.
+ * never locks itself after the first click. Used while a store or period
+ * choice is still loading, it is laid on top of that choice (./url
+ * onTopOfInFlight) instead of undoing it.
  *
  * Props: { on: boolean; onQuery: string; offQuery: string } — the two URLs'
  * queries, from ctx.hrefWith('', { parte: true|false }).
  */
 
-import { usePathname, useRouter } from 'next/navigation'
-import { useTransition } from 'react'
-import { hrefFor } from './url'
+import { usePathname } from 'next/navigation'
+import { hrefFor, inFlightParam, NAV_LAYER, onTopOfInFlight } from './url'
+import { useShellNavigation } from './useShellNavigation'
 import s from './shell.module.css'
 
 export function SplitToggle({ on, onQuery, offQuery }: { on: boolean; onQuery: string; offQuery: string }) {
-  const router = useRouter()
   const pathname = usePathname() || '/'
-  const [pending, startTransition] = useTransition()
+  const nav = useShellNavigation()
+  const toggle = () => {
+    // While another choice loads, flip the split of the URL being opened.
+    const opening = inFlightParam('parte')
+    const isOn = opening === undefined ? on : opening === '50'
+    nav.push(onTopOfInFlight(hrefFor(pathname, isOn ? offQuery : onQuery), NAV_LAYER.split))
+  }
   return (
     <button
       type="button"
       className={s.split}
       aria-pressed={on}
-      aria-busy={pending || undefined}
+      aria-busy={nav.pending || undefined}
       title="Mostra só a sua metade do lucro. Margens e ROAS não mudam."
-      onClick={() => startTransition(() => { router.push(hrefFor(pathname, on ? offQuery : onQuery)) })}
+      onClick={toggle}
     >
-      {pending ? <span className={s.spin} aria-hidden="true" /> : <span className={s.switch} aria-hidden="true" />}
+      {nav.pending ? <span className={s.spin} aria-hidden="true" /> : <span className={s.switch} aria-hidden="true" />}
       Minha parte 50%
     </button>
   )

@@ -12,7 +12,9 @@
  *  - A store without cost settings is judged on revenue − ads and says so;
  *    in a sum of several stores it is left OUT of the amount and named.
  *  - No sales is "sem vendas", never a fake $0.
- *  - A young day or a handful of orders is "cedo demais para julgar".
+ *  - A young day or a handful of orders is "cedo demais para julgar" — but
+ *    past 04h a day whose ads already cost more than its sales is a loss,
+ *    whatever the order count (adsAboveSales).
  *  - Every comparison says exactly what it compares ("vs ontem até esta hora").
  *  - The partner split halves money results only, never margins or ROAS.
  *
@@ -20,17 +22,23 @@
  *   buildVerdict(input)                    any number of stores, any period
  *   verdictInputFromPortfolio(view, opts)  adapter from buildPortfolio()
  *   storeStatus(store, opts)               one chip for a store row in a list
- *   roasSummary(roas, breakEven)           "ROAS 1,95× · empate 1,58× → no lucro"
+ *   roasSummary(roas, breakEven, facts)    "ROAS 1,95× · empate 1,58× → no lucro"
+ *   storeRoas(totals, configured)          the same on the store's ad channel
+ *   judgedStores(stores) / isIdle(totals)  which stores a sum is made of
  */
 
 import type { PnL } from '../engine/pnl'
 import type { DateRange, Period } from '../engine/dates'
 import { daysBetween, minutesIntoDay } from '../engine/dates'
-import type { PortfolioView, DayState } from './portfolio'
+import type { PortfolioStoreRow, PortfolioView, DayState } from './portfolio'
 import {
   dayOfLabel, formatClock, formatDate, formatDuration, formatMoney, formatPct, formatRangeLabel,
-  formatRoas, pctChange, plural, tzCity,
+  formatRoas, monthLong, plural, readablePctChange, tzCity,
 } from '../format'
+import { adChannelOf, channelRoas, channelSpend, CHANNEL_LABEL, ROAS_LABEL, type AdChannel } from './adChannel'
+// Pure (no React): the RoasGauge and this module word a missing break-even
+// the same way.
+import { breakEvenReason, reasonText, REASON_WORDS, type BreakEvenReason } from '../../components/ui/roasReason'
 
 // ─── Thresholds ──────────────────────────────────────────────────────────────
 
@@ -40,6 +48,19 @@ export const THIN_MARGIN_PCT = 15
 export const MIN_ORDERS = 5
 /** Before 04h00 of the store's day, a day is too young to judge. */
 export const EARLY_DAY_MINUTES = 240
+
+/**
+ * The ads alone already cost more than everything sold (ROAS under 1×): a
+ * loss whatever the products cost, since every break-even is above 1×. A
+ * running day past its early hours in this state is "no prejuízo" even with a
+ * handful of orders — like the same day with no order at all. "Cedo demais"
+ * hid EPOCH's −$511 at 14h15 (2 orders, $227 sold, $698 of ads) while a
+ * smaller loss with no sale was flagged. Few orders only soften a verdict
+ * whose money is still in play.
+ */
+export function adsAboveSales(t: Pick<PnL, 'revenue' | 'adSpend'>): boolean {
+  return t.adSpend > 0 && t.revenue < t.adSpend
+}
 /** A change within ±5% is "quase o mesmo". */
 const SAME_BAND_PCT = 5
 /** What the partner split keeps of a money result. */
@@ -83,6 +104,10 @@ export interface VerdictStore {
   /** Minutes into the store's day when partial, else 1440. */
   minutesCovered: number
   dayState: DayState
+  /** The store's first order, on its own calendar (YYYY-MM-DD); null or
+   *  absent when unknown. A window that ends before it is "the store did not
+   *  sell yet", not a dead month. */
+  firstOrderDate?: string | null
 }
 
 export interface VerdictInput {
@@ -108,11 +133,37 @@ export interface VerdictInput {
 
 export interface RoasSummary {
   roas: number
+  /** The break-even it was judged against; null when there is none to use. */
   breakEven: number | null
-  /** pos: at or above break-even; neg: below; unknown: no cost settings. */
+  /** pos: at or above break-even; neg: below it, or a loss whatever the ROAS
+   *  (no sales, no margin); unknown: no cost settings or no known cause. */
   state: 'pos' | 'neg' | 'unknown'
-  /** "ROAS 1,95× · empate 1,58× → no lucro". */
+  /** Why there is no break-even (components/ui/roasReason): no_costs is only
+   *  one of the causes. Null when there is one (breakEven set) or when the
+   *  cause is not known (breakEven null, text "empate desconhecido"). */
+  reason: BreakEvenReason | null
+  /** "ROAS 1,95× · empate 1,58× → no lucro",
+   *  "ROAS 0,00× · sem empate → nenhuma venda no período: todo o gasto foi prejuízo". */
   text: string
+  // ── Filled by buildVerdict for its one-store ROAS box (not by roasSummary):
+  /** The ad spend the ROAS divides by (lib/views/adChannel adChannelOf): the
+   *  same spend the break-even sentence talks about. */
+  channel?: AdChannel
+  /** "ROAS do Meta", "ROAS dos Anúncios Shopify", "ROAS dos anúncios (Meta + Shopify)". */
+  label?: string
+  /** The spend of `channel`. */
+  spend?: number
+  /** One plain sentence for under the gauge, in the channel's words. */
+  explain?: string
+}
+
+/** What the ROAS box needs to know about the store to say why a break-even
+ *  is missing (components/ui/roasReason BreakEvenFacts). */
+export interface RoasFacts {
+  configured?: boolean
+  revenue?: number | null
+  contribution?: number | null
+  reason?: BreakEvenReason | null
 }
 
 export interface ExcludedStore {
@@ -151,7 +202,8 @@ export interface Verdict {
   comparisonTotals: PnL | null
   /** Stores without cost settings left out of a several-store amount. */
   excluded: ExcludedStore[]
-  /** One store with Meta spend: ROAS against its own break-even. */
+  /** One store with ad spend: the ROAS of its ad channel (storeRoas) against
+   *  its own break-even, with the channel, its label and the plain sentence. */
   roas: RoasSummary | null
   /** A running day too young (or with too few orders) to judge: the tone is
    *  neutral on purpose. */
@@ -193,12 +245,67 @@ export function sumTotals(list: PnL[]): PnL {
   return out as unknown as PnL
 }
 
+/**
+ * Which stores a verdict sums. A lone store is judged as it is; in a sum,
+ * only the stores with cost settings when some have them (an unconfigured
+ * store's revenue − ads is not profit and would inflate or deflate the total:
+ * it is named in a line instead). Exported so the series drawn under the
+ * verdict (lib/views/portfolio dailyJudged) follow the same rule.
+ */
+export function judgedStores<T extends { configured: boolean }>(stores: readonly T[]): { judged: T[]; excluded: T[] } {
+  const configured = stores.filter(s => s.configured)
+  const sumOnlyConfigured = stores.length > 1 && configured.length > 0 && configured.length < stores.length
+  return sumOnlyConfigured
+    ? { judged: configured, excluded: stores.filter(s => !s.configured) }
+    : { judged: [...stores], excluded: [] }
+}
+
+/** Nothing happened in the window: no order, no sale, no ad spend, no refund
+ *  or chargeback and no fixed cost. Such a store adds nothing to a sum. */
+export function isIdle(t: Pick<PnL, 'orders' | 'revenue' | 'adSpend' | 'adjustments' | 'fixedCosts'>): boolean {
+  const zero = (v: number) => !(Math.abs(v) >= 0.005)
+  return t.orders === 0 && zero(t.revenue) && zero(t.adSpend) && zero(t.adjustments) && zero(t.fixedCosts)
+}
+
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
 const line = (...parts: (string | { text: string; strong?: boolean; tone?: 'pos' | 'neg' | 'warn' })[]): VerdictLine => {
   const ps = parts.map(p => (typeof p === 'string' ? { text: p } : p))
   return { parts: ps, text: ps.map(p => p.text).join('') }
 }
 const strong = (text: string, tone?: 'pos' | 'neg' | 'warn') => ({ text, strong: true, tone })
+
+/**
+ * "subiram 12%" / "caíram $480": how a revenue or spend figure (never halved)
+ * moved. In percent when the percentage means something (format
+ * readablePctChange), in dollars over a tiny base or a huge jump. Null when
+ * there is no base or it barely moved.
+ */
+function moved(cur: number, prev: number, up: string, down: string): string | null {
+  if (!(prev > 0)) return null
+  const pct = readablePctChange(cur, prev)
+  if (pct !== null) return Math.abs(pct) >= 1 ? `${pct >= 0 ? up : down} ${formatPct(Math.abs(pct), { digits: 0 })}` : null
+  const d = cur - prev
+  return Math.abs(d) >= 0.5 ? `${d >= 0 ? up : down} ${formatMoney(Math.abs(d))}` : null
+}
+
+/**
+ * What each dollar sold left (margin ≥ 0) or lacked to break even, in words
+ * that agree: "Sobraram 12 centavos", "Sobrou 1 centavo", "Sobrou menos de 1
+ * centavo" (a 0,32% margin read "Sobraram 0 centavos" beside "lucrou"),
+ * "Faltaram $2,25" past a dollar (not "225 centavos").
+ */
+export function perDollarLine(marginPct: number, inProfit: boolean): VerdictLine {
+  const c = Math.round(Math.abs(marginPct))
+  const cents = (n: number) => `${n} ${n === 1 ? 'centavo' : 'centavos'}`
+  if (inProfit) {
+    if (c < 1) return line('Sobrou ', strong('menos de 1 centavo de cada dólar vendido'), '.')
+    return line(c === 1 ? 'Sobrou ' : 'Sobraram ', strong(`${cents(c)} de cada dólar vendido`), '.')
+  }
+  if (c < 1) return line('Faltou ', strong('menos de 1 centavo em cada dólar vendido', 'neg'), ' para empatar.')
+  if (c < 100) return line(c === 1 ? 'Faltou ' : 'Faltaram ', strong(`${cents(c)} em cada dólar vendido`, 'neg'), ' para empatar.')
+  // pt-BR keeps the singular below 2 ("Faltou $1,40").
+  return line(c < 200 ? 'Faltou ' : 'Faltaram ', strong(`${formatMoney(c / 100, { cents: 'always' })} em cada dólar vendido`, 'neg'), ' para empatar.')
+}
 
 /** "MOKOO e Glooty", "MOKOO, EPOCH e Glooty". */
 function joinNames(names: string[]): string {
@@ -241,16 +348,65 @@ export function comparisonText(c: { from: string; to: string; label: string; sam
   return `vs ${c.label} (${formatRangeLabel({ from: c.from, to: c.to }, today)})`
 }
 
-/** "ROAS 1,95× · empate 1,58× → no lucro". */
-export function roasSummary(roas: number, breakEven: number | null): RoasSummary {
-  if (breakEven === null || !(breakEven > 0)) {
-    return { roas, breakEven: null, state: 'unknown', text: `ROAS ${formatRoas(roas)} · empate desconhecido → custos não configurados` }
+/**
+ * "ROAS 1,95× · empate 1,58× → no lucro". A missing break-even is said for
+ * what it is, with the RoasGauge's words (components/ui/roasReason): no cost
+ * settings, no sales (every ad dollar a loss), sales that did not cover
+ * product, shipping and fees, or — with no facts given — just "empate
+ * desconhecido". It used to read "custos não configurados" for every null,
+ * sending the owner to a cost page that was already filled in.
+ */
+export function roasSummary(roas: number, breakEven: number | null, facts: RoasFacts = {}): RoasSummary {
+  const reason = breakEvenReason({ breakEven, ...facts })
+  if (reason !== null || breakEven === null) {
+    const why = reason ?? 'unknown'
+    return {
+      // An unknown cause is not a reason: a caller without facts must not
+      // override a gauge that has them (VerdictCard forwards `reason`).
+      roas, breakEven: null, reason: why === 'unknown' ? null : why, state: REASON_WORDS[why].tone === 'neg' ? 'neg' : 'unknown',
+      text: `ROAS ${formatRoas(roas)} · ${reasonText(why)}`,
+    }
   }
   const state = roas >= breakEven ? 'pos' : 'neg'
   return {
-    roas, breakEven, state,
+    roas, breakEven, state, reason: null,
     text: `ROAS ${formatRoas(roas)} · empate ${formatRoas(breakEven)} → ${state === 'pos' ? 'no lucro' : 'no prejuízo'}`,
   }
+}
+
+/**
+ * The one-store ROAS box: measured on the ad spend lib/views/adChannel picks
+ * (Meta, Anúncios Shopify, or both together), so the ROAS and the break-even
+ * sentence talk about the same money. It was revenue ÷ Meta spend only, next
+ * to a profit that also paid for Shopify ads (Dumpling 8jcp3a: 109× on $56 of
+ * Meta beside $1.796 of Shopify ads) — and a store with only Shopify ads got
+ * no box at all. Null without ad spend.
+ */
+export function storeRoas(t: PnL, configured: boolean): RoasSummary | null {
+  const channel = adChannelOf(t)
+  const value = channelRoas(t)
+  if (!channel || value === null) return null
+  const s = roasSummary(value, configured ? t.breakEvenRoas : null, { configured, revenue: t.revenue, contribution: t.contribution })
+  const spend = channelSpend(t, channel)
+  return { ...s, channel, label: ROAS_LABEL[channel], spend, explain: roasExplain(s, channel, t) }
+}
+
+function roasExplain(s: RoasSummary, channel: AdChannel, t: PnL): string {
+  if (s.reason !== null || s.breakEven === null) return REASON_WORDS[s.reason ?? 'unknown'].explain
+  const per = formatMoney(s.roas, { cents: 'always' })
+  const lead = channel === 'meta'
+    ? `Cada $1 no Meta trouxe ${per} em vendas da loja (todas as vendas, não só as que o Meta atribui a si).`
+    : channel === 'shop'
+      ? `Cada $1 em Anúncios Shopify trouxe ${per} em vendas da loja (todas as vendas, não só as que a Shopify atribui aos anúncios).`
+      : `Cada $1 em anúncios (Meta e Shopify somados) trouxe ${per} em vendas da loja.`
+  const below = ` Abaixo de ${formatMoney(s.breakEven, { cents: 'always' })} a loja passa a perder dinheiro com os anúncios.`
+  // A minor second channel (under 10% of the ad spend) is outside the ratio
+  // but inside the profit: say so, or the gauge reads as all the ad money.
+  const minor = channel === 'meta' && t.shopSpend > 0 ? { what: CHANNEL_LABEL.shop, spend: t.shopSpend }
+    : channel === 'shop' && t.metaSpend > 0 ? { what: CHANNEL_LABEL.meta, spend: t.metaSpend }
+      : null
+  const aside = minor ? ` Os ${formatMoney(minor.spend)} de ${minor.what} ficam fora deste ROAS (menos de 10% do gasto em anúncios), mas entram no lucro.` : ''
+  return lead + below + aside
 }
 
 const CHIP: Record<ChipCode, Omit<VerdictChip, 'code' | 'label'> & { label: string }> = {
@@ -276,14 +432,12 @@ export function buildVerdict(input: VerdictInput): Verdict {
   const k = split ? SPLIT_SHARE : 1
   const money = (v: number) => formatMoney(v)
 
-  // What is judged: a lone store as it is; in a sum, only stores with costs
-  // (an unconfigured store's revenue − ads is not profit and would inflate
-  // or deflate the total; it is named in a line instead).
-  const configured = stores.filter(s => s.configured)
-  const sumOnlyConfigured = !single && configured.length > 0 && configured.length < stores.length
-  const judged = sumOnlyConfigured ? configured : stores
-  const excludedStores = sumOnlyConfigured ? stores.filter(s => !s.configured) : []
+  const { judged, excluded: excludedStores } = judgedStores(stores)
   const withCosts = judged.length > 0 && judged.every(s => s.configured)
+  // A store with nothing in the window adds nothing to the sum: "6 lojas na
+  // soma" with CAMP HALLOW idle overstated what the amount is made of.
+  const idleStores = single ? [] : judged.filter(s => isIdle(s.totals))
+  const nStores = judged.length - idleStores.length
 
   const totals = sumTotals(judged.map(s => s.totals))
   const cmpJudged = judged.filter(s => s.comparison?.included)
@@ -296,6 +450,11 @@ export function buildVerdict(input: VerdictInput): Verdict {
   const noSales = totals.orders === 0 && totals.revenue <= 0
   const spent = totals.adSpend > 0
   const basis: Verdict['basis'] = noSales && !spent && withCosts ? 'none' : withCosts ? 'profit' : 'revenue_minus_ads'
+  // A window that ends before the store's first order is not a dead month:
+  // Hibikura's October read "não teve vendas no mês passado" for a store that
+  // only started selling on 7 nov.
+  const firstOrder = single ? stores[0].firstOrderDate ?? null : null
+  const beforeStart = !!firstOrder && noSales && !spent && input.range.to < firstOrder
 
   const rawAmount = resultOf(totals)
   const amount = noSales && !spent ? null : rawAmount * k
@@ -313,9 +472,12 @@ export function buildVerdict(input: VerdictInput): Verdict {
   const runningDay = partial && singleDay
   const earlyDay = runningDay && minutes < EARLY_DAY_MINUTES
   // A day still running with a young clock or a handful of orders cannot be
-  // judged. Any other window with few orders is still what happened (money
-  // lost is lost): it keeps its verdict and gets a "poucos pedidos" chip.
-  const early = runningDay && !noSales && (earlyDay || orders < MIN_ORDERS)
+  // judged — unless its ads already cost more than it sold (adsAboveSales):
+  // that loss is real however few the orders. Any other window with few
+  // orders is still what happened (money lost is lost): it keeps its verdict
+  // and gets a "poucos pedidos" chip.
+  const lossAlready = runningDay && !earlyDay && !noSales && orders < MIN_ORDERS && adsAboveSales(totals)
+  const early = runningDay && !noSales && (earlyDay || (orders < MIN_ORDERS && !lossAlready))
   const fewOrders = !runningDay && !noSales && orders < MIN_ORDERS
   const margin = totals.margin
   const thin = basis === 'profit' && rawAmount > 0 && margin !== null && margin < THIN_MARGIN_PCT
@@ -323,7 +485,8 @@ export function buildVerdict(input: VerdictInput): Verdict {
   // ── Chips
   const chips: VerdictChip[] = []
   if (noSales) {
-    if (spent && !earlyDay) chips.push(chip('prejuizo'))
+    if (beforeStart) chips.push(chip('comecando', `Vende desde ${formatDate(firstOrder!, input.today)}`))
+    else if (spent && !earlyDay) chips.push(chip('prejuizo'))
     else if (spent) chips.push(chip('cedo'))
     else chips.push(chip('sem_vendas', partial ? 'Sem vendas ainda' : 'Sem vendas no período'))
   } else if (early) {
@@ -361,7 +524,12 @@ export function buildVerdict(input: VerdictInput): Verdict {
   const cp = cmp ? comparisonPhrase(cmp.label) : ''
 
   let headline: string
-  if (noSales) {
+  if (beforeStart) {
+    const span = input.period === 'lastmonth' ? monthLong(input.range.from)
+      : input.range.from === input.range.to ? formatDate(input.range.from, input.today)
+        : formatRangeLabel(input.range, input.today)
+    headline = `${subject} começou a vender em ${formatDate(firstOrder!, input.today)} — não há dados de ${span}.`
+  } else if (noSales) {
     if (spent) {
       headline = partial
         ? `${subject} ainda não ${pl ? 'venderam' : 'vendeu'} ${P}, e já ${pl ? 'gastaram' : 'gastou'} ${money(totals.adSpend)} em anúncios.`
@@ -408,9 +576,8 @@ export function buildVerdict(input: VerdictInput): Verdict {
 
   // ── Amount caption
   let amountCaption: string
-  const nStores = judged.length
   if (amount === null) {
-    amountCaption = partial ? 'nenhum pedido até agora' : 'nenhum pedido no período'
+    amountCaption = beforeStart ? 'a loja ainda não vendia nesse período' : partial ? 'nenhum pedido até agora' : 'nenhum pedido no período'
   } else if (basis === 'revenue_minus_ads') {
     amountCaption = 'de receita menos anúncios, sem o custo dos produtos'
   } else if (noSales) {
@@ -439,20 +606,43 @@ export function buildVerdict(input: VerdictInput): Verdict {
         : line(strong(joinNames(ex.map(s => s.name))), `${verb} (receita − anúncios: `, strong(money(rma), rma < 0 ? 'neg' : undefined), ').'),
     })
   }
+  if (beforeStart) {
+    cand.push({ p: 99, l: line('Escolha um período a partir de ', strong(formatDate(firstOrder!, input.today)), ' para ver o resultado.') })
+  }
+  // Money can leave with no sale in the window: refunds and chargebacks of
+  // older orders. "Sem vendas" alone hid CAMP HALLOW's −$343 of chargebacks
+  // while the ledger beside it ended in "Resultado de caixa −$343".
+  if (noSales && totals.adjustments >= 0.005) {
+    const lead = spent ? 'E' : 'Mas'
+    const out = strong(`${money(-totals.adjustments * k)} no caixa`, 'neg')
+    const what = [
+      totals.refundCount > 0 ? plural(totals.refundCount, 'reembolso', 'reembolsos') : null,
+      totals.chargebackCount > 0 ? plural(totals.chargebackCount, 'chargeback', 'chargebacks') : null,
+    ].filter((x): x is string => x !== null)
+    const n = totals.refundCount + totals.chargebackCount
+    cand.push({
+      p: 97,
+      l: what.length
+        ? line(`${lead} ${n === 1 ? 'chegou' : 'chegaram'} ${joinNames(what)}: `, out, '.')
+        : line(`${lead} reembolsos e chargebacks tiraram `, out, '.'),
+    })
+  }
   if (early) {
     cand.push({ p: 95, l: line(`Com ${plural(orders, 'pedido', 'pedidos')}, o resultado de hoje ainda não diz nada. Para decidir, olhe ontem e os últimos 7 dias.`) })
+  }
+  if (lossAlready) {
+    // Spend and sales are never halved: only the profit is the partner's.
+    cand.push({
+      p: 95,
+      l: line('Os anúncios já custaram ', strong(money(totals.adSpend)), ' e as vendas somam ', strong(money(totals.revenue)),
+        ` até agora: mesmo com só ${plural(orders, 'pedido', 'pedidos')}, o gasto já passou das vendas.`),
+    })
   }
   if (basis === 'revenue_minus_ads' && !noSales) {
     cand.push({ p: 92, l: line('Vendas ', strong(money(totals.revenue)), ' − anúncios ', strong(money(totals.adSpend)), '. Configure o custo dos produtos, o frete e as taxas para ver o lucro real.') })
   }
   if (basis === 'profit' && !noSales && !early && totals.revenue > 0 && margin !== null) {
-    const c = Math.round(Math.abs(margin))
-    cand.push({
-      p: 90,
-      l: rawAmount >= 0
-        ? line('Sobraram ', strong(`${c} ${c === 1 ? 'centavo' : 'centavos'} de cada dólar vendido`), '.')
-        : line('Faltaram ', strong(`${c} ${c === 1 ? 'centavo' : 'centavos'} em cada dólar vendido`, 'neg'), ' para empatar.'),
-    })
+    cand.push({ p: 90, l: perDollarLine(margin, rawAmount >= 0) })
   }
   if (fewOrders) {
     cand.push({ p: 85, l: line(`Só ${plural(orders, 'pedido', 'pedidos')} no período: pouca amostra para cravar uma tendência.`) })
@@ -461,9 +651,17 @@ export function buildVerdict(input: VerdictInput): Verdict {
     const prev = resultOf(comparisonTotals)
     const where = cmp.label === 'ontem até esta hora' ? 'ontem até esta hora' : `em ${formatRangeLabel({ from: cmp.from, to: cmp.to }, input.today)}`
     // A percentage only between two positive results: "376% a menos" from a
-    // profit to a loss says nothing a reader can use.
-    const ch = rawAmount >= 0 ? pctChange(rawAmount, prev) : null
-    const tail = ch === null ? '.' : `: ${formatPct(Math.abs(ch), { digits: 0 })} ${ch >= 0 ? 'a mais' : 'a menos'}${partial ? ' até agora' : ''}.`
+    // profit to a loss says nothing a reader can use. And only over a base
+    // big enough to mean something: $250 after $1,89 read "13.123% a mais";
+    // that case says the difference in dollars ("$248 a mais").
+    const ch = rawAmount >= 0 ? readablePctChange(rawAmount, prev) : null
+    const diff = rawAmount - prev
+    const soFar = partial ? ' até agora' : ''
+    const tail = ch !== null
+      ? `: ${formatPct(Math.abs(ch), { digits: 0 })} ${ch >= 0 ? 'a mais' : 'a menos'}${soFar}.`
+      : rawAmount >= 0 && prev > 0 && Math.abs(diff) >= 0.005
+        ? `: ${money(Math.abs(diff) * k)} ${diff >= 0 ? 'a mais' : 'a menos'}${soFar}.`
+        : '.'
     cand.push({
       p: 80,
       l: basis === 'profit' && prev < 0
@@ -471,15 +669,14 @@ export function buildVerdict(input: VerdictInput): Verdict {
         : line(`${basis === 'profit' ? 'O lucro' : 'Vendas − anúncios'} ${prev >= 0 ? 'era' : 'foi'} `, strong(money(prev * k), prev < 0 ? 'neg' : undefined), ` ${where}${tail}`),
     })
   } else if (cmp && !noSales && !early && !comparable && input.period !== 'today') {
-    cand.push({ p: 45, l: line(`Sem vendas para comparar em ${formatRangeLabel({ from: cmp.from, to: cmp.to }, input.today)}.`) })
+    const started = firstOrder && cmp.to < firstOrder ? `: a loja começou a vender em ${formatDate(firstOrder, input.today)}` : ''
+    cand.push({ p: 45, l: line(`Sem vendas para comparar em ${formatRangeLabel({ from: cmp.from, to: cmp.to }, input.today)}${started}.`) })
   }
   if (cmp && comparisonTotals && !noSales && !early && comparisonTotals.revenue > 0) {
-    const rv = pctChange(totals.revenue, comparisonTotals.revenue)
-    const ad = pctChange(totals.adSpend, comparisonTotals.adSpend)
-    if (rv !== null && Math.abs(rv) >= 1) {
-      const rvText = `As vendas ${rv >= 0 ? 'subiram' : 'caíram'} ${formatPct(Math.abs(rv), { digits: 0 })}`
-      const adText = ad !== null && Math.abs(ad) >= 1 ? ` e o gasto em anúncios ${ad >= 0 ? 'subiu' : 'caiu'} ${formatPct(Math.abs(ad), { digits: 0 })}` : ''
-      cand.push({ p: 40, l: line(`${rvText}${adText}.`) })
+    const rvText = moved(totals.revenue, comparisonTotals.revenue, 'subiram', 'caíram')
+    if (rvText) {
+      const adText = moved(totals.adSpend, comparisonTotals.adSpend, 'subiu', 'caiu')
+      cand.push({ p: 40, l: line(`As vendas ${rvText}${adText ? ` e o gasto em anúncios ${adText}` : ''}.`) })
     }
   }
   const details = cand
@@ -506,19 +703,37 @@ export function buildVerdict(input: VerdictInput): Verdict {
     if (notStarted.length) {
       notes.push(line(strong(joinNames(notStarted.map(s => s.name))), ` ainda não ${notStarted.length === 1 ? 'começou' : 'começaram'} este dia no próprio fuso.`))
     }
+    // Idle stores are out of the count in `when`; say who they are (a store
+    // whose day has not started is already explained above). One that had not
+    // made its first sale yet is not "parada": say that instead.
+    const notYet = idleStores.filter(s => s.dayState !== 'not_started' && !!s.firstOrderDate && input.range.to < s.firstOrderDate)
+    if (notYet.length && nStores > 0) {
+      notes.push(line(strong(joinNames(notYet.map(s => s.name))), ` ainda não ${notYet.length === 1 ? 'vendia' : 'vendiam'} ${P}: ${notYet.length === 1 ? 'fica' : 'ficam'} fora da contagem de lojas.`))
+    }
+    const quiet = idleStores.filter(s => s.dayState !== 'not_started' && !notYet.includes(s))
+    if (quiet.length && nStores > 0) {
+      const nothing = `${partial ? 'ainda não ' : 'não '}${quiet.length === 1 ? 'teve' : 'tiveram'} vendas, anúncios nem reembolsos ${P}`
+      notes.push(quiet.length === 1
+        ? line(strong(quiet[0].name), ` ${nothing}: fica fora da contagem de lojas.`)
+        : line(strong(`${quiet.length} lojas paradas`), `, fora da contagem: ${joinNames(quiet.map(s => s.name))} ${nothing}.`))
+    }
   } else if (city && input.range.from === input.range.to) {
     notes.push(line(`Dia de ${city}: a loja fecha o dia no fuso dela, que pode não bater com o de Brasília.`))
+  }
+  // A window that starts before the first order: its early days are empty
+  // because the store was not selling yet, not because sales stopped.
+  if (firstOrder && !beforeStart && input.range.from < firstOrder && firstOrder <= input.range.to) {
+    notes.push(line(`${subject} só começou a vender em `, strong(formatDate(firstOrder, input.today)), ': o período tem dias antes disso.'))
   }
 
   // ── When
   const isToday = input.range.from === input.range.to && input.range.from === input.today
   const rangeText = isToday ? 'hoje' : formatRangeLabel(input.range, input.today)
-  const lead = single ? rangeText : `${plural(nStores, 'loja', 'lojas')} na soma · ${rangeText}`
+  const lead = single ? rangeText
+    : nStores > 0 ? `${plural(nStores, 'loja', 'lojas')} na soma · ${rangeText}` : `nenhuma loja com movimento · ${rangeText}`
   const when = cmp ? `${lead} · ${comparisonText(cmp, input.today)}` : lead
 
-  const roas = single && totals.metaSpend > 0 && totals.roas !== null
-    ? roasSummary(totals.roas, basis === 'profit' ? totals.breakEvenRoas : null)
-    : null
+  const roas = single ? storeRoas(totals, stores[0].configured) : null
 
   return {
     tone, chips, when, headline,
@@ -539,7 +754,9 @@ export function buildVerdict(input: VerdictInput): Verdict {
 /**
  * The single status chip for a store in a list (phone store list, overview
  * table): sem vendas / custos não configurados / começando / no prejuízo /
- * margem fina / no lucro. Lowercase labels, as the lists use them.
+ * margem fina / no lucro. Lowercase labels, as the lists use them. Agrees
+ * with buildVerdict: a running day is "começando" before 04h, or with fewer
+ * than MIN_ORDERS orders while its ads have not yet passed its sales.
  *
  * `singleDay` (default true): the window is one day. Pass
  * `{ singleDay: range.from === range.to }` for longer windows, where a young
@@ -557,7 +774,10 @@ export function storeStatus(
     return low(chip('sem_vendas', 'Sem vendas'))
   }
   if (!s.configured) return low(chip('sem_custos'))
-  if (runningDay && (s.minutesCovered < EARLY_DAY_MINUTES || t.orders < MIN_ORDERS)) return chip('comecando')
+  if (runningDay && s.minutesCovered < EARLY_DAY_MINUTES) return chip('comecando')
+  // Past 04h a handful of orders is still "começando" — unless the ads already
+  // cost more than the sales, as the zero-order rule above (adsAboveSales).
+  if (runningDay && t.orders < MIN_ORDERS && !adsAboveSales(t)) return chip('comecando')
   if (t.operatingProfit < 0) return low(chip('prejuizo'))
   if (t.margin !== null && t.margin < THIN_MARGIN_PCT) return low(chip('margem_fina'))
   return low(chip('lucro'))
@@ -570,10 +790,13 @@ export function verdictInputFromPortfolio(
   view: PortfolioView, opts: { subject?: string; split?: boolean } = {},
 ): VerdictInput {
   return {
-    stores: view.stores.map(r => ({
+    stores: view.stores.map((r: PortfolioStoreRow & { firstOrderDate?: string | null }) => ({
       id: r.id, name: r.name, timezone: r.timezone, configured: r.configured, totals: r.totals,
       comparison: { included: r.comparison.included, totals: r.comparison.totals },
       partial: r.partial, minutesCovered: r.minutesCovered, dayState: r.dayState,
+      // Read when the portfolio row carries it (the first order on the
+      // store's own calendar); without it the verdict reads as before.
+      firstOrderDate: r.firstOrderDate ?? null,
     })),
     period: view.period,
     range: view.range,

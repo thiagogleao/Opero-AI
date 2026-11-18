@@ -8,10 +8,14 @@
  *        andamento: fica fora da soma."
  *
  * PageHeader props: { ctx: PageContext; title?: ReactNode (default ctx.scopeName);
- *   sub?: ReactNode (default "<periodLabel> · <rangeLabel>"); badges?: ReactNode;
+ *   sub?: ReactNode (default "<periodLabel> · <rangeLabel>"; a custom period,
+ *   whose label is its range, reads "Período escolhido · 1–10 nov"); badges?: ReactNode;
  *   actions?: ReactNode; code?: string|null (default the store's domain code) }
  * PeriodNote props: { ctx: PageContext } — returns null when there is nothing to say.
  * periodNoteText(ctx) returns the same sentence as a string (or null).
+ * periodName(ctx) is the bold name before the range ("Últimos 7 dias", or
+ * "Período escolhido" for a custom range): use it in a custom sub so the
+ * range is not printed twice.
  */
 
 import type { ReactNode } from 'react'
@@ -20,6 +24,12 @@ import { formatDate, tzCity, dayOfLabel } from '@/lib/format'
 import { Callout } from '@/components/ui/Card'
 import { Chip, CodePill } from '@/components/ui/Chip'
 import s from './shell.module.css'
+
+/** "Últimos 7 dias"; a custom period, whose label IS its range ("1–10 nov"),
+ *  is named "Período escolhido" so a header never prints the range twice. */
+export function periodName(ctx: Pick<PageContext, 'periodLabel' | 'rangeLabel'>): string {
+  return ctx.periodLabel === ctx.rangeLabel ? 'Período escolhido' : ctx.periodLabel
+}
 
 export function PageHeader({ ctx, title, sub, badges, actions, code }: {
   ctx: PageContext; title?: ReactNode; sub?: ReactNode; badges?: ReactNode; actions?: ReactNode; code?: string | null
@@ -35,10 +45,14 @@ export function PageHeader({ ctx, title, sub, badges, actions, code }: {
           {opt?.dayLabel && <Chip tone="info" icon="clock" size="sm">{opt.dayLabel}</Chip>}
           {ctx.store?.archived && <Chip tone="mut" size="sm">arquivada</Chip>}
           {ctx.split && <Chip tone="neu" icon="split" size="sm">sua parte (50%)</Chip>}
+          {ctx.rangeNote && <Chip tone="warn" icon="alert" size="sm" title={ctx.rangeNote}>período ajustado</Chip>}
           {badges}
         </div>
         <div className={s.pageSub}>
-          {sub ?? <><b>{ctx.periodLabel}</b> · <span className="num">{ctx.rangeLabel}</span>{ctx.scope === 'all' ? ` · ${ctx.selected.length} lojas` : ''}</>}
+          {sub ?? <>
+            <b>{periodName(ctx)}</b> · <span className="num">{ctx.rangeLabel}</span>
+            {ctx.scope === 'all' ? ` · ${ctx.selected.length} lojas` : ''}
+          </>}
         </div>
       </div>
       {actions && <div className={s.pageActions}>{actions}</div>}
@@ -73,7 +87,7 @@ export function periodNoteText(ctx: PageContext): string | null {
     case 'lastmonth':
       return `O mês passado inteiro, no horário de ${city}.${tail}`
     case 'custom':
-      return `${ctx.rangeLabel} no horário de ${city}${ctx.partial ? '; hoje entra parcial' : ''}.${tail}`
+      return `${ctx.rangeLabel} no horário de ${city}${ctx.partial ? '; hoje entra parcial' : ''}.${ctx.rangeNote ? ` ${ctx.rangeNote}` : ''}${tail}`
     default:
       return tail.trim() || null
   }

@@ -11,7 +11,9 @@
  * Taxas Shopify e pagamento · Extras por pedido (only when > 0) · Anúncios Meta · Anúncios Shopify · Custos
  * fixos · = Lucro real · then, when refunds or chargebacks arrived, − Reembolsos
  * e chargebacks · = Resultado de caixa. Each line shows its value and the ¢ of
- * each dollar sold (largest-remainder rounding, adds to 100 when in profit).
+ * each dollar sold (largest-remainder rounding, adds to 100 when in profit);
+ * a share past a dollar prints in dollars ("$2,62", components/ui/perDollar),
+ * and with no sales the bar's legend prints money instead of shares.
  *
  * Honest states: a store without cost settings shows "não configurado" on
  * product, shipping, fees and fixed costs and its total is "Vendas − anúncios";
@@ -34,9 +36,10 @@
 
 import type { ReactNode } from 'react'
 import type { PnL } from '@/lib/engine/pnl'
-import { centsOfDollar, formatCents, formatMoney, plural } from '@/lib/format'
+import { centsOfDollar, formatMoney, plural } from '@/lib/format'
 import { EmptyState } from './Card'
 import { Badge } from './Chip'
+import { formatPerDollar, perDollarPhrase } from './perDollar'
 import s from './Kpi.module.css'
 
 export type LedgerKey = 'revenue' | 'cogs' | 'shipping' | 'fees' | 'extras' | 'meta' | 'shop' | 'fixed' | 'profit' | 'adjustments' | 'cash'
@@ -57,6 +60,16 @@ function costParts(p: PnL): Part[] {
   ]
 }
 
+/**
+ * The legend's lead and how each part is printed. Costs above the sales get
+ * "Para cada $1 vendido: $2,62 Meta" (formatPerDollar), never "262¢"; with no
+ * sales at all there is no dollar to divide, so the parts print in money.
+ */
+function shareFormat(rev: number, over: boolean) {
+  if (!(rev > 0)) return { lead: 'Nenhuma venda:', part: (_c: number, v: number) => formatMoney(v) }
+  return { lead: over ? 'Para cada $1 vendido:' : 'De cada $1:', part: (c: number) => formatPerDollar(c) }
+}
+
 export function BreakdownBar({ pnl, configured = true, size = 'md', legend = true }: {
   pnl: PnL; configured?: boolean; size?: 'md' | 'thin'; legend?: boolean
 }) {
@@ -69,24 +82,30 @@ export function BreakdownBar({ pnl, configured = true, size = 'md', legend = tru
       { k: 'meta', label: 'Meta', v: pnl.metaSpend, cls: s.meta },
       { k: 'shop', label: 'Anúncios Shopify', v: pnl.shopSpend, cls: s.shop },
     ].filter(x => x.v > 0)
+    const over = pnl.adSpend > rev
     const total = Math.max(rev, pnl.adSpend)
     const cents = centsOfDollar([...parts.map(p => p.v), left], rev)
+    const fmt = shareFormat(rev, over)
+    const aria = rev > 0
+      ? `Anúncios ${formatMoney(pnl.adSpend)} de ${formatMoney(rev)} vendidos (${perDollarPhrase((pnl.adSpend / rev) * 100)}); custos de produto não configurados`
+      : `Nenhuma venda; ${formatMoney(pnl.adSpend)} em anúncios; custos de produto não configurados`
     return (
       <div>
-        <div className={`${s.stack} ${thin ? s.stackThin : ''}`} role="img"
-             aria-label={`Anúncios ${formatMoney(pnl.adSpend)} de ${formatMoney(rev)} vendidos; custos de produto não configurados`}>
+        <div className={`${s.stack} ${thin ? s.stackThin : ''}`} role="img" aria-label={aria}>
           {parts.map((p, i) => (
-            <span key={p.k} className={`${s.seg} ${p.cls}`} style={{ flex: `${p.v / Math.max(total, 1e-9)} 0 0` }}>
-              {!thin && cents[i] >= 7 ? `${cents[i]}¢` : ''}
+            <span key={p.k} className={`${s.seg} ${p.cls}`} style={{ flex: `${p.v / Math.max(total, 1e-9)} 0 0` }}
+                  title={rev > 0 ? `${p.label}: ${formatMoney(p.v)} · ${perDollarPhrase(cents[i])}` : `${p.label}: ${formatMoney(p.v)}`}>
+              {!thin && rev > 0 && cents[i] >= 7 ? formatPerDollar(cents[i]) : ''}
             </span>
           ))}
           {left > 0 && <span className={`${s.seg} ${s.segLeft}`} style={{ flex: `${left / total} 0 0` }}>{!thin && cents[parts.length] >= 12 ? 'sobra antes do custo dos produtos' : ''}</span>}
-          {pnl.adSpend > rev && rev > 0 && <span className={s.revMark} style={{ left: `${(rev / total) * 100}%` }} title="vendas" />}
+          {over && rev > 0 && <span className={s.revMark} style={{ left: `${(rev / total) * 100}%` }} title="até aqui, as vendas" />}
         </div>
         {legend && (
           <div className={s.cents}>
-            <span className={s.centsLead}>De cada $1:</span>
-            {parts.map((p, i) => <span key={p.k}><i className={p.cls} /><b>{cents[i]}¢</b> {p.label}</span>)}
+            <span className={s.centsLead}>{fmt.lead}</span>
+            {parts.map((p, i) => <span key={p.k}><i className={p.cls} /><b>{fmt.part(cents[i], p.v)}</b> {p.label}</span>)}
+            {over && rev > 0 && <span><i className={s.markSw} />até aqui, as vendas: os anúncios passaram delas</span>}
             <span><i className={s.leftSw} />custo dos produtos não configurado</span>
           </div>
         )}
@@ -101,33 +120,37 @@ export function BreakdownBar({ pnl, configured = true, size = 'md', legend = tru
   const total = loss ? costTotal : rev
   const values = [...costs.map(p => p.value), ...(loss ? [] : [profit])]
   const cents = centsOfDollar(values, rev)
-  const label = loss
-    ? `Custos de ${formatMoney(costTotal)} contra ${formatMoney(rev)} vendidos: prejuízo de ${formatMoney(-profit)}`
-    : `De ${formatMoney(rev)} vendidos: ${costs.map((p, i) => `${p.short} ${cents[i]}¢`).join(', ')}, lucro ${cents[costs.length]}¢`
+  const fmt = shareFormat(rev, loss)
+  const label = !(rev > 0)
+    ? `Nenhuma venda: ${costs.map(p => `${p.short} ${formatMoney(p.value)}`).join(', ')}; prejuízo de ${formatMoney(-profit)}`
+    : loss
+      ? `Custos de ${formatMoney(costTotal)} contra ${formatMoney(rev)} vendidos: prejuízo de ${formatMoney(-profit)}`
+      : `De ${formatMoney(rev)} vendidos: ${costs.map((p, i) => `${p.short} ${formatPerDollar(cents[i])}`).join(', ')}, lucro ${formatPerDollar(cents[costs.length])}`
 
   return (
     <div>
       <div className={`${s.stack} ${thin ? s.stackThin : ''}`} role="img" aria-label={label}>
         {costs.map((p, i) => (
           <span key={p.key} className={`${s.seg} ${p.sw} ${p.key === 'fixed' || p.key === 'shipping' ? s.segLight : ''}`}
-                style={{ flex: `${p.value / Math.max(total, 1e-9)} 0 0` }} title={`${p.name}: ${formatMoney(p.value)} · ${cents[i]}¢ de cada $1`}>
-            {!thin && cents[i] >= 6 ? `${cents[i]}¢` : ''}
+                style={{ flex: `${p.value / Math.max(total, 1e-9)} 0 0` }}
+                title={rev > 0 ? `${p.name}: ${formatMoney(p.value)} · ${perDollarPhrase(cents[i])}` : `${p.name}: ${formatMoney(p.value)}`}>
+            {!thin && rev > 0 && cents[i] >= 6 ? formatPerDollar(cents[i]) : ''}
           </span>
         ))}
         {!loss && profit > 0 && (
           <span className={`${s.seg} ${s.profit}`} style={{ flex: `${profit / Math.max(total, 1e-9)} 0 0` }} title={`Lucro real: ${formatMoney(profit)}`}>
-            {!thin && cents[costs.length] >= 6 ? `${cents[costs.length]}¢` : ''}
+            {!thin && cents[costs.length] >= 6 ? formatPerDollar(cents[costs.length]) : ''}
           </span>
         )}
         {loss && rev > 0 && <span className={s.revMark} style={{ left: `${(rev / total) * 100}%` }} title="até aqui, as vendas" />}
       </div>
       {legend && (
         <div className={s.cents}>
-          <span className={s.centsLead}>De cada $1:</span>
-          {costs.map((p, i) => <span key={p.key}><i className={p.sw} /><b>{cents[i]}¢</b> {p.short}</span>)}
+          <span className={s.centsLead}>{fmt.lead}</span>
+          {costs.map((p, i) => <span key={p.key}><i className={p.sw} /><b>{fmt.part(cents[i], p.value)}</b> {p.short}</span>)}
           {!loss
-            ? <span><i className={s.profit} /><b>{cents[costs.length] ?? 0}¢</b> lucro</span>
-            : <span><i className={s.lossSw} /><b className="neg">{formatMoney(profit)}</b> prejuízo: os custos passaram das vendas</span>}
+            ? <span><i className={s.profit} /><b>{formatPerDollar(cents[costs.length] ?? 0)}</b> lucro</span>
+            : <span><i className={s.lossSw} /><b className="neg">{formatMoney(profit)}</b> prejuízo: {rev > 0 ? 'os custos passaram das vendas' : 'custos sem nenhuma venda'}</span>}
         </div>
       )}
     </div>
@@ -150,15 +173,22 @@ export function BreakdownLedger({ pnl, configured = true, split, title, sub, bar
   const profitBase = configured ? pnl.operatingProfit : pnl.revenue - pnl.adSpend
   const shown = parts.filter(p => p.key !== 'extras' || p.value > 0)
   const cents = centsOfDollar([...shown.map(p => (configured || p.key === 'meta' || p.key === 'shop' ? p.value : 0)), Math.max(0, profitBase)], rev)
-  const ct = (i: number) => (rev > 0 ? formatCents(cents[i]) : '—')
+  // The column reads "per dollar sold" (Vendas = $1,00): cents up to a dollar,
+  // dollars past it ("$2,62", not "262¢", when the ads passed the sales).
+  const ct = (i: number) => (rev > 0 ? formatPerDollar(cents[i]) : '—')
+  const ctTitle = (c: number) => (rev > 0 ? perDollarPhrase(c) : undefined)
+  const totalShare = rev > 0 ? (profitBase >= 0 ? cents[shown.length] : (profitBase / rev) * 100) : null
   const unknown = (k: LedgerKey) => !configured && (k === 'cogs' || k === 'shipping' || k === 'fees' || k === 'fixed' || k === 'extras')
 
   const defaultNote: Partial<Record<LedgerKey, ReactNode>> = {
     revenue: `${plural(pnl.orders, 'pedido', 'pedidos')}, valor pago pelos clientes`,
+    // Both amounts are the window's totals, not a per-order or per-unit price
+    // ("já descontados $1.158 por unidade extra" read like $1.158 a unit). The
+    // engine PnL does not carry the per-unit discount itself, so it is not named.
     cogs: pnl.unitSavings > 0 || pnl.supplierFees > 0
       ? [
-          pnl.supplierFees > 0 ? `inclui ${formatMoney(pnl.supplierFees)} de taxa por pedido` : null,
-          pnl.unitSavings > 0 ? `já descontados ${formatMoney(pnl.unitSavings)} por unidade extra` : null,
+          pnl.supplierFees > 0 ? `inclui ${formatMoney(pnl.supplierFees)} de taxas por pedido do fornecedor, somadas no período` : null,
+          pnl.unitSavings > 0 ? `já descontados ${formatMoney(pnl.unitSavings)} no período (desconto nas unidades extras do mesmo pedido)` : null,
         ].filter(Boolean).join(' · ')
       : undefined,
     shipping: 'tarifa de entrega cadastrada por país',
@@ -223,7 +253,7 @@ export function BreakdownLedger({ pnl, configured = true, split, title, sub, bar
                 <td className={s.v}>
                   {isUnknown ? <Badge tone="warn" icon="alert">não configurado</Badge> : zero ? '$0' : `${formatMoney(-p.value)}`}
                 </td>
-                <td className={s.ct}>{isUnknown ? '—' : ct(i)}</td>
+                <td className={s.ct} title={isUnknown ? undefined : ctTitle(cents[i])}>{isUnknown ? '—' : ct(i)}</td>
               </tr>
             )
           })}
@@ -235,7 +265,7 @@ export function BreakdownLedger({ pnl, configured = true, split, title, sub, bar
               {configured && notes.profit && <span className={s.sub}>{notes.profit}</span>}
             </td>
             <td className={`${s.v} ${profitBase < 0 ? s.vNegT : configured ? s.vPosT : ''}`}>{formatMoney(profitBase)}</td>
-            <td className={s.ct}>{rev > 0 ? formatCents(profitBase >= 0 ? cents[shown.length] : (profitBase / rev) * 100) : '—'}</td>
+            <td className={s.ct} title={totalShare === null ? undefined : ctTitle(totalShare)}>{totalShare === null ? '—' : formatPerDollar(totalShare)}</td>
           </tr>
           {split && (
             <tr className={s.rowPart}>

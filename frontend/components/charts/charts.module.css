@@ -13,12 +13,18 @@
 .grid { stroke: var(--grid); stroke-width: 1; }
 .zero { stroke: var(--zero); stroke-width: 1.25; }
 .monthTick { stroke: var(--grid); }
+.monthSep { stroke: var(--line-2); stroke-width: 1; }
 
 .barPos { fill: var(--pos-m); }
 .barNeg { fill: var(--neg-m); }
 .barPosSoft { fill: rgba(31, 163, 111, .38); }
 .barNegSoft { fill: rgba(224, 100, 92, .38); }
 .barPartial { stroke: rgba(127, 178, 238, .8); stroke-width: 1.2; stroke-dasharray: 3 2; }
+.barPartialSolid { stroke-dasharray: none; }
+/* Value labels pulled over grid lines, the band's border or other bars
+   ("hoje −$53,26" at the right edge) keep a card-coloured outline so they
+   read as one clean label instead of crowding the lines under them. */
+.halo { paint-order: stroke; stroke: var(--card); stroke-width: 4px; stroke-linejoin: round; }
 .hatchBg { fill: rgba(127, 178, 238, .06); }
 .hatchLine { stroke: rgba(127, 178, 238, .6); stroke-width: 1.6; }
 .futureLine { stroke: rgba(130, 141, 153, .14); stroke-width: 1.2; }
@@ -59,8 +65,13 @@
 .miniNull { fill: var(--tx-4); opacity: .35; }
 
 /* Horizontal bars (HTML) */
-.hbars { list-style: none; display: flex; flex-direction: column; }
-.hrow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(70px, 34%) auto; align-items: center; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); }
+/* The list owns the three columns and every row takes them as a subgrid, so
+   all bar tracks start and end at the same x. With a grid per row, the value
+   column ("110 · $78,40 por cliente" vs "0") sized itself row by row and the
+   tracks were staggered (105/119/221/221 px at 390 px). The per-row columns
+   before `subgrid` are the fallback for a browser without it. */
+.hbars { list-style: none; display: grid; grid-template-columns: minmax(0, 1fr) minmax(70px, 34%) auto; column-gap: 12px; }
+.hrow { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) minmax(70px, 34%) auto; grid-template-columns: subgrid; align-items: center; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); }
 .hrow:first-child { border-top: 0; }
 .hlabel { min-width: 0; font-size: 13px; color: var(--tx); }
 .hlabel small { display: block; font-size: 11.5px; color: var(--tx-3); margin-top: 1px; }

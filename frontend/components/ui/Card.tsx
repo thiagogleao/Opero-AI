@@ -4,6 +4,8 @@
  *
  * Card    { as?: 'div'|'section'|'article'|'aside'; pad?: 'none'|'sm'|'md'|'lg';
  *           surface?: 'card'|'raised'|'flat'; className?; id?; children; ...aria }
+ *         pad 'none' (default) adds no class, so a className may set its own
+ *         padding; never pass both an explicit pad and a padding className.
  *
  * Block   A card that opens with a title and ONE line telling how to read it.
  *         { title: ReactNode; howTo?: ReactNode; eyebrow?: ReactNode;
@@ -45,7 +47,14 @@ import s from './Card.module.css'
 
 const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ')
 
-const PAD = { none: s.padNone, sm: s.padSm, md: s.padMd, lg: s.padLg } as const
+// pad 'none' emits no class at all. A `.padNone { padding: 0 }` rule used to
+// fight the caller's own padding class (KpiCard's `.kpi`) at equal specificity,
+// so the winner was whichever stylesheet the browser inserted last — and the
+// root loading.css, which carries this module, is inserted after a page's CSS:
+// every KPI card lost its padding. The global reset already zeroes padding.
+// An explicit pad ('sm'|'md'|'lg') is still a class: do not combine it with a
+// className that sets padding.
+const PAD = { none: null, sm: s.padSm, md: s.padMd, lg: s.padLg } as const
 
 export interface CardProps extends HTMLAttributes<HTMLElement> {
   as?: 'div' | 'section' | 'article' | 'aside'

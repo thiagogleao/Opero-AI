@@ -6,7 +6,7 @@
  */
 import 'server-only'
 export { AppShell, Logo } from './AppShell'
-export { PageHeader, PeriodNote, periodNoteText } from './PageHeader'
+export { PageHeader, PeriodNote, periodName, periodNoteText } from './PageHeader'
 export { Freshness, FreshnessFallback } from './Freshness'
 export { StorePicker, type StorePickerProps } from './StorePicker'
 export { PeriodPicker, type PeriodPickerProps, type PeriodOption } from './PeriodPicker'

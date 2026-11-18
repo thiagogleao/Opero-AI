@@ -31,6 +31,7 @@
 .vNeg { color: var(--neg); font-weight: 600; }
 .vUnk { color: var(--warn); font-weight: 600; }
 .vOff { color: var(--tx-3); font-weight: 600; }
+.vMut { color: var(--tx-2); font-weight: 600; }
 .arrow { color: var(--tx-3); }
 .gauge { display: block; width: 100%; overflow: visible; font-family: var(--mono); font-size: 10px; fill: var(--tx-3); }
 .trackLow { fill: rgba(224, 100, 92, .22); }
@@ -59,6 +60,7 @@
 .cents i { width: 8px; height: 8px; border-radius: 2px; display: block; flex: none; }
 .centsLead { color: var(--tx-3); }
 .leftSw { background: repeating-linear-gradient(135deg, rgba(142, 167, 196, .7) 0 1.5px, transparent 1.5px 3.5px); }
+.cents i.markSw { width: 2px; height: 12px; border-radius: 1px; background: var(--tx); }
 .lossSw { background: repeating-linear-gradient(135deg, rgba(224, 100, 92, .8) 0 1.5px, transparent 1.5px 3.5px); }
 
 /* ── BreakdownLedger ── */
@@ -72,7 +74,7 @@
 .nm { color: var(--tx); }
 .sub { display: block; font-size: 11.5px; color: var(--tx-3); margin: 2px 0 0 13px; line-height: 1.35; }
 .v { text-align: right; font: 500 13px/1.35 var(--mono); white-space: nowrap; padding-left: 12px !important; }
-.ct { text-align: right; font: 400 12px/1.35 var(--mono); color: var(--tx-3); width: 46px; white-space: nowrap; }
+.ct { text-align: right; font: 400 12px/1.35 var(--mono); color: var(--tx-3); width: 46px; white-space: nowrap; padding-left: 10px !important; }
 .rowRev td { color: var(--tx-2); }
 .rowRev .nm, .rowRev .v { font-weight: 600; color: var(--tx); }
 .rowZero .nm, .rowZero .v { color: var(--tx-3); }

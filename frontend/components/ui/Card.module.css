@@ -7,7 +7,6 @@
 .raised { background: var(--card-2); }
 .flat { background: var(--panel); }
 
-.padNone { padding: 0; }
 .padSm { padding: var(--s3) var(--s4); }
 .padMd { padding: var(--s4) var(--s5); }
 .padLg { padding: var(--s6) var(--s6); }

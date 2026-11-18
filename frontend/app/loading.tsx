@@ -1,3 +1,6 @@
+'use client'
+
+import { usePathname } from 'next/navigation'
 import { Skeleton, SkeletonBlock } from '@/components/ui/Card'
 import s from '@/components/shell/shell.module.css'
 
@@ -11,8 +14,22 @@ import s from '@/components/shell/shell.module.css'
  * the same classes, so the sidebar does not vanish and jump back on every
  * navigation; below 768px the sidebar is the hidden drawer, as in the shell.
  * The content is shaped like a page — header, verdict, blocks.
+ *
+ * The focused pages without a sidebar (sign-in, onboarding, the Facebook
+ * account pickers) get a centred card instead, so a sidebar does not flash in
+ * before a page that has none. /m has its own loading screen (app/m/loading).
+ * A client component only to read the destination path.
+ *
+ * Known trade-off: because this boundary sits at the root, a page's
+ * notFound()/redirect() streams with HTTP 200 (+ noindex, the right UI) —
+ * see node_modules/next/dist/docs/01-app/03-api-reference/03-file-conventions/loading.md.
  */
+
+const FOCUSED = ['/sign-in', '/onboarding', '/facebook']
+
 export default function Loading() {
+  const path = usePathname() || '/'
+  if (FOCUSED.some(p => path === p || path.startsWith(`${p}/`))) return <FocusedLoading />
   return (
     <div className={s.frame}>
       <aside className={s.side} aria-hidden="true">
@@ -37,6 +54,16 @@ export default function Loading() {
           </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+function FocusedLoading() {
+  return (
+    <div style={{ maxWidth: 560, margin: '12vh auto 0', padding: '0 20px', display: 'grid', gap: 14 }} role="status" aria-live="polite">
+      <span className="sr-only">Carregando…</span>
+      <Skeleton width={120} height={24} />
+      <SkeletonBlock height={220} lines={3} />
     </div>
   )
 }

@@ -7,3 +7,4 @@ export { IntradayCurve, IntradayLegend, type IntradayCurveProps, type IntradayPo
 export { Sparkline, MiniBars, HorizontalBars, type SparklineProps, type MiniBarsProps, type HorizontalBarItem } from './Sparkline'
 export { ChartTips } from './ChartTips'
 export { niceTicks, linear, barPath, tipAttr, type ChartTip } from './scale'
+export { dailyAxis, clampLabel, textWidth, type DailyAxis, type DailyAxisOptions, type PlacedLabel } from './axis'

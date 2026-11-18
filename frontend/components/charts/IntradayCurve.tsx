@@ -179,7 +179,9 @@ export function IntradayCurve({
             <g
               key={p.hour}
               className={s.hourCol}
-              tabIndex={0}
+              // One tab stop for the whole curve (ChartTips roving: ←/→ between
+              // hours); Tab lands on the latest hour.
+              tabIndex={i === points.length - 1 ? 0 : -1}
               role="img"
               aria-label={`até ${hh(p.hour + 1)}: lucro acumulado ${formatMoney(p.cumProfit)}`}
               data-tip={tipAttr({

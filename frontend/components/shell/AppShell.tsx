@@ -30,7 +30,7 @@
 import { Suspense, type ReactNode } from 'react'
 import Link from 'next/link'
 import type { Period } from '@/lib/engine/dates'
-import { ALL_STORES, toStoreOption, type PageContext } from '@/lib/views/page'
+import { ALL_STORES, MAX_WINDOW_DAYS, MIN_PAGE_DATE, toStoreOption, type PageContext } from '@/lib/views/page'
 import { CopilotLauncher } from '@/components/ai/CopilotLauncher'
 import { Freshness, FreshnessFallback } from './Freshness'
 import { NavLinks, type NavItem } from './NavLinks'
@@ -80,7 +80,9 @@ export function AppShell({ ctx, children, copilot = true }: { ctx: PageContext; 
   const listed = ctx.store?.archived ? [...ctx.storeOptions, toStoreOption(ctx.store)] : ctx.storeOptions
   // On a page that shows only one kind of scope, the other kind opens the page
   // that has it (a one-store page cannot show Todas, the overview cannot show
-  // one store); everywhere else the choice reloads the same page.
+  // one store); everywhere else the choice reloads the same page — except a
+  // page of one store's object (/creatives/<ad>), where the picker opens the
+  // chosen store's list (./url DETAIL_ROUTES, resolved on the client).
   const options = listed.map(o => ({
     ...o,
     query: ctx.hrefWith('', { loja: o.id }),
@@ -129,6 +131,8 @@ export function AppShell({ ctx, children, copilot = true }: { ctx: PageContext; 
             current={ctx.period}
             customBase={ctx.hrefWith('', { periodo: null })}
             today={ctx.today}
+            minDate={MIN_PAGE_DATE}
+            maxDays={MAX_WINDOW_DAYS}
             range={ctx.range}
             rangeLabel={ctx.rangeLabel}
             partialLabel={ctx.partialLabel}

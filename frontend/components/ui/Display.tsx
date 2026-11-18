@@ -26,7 +26,7 @@
  */
 
 import type { VerdictLine } from '@/lib/views/verdict'
-import { formatCount, formatMoney, formatPct, formatPp, formatRoas, pctChange, type MoneyOptions } from '@/lib/format'
+import { formatCount, formatMoney, formatPct, formatPp, formatRoas, pctChange, readablePctChange, type MoneyOptions } from '@/lib/format'
 import s from './Display.module.css'
 
 const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ')
@@ -78,7 +78,24 @@ export function Delta({ current, previous, label, kind = 'money', goodWhen = 'up
   // Margins and other percentages change in points, not in percent of percent.
   // A money/count change that crosses zero ($1.869 → −$200) has no honest
   // percentage either: it falls back to "era $1.869".
-  const change = kind === 'pct' ? current - previous : current < 0 ? null : pctChange(current, previous)
+  const pct = kind === 'pct' ? current - previous : current < 0 ? null : pctChange(current, previous)
+  // Past ±300% a percentage stops informing ($250 after $1,89 read
+  // "▲13.123%"): say the difference instead. No minimum base here, unlike the
+  // verdict's totals: a $8 cost per order still moves meaningfully in percent.
+  const change = kind !== 'pct' && pct !== null && readablePctChange(current, previous, { minBase: 0 }) === null ? null : pct
+  if (change === null && pct !== null) {
+    const d = current - previous
+    const dir = d > 0 ? 'up' : 'down'
+    const good = goodWhen === 'neutral' ? 'neutral' : (dir === 'up') === (goodWhen === 'up') ? 'up' : 'down'
+    return (
+      <span className={cx(s.delta, good === 'neutral' ? s.neutral : s[good], className)}>
+        <span className={s.arrow} aria-hidden="true">{dir === 'up' ? '▲' : '▼'}</span>
+        <span className="sr-only">{dir === 'up' ? 'subiu' : 'caiu'}</span>
+        {kind === 'money' ? formatMoney(Math.abs(d)) : formatCount(Math.abs(d))} a {d > 0 ? 'mais' : 'menos'}
+        {label && <span className={s.vs}>{label}{showPrevious ? ` (${fmtPrev(previous)})` : ''}</span>}
+      </span>
+    )
+  }
   if (change === null) {
     return (
       <span className={cx(s.delta, s.none, className)}>

@@ -36,6 +36,11 @@
  *   maxHeight?    number (px) — scroll inside the table; the header sticks.
  *   dense?        boolean — tighter rows.
  *   stickyHeader? boolean (default true).
+ *   stickyFooter? boolean (default false) — the totals row stays at the bottom of the
+ *                 box while the body scrolls (needs maxHeight: the box is what scrolls).
+ *   stickyFirstColumn? boolean (default false) — the first column stays put while a wide
+ *                 table scrolls sideways (names on a phone); it gets an opaque background
+ *                 and a hairline on its right edge.
  */
 
 import Link from 'next/link'
@@ -74,11 +79,15 @@ export interface DataTableProps {
   maxHeight?: number
   dense?: boolean
   stickyHeader?: boolean
+  stickyFooter?: boolean
+  stickyFirstColumn?: boolean
 }
 
 const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ')
 
-export function DataTable({ columns, rows, caption, initialSort, empty, footer, maxHeight, dense, stickyHeader = true }: DataTableProps) {
+export function DataTable({
+  columns, rows, caption, initialSort, empty, footer, maxHeight, dense, stickyHeader = true, stickyFooter = false, stickyFirstColumn = false,
+}: DataTableProps) {
   const router = useRouter()
   const [sort, setSort] = useState(initialSort ?? null)
 
@@ -105,7 +114,7 @@ export function DataTable({ columns, rows, caption, initialSort, empty, footer, 
 
   return (
     <div className={s.wrap} style={maxHeight ? { maxHeight } : undefined}>
-      <table className={cx(s.table, stickyHeader && s.sticky, dense && s.dense)}>
+      <table className={cx(s.table, stickyHeader && s.sticky, stickyFooter && s.stickyFoot, stickyFirstColumn && s.stickyFirst, dense && s.dense)}>
         <caption className={s.caption}>{caption}</caption>
         <thead>
           <tr>

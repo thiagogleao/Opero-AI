@@ -25,6 +25,7 @@ import { VerdictChips } from './Chip'
 import { RichLine } from './Display'
 import { Icon } from './Icon'
 import { RoasGauge } from './RoasGauge'
+import { breakEvenReason, REASON_WORDS } from './roasReason'
 import s from './VerdictCard.module.css'
 
 export interface VerdictCardProps {
@@ -39,6 +40,13 @@ export interface VerdictCardProps {
 export function VerdictCard({ verdict: v, aside, roas = true, footer, compact, headingLevel = 'h2' }: VerdictCardProps) {
   const H = headingLevel
   const amountClass = v.amount === null ? s.amountNone : v.amountTone === 'pos' ? s.amountPos : v.amountTone === 'neg' ? s.amountNeg : ''
+  // The ROAS box is one store's: the verdict's basis says whether it has cost
+  // settings, its totals whether it sold and what was left before ads — the
+  // three different reasons a break-even can be missing.
+  const facts = v.roas
+    ? { breakEven: v.roas.breakEven, configured: v.basis !== 'revenue_minus_ads', revenue: v.totals.revenue, contribution: v.totals.contribution }
+    : null
+  const missing = facts ? breakEvenReason(facts) : null
   return (
     <Card as="section" className={`${s.card}${aside ? '' : ` ${s.single}`}${compact ? ` ${s.compact}` : ''}`} aria-label="Veredito">
       <div className={s.left}>
@@ -56,13 +64,16 @@ export function VerdictCard({ verdict: v, aside, roas = true, footer, compact, h
             {v.details.map((d, i) => <li key={i}><RichLine line={d} /></li>)}
           </ul>
         )}
-        {roas && v.roas && (
+        {roas && v.roas && facts && (
           <div className={s.roasBox}>
-            <RoasGauge roas={v.roas.roas} breakEven={v.roas.breakEven} label="ROAS da loja" />
+            {/* The verdict names the spend its ROAS divides by (Meta, Anúncios
+                Shopify or both) and words the sentence under it; the fallbacks
+                are the Meta-only box. */}
+            <RoasGauge roas={v.roas.roas} {...facts} reason={v.roas.reason ?? null} label={v.roas.label ?? 'ROAS da loja'} />
             <p className={s.roasExplain}>
-              {v.roas.breakEven
+              {v.roas.explain ?? (missing === null && v.roas.breakEven
                 ? `Cada $1 no Meta trouxe ${formatMoney(v.roas.roas, { cents: 'always' })} em vendas da loja (todas as vendas, não só as que o Meta atribui a si). Abaixo de ${formatMoney(v.roas.breakEven, { cents: 'always' })} a loja passa a perder dinheiro com o Meta.`
-                : 'Sem o custo dos produtos não dá para saber em que ROAS esta loja empata.'}
+                : REASON_WORDS[missing ?? 'unknown'].explain)}
             </p>
           </div>
         )}

@@ -11,8 +11,14 @@
  *
  * Props:
  *   days          DailyPoint[] — { date: 'YYYY-MM-DD'; profit: number; revenue?; metaSpend?;
- *                 shopSpend?; orders? }, oldest first. Pass already-halved profit in the
- *                 partner split view.
+ *                 shopSpend?; orders? }, oldest first. `profit` is the WHOLE day's
+ *                 profit, in the partner split view too (pass `share` for the split).
+ *   share?        the partner split (ctx.splitFactor; default 1 = no split). The bars,
+ *                 the axis, the value labels, the band total and the aria labels use
+ *                 profit × share; the tooltip shows "sua parte (50%)" next to the whole
+ *                 day's profit, and its margin is always the whole day's. The split
+ *                 halves money, never ratios: callers that passed a halved profit got
+ *                 "margem 9,5%" for a 19,1% day.
  *   selected?     DateRange — the chosen window, drawn as a shaded band with its label
  *                 and sum ("10–16 nov · $1.313").
  *   selectedLabel? string — overrides that band label.
@@ -24,11 +30,19 @@
  *   annotate?     label the best and the worst day (default true).
  *   ariaLabel     what the chart shows, in words.
  * Coral = loss, green = profit; the x axis says the day and the month in pt-BR.
+ * Keyboard: the chart is one tab stop — Tab lands on the first day of the
+ * window (else the latest day), ←/→ move day by day with the tooltip, Home/End
+ * jump to the ends, the next Tab leaves the chart (ChartTips, ./roving).
+ * Labels never overlap at any length (7 days to a year, 1000 or 340 wide): day
+ * numbers thin out to calendar-regular days (1, 8, 15, 22, 29…), each month
+ * change is named once with a tick, and "hoje" and the value labels stay
+ * inside the plot (./axis dailyAxis, clampLabel).
  */
 
 import { useId } from 'react'
 import type { DateRange } from '@/lib/engine/dates'
-import { formatCount, formatMoney, formatMoneyAxis, formatPct, formatRangeLabel, formatWeekdayDate, monthShort } from '@/lib/format'
+import { formatCount, formatMoney, formatMoneyAxis, formatPct, formatRangeLabel, formatWeekdayDate } from '@/lib/format'
+import { boxesOverlap, clampLabel, dailyAxis, textWidth, valueBox, type ValueBox } from './axis'
 import { ChartTips } from './ChartTips'
 import { barPath, linear, niceTicks, svgId, tipAttr, type ChartTip } from './scale'
 import s from './charts.module.css'
@@ -44,6 +58,7 @@ export interface DailyPoint {
 
 export interface DailyProfitBarsProps {
   days: DailyPoint[]
+  share?: number
   selected?: DateRange | null
   selectedLabel?: string
   partialDate?: string | null
@@ -56,18 +71,17 @@ export interface DailyProfitBarsProps {
 }
 
 export function DailyProfitBars({
-  days, selected, selectedLabel, partialDate, partialNote, today, height = 260, width = 1000, annotate = true, ariaLabel,
+  days: whole, share = 1, selected, selectedLabel, partialDate, partialNote, today, height = 260, width = 1000, annotate = true, ariaLabel,
 }: DailyProfitBarsProps) {
   const uid = useId()
   const hatch = svgId(uid, 'hatch')
   const W = width
   const H = height
-  const m = { l: W < 600 ? 44 : 56, r: 8, t: selected ? 30 : 14, b: 36 }
-  const iw = W - m.l - m.r
-  const ih = H - m.t - m.b
-  const n = Math.max(1, days.length)
-  const band = iw / n
-  const bw = Math.min(18, band * 0.62)
+  const split = share !== 1
+  const shareLabel = `sua parte (${formatPct(share * 100, { digits: 0 })})`
+  // What is drawn is the viewer's share of each day; the whole day (whole[i])
+  // stays at hand for the tooltip, whose margin is never halved.
+  const days = split ? whole.map(d => ({ ...d, profit: d.profit * share })) : whole
 
   const values = days.map(d => d.profit)
   const lo = Math.min(0, ...values)
@@ -76,6 +90,18 @@ export function DailyProfitBars({
   // just beyond them, and must not run into the day labels or the band label.
   const pad = (hi - lo) * 0.12
   const ticks = niceTicks(lo < 0 ? lo - pad : 0, hi > 0 ? hi + pad : 0, 5)
+  const tickText = (t: number) => (t === 0 ? '$0' : formatMoneyAxis(t))
+  // The left margin fits the widest tick ("−$1.000" spilled out of a 340-wide
+  // phone chart with a fixed 44).
+  const m = {
+    l: Math.max(W < 600 ? 44 : 56, Math.ceil(Math.max(...ticks.map(t => textWidth(tickText(t), 11))) + 14)),
+    r: 8, t: selected ? 30 : 14, b: 36,
+  }
+  const iw = W - m.l - m.r
+  const ih = H - m.t - m.b
+  const n = Math.max(1, days.length)
+  const band = iw / n
+  const bw = Math.min(18, band * 0.62)
   const y = linear([ticks[0], ticks[ticks.length - 1]], [m.t + ih, m.t])
   const y0 = y(0)
   const x = (i: number) => m.l + i * band
@@ -88,17 +114,66 @@ export function DailyProfitBars({
   const complete = days.map((d, i) => ({ d, i })).filter(({ d }) => d.date !== partialDate)
   const best = annotate && complete.length ? complete.reduce((a, b) => (b.d.profit > a.d.profit ? b : a)) : null
   const worst = annotate && complete.length ? complete.reduce((a, b) => (b.d.profit < a.d.profit ? b : a)) : null
-  // A day number needs ~18 units of room; thin out the labels when bars are narrower.
-  const labelEvery = Math.max(1, Math.ceil(18 / band))
   const partialIdx = partialDate ? days.findIndex(d => d.date === partialDate) : -1
+  // The chart is one tab stop (ChartTips roving: ←/→ between days). Tab lands
+  // on the first day of the chosen window, else on the most recent day.
+  const tabStop = selIdx.length ? selIdx[0] : days.length - 1
+  const right = W - m.r
 
-  const tipFor = (d: DailyPoint): ChartTip => {
-    const rows: ChartTip['rows'] = [['lucro', formatMoney(d.profit), d.profit < 0 ? 'neg' : 'pos']]
+  // x axis: labels thinned by the room each day has (lib: ./axis), one month
+  // name per month change, a tick where a month starts, "hoje" kept inside.
+  const axis = dailyAxis(days.map(d => d.date), { x0: m.l, band, right, partialIdx })
+  const dayLabel = new Map(axis.days.map(l => [l.i, l]))
+  const monthLabel = new Map(axis.months.map(l => [l.i, l]))
+
+  // Value labels (today first, then the best and the worst day): centred on
+  // their bar, moved inside the plot at the edges, dropped when they would sit
+  // on a label already drawn.
+  const valueLabels = new Map<number, { text: string; x: number; y: number; anchor: 'start' | 'middle' | 'end'; cls: string }>()
+  {
+    const kept: ValueBox[] = []
+    const put = (i: number, v: number, baseline: number, cls: string, prefix = '') => {
+      const text = `${prefix}${formatMoney(v)}`
+      const c = clampLabel(x(i) + band / 2, textWidth(text, 11), m.l, right)
+      const box = valueBox(c, baseline)
+      if (kept.some(k => boxesOverlap(k, box))) return
+      kept.push(box)
+      valueLabels.set(i, { text, x: c.x, y: baseline, anchor: c.anchor, cls })
+    }
+    if (partialIdx >= 0) {
+      // Today sits at the right edge, so its label is pulled left over the
+      // bars before it: lift it above every bar it spans, not just its own.
+      // Once it is no longer centred on its own bar it says whose it is.
+      const p = days[partialIdx].profit
+      const plain = clampLabel(x(partialIdx) + band / 2, textWidth(formatMoney(p), 11), m.l, right)
+      const prefix = plain.anchor === 'middle' ? '' : 'hoje '
+      const c = clampLabel(x(partialIdx) + band / 2, textWidth(`${prefix}${formatMoney(p)}`, 11), m.l, right)
+      const i0 = Math.max(0, Math.floor((c.from - m.l) / band))
+      const i1 = Math.min(days.length - 1, Math.floor((c.to - m.l) / band))
+      let top = Math.min(y(p), y0)
+      for (let i = i0; i <= i1; i++) top = Math.min(top, y(days[i].profit), y0)
+      put(partialIdx, p, Math.max(m.t + 10, top - 7), s.txInfo, prefix)
+    }
+    if (best && best.d.profit > 0) put(best.i, best.d.profit, y(best.d.profit) - 7, s.strong)
+    if (worst && worst.d.profit < 0) put(worst.i, worst.d.profit, y(worst.d.profit) + 15, s.strong)
+  }
+
+  // The band label starts inside the band and is pulled left when it would
+  // run past the plot (a band at the right edge: "hoje", "ontem").
+  const bandText = selected ? (selectedLabel ?? `${formatRangeLabel(selected, today)} · `) : ''
+  const bandW = textWidth(bandText, 11.5, 'sans') + (selectedLabel ? 0 : textWidth(formatMoney(selSum), 11.5))
+  const bandX = selIdx.length ? Math.max(m.l, Math.min(x(selIdx[0]) + 8, right - bandW)) : 0
+
+  const tipFor = (d: DailyPoint, i: number): ChartTip => {
+    const w = whole[i]
+    const rows: ChartTip['rows'] = split
+      ? [[shareLabel, formatMoney(d.profit), d.profit < 0 ? 'neg' : 'pos'], ['lucro do dia', formatMoney(w.profit)]]
+      : [['lucro', formatMoney(d.profit), d.profit < 0 ? 'neg' : 'pos']]
     if (d.revenue !== undefined) rows.push(['receita', formatMoney(d.revenue)])
     if (d.metaSpend !== undefined) rows.push(['Anúncios Meta', formatMoney(d.metaSpend)])
     if (d.shopSpend) rows.push(['Anúncios Shopify', formatMoney(d.shopSpend)])
     if (d.orders !== undefined) rows.push(['pedidos', formatCount(d.orders)])
-    if (d.revenue) rows.push(['margem', formatPct((d.profit / d.revenue) * 100)])
+    if (d.revenue) rows.push(['margem', formatPct((w.profit / d.revenue) * 100)])
     return {
       title: `${formatWeekdayDate(d.date, today)}${d.date === partialDate && partialNote ? ` · ${partialNote}` : ''}`,
       rows,
@@ -123,8 +198,8 @@ export function DailyProfitBars({
               width={(selIdx[selIdx.length - 1] - selIdx[0] + 1) * band - 2} height={ih + 24}
               className={s.band}
             />
-            <text x={x(selIdx[0]) + 8} y={m.t - 9} className={`${s.sans} ${s.tx2}`} fontSize={11.5}>
-              {selectedLabel ?? `${formatRangeLabel(selected!, today)} · `}
+            <text x={bandX} y={m.t - 9} className={`${s.sans} ${s.tx2}`} fontSize={11.5}>
+              {bandText}
               {!selectedLabel && <tspan className={`${s.mono} ${selSum < 0 ? s.txNeg : s.txPos}`} fontWeight={500}>{formatMoney(selSum)}</tspan>}
             </text>
           </g>
@@ -133,41 +208,39 @@ export function DailyProfitBars({
         {ticks.map(t => (
           <g key={t}>
             <line x1={m.l} x2={W - m.r} y1={y(t)} y2={y(t)} className={t === 0 ? s.zero : s.grid} />
-            <text x={m.l - 10} y={y(t) + 4} textAnchor="end">{t === 0 ? '$0' : formatMoneyAxis(t)}</text>
+            <text x={m.l - 10} y={y(t) + 4} textAnchor="end">{tickText(t)}</text>
           </g>
+        ))}
+
+        {axis.boundaries.map(i => (
+          <line key={`m${i}`} x1={x(i)} x2={x(i)} y1={H - m.b + 21} y2={H - m.b + 34} className={s.monthSep} aria-hidden="true" />
         ))}
 
         {days.map((d, i) => {
           const partial = d.date === partialDate
-          const yv = y(d.profit)
+          // A running day with a tiny result was a sliver a couple of units
+          // tall whose dashed outline broke into loose dashes on the zero line,
+          // read as a clipped label ("ho…"): give it a minimum height and a
+          // solid outline. The tooltip and the value label carry the number.
+          const tiny = partial && Math.abs(y(d.profit) - y0) < 8
+          const yv = tiny ? y0 + (d.profit < 0 ? 1 : -1) * Math.max(4, Math.abs(y(d.profit) - y0)) : y(d.profit)
           const bx = x(i) + (band - bw) / 2
-          const cls = partial ? s.barPartial : d.profit >= 0 ? s.barPos : s.barNeg
-          const day = Number(d.date.slice(8, 10))
-          const first = i === 0 || day === 1
-          // "hoje" keeps its label; a day label right before it would collide.
-          const showDay = partial || ((i % labelEvery === 0 || first) && (partialIdx < 0 || i > partialIdx || partialIdx - i >= labelEvery))
+          const cls = partial ? `${s.barPartial}${tiny ? ` ${s.barPartialSolid}` : ''}` : d.profit >= 0 ? s.barPos : s.barNeg
+          const dl = dayLabel.get(i)
+          const ml = monthLabel.get(i)
+          const vl = valueLabels.get(i)
           return (
-            <g key={d.date} className={s.col} data-tip={tipAttr(tipFor(d))} tabIndex={0} role="img"
-               aria-label={`${formatWeekdayDate(d.date, today)}: lucro ${formatMoney(d.profit)}${partial ? ' (parcial)' : ''}`}>
+            <g key={d.date} className={s.col} data-tip={tipAttr(tipFor(d, i))} tabIndex={i === tabStop ? 0 : -1} role="img"
+               aria-label={`${formatWeekdayDate(d.date, today)}: ${split ? `${shareLabel} ${formatMoney(d.profit)}, lucro do dia ${formatMoney(whole[i].profit)}` : `lucro ${formatMoney(d.profit)}`}${partial ? ' (parcial)' : ''}`}>
               <rect className={s.hit} x={x(i)} y={m.t - (selected ? 24 : 4)} width={band} height={ih + (selected ? 24 : 4) + 20} />
               <path className={`${s.bar} ${cls}`} d={barPath(bx, bw, y0, yv, 4)} fill={partial ? `url(#${hatch})` : undefined} />
-              {showDay && (
-                <text x={x(i) + band / 2} y={H - m.b + 16} textAnchor="middle" className={inSel(d.date) || partial ? s.tx2 : undefined}>
-                  {partial ? 'hoje' : day}
-                </text>
+              {dl && (
+                <text x={dl.x} y={H - m.b + 16} textAnchor={dl.anchor} className={inSel(d.date) || partial ? s.tx2 : undefined}>{dl.text}</text>
               )}
-              {first && (
-                <text x={x(i) + band / 2} y={H - m.b + 31} textAnchor="middle" className={s.sans} fontSize={10.5}>{monthShort(d.date)}</text>
+              {ml && (
+                <text x={ml.x} y={H - m.b + 31} textAnchor={ml.anchor} className={s.sans} fontSize={10.5}>{ml.text}</text>
               )}
-              {partial && (
-                <text x={x(i) + band / 2} y={Math.min(yv, y0) - 7} textAnchor="middle" className={s.txInfo}>{formatMoney(d.profit)}</text>
-              )}
-              {!partial && best && best.i === i && d.profit > 0 && (
-                <text x={x(i) + band / 2} y={yv - 7} textAnchor="middle" className={s.strong}>{formatMoney(d.profit)}</text>
-              )}
-              {!partial && worst && worst.i === i && d.profit < 0 && (
-                <text x={x(i) + band / 2} y={yv + 15} textAnchor="middle" className={s.strong}>{formatMoney(d.profit)}</text>
-              )}
+              {vl && <text x={vl.x} y={vl.y} textAnchor={vl.anchor} className={`${vl.cls} ${s.halo}`}>{vl.text}</text>}
             </g>
           )
         })}

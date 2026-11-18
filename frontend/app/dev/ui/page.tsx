@@ -1,6 +1,5 @@
 import { notFound } from 'next/navigation'
-import type { Metadata } from 'next'
-import { getPageContext, type SearchParams } from '@/lib/views/page'
+import { getPageContext, pageMetadata, type SearchParams } from '@/lib/views/page'
 import { buildPortfolio, type PortfolioView } from '@/lib/views/portfolio'
 import { buildVerdict, storeStatus, verdictInputFromPortfolio } from '@/lib/views/verdict'
 import { computeStorePnL } from '@/lib/engine/pnl'
@@ -21,11 +20,13 @@ import s from './page.module.css'
 /**
  * /dev/ui — the styleguide. Every primitive and chart with REAL data from one
  * store (the one in ?loja, else MOKOO), plus verdicts for Todas (hoje),
- * Hibikura (dia de Tóquio) and Glooty (sem custos). Owner only: anyone else
+ * Hibikura (dia de Tóquio) and Glooty (sem custos, 30 dias). Owner only: anyone else
  * gets a 404, so partners never see other stores here.
  */
 
-export const metadata: Metadata = { title: 'Styleguide' }
+// generateMetadata, not a static title: a ?loja the viewer cannot see must swap
+// in the not-found title (lib/views/page pageMetadata).
+export const generateMetadata = pageMetadata('Styleguide')
 export const dynamic = 'force-dynamic'
 
 const NO_EXTRAS = { liveFeed: false, chargebackHealth: false, freshness: false } as const
@@ -43,21 +44,24 @@ export default async function StyleguidePage({ searchParams }: { searchParams: P
   const glooty = byName('Glooty')
   const storeToday = todayInTz(store.timezone, ctx.now)
 
-  const [main, todas, hibToday, glootyWeek, month, today, yesterday, prodPnl] = await Promise.all([
+  const [main, todas, hibToday, glootyMonth, month, today, yesterday, prodPnl, quarter] = await Promise.all([
     buildPortfolio([store], ctx.period, ctx.params.de, ctx.params.ate, ctx.now, NO_EXTRAS),
     buildPortfolio(ctx.stores, 'today', null, null, ctx.now, NO_EXTRAS),
     hib ? buildPortfolio([hib], 'today', null, null, ctx.now, NO_EXTRAS) : Promise.resolve(null),
-    glooty ? buildPortfolio([glooty], '7d', null, null, ctx.now, NO_EXTRAS) : Promise.resolve(null),
+    // 30 days: Glooty has no cost settings and its ads passed its sales.
+    glooty ? buildPortfolio([glooty], '30d', null, null, ctx.now, NO_EXTRAS) : Promise.resolve(null),
     computeStorePnL(store.id, { from: shiftDate(storeToday, -30), to: storeToday }, {}, ctx.now),
     computeStorePnL(store.id, { from: storeToday, to: storeToday }, {}, ctx.now),
     computeStorePnL(store.id, { from: shiftDate(storeToday, -1), to: shiftDate(storeToday, -1) }, {}, ctx.now),
     computeStorePnL(store.id, ctx.scope === 'store' && ctx.store?.id === store.id ? ctx.range : { from: shiftDate(storeToday, -7), to: shiftDate(storeToday, -1) }, { products: true, countries: true }, ctx.now),
+    // 90 days and today: the axis across three month changes (label thinning).
+    computeStorePnL(store.id, { from: shiftDate(storeToday, -90), to: storeToday }, {}, ctx.now),
   ])
 
   const v = buildVerdict(verdictInputFromPortfolio(main, { split: ctx.split }))
   const vTodas = buildVerdict(verdictInputFromPortfolio(todas, { subject: 'Suas lojas', split: ctx.split }))
   const vHib = hibToday ? buildVerdict(verdictInputFromPortfolio(hibToday, { split: ctx.split })) : null
-  const vGlooty = glootyWeek ? buildVerdict(verdictInputFromPortfolio(glootyWeek, { split: ctx.split })) : null
+  const vGlooty = glootyMonth ? buildVerdict(verdictInputFromPortfolio(glootyMonth, { split: ctx.split })) : null
   const t = main.totals
   const c = main.comparison.totals
   const cmpLabel = `vs ${formatRangeLabel({ from: main.comparison.from, to: main.comparison.to }, main.anchorToday)}`
@@ -153,6 +157,12 @@ export default async function StyleguidePage({ searchParams }: { searchParams: P
           {vHib && <VerdictCard verdict={vHib} compact />}
           {vGlooty && <VerdictCard verdict={vGlooty} compact />}
         </div>
+        {vGlooty && (
+          <Card pad="md">
+            <BreakdownLedger pnl={vGlooty.totals} configured={vGlooty.basis !== 'revenue_minus_ads'} split={ctx.split}
+              title="Glooty: anúncios acima das vendas" sub="Sem custos configurados; quando a fatia passa de $1 ela aparece em dólares, não em centavos." />
+          </Card>
+        )}
         <Card pad="sm">
           <div className={s.check}>
             Conferência com o motor ({store.name}, {main.rangeLabel}): engine operatingProfit <b>{t.operatingProfit.toFixed(2)}</b> ·
@@ -176,7 +186,7 @@ export default async function StyleguidePage({ searchParams }: { searchParams: P
             delta={<Delta current={t.operatingProfit} previous={c.operatingProfit} label={cmpLabel} showPrevious />}
             info="Receita − produto − frete − taxas − anúncios − custos fixos." />
           <KpiCard label="ROAS Meta" value={<Roas value={t.roas} />} swatch="meta"
-            note={<RoasGauge roas={t.roas} breakEven={configured ? t.breakEvenRoas : null} size="mini" />}
+            note={<RoasGauge roas={t.roas} breakEven={t.breakEvenRoas} configured={configured} revenue={t.revenue} contribution={t.contribution} size="mini" />}
             info="Receita da loja ÷ gasto no Meta. Conta também as vendas que o Meta não credita a nenhuma campanha." />
           <KpiCard label="Anúncios Meta" value={<Money value={t.metaSpend} />} swatch="meta"
             note={<><b>{formatPct(t.revenue ? (t.metaSpend / t.revenue) * 100 : null)}</b> da receita</>}
@@ -194,14 +204,27 @@ export default async function StyleguidePage({ searchParams }: { searchParams: P
       <section id="roas" className={s.section}>
         <h2 className={s.h2}>ROAS contra o empate <code>RoasGauge</code></h2>
         <div className={s.grid3}>
-          <Card pad="md"><RoasGauge roas={t.roas} breakEven={configured ? t.breakEvenRoas : null} label="ROAS da loja" /></Card>
+          <Card pad="md"><RoasGauge roas={t.roas} breakEven={t.breakEvenRoas} configured={configured} revenue={t.revenue} contribution={t.contribution} label="ROAS da loja" /></Card>
           <Card pad="md"><RoasGauge roas={0.87} breakEven={1.26} /></Card>
-          <Card pad="md"><RoasGauge roas={0.42} breakEven={null} /></Card>
+          {glootyMonth
+            ? <Card pad="md"><RoasGauge roas={glootyMonth.totals.roas} breakEven={glootyMonth.totals.breakEvenRoas} configured={false} revenue={glootyMonth.totals.revenue} label="ROAS Glooty" /></Card>
+            : <Card pad="md"><RoasGauge roas={0.42} breakEven={null} configured={false} /></Card>}
+        </div>
+        {/* Why a break-even is missing: each cause in its own words. */}
+        <div className={s.grid3}>
+          <Card pad="md"><RoasGauge roas={0} breakEven={null} configured revenue={0} contribution={0} /></Card>
+          <Card pad="md"><RoasGauge roas={1.2} breakEven={null} configured revenue={812} contribution={-40} /></Card>
+          <Card pad="md"><RoasGauge roas={1.2} breakEven={null} reason="other_store" /></Card>
         </div>
         <Card pad="md"><div className={s.row} style={{ gap: 28 }}>
           <RoasGauge roas={2.73} breakEven={1.58} size="mini" />
           <RoasGauge roas={1.45} breakEven={1.58} size="mini" paused />
           <RoasGauge roas={1.5} breakEven={1.29} size="mini" />
+          <RoasGauge roas={0.42} breakEven={null} configured={false} size="mini" />
+          <RoasGauge roas={0} breakEven={null} configured revenue={0} size="mini" />
+          <RoasGauge roas={1.2} breakEven={null} configured revenue={812} size="mini" />
+          <RoasGauge roas={1.2} breakEven={null} reason="other_store" size="mini" />
+          <RoasGauge roas={1.2} breakEven={null} configured revenue={812} size="mini" words={false} />
         </div></Card>
       </section>
 
@@ -216,9 +239,20 @@ export default async function StyleguidePage({ searchParams }: { searchParams: P
               <span>30 dias: <b className="num">{formatMoney(ctx.part(month.daily.filter(d => d.date < storeToday).reduce((a, d) => a + d.operatingProfit, 0)))}</b></span>
             </>}>
             <DailyProfitBars
-              days={month.daily.map(d => ({ date: d.date, profit: ctx.part(d.operatingProfit), revenue: d.revenue, metaSpend: d.metaSpend, shopSpend: d.shopSpend, orders: d.orders }))}
+              days={month.daily.map(d => ({ date: d.date, profit: d.operatingProfit, revenue: d.revenue, metaSpend: d.metaSpend, shopSpend: d.shopSpend, orders: d.orders }))}
+              share={ctx.splitFactor}
               selected={main.range} partialDate={storeToday} partialNote={ctx.partialLabel ?? undefined} today={storeToday}
               ariaLabel={`Lucro real por dia da ${store.name}, últimos 30 dias e hoje parcial`} />
+          </Block>
+        )}
+        {quarter && (
+          <Block title="Lucro real por dia · 90 dias" howTo="Período longo: os dias se espaçam pelo espaço disponível, cada mês aparece uma vez e hoje fica dentro do gráfico."
+            actions={<DailyProfitLegend selected={false} />}>
+            <DailyProfitBars
+              days={quarter.daily.map(d => ({ date: d.date, profit: d.operatingProfit, revenue: d.revenue, metaSpend: d.metaSpend, shopSpend: d.shopSpend, orders: d.orders }))}
+              share={ctx.splitFactor}
+              partialDate={storeToday} partialNote={ctx.partialLabel ?? undefined} today={storeToday}
+              ariaLabel={`Lucro real por dia da ${store.name}, últimos 90 dias e hoje parcial`} />
           </Block>
         )}
         <div className={s.grid2}>
@@ -254,6 +288,17 @@ export default async function StyleguidePage({ searchParams }: { searchParams: P
             caption={`Países dos pedidos da ${store.name}`}
             initialSort={{ key: 'revenue', dir: 'desc' }}
             maxHeight={320}
+            stickyFirstColumn
+            stickyFooter
+            footer={(() => {
+              // The footer adds up the rows shown (countries with orders).
+              const rows = (prodPnl?.countries ?? []).filter(x => x.orders > 0)
+              const sum = (k: 'orders' | 'revenue' | 'contribution' | 'metaSpend') => rows.reduce((a, x) => a + x[k], 0)
+              return rows.length ? {
+                country: <b>Total</b>, orders: formatCount(sum('orders')), revenue: <Money value={sum('revenue')} />,
+                contribution: <Money value={sum('contribution')} />, meta: <Money value={sum('metaSpend')} tone="mut" />,
+              } : undefined
+            })()}
             columns={[
               { key: 'country', label: 'País' },
               { key: 'orders', label: 'Pedidos', numeric: true, sortable: true },
@@ -322,7 +367,8 @@ export default async function StyleguidePage({ searchParams }: { searchParams: P
             <Card pad="md">
               <div style={{ fontSize: 15, fontWeight: 600 }}>Últimos 30 dias</div>
               <DailyProfitBars width={340} height={190} annotate={false}
-                days={month.daily.map(d => ({ date: d.date, profit: ctx.part(d.operatingProfit), revenue: d.revenue, metaSpend: d.metaSpend, shopSpend: d.shopSpend, orders: d.orders }))}
+                days={month.daily.map(d => ({ date: d.date, profit: d.operatingProfit, revenue: d.revenue, metaSpend: d.metaSpend, shopSpend: d.shopSpend, orders: d.orders }))}
+                share={ctx.splitFactor}
                 selected={main.range} selectedLabel="7 dias" partialDate={storeToday} today={storeToday} ariaLabel="Lucro por dia, 30 dias" />
             </Card>
           )}

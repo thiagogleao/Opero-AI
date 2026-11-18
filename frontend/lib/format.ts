@@ -145,6 +145,25 @@ export function pctChange(cur: Num, prev: Num): number | null {
   return ((cur - prev) / prev) * 100
 }
 
+/** Below this base (in dollars) a percentage change is noise, not news. */
+export const PCT_MIN_BASE = 50
+/** Past this change (in %) a percentage stops meaning anything to a reader. */
+export const PCT_MAX_CHANGE = 300
+
+/**
+ * pctChange, but only when the percentage is worth printing: a positive base
+ * of at least `minBase` and a change within ±`maxPct`. A profit of $250 after
+ * $1,89 the day before read "13.123% a mais"; the caller should say the
+ * difference in dollars instead ("$248 a mais"). Null otherwise.
+ */
+export function readablePctChange(
+  cur: Num, prev: Num, opts: { minBase?: number; maxPct?: number } = {},
+): number | null {
+  const ch = pctChange(cur, prev)
+  if (ch === null || (prev as number) < (opts.minBase ?? PCT_MIN_BASE) || Math.abs(ch) > (opts.maxPct ?? PCT_MAX_CHANGE)) return null
+  return ch
+}
+
 // ─── Dates and times ─────────────────────────────────────────────────────────
 
 const MONTHS = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez']
@@ -187,6 +206,8 @@ export function formatDdMm(iso: string): string {
 /** Short weekday ("ter") and month ("nov") names, for chart axes. */
 export function weekdayShort(iso: string): string { return WEEKDAYS[weekdayOf(iso)] }
 export function monthShort(iso: string): string { return MONTHS[parts(iso)[1] - 1] }
+/** "outubro". */
+export function monthLong(iso: string): string { return MONTHS_LONG[parts(iso)[1] - 1] }
 
 /** "10–16 nov", "28 out – 3 nov" (the engine's formatter, re-exported so
  *  every label goes through this module). */
@@ -254,23 +275,4 @@ const BRAZIL_DAY = new Set(['America/Sao_Paulo', 'America/Belem', 'America/Forta
 /** "dia de Tóquio" for a store whose calendar day is not Brazil's, else null. */
 export function dayOfLabel(tz: string): string | null {
   return BRAZIL_DAY.has(tz) ? null : `dia de ${tzCity(tz)}`
-}
-
-// ─── Deprecated (old screens, until the final cleanup) ──────────────────────
-
-/**
- * @deprecated Use formatMoney. Kept for the old components that still pass a
- * currency from SettingsContext: the argument is ignored and values are
- * always formatted as US dollars (the currency selector only swapped the
- * symbol without converting, so R$/€/£ were wrong numbers).
- */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export function makeFmt(_currency?: string): (n: number) => string {
-  return (n: number) => formatMoney(n, { cents: 'always' })
-}
-
-/** @deprecated Always "$" — values are US dollars everywhere. */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export function currencySymbol(_currency?: string): string {
-  return '$'
 }

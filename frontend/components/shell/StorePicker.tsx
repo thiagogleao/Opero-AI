@@ -4,15 +4,38 @@
  * StorePicker — which store (or "Todas as lojas") the page shows.
  *
  * Changing it navigates to the same page with ?loja=<id> (every other state
- * key and the page's own keys kept), inside a transition so the button shows a
+ * key and the page's own keys kept, one-shot result flags dropped; a page of
+ * one store's object, like /creatives/<ad>, opens that store's list instead —
+ * see ./url storeSwitchHref), inside a transition so the button shows a
  * spinner until the new page is there — never a silent stale page, never a
- * stuck "Trocando…". It also POSTs /api/active-store { storeId } so this
- * browser opens on that store next time (a preference only: the URL wins, and
- * the route re-checks access). "Todas" is not remembered: that route accepts a
- * store id only.
+ * stuck "Trocando…". Once the chosen store is on screen it POSTs
+ * /api/active-store { storeId } so this browser opens on that store next time
+ * (a preference only: the URL wins, and the route re-checks access) — never
+ * before: a choice still loading can be replaced, and the remembered store
+ * must be the one that ended up shown. "Todas" is not remembered: that route
+ * accepts a store id only.
+ *
+ * A choice made while another navigation is still loading (a period picked
+ * during "abrindo…") is laid on top of the URL being opened (./url
+ * onTopOfInFlight), so both choices stick.
  *
  * Accessible listbox: Enter/Space/↓ opens, ↑/↓/Home/End move, Enter picks,
  * Esc closes and returns focus.
+ *
+ * Leaving with unsaved work: before navigating, the picker dispatches a
+ * cancelable `window` CustomEvent 'opero:before-store-change' (BEFORE_STORE_CHANGE)
+ * with detail { from, to, href } — store ids ('todas' for Todas as lojas) and the
+ * URL it is about to open. If any listener calls preventDefault(), nothing
+ * happens: no navigation, no "remember this store". The page can then ask and,
+ * if the user agrees, open detail.href itself:
+ *
+ *   useEffect(() => {
+ *     const onLeave = (e: Event) => { if (dirty) e.preventDefault() }
+ *     window.addEventListener(BEFORE_STORE_CHANGE, onLeave)
+ *     return () => window.removeEventListener(BEFORE_STORE_CHANGE, onLeave)
+ *   }, [dirty])
+ *
+ * The listener must decide synchronously (no await before preventDefault).
  *
  * Props (built by AppShell from the page context):
  *   options   (StoreOption & { query: string; href?: string })[] — query = ctx.hrefWith('', { loja: id });
@@ -23,12 +46,13 @@
  *   currentId the store id shown, or 'todas'
  */
 
-import { usePathname, useRouter } from 'next/navigation'
-import { useEffect, useId, useRef, useState, useTransition, type KeyboardEvent } from 'react'
+import { usePathname } from 'next/navigation'
+import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 import type { StoreOption } from '@/lib/views/page'
 import { Avatar } from '@/components/ui/Card'
 import { Icon } from '@/components/ui/Icon'
-import { hrefFor } from './url'
+import { inFlightParam, navigationInFlight, NAV_LAYER, onTopOfInFlight, storeSwitchHref } from './url'
+import { useShellNavigation } from './useShellNavigation'
 import s from './shell.module.css'
 
 export interface StorePickerProps {
@@ -37,15 +61,42 @@ export interface StorePickerProps {
   currentId: string
 }
 
+/** Cancelable window event sent before the picker opens another store. */
+export const BEFORE_STORE_CHANGE = 'opero:before-store-change'
+
+export interface BeforeStoreChangeDetail {
+  /** Store id shown now ('todas' for Todas as lojas). */
+  from: string
+  /** Store id about to open ('todas' for Todas as lojas). */
+  to: string
+  /** The path + query the picker would open. */
+  href: string
+}
+
+/** True when no listener vetoed the change (preventDefault). */
+function mayLeave(detail: BeforeStoreChangeDetail): boolean {
+  return window.dispatchEvent(new CustomEvent<BeforeStoreChangeDetail>(BEFORE_STORE_CHANGE, { detail, cancelable: true }))
+}
+
 interface Entry { id: string; name: string; meta: string; query: string; href?: string }
 
+/**
+ * The store picked last, to save as this browser's default once it is the
+ * store on screen. Module scope: the picker that made the choice may be
+ * replaced by the next page's picker before it lands (/overview → /).
+ */
+let rememberOnArrival: string | null = null
+const rememberWhenShown = (storeId: string | null) => { rememberOnArrival = storeId }
+
+const NOT_SAVED = 'A loja abriu, mas não ficou salva como padrão neste navegador.'
+
 export function StorePicker({ options, all, currentId }: StorePickerProps) {
-  const router = useRouter()
   const pathname = usePathname() || '/'
   const listId = useId()
   const [open, setOpen] = useState(false)
   const [active, setActive] = useState(0)
-  const [pending, startTransition] = useTransition()
+  const nav = useShellNavigation()
+  const pending = nav.pending
   const [error, setError] = useState<string | null>(null)
   const btn = useRef<HTMLButtonElement>(null)
   const list = useRef<HTMLUListElement>(null)
@@ -74,6 +125,25 @@ export function StorePicker({ options, all, currentId }: StorePickerProps) {
     if (open) list.current?.focus()
   }, [open])
 
+  // Save the default only for the store that ended up on screen.
+  useEffect(() => {
+    if (pending || rememberOnArrival === null) return
+    if (rememberOnArrival !== currentId) {
+      // Landed elsewhere (browser back, a newer choice): forget it — unless a
+      // navigation is still loading, which may yet bring the store.
+      if (navigationInFlight() === null) rememberOnArrival = null
+      return
+    }
+    const storeId = rememberOnArrival
+    rememberOnArrival = null
+    fetch('/api/active-store', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ storeId }), keepalive: true,
+    })
+      .then(r => { if (!r.ok) setError(NOT_SAVED) })
+      .catch(() => setError(NOT_SAVED))
+  }, [pending, currentId])
+
   useEffect(() => {
     if (!error) return
     const t = setTimeout(() => setError(null), 6000)
@@ -88,17 +158,18 @@ export function StorePicker({ options, all, currentId }: StorePickerProps) {
   function pick(e: Entry) {
     setOpen(false)
     btn.current?.focus()
-    if (e.id === currentId) return
-    // Another page (href) starts clean; the same page keeps its own keys.
-    startTransition(() => { router.push(e.href ?? hrefFor(pathname, e.query)) })
-    if (e.id !== 'todas') {
-      fetch('/api/active-store', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ storeId: e.id }), keepalive: true,
-      })
-        .then(r => { if (!r.ok) setError('A loja abriu, mas não ficou salva como padrão neste navegador.') })
-        .catch(() => setError('A loja abriu, mas não ficou salva como padrão neste navegador.'))
-    }
+    // While another choice is loading, the store that counts is the one being
+    // opened: picking the store still on screen then takes the choice back.
+    const opening = inFlightParam('loja')
+    if (e.id === (opening ?? currentId)) return
+    // Another page (href) starts clean; the same page keeps its own keys,
+    // except on a page of one store's object (an ad), which opens that list
+    // of the chosen store instead (./url DETAIL_ROUTES). A period or split
+    // still loading is kept (onTopOfInFlight).
+    const href = onTopOfInFlight(e.href ?? storeSwitchHref(pathname, e.query), NAV_LAYER.store)
+    if (!mayLeave({ from: currentId || current?.id || '', to: e.id, href })) return
+    nav.push(href)
+    rememberWhenShown(e.id === 'todas' ? null : e.id)
   }
 
   function onButtonKey(e: KeyboardEvent<HTMLButtonElement>) {
