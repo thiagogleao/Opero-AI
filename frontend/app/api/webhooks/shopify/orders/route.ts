@@ -4,6 +4,7 @@ import { sendPushToAll } from '@/lib/push'
 import { localDay } from '@/lib/sync/orderMapping'
 import { adminUrl, isOrderTopic, webhookAuthMethod } from '@/lib/sync/shopifyApi'
 import { usdRate } from '@/lib/sync/fx'
+import { salePushText } from '@/lib/sync/salePush'
 import { upsertOrderFromWebhook } from '@/lib/sync/webhookOrders'
 
 export const runtime = 'nodejs'
@@ -37,22 +38,6 @@ async function findTenant(shopDomain: string): Promise<Tenant | null> {
     [shopDomain],
   )
   return rows[0] ?? null
-}
-
-const money = (v: number, currency: string) => {
-  try {
-    return new Intl.NumberFormat('en-US', { style: 'currency', currency, maximumFractionDigits: currency === 'JPY' ? 0 : 2 }).format(v)
-  } catch {
-    return `${currency} ${v.toFixed(2)}`
-  }
-}
-
-/** Compact USD for the notification body: $966 / $12.9K. */
-const compactUsd = (v: number) => {
-  const sign = v < 0 ? '-' : ''
-  const a = Math.abs(v)
-  if (a >= 10_000) return `${sign}$${(a / 1_000).toFixed(1)}K`
-  return `${sign}$${Math.round(a).toLocaleString('en-US')}`
 }
 
 /** This store's profit so far today (the engine's "lucro"), or null when the
@@ -175,11 +160,6 @@ export async function POST(req: Request) {
   if (inserted.length === 0) return new Response('OK', { status: 200 })
 
   const storeName = tenant.shop_name ?? tenant.shopify_domain.replace('.myshopify.com', '')
-  const units = lineItems.reduce((s, li) => s + Number(li.quantity ?? 0), 0)
-  const first = lineItems[0]
-  const itemLabel = first
-    ? `${units}× ${String(first.title ?? 'item')}${lineItems.length > 1 ? ` +${lineItems.length - 1}` : ''}`
-    : `${units} item(s)`
   const orderLabel = order.name ? String(order.name) : `#${order.order_number ?? orderId}`
 
   // Dollars first for a store that bills in another currency; local amount after.
@@ -188,15 +168,16 @@ export async function POST(req: Request) {
     const rate = day ? await usdRate(currency, day).catch(() => null) : null
     usdTotal = rate ? total * rate : null
   }
-  const amount = currency === 'USD' ? money(total, 'USD')
-    : usdTotal !== null ? `${money(usdTotal, 'USD')} (${money(total, currency)})` : money(total, currency)
 
   const profit = await todayProfit(tenant.id, tenant.timezone)
+  const { title, body } = salePushText({
+    storeName, orderLabel, total, currency, usdTotal, profitToday: profit, lineItems, country,
+  })
   try {
     await sendPushToAll({
       kind: 'sale',
-      title: `💰 ${amount} · ${orderLabel} — ${storeName}`,
-      body: [profit !== null ? `Lucro hoje: ${compactUsd(profit)}` : null, itemLabel, country].filter(Boolean).join(' · '),
+      title,
+      body,
       url: `/m?loja=${encodeURIComponent(tenant.id)}`,
       tag: `order-${tenant.id}-${orderId}`,
       data: { tenantId: tenant.id, orderId, total, currency, totalUsd: usdTotal, profitToday: profit },

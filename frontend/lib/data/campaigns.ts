@@ -453,6 +453,154 @@ export async function getCampaignReport(
   }
 }
 
+// ─── Own vs shared-account campaigns, for several stores ──────────────────────
+
+/**
+ * A store's Meta money split the way its Campanhas page splits it: campaigns
+ * whose sales are this store's, and shared-account campaigns (in this store's
+ * books, sales mostly in another shop — CAMP HALLOW's in EPOCH's old account).
+ * "ROAS atribuído" is own.purchaseValue ÷ own.spend everywhere: "Todas as
+ * lojas" read EPOCH's October as 1,56× (every campaign) while EPOCH's own page
+ * said 1,35× (its own campaigns), under the same label.
+ */
+export interface OwnAttribution {
+  own: { spend: number; purchaseValue: number }
+  shared: { spend: number; purchaseValue: number; campaigns: number }
+}
+
+/**
+ * The split of one store's facts, with the exact rule of buildCampaignRows:
+ * group by campaign (unsynced ads per account), take the catalog's account
+ * else the facts', flag with sharedAccountFlag on all-time journeys. No
+ * database.
+ */
+export function splitOwnShared(
+  storeId: string,
+  facts: readonly AdDayFact[],
+  campaigns: ReadonlyMap<string, Pick<CampaignInfo, 'accountId'>>,
+  journeys: ReadonlyMap<string, ReadonlyMap<string, number>>,
+): OwnAttribution {
+  const sharedKeys = sharedGroups(storeId, facts, campaigns, journeys)
+  const groups = new Map<string, { campaignId: string | null; spend: number; pv: number }>()
+  for (const f of facts) {
+    const key = groupKey(f)
+    const g = groups.get(key) ?? { campaignId: f.campaignId, spend: 0, pv: 0 }
+    g.spend += f.spend
+    g.pv += f.purchaseValue
+    groups.set(key, g)
+  }
+  const out: OwnAttribution = { own: { spend: 0, purchaseValue: 0 }, shared: { spend: 0, purchaseValue: 0, campaigns: 0 } }
+  for (const [key, g] of groups) {
+    if (sharedKeys.has(key)) {
+      out.shared.spend += g.spend
+      out.shared.purchaseValue += g.pv
+      if (g.campaignId && (g.spend > 0 || g.pv > 0)) out.shared.campaigns++
+    } else {
+      out.own.spend += g.spend
+      out.own.purchaseValue += g.pv
+    }
+  }
+  out.own.spend = round2(out.own.spend)
+  out.own.purchaseValue = round2(out.own.purchaseValue)
+  out.shared.spend = round2(out.shared.spend)
+  out.shared.purchaseValue = round2(out.shared.purchaseValue)
+  return out
+}
+
+/**
+ * OwnAttribution of every store, same window for all (each store's own
+ * calendar dates, as the engine and Campanhas read them). One fact read per
+ * store, then one catalog and one journey read for all of them.
+ */
+export async function getOwnAttribution(storeIds: string[], range: DateRange): Promise<Map<string, OwnAttribution>> {
+  const facts = await Promise.all(storeIds.map(id => loadFactsCovering(id, [range])))
+  const campaignIds = [...new Set(facts.flat().map(f => f.campaignId).filter((x): x is string => !!x))]
+  const [campaigns, journeys] = await Promise.all([loadCampaignInfo(campaignIds), loadCampaignJourneyStores(campaignIds)])
+  return new Map(storeIds.map((id, i) => [id, splitOwnShared(id, facts[i], campaigns, journeys)]))
+}
+
+/** A shared-account group of a store's facts: one campaign, or the unsynced
+ *  ads of one account. */
+export interface SharedGroup {
+  campaignId: string | null
+  /** The store most of the campaign's tracked orders landed in (all time);
+   *  null when no other store has any (or for unsynced ads). */
+  salesStoreId: string | null
+}
+
+/**
+ * The groups (keyed by groupKey) that the Campanhas page treats as
+ * shared-account campaigns: take the catalog's account else the facts', flag
+ * with sharedAccountFlag on all-time journeys. The one rule behind
+ * buildCampaignRows' `shared`, splitOwnShared and partitionOwnShared.
+ */
+export function sharedGroups(
+  storeId: string,
+  facts: readonly AdDayFact[],
+  campaigns: ReadonlyMap<string, Pick<CampaignInfo, 'accountId'>>,
+  journeys: ReadonlyMap<string, ReadonlyMap<string, number>>,
+): Map<string, SharedGroup> {
+  const seen = new Map<string, { campaignId: string | null; accountId: string | null }>()
+  for (const f of facts) {
+    const key = groupKey(f)
+    if (!seen.has(key)) seen.set(key, { campaignId: f.campaignId, accountId: f.accountId })
+  }
+  const out = new Map<string, SharedGroup>()
+  for (const [key, g] of seen) {
+    const accountId = (g.campaignId ? campaigns.get(g.campaignId)?.accountId : null) ?? g.accountId
+    const j = g.campaignId ? journeys.get(g.campaignId) : undefined
+    if (!sharedAccountFlag(storeId, accountId, j)) continue
+    let salesStoreId: string | null = null, top = 0
+    for (const [tenant, orders] of j ?? []) {
+      if (tenant !== storeId && orders > top) { salesStoreId = tenant; top = orders }
+    }
+    out.set(key, { campaignId: g.campaignId, salesStoreId })
+  }
+  return out
+}
+
+/**
+ * A store's ad-day facts split the way Campanhas splits its campaigns: the
+ * store's own, and those of shared-account campaigns (in this store's books,
+ * sales mostly in another shop). Pages that compare Meta's purchases with the
+ * store's real orders (the funnel's capture, Meta's country split) use `own`:
+ * EPOCH's October counted the 439 purchases of five campaigns whose sales
+ * landed in CAMP HALLOW and read "o Meta viu 196% dos pedidos reais". No
+ * database.
+ */
+export interface OwnSharedFacts {
+  own: AdDayFact[]
+  shared: AdDayFact[]
+  /** Shared groups with spend or purchases in the facts. */
+  sharedGroups: SharedGroup[]
+}
+
+export function partitionOwnShared(
+  storeId: string,
+  facts: readonly AdDayFact[],
+  campaigns: ReadonlyMap<string, Pick<CampaignInfo, 'accountId'>>,
+  journeys: ReadonlyMap<string, ReadonlyMap<string, number>>,
+): OwnSharedFacts {
+  const flags = sharedGroups(storeId, facts, campaigns, journeys)
+  const own: AdDayFact[] = [], shared: AdDayFact[] = []
+  const active = new Set<string>()
+  for (const f of facts) {
+    const key = groupKey(f)
+    if (!flags.has(key)) { own.push(f); continue }
+    shared.push(f)
+    if (f.spend > 0 || f.purchases > 0 || f.purchaseValue > 0) active.add(key)
+  }
+  return { own, shared, sharedGroups: [...active].map(k => flags.get(k)!) }
+}
+
+/** partitionOwnShared over one store's window (its own calendar dates). */
+export async function getOwnSharedFacts(storeId: string, range: DateRange): Promise<OwnSharedFacts> {
+  const facts = await loadFactsCovering(storeId, [range])
+  const campaignIds = [...new Set(facts.map(f => f.campaignId).filter((x): x is string => !!x))]
+  const [campaigns, journeys] = await Promise.all([loadCampaignInfo(campaignIds), loadCampaignJourneyStores(campaignIds)])
+  return partitionOwnShared(storeId, facts, campaigns, journeys)
+}
+
 // ─── Ad sets of one campaign ──────────────────────────────────────────────────
 
 export interface AdsetRow extends MetaTotals {

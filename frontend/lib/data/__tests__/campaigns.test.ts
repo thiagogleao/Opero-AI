@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildCampaignRows, campaignTotals, decisionWindows, type BuildCampaignInput } from '../campaigns'
+import { buildCampaignRows, campaignTotals, decisionWindows, splitOwnShared, type BuildCampaignInput } from '../campaigns'
 import { adRunning, buildCreativeRows } from '../creatives'
 import {
   mergeRanges, reconcile, sharedAccountFlag, ORPHAN_CAMPAIGN_NAME,
@@ -151,6 +151,11 @@ describe('sharedAccountFlag', () => {
     expect(f?.journeyStoreId).toBeNull()
     expect(f?.note).toMatch(/outra loja/)
   })
+  it('says its order count is all time, not the window of the table it sits in', () => {
+    // Freddie: 338 tracked orders since it started, 321 of them in October.
+    const f = sharedAccountFlag(EPOCH, OLD_ACCOUNT, new Map([[CAMP_HALLOW, 1338]]), new Map([[CAMP_HALLOW, 'CAMP HALLOW']]))
+    expect(f?.note).toContain('100% dos 1.338 pedidos rastreados dela, desde sempre, caíram em CAMP HALLOW')
+  })
 })
 
 describe('windows', () => {
@@ -214,3 +219,31 @@ describe('buildCreativeRows', () => {
 function eachWindowDay(f: (date: string) => AdDayFact): AdDayFact[] {
   return ['2026-11-10', '2026-11-11', '2026-11-12', '2026-11-13', '2026-11-14', '2026-11-15', '2026-11-16'].map(f)
 }
+
+describe('splitOwnShared', () => {
+  it('splits a store\'s Meta money exactly as its campaign rows flag it', () => {
+    // EPOCH's own campaign, CAMP HALLOW's Freddie in the old account, an
+    // EVEREST campaign there with no orders anywhere, and unsynced ads of
+    // both accounts.
+    const facts = [
+      fact({ campaignId: 'own', accountId: NEW_ACCOUNT, spend: 1000, purchaseValue: 1400 }),
+      fact({ campaignId: 'freddie', accountId: OLD_ACCOUNT, spend: 600, purchaseValue: 1100, date: '2026-11-12' }),
+      fact({ campaignId: 'freddie', accountId: OLD_ACCOUNT, spend: 400, purchaseValue: 500 }),
+      fact({ campaignId: 'everest', accountId: OLD_ACCOUNT, spend: 50 }),
+      fact({ adId: 'o1', campaignId: null, accountId: OLD_ACCOUNT, spend: 30 }),
+      fact({ adId: 'o2', campaignId: null, accountId: NEW_ACCOUNT, spend: 20, purchaseValue: 10 }),
+    ]
+    const campaigns = new Map([['own', camp('own', NEW_ACCOUNT)], ['freddie', camp('freddie', OLD_ACCOUNT)], ['everest', camp('everest', OLD_ACCOUNT)]])
+    const journeys = new Map([['freddie', new Map([[CAMP_HALLOW, 338]])], ['own', new Map([[EPOCH, 40]])]])
+    const split = splitOwnShared(EPOCH, facts, campaigns, journeys)
+    expect(split.own).toEqual({ spend: 1020, purchaseValue: 1410 })
+    expect(split.shared).toEqual({ spend: 1080, purchaseValue: 1600, campaigns: 2 })
+
+    // The same facts through the campaign report: the same split.
+    const rows = build({ facts, campaigns, journeys })
+    const own = rows.filter(r => !r.shared)
+    expect(own.reduce((t, r) => t + r.spend, 0)).toBe(split.own.spend)
+    expect(own.reduce((t, r) => t + r.purchaseValue, 0)).toBe(split.own.purchaseValue)
+    expect(campaignTotals(rows, true).unpricedSpend).toBe(split.shared.spend)
+  })
+})

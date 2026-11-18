@@ -60,8 +60,11 @@ export interface CreativeRow extends MetaTotals {
   campaignName: string | null
   adsetId: string | null
   adsetName: string | null
+  /** Null when there is none or its signed Meta link has expired. */
   thumbnailUrl: string | null
   creativeUrl: string | null
+  /** The ad had picture links and all of them expired (lib/data/metaCdn). */
+  previewExpired?: boolean
   landingUrl: string | null
   createdTime: string | null
   shared: SharedAccountFlag | null
@@ -198,7 +201,7 @@ export function buildCreativeRows(input: BuildCreativeInput): CreativeRow[] {
       running,
       campaignId, campaignName: info?.campaignName ?? null,
       adsetId: info?.adsetId ?? null, adsetName: info?.adsetName ?? null,
-      thumbnailUrl: info?.thumbnailUrl ?? null, creativeUrl: info?.creativeUrl ?? null,
+      thumbnailUrl: info?.thumbnailUrl ?? null, creativeUrl: info?.creativeUrl ?? null, previewExpired: !!info?.previewExpired,
       landingUrl: info?.landingUrl ?? null, createdTime: info?.createdTime ?? null,
       shared,
       estimatedProfit: rate !== null ? round2(estimateProfit(s.purchaseValue, s.spend, rate)) : null,
@@ -241,7 +244,7 @@ export async function getCreativesReport(store: StoreTz, range: DateRange, opts:
   ])
   const adIds = [...new Set(facts.map(f => f.adId))]
   const campaignIds = [...new Set(facts.map(f => f.campaignId).filter((x): x is string => !!x))]
-  const [info, journeys] = await Promise.all([loadAdInfo(adIds), loadCampaignJourneyStores(campaignIds)])
+  const [info, journeys] = await Promise.all([loadAdInfo(adIds, opts.now), loadCampaignJourneyStores(campaignIds)])
   const creatives = buildCreativeRows({ storeId: store.id, range, facts, info, journeys, margin, storeNames: opts.storeNames })
 
   const verdicts: Record<Signal | 'none', number> = { kill: 0, scale: 0, refresh: 0, ok: 0, none: 0 }
@@ -326,7 +329,7 @@ export async function getCreativeDetail(
     ),
   ])
   if (!owned[0]?.ok) return null
-  const info = await loadAdInfo([adId])
+  const info = await loadAdInfo([adId], opts.now)
   const campaignId = info.get(adId)?.campaignId ?? null
   const journeys = campaignId ? await loadCampaignJourneyStores([campaignId]) : new Map()
   const emptyFact: AdDayFact = {

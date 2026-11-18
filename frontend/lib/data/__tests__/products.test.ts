@@ -71,6 +71,7 @@ describe('allocateAdSpend', () => {
     const fromEpoch = allocateAdSpend(credits, spend, STORE)
     expect(fromEpoch.ownAllocatedHere).toBeCloseTo(40)
     expect(fromEpoch.ownAllocatedSiblings).toBeCloseTo(40)
+    expect([...fromEpoch.ownAllocatedBySibling]).toEqual([[SIB, 40]])
     expect(fromEpoch.perOrder.has('c1')).toBe(false)
 
     const fromCamp = allocateAdSpend(credits, spend, SIB)

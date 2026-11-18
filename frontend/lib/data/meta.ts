@@ -23,8 +23,10 @@
  */
 
 import { query } from '../db'
-import { computeStorePnL, PHANTOM_PURCHASE_VALUE, purchasesSql, purchaseValueSql } from '../engine/pnl'
+import { computeStorePnL, KEPT_ORDER_SQL, PHANTOM_PURCHASE_VALUE, purchasesSql, purchaseValueSql } from '../engine/pnl'
 import { daysBetween, type DateRange } from '../engine/dates'
+import { livePictures } from './metaCdn'
+import { formatCount } from '../format'
 
 // ─── Shared ad accounts ───────────────────────────────────────────────────────
 
@@ -248,8 +250,12 @@ export interface AdInfo {
   campaignStatus: string | null
   campaignObjective: string | null
   campaignAccountId: string | null
+  /** Null when there is none or its signed CDN link has expired (metaCdn). */
   thumbnailUrl: string | null
   creativeUrl: string | null
+  /** True when the ad had a picture link on record and every one of them has
+   *  expired: the screen says "o link do Meta expirou" instead of a blank box. */
+  previewExpired?: boolean
   landingUrl: string | null
   /** When the ad was created in Meta (ISO), null when unknown. */
   createdTime: string | null
@@ -264,7 +270,12 @@ interface InfoRow {
   created_time: string | null
 }
 
-export async function loadAdInfo(adIds: string[]): Promise<Map<string, AdInfo>> {
+/**
+ * What the catalog knows about each ad. Picture links whose signed expiry has
+ * passed are dropped here, once for every screen (Campanhas, the creative
+ * page, the phone): the browser would only get a 403 for them.
+ */
+export async function loadAdInfo(adIds: string[], now: Date = new Date()): Promise<Map<string, AdInfo>> {
   const ids = [...new Set(adIds)].filter(Boolean)
   const out = new Map<string, AdInfo>()
   if (!ids.length) return out
@@ -289,7 +300,8 @@ export async function loadAdInfo(adIds: string[]): Promise<Map<string, AdInfo>> 
       adId: r.ad_id, known: true, name: r.name || orphanAdName(r.ad_id), status: r.status,
       adsetId: r.adset_id, adsetName: r.adset_name, adsetStatus: r.adset_status, campaignId: r.campaign_id, campaignName: r.campaign_name,
       campaignStatus: r.campaign_status, campaignObjective: r.objective, campaignAccountId: r.account_id,
-      thumbnailUrl: r.thumbnail_url, creativeUrl: r.creative_url, landingUrl: r.landing_url,
+      ...livePictures(r.thumbnail_url, r.creative_url, now),
+      landingUrl: r.landing_url,
       createdTime: r.created_time,
     })
   }
@@ -367,12 +379,22 @@ export interface CampaignBilledElsewhere {
   /** The store whose books carry the spend. */
   billedStoreId: string
   accountId: string | null
+  /** The campaign's whole spend in the window (every ad of it), which is more
+   *  than Atribuição's "gasto desses anúncios": that one sums only the ads
+   *  credited with an order here in the window. */
   spend: number
   purchaseValue: number
   purchases: number
-  /** Journey orders of this campaign that landed in this store / in all stores. */
+  /** Journey orders of this campaign that landed in this store / in all
+   *  stores, ALL TIME. This decides that the campaign sells here (the list's
+   *  membership rule); it is not a count for the page's window. */
   journeyOrdersHere: number
   journeyOrdersTotal: number
+  /** The same counts for orders placed inside the window (each store's own
+   *  calendar dates, refunded/voided orders out, as the engine counts them):
+   *  what a table that shows the window's spend must show next to it. */
+  windowOrdersHere: number
+  windowOrdersTotal: number
 }
 
 /**
@@ -380,11 +402,16 @@ export interface CampaignBilledElsewhere {
  * (and at least JOURNEY_MIN_ORDERS of them) land in this store. Their spend is
  * NOT in this store's books — the engine charges it to the store that holds
  * the metrics — so this list is information, never a cost line.
+ *
+ * Membership is judged on all-time journeys (a campaign does not change hands
+ * because one week was quiet); the order counts shown with the window's spend
+ * are the window's. Showing the all-time count there read as "338 de 338"
+ * against a store with 103 orders in the window.
  */
 export async function loadCampaignsBilledElsewhere(storeId: string, range: DateRange): Promise<CampaignBilledElsewhere[]> {
   const rows = await query<{
     campaign_id: string; name: string | null; tenant_id: string; account_id: string | null
-    spend: number; pv: number; pc: number; here: number; total: number
+    spend: number; pv: number; pc: number; here: number; total: number; w_here: number; w_total: number
   }>(
     `WITH j AS (
        SELECT campaign_id, tenant_id, COUNT(DISTINCT order_id) AS orders
@@ -396,19 +423,34 @@ export async function loadCampaignsBilledElsewhere(storeId: string, range: DateR
               COALESCE(SUM(orders) FILTER (WHERE tenant_id = $1), 0) AS here,
               SUM(orders) AS total
          FROM j GROUP BY 1
+     ), member AS (
+       SELECT * FROM share WHERE here >= ${JOURNEY_MIN_ORDERS} AND here * 2 > total
+     ), win AS (
+       -- Orders placed in the window, each on its own store's calendar.
+       SELECT p.campaign_id,
+              COUNT(DISTINCT p.order_id) FILTER (WHERE p.tenant_id = $1) AS here,
+              COUNT(DISTINCT (p.tenant_id, p.order_id)) AS total
+         FROM order_touchpoints p
+         JOIN tenants t ON t.id = p.tenant_id
+         JOIN shopify_orders o ON o.order_id = p.order_id AND o.tenant_id = p.tenant_id
+        WHERE p.campaign_id IN (SELECT campaign_id FROM member)
+          AND (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date BETWEEN $2::date AND $3::date
+          AND ${KEPT_ORDER_SQL}
+        GROUP BY 1
      )
      SELECT a.campaign_id, COALESCE(c.name, a.campaign_name) AS name, m.tenant_id,
             COALESCE(c.account_id, m.fb_ad_account_id) AS account_id,
             SUM(COALESCE(m.spend, 0))::float8 AS spend,
             SUM(${purchaseValueSql('m.purchase_value')})::float8 AS pv,
             SUM(${purchasesSql('m.purchase_value', 'm.purchases')})::float8 AS pc,
-            MAX(s.here)::float8 AS here, MAX(s.total)::float8 AS total
+            MAX(s.here)::float8 AS here, MAX(s.total)::float8 AS total,
+            COALESCE(MAX(w.here), 0)::float8 AS w_here, COALESCE(MAX(w.total), 0)::float8 AS w_total
        FROM fb_ad_daily_metrics m
        ${AD_FOR_METRIC}
        ${CAMPAIGN_FOR_AD}
-       JOIN share s ON s.campaign_id = a.campaign_id
+       JOIN member s ON s.campaign_id = a.campaign_id
+       LEFT JOIN win w ON w.campaign_id = a.campaign_id
       WHERE m.tenant_id <> $1 AND m.date BETWEEN $2::date AND $3::date
-        AND s.here >= ${JOURNEY_MIN_ORDERS} AND s.here * 2 > s.total
       GROUP BY 1, 2, 3, 4
      HAVING SUM(COALESCE(m.spend, 0)) > 0
       ORDER BY spend DESC`,
@@ -418,6 +460,7 @@ export async function loadCampaignsBilledElsewhere(storeId: string, range: DateR
     campaignId: r.campaign_id, name: r.name || r.campaign_id, billedStoreId: r.tenant_id,
     accountId: r.account_id, spend: num(r.spend), purchaseValue: num(r.pv), purchases: num(r.pc),
     journeyOrdersHere: num(r.here), journeyOrdersTotal: num(r.total),
+    windowOrdersHere: num(r.w_here), windowOrdersTotal: num(r.w_total),
   }))
 }
 
@@ -465,8 +508,10 @@ export function sharedAccountFlag(
   const other = topId ? (storeNames.get(topId) ?? 'outra loja') : null
   const pctOther = topId && total > 0 ? Math.round((topOrders / total) * 100) : 0
   const where = shared && accountId ? `Rodou na ${SHARED_AD_ACCOUNTS[accountId]}` : 'As vendas rastreadas desta campanha caem em outra loja'
+  // The counts are all time (the membership rule), shown next to a windowed
+  // table: say so, as BilledElsewhere does, or 338 reads as October's orders.
   const evidence = other
-    ? `${pctOther}% dos ${total} pedidos rastreados dela caíram em ${other}`
+    ? `${pctOther}% dos ${formatCount(total)} pedidos rastreados dela, desde sempre, caíram em ${other}`
     : 'nenhum pedido rastreado dela caiu em uma loja do Opero'
   return {
     accountId,

@@ -69,6 +69,11 @@ export interface ProductAttribution {
   /** This store's own Meta spend that went to ads crediting orders of other
    *  stores of the same login. In the books here, attributed there. */
   ownSpendCreditedElsewhere: number
+  /** ownSpendCreditedElsewhere by the store whose orders the ads credit, most
+   *  spend first (EPOCH's October: $15.203 to CAMP HALLOW). Ids only: the
+   *  caller names the stores its viewer may see. Always set by
+   *  getProductReport; optional only so older fixtures still type-check. */
+  ownSpendCreditedElsewhereByStore?: { storeId: string; spend: number }[]
   /** This store's own Meta spend on ads that no order of the window links back
    *  to. In the books, attributed to no product. */
   unlinkedSpend: number
@@ -123,6 +128,8 @@ export interface SpendAllocation {
   perOrder: Map<string, { spend: number; billedElsewhere: number }>
   ownAllocatedHere: number
   ownAllocatedSiblings: number
+  /** ownAllocatedSiblings by the sibling store credited. */
+  ownAllocatedBySibling: Map<string, number>
   siblingAllocatedHere: number
 }
 
@@ -138,7 +145,7 @@ export function allocateAdSpend(credits: CreditRow[], spend: AdSpendRow[], store
     list.push(c)
     byAd.set(c.adId, list)
   }
-  const out: SpendAllocation = { perOrder: new Map(), ownAllocatedHere: 0, ownAllocatedSiblings: 0, siblingAllocatedHere: 0 }
+  const out: SpendAllocation = { perOrder: new Map(), ownAllocatedHere: 0, ownAllocatedSiblings: 0, ownAllocatedBySibling: new Map(), siblingAllocatedHere: 0 }
   for (const s of spend) {
     const rows = byAd.get(s.adId)
     if (!rows?.length || !(s.spend > 0)) continue
@@ -157,6 +164,7 @@ export function allocateAdSpend(credits: CreditRow[], spend: AdSpendRow[], store
         else out.siblingAllocatedHere += amount
       } else if (own) {
         out.ownAllocatedSiblings += amount
+        out.ownAllocatedBySibling.set(r.storeId, (out.ownAllocatedBySibling.get(r.storeId) ?? 0) + amount)
       }
     }
   }
@@ -291,6 +299,9 @@ export async function getProductReport(
       attributedSpend,
       billedElsewhere,
       ownSpendCreditedElsewhere: alloc.ownAllocatedSiblings,
+      ownSpendCreditedElsewhereByStore: [...alloc.ownAllocatedBySibling]
+        .map(([storeId, spend]) => ({ storeId, spend }))
+        .sort((a, b) => b.spend - a.spend),
       unlinkedSpend: Math.max(0, pnl.totals.metaSpend - alloc.ownAllocatedHere - alloc.ownAllocatedSiblings),
     },
   }

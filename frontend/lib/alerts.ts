@@ -3,8 +3,9 @@ import { pushDeviceCount, sendPushToAll, type PushKind } from './push'
 import { listStores, type StoreRef } from './access'
 import { computePnL, type PnL } from './engine/pnl'
 import { REFERENCE_TZ, minutesIntoDay, safeTz, shiftDate, todayInTz } from './engine/dates'
-import { getCampaignSignals, DEFAULT_SCALE_CONFIG } from './scaleSignals'
+import { getCampaignSignals, DEFAULT_SCALE_CONFIG, type CampaignSignal } from './scaleSignals'
 import { buildPortfolio, type PortfolioStoreRow } from './views/portfolio'
+import { formatMoney, formatPct, formatRoas, plural, readablePctChange } from './format'
 
 /**
  * Alerts and the daily summary.
@@ -197,14 +198,15 @@ async function release(kind: string, key: string, day: string): Promise<void> {
   await query(`DELETE FROM alert_events WHERE kind = $1 AND tenant_id = $2 AND day = $3::date`, [kind, key, day])
 }
 
-export function money(v: number): string {
-  const s = v < 0 ? '-' : ''
-  const a = Math.abs(v)
-  if (a >= 10_000) return `${s}$${(a / 1000).toFixed(1)}K`
-  return `${s}$${a.toFixed(0)}`
-}
-
-const x2 = (v: number) => `${v.toFixed(2)}×`
+// Push titles and bodies are stored and shown again in the phone's alerts
+// sheet, so they follow the same pt-BR rules as every screen (lib/format):
+// "$1.234", "−$201", "ROAS 0,62×", "Margem −82%".
+const money = (v: number) => formatMoney(v)
+const pct0 = (v: number, sign = false) => formatPct(v, { digits: 0, sign })
+/** A configured threshold, as typed: "10%", "7,5%", "−2,25%". */
+const thresholdPct = (v: number) =>
+  formatPct(v, { digits: Number.isInteger(v) ? 0 : Number.isInteger(v * 10) ? 1 : 2 })
+const orders = (n: number) => plural(n, 'pedido', 'pedidos')
 
 /** The phone, opened on one store. */
 export const storeUrl = (storeId: string, tab?: string) =>
@@ -271,11 +273,11 @@ export function evaluateStoreAlerts(
     const target = s.configured ? own : cfg.roasDrop.threshold
     if (target !== null && t.roas < target) {
       const why = s.configured
-        ? `Empate desta loja: ${x2(target)} (receita ÷ margem de contribuição, últimos ${TRAILING_DAYS} dias).`
-        : `Custos não configurados: comparado com a meta fixa de ${x2(target)}.`
+        ? `Empate desta loja: ${formatRoas(target)} (receita ÷ margem de contribuição, últimos ${TRAILING_DAYS} dias).`
+        : `Custos não configurados: comparado com a meta fixa de ${formatRoas(target)}.`
       out.push({
         ...base, kind: 'roas_drop',
-        title: `⚠️ ROAS ${x2(t.roas)} abaixo do empate — ${s.name}`,
+        title: `⚠️ ROAS ${formatRoas(t.roas)} abaixo do empate — ${s.name}`,
         body: `${why} Hoje: ${money(t.revenue)} de receita, ${money(t.metaSpend)} na Meta, lucro ${money(t.operatingProfit)}.`,
       })
     }
@@ -286,8 +288,8 @@ export function evaluateStoreAlerts(
   if (cfg.marginDrop.enabled && judgeable && !roasFired && s.configured && t.margin !== null && t.margin < cfg.marginDrop.threshold) {
     out.push({
       ...base, kind: 'margin_drop',
-      title: `⚠️ Margem ${t.margin.toFixed(0)}% — ${s.name}`,
-      body: `Abaixo de ${cfg.marginDrop.threshold}%. Hoje: ${money(t.revenue)} de receita e ${money(t.operatingProfit)} de lucro em ${t.orders} pedido${t.orders === 1 ? '' : 's'}.`,
+      title: `⚠️ Margem ${pct0(t.margin)} — ${s.name}`,
+      body: `Abaixo de ${thresholdPct(cfg.marginDrop.threshold)}. Hoje: ${money(t.revenue)} de receita e ${money(t.operatingProfit)} de lucro em ${orders(t.orders)}.`,
     })
   }
 
@@ -297,8 +299,8 @@ export function evaluateStoreAlerts(
     if (avg > 0 && t.metaSpend >= cfg.minSpend && pct >= cfg.spendSpike.threshold) {
       out.push({
         ...base, kind: 'spend_spike',
-        title: `📣 Gasto ${pct.toFixed(0)}% da média — ${s.name}`,
-        body: `${money(t.metaSpend)} hoje contra ${money(avg)} de média nos últimos ${TRAILING_DAYS} dias. ROAS ${t.roas !== null ? x2(t.roas) : '—'}.`,
+        title: `📣 Gasto ${pct0(pct)} da média — ${s.name}`,
+        body: `${money(t.metaSpend)} hoje contra ${money(avg)} de média nos últimos ${TRAILING_DAYS} dias. ROAS ${formatRoas(t.roas)}.`,
       })
     }
   }
@@ -415,6 +417,23 @@ export async function runAlertChecks(opts: RunOpts = {}): Promise<FiredAlert[]> 
 
 // ─── Scale opportunities ──────────────────────────────────────────────────────
 
+/** Title and body of a scale push for one campaign. Pure. */
+export function scalePushText(
+  storeName: string,
+  c: Pick<CampaignSignal, 'name' | 'reasons' | 'spend' | 'orders'> & { verdict: 'scale' | 'cut' },
+): { kind: 'scale_up' | 'scale_cut'; title: string; body: string } {
+  const scaling = c.verdict === 'scale'
+  const title = scaling
+    ? `🚀 ${c.name.slice(0, 40)} — dá para escalar`
+    : `🛑 ${c.name.slice(0, 40)} — queimando dinheiro`
+  const body = [
+    c.reasons[0],
+    c.reasons[1],
+    `${storeName}: ${money(c.spend)} gastos, ${orders(c.orders)} nos últimos 7 dias fechados.`,
+  ].filter(Boolean).join(' · ')
+  return { kind: scaling ? 'scale_up' : 'scale_cut', title, body }
+}
+
 /**
  * Tell the owner which campaigns have earned more budget, and which are
  * burning it. Once per campaign per day.
@@ -449,16 +468,7 @@ export async function runScaleChecks(opts: RunOpts = {}): Promise<FiredAlert[]> 
       // cut one they already stopped is noise.
       if (c.status !== 'ACTIVE') continue
 
-      const scaling = c.verdict === 'scale'
-      const kind = scaling ? 'scale_up' : 'scale_cut'
-      const title = scaling
-        ? `🚀 ${c.name.slice(0, 40)} — dá para escalar`
-        : `🛑 ${c.name.slice(0, 40)} — queimando dinheiro`
-      const body = [
-        c.reasons[0],
-        c.reasons[1],
-        `${store.name}: $${c.spend.toFixed(0)} gastos, ${c.orders} pedidos nos últimos 7 dias fechados.`,
-      ].filter(Boolean).join(' · ')
+      const { kind, title, body } = scalePushText(store.name, { ...c, verdict: c.verdict })
 
       // The phone, on this store's campaigns: /campaigns is a Clerk page the
       // phone cannot open.
@@ -486,15 +496,32 @@ export interface DailySummary {
   profit: number
 }
 
+/**
+ * " (+80% vs ontem nesta hora)" / " ($308 a mais que ontem nesta hora)": how
+ * today's profit compares with yesterday's, by the verdict's rule (lib/views/
+ * verdict). A percentage only between two profits and over a base worth one
+ * (format readablePctChange): $310 after $1,89 read "+16.302%", and a swing
+ * across zero has no percentage a reader can use. Otherwise the difference in
+ * dollars, which a loss turning into a smaller loss reads as a gain. Empty when
+ * yesterday's profit is exactly zero: nothing to compare against.
+ */
+export function vsYesterday(today: number, yesterday: number, sameTimeOfDay: boolean): string {
+  if (yesterday === 0) return ''
+  const when = `ontem${sameTimeOfDay ? ' nesta hora' : ''}`
+  const pct = today >= 0 ? readablePctChange(today, yesterday) : null
+  if (pct !== null) return ` (${pct0(pct, true)} vs ${when})`
+  const diff = today - yesterday
+  if (Math.abs(diff) < 0.005) return ` (igual a ${when})`
+  return ` (${money(Math.abs(diff))} ${diff > 0 ? 'a mais' : 'a menos'} que ${when})`
+}
+
 /** Title and body of the summary, from the same portfolio view the phone
  *  shows for Todas / Hoje. Pure. */
 export function summaryText(
   t: PnL, before: PnL, stores: Pick<PortfolioStoreRow, 'name' | 'totals' | 'configured' | 'dayClosed'>[],
   sameTimeOfDay: boolean,
 ): DailySummary {
-  const delta = before.operatingProfit !== 0
-    ? ` (${t.operatingProfit >= before.operatingProfit ? '+' : ''}${(((t.operatingProfit - before.operatingProfit) / Math.abs(before.operatingProfit)) * 100).toFixed(0)}% vs ontem${sameTimeOfDay ? ' nesta hora' : ''})`
-    : ''
+  const delta = vsYesterday(t.operatingProfit, before.operatingProfit, sameTimeOfDay)
   const active = stores.filter(s => s.totals.orders > 0 || s.totals.adSpend > 0)
   const ranked = [...active].sort((a, b) => b.totals.operatingProfit - a.totals.operatingProfit)
   const best = ranked[0]
@@ -502,7 +529,7 @@ export function summaryText(
   const noSales = stores.filter(s => s.totals.orders === 0 && s.totals.adSpend > 0)
   const unconfigured = stores.filter(s => !s.configured && (s.totals.orders > 0 || s.totals.adSpend > 0))
   const lines = [
-    `${t.orders} pedidos · ${money(t.revenue)} receita · ${money(t.adSpend)} anúncios · margem ${t.margin !== null ? `${t.margin.toFixed(0)}%` : '—'}`,
+    `${orders(t.orders)} · ${money(t.revenue)} receita · ${money(t.adSpend)} anúncios · margem ${formatPct(t.margin, { digits: 0 })}`,
     ranked.length > 1 && best ? `Melhor: ${best.name} ${money(best.totals.operatingProfit)}` : null,
     ranked.length > 1 && worst && worst !== best ? `Pior: ${worst.name} ${money(worst.totals.operatingProfit)}` : null,
     noSales.length ? `Sem vendas: ${noSales.map(s => `${s.name} (${money(s.totals.adSpend)} em anúncios)`).join(', ')}` : null,

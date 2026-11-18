@@ -13,13 +13,21 @@
  *    (one marks $263,859, currencies are null) and filtering by value dropped a
  *    third of EPOCH's checkouts.
  *  - Meta purchases go through the engine's phantom filter.
+ *  - Shared-account campaigns (in this store's books, sales mostly in another
+ *    shop: CAMP HALLOW's in EPOCH's old account) are left out of the steps,
+ *    the capture and the spend per order, by the Campanhas rule
+ *    (lib/data/campaigns partitionOwnShared), and named in `sharedLeftOut`.
+ *    Counted, EPOCH's October read "o Meta viu 196% dos pedidos reais": 439
+ *    of its 748 purchases were of campaigns whose sales landed in CAMP HALLOW.
  */
 
 import { query } from '../db'
-import { KEPT_ORDER_SQL, purchasesSql } from '../engine/pnl'
+import { KEPT_ORDER_SQL } from '../engine/pnl'
 import { isIsoDate, type DateRange } from '../engine/dates'
 import { getSharedAdAccountsForStore } from '../attribution'
 import { SHARED_ACCOUNT_NOTE } from '../attributionModels'
+import { getOwnSharedFacts, type OwnSharedFacts } from './campaigns'
+import type { AdDayFact } from './meta'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -39,10 +47,24 @@ export interface FunnelStep {
   costPer: number | null
 }
 
+/** What a store's funnel leaves out: its shared-account campaigns. */
+export interface FunnelSharedLeftOut {
+  campaigns: number
+  spend: number
+  purchases: number
+  purchaseValue: number
+  /** Their Meta steps, so a sum over several stores can add them back when
+   *  the stores their sales landed in are in the sum too. */
+  values: Record<MetaStepKey, number>
+  /** Stores most of their tracked orders landed in (ids). */
+  salesStoreIds: string[]
+}
+
 export interface FunnelReport {
   storeId: string
   range: DateRange
-  /** Meta spend of the store's own ad account in the window. */
+  /** Meta spend of the store's own campaigns in the window (shared-account
+   *  campaigns are in sharedLeftOut). */
   spend: number
   meta: {
     steps: FunnelStep[]
@@ -66,6 +88,9 @@ export interface FunnelReport {
   metaCapturePct: number | null
   /** Portuguese sentences to show under the funnel (shared ad account…). */
   notes: string[]
+  /** Shared-account campaigns left out of the steps, the capture and the
+   *  spend per order; null when the store has none in the window. */
+  sharedLeftOut: FunnelSharedLeftOut | null
 }
 
 export const META_STEPS: { key: MetaStepKey; label: string }[] = [
@@ -108,9 +133,108 @@ export function buildMetaSteps(values: Record<MetaStepKey, number>, spend: numbe
   return { steps, omitted, cpm: impressions > 0 ? (spend / impressions) * 1000 : null }
 }
 
+/**
+ * One funnel for several stores: Meta's step counts and Shopify's counts add
+ * up; the rates are recomputed by the same rule (lib/data/funnel). A store's
+ * shared-account campaigns come back in when every store their sales landed
+ * in is in the sum (EPOCH's old account and CAMP HALLOW in "Todas": those
+ * purchases are orders of the sum); otherwise they stay out, and are named.
+ */
+export function sumFunnels(list: FunnelReport[], inSum: ReadonlySet<string>, range: DateRange): FunnelReport {
+  const values = Object.fromEntries(META_STEPS.map(s => [s.key, 0])) as Record<MetaStepKey, number>
+  let spend = 0, orders = 0, abandoned = 0
+  const left = { campaigns: 0, spend: 0, purchases: 0, purchaseValue: 0, values: { ...values }, salesStoreIds: new Set<string>() }
+  for (const f of list) {
+    spend += f.spend
+    orders += f.shopify.orders
+    abandoned += f.shopify.abandonedCheckouts
+    for (const st of f.meta.steps) values[st.key] += st.value
+    const lo = f.sharedLeftOut
+    if (!lo) continue
+    if (lo.salesStoreIds.length > 0 && lo.salesStoreIds.every(id => inSum.has(id))) {
+      spend += lo.spend
+      for (const k of META_STEPS) values[k.key] += lo.values[k.key]
+    } else {
+      left.campaigns += lo.campaigns; left.spend += lo.spend; left.purchases += lo.purchases; left.purchaseValue += lo.purchaseValue
+      for (const k of META_STEPS) left.values[k.key] += lo.values[k.key]
+      for (const id of lo.salesStoreIds) left.salesStoreIds.add(id)
+    }
+  }
+  const hasLeft = left.spend > 0 || left.purchases > 0
+  return {
+    storeId: 'todas',
+    range,
+    spend,
+    meta: buildMetaSteps(values, spend),
+    shopify: {
+      orders, abandonedCheckouts: abandoned,
+      abandonmentPct: orders + abandoned > 0 ? (abandoned / (orders + abandoned)) * 100 : null,
+      costPerOrder: orders > 0 && spend > 0 ? spend / orders : null,
+    },
+    metaCapturePct: orders > 0 && spend > 0 ? (values.purchases / orders) * 100 : null,
+    notes: [...new Set(list.flatMap(f => f.notes))],
+    sharedLeftOut: hasLeft ? { ...left, salesStoreIds: [...left.salesStoreIds] } : null,
+  }
+}
+
 // ─── Loading ──────────────────────────────────────────────────────────────────
 
 const num = (v: unknown): number => Number(v) || 0
+
+const emptyValues = (): Record<MetaStepKey, number> =>
+  ({ impressions: 0, link_clicks: 0, landing_page_views: 0, add_to_cart: 0, initiate_checkout: 0, purchases: 0 })
+
+/** Meta's step counts and spend over ad-day facts (phantoms already dropped
+ *  by the fact read, lib/data/meta loadAdDayFacts). */
+export function stepValues(facts: readonly AdDayFact[]): { values: Record<MetaStepKey, number>; spend: number; purchaseValue: number } {
+  const values = emptyValues()
+  let spend = 0, purchaseValue = 0
+  for (const f of facts) {
+    values.impressions += f.impressions
+    values.link_clicks += f.linkClicks
+    values.landing_page_views += f.landingPageViews
+    values.add_to_cart += f.addToCart
+    values.initiate_checkout += f.initiateCheckout
+    values.purchases += f.purchases
+    spend += f.spend
+    purchaseValue += f.purchaseValue
+  }
+  return { values, spend, purchaseValue }
+}
+
+/** The funnel from a store's split facts and its Shopify counts. No database. */
+export function buildFunnel(
+  storeId: string, range: DateRange, split: OwnSharedFacts,
+  counts: { orders: number; abandonedCheckouts: number }, sharedPairs: number,
+): FunnelReport {
+  const own = stepValues(split.own)
+  const out = stepValues(split.shared)
+  const { orders, abandonedCheckouts } = counts
+  const sharedLeftOut: FunnelSharedLeftOut | null = split.sharedGroups.length
+    ? {
+        campaigns: split.sharedGroups.filter(g => g.campaignId).length,
+        spend: out.spend, purchases: out.values.purchases, purchaseValue: out.purchaseValue, values: out.values,
+        salesStoreIds: [...new Set(split.sharedGroups.map(g => g.salesStoreId).filter((x): x is string => !!x))],
+      }
+    : null
+  return {
+    storeId,
+    range,
+    spend: own.spend,
+    meta: buildMetaSteps(own.values, own.spend),
+    shopify: {
+      orders,
+      abandonedCheckouts,
+      abandonmentPct: orders + abandonedCheckouts > 0 ? (abandonedCheckouts / (orders + abandonedCheckouts)) * 100 : null,
+      costPerOrder: orders > 0 && own.spend > 0 ? own.spend / orders : null,
+    },
+    metaCapturePct: orders > 0 && own.spend > 0 ? (own.values.purchases / orders) * 100 : null,
+    // The left-out campaigns get their own sentence on screen (with the store
+    // names); the generic note stays for a store that sells on another's ads.
+    notes: !sharedLeftOut && sharedPairs > 0 ? [SHARED_ACCOUNT_NOTE] : [],
+    sharedLeftOut,
+  }
+}
 
 /** Abandoned checkouts and kept orders of one store, on its own calendar. */
 export async function getCheckoutCounts(store: { id: string }, range: DateRange): Promise<{ orders: number; abandonedCheckouts: number }> {
@@ -134,39 +258,10 @@ export async function getFunnel(store: { id: string }, range: DateRange): Promis
   if (!isIsoDate(range.from) || !isIsoDate(range.to) || range.from > range.to) {
     throw new RangeError(`invalid range ${range.from}..${range.to}`)
   }
-  const [[m], counts, shared] = await Promise.all([
-    query<Record<MetaStepKey | 'spend', number>>(
-      // ::float8 everywhere: pg returns bigint sums as strings, which is how the
-      // old funnel printed "4278774" with no separators.
-      `SELECT COALESCE(SUM(impressions), 0)::float8        AS impressions,
-              COALESCE(SUM(link_clicks), 0)::float8        AS link_clicks,
-              COALESCE(SUM(landing_page_views), 0)::float8 AS landing_page_views,
-              COALESCE(SUM(add_to_cart), 0)::float8        AS add_to_cart,
-              COALESCE(SUM(initiate_checkout), 0)::float8  AS initiate_checkout,
-              COALESCE(SUM(${purchasesSql()}), 0)::float8  AS purchases,
-              COALESCE(SUM(spend), 0)::float8              AS spend
-         FROM fb_ad_daily_metrics
-        WHERE tenant_id = $1 AND date BETWEEN $2::date AND $3::date`,
-      [store.id, range.from, range.to],
-    ),
+  const [split, counts, shared] = await Promise.all([
+    getOwnSharedFacts(store.id, range),
     getCheckoutCounts(store, range),
     getSharedAdAccountsForStore(store.id, range).catch(() => []),
   ])
-  const values = Object.fromEntries(META_STEPS.map(s => [s.key, num(m?.[s.key])])) as Record<MetaStepKey, number>
-  const spend = num(m?.spend)
-  const { orders, abandonedCheckouts } = counts
-  return {
-    storeId: store.id,
-    range,
-    spend,
-    meta: buildMetaSteps(values, spend),
-    shopify: {
-      orders,
-      abandonedCheckouts,
-      abandonmentPct: orders + abandonedCheckouts > 0 ? (abandonedCheckouts / (orders + abandonedCheckouts)) * 100 : null,
-      costPerOrder: orders > 0 && spend > 0 ? spend / orders : null,
-    },
-    metaCapturePct: orders > 0 && spend > 0 ? (values.purchases / orders) * 100 : null,
-    notes: shared.length ? [SHARED_ACCOUNT_NOTE] : [],
-  }
+  return buildFunnel(store.id, range, split, counts, shared.length)
 }
