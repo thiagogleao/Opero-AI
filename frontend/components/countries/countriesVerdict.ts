@@ -10,6 +10,7 @@ import { SMALL_SAMPLE } from '@/lib/data/countries'
 import type { PnL } from '@/lib/engine/pnl'
 import type { Verdict, VerdictChip, VerdictLine } from '@/lib/views/verdict'
 import { formatPct, plural } from '@/lib/format'
+import { beforeStartVerdict, isBeforeStart, type BeforeStartInput } from '@/components/campaigns/storeStart'
 
 const line = (...parts: (string | { text: string; strong?: boolean; tone?: 'pos' | 'neg' | 'warn' })[]): VerdictLine => {
   const ps = parts.map(p => (typeof p === 'string' ? { text: p } : p))
@@ -22,6 +23,28 @@ export interface CustomerCounts {
   newOrders: number
   returningOrders: number
   guestOrders: number
+}
+
+/**
+ * The new / returning / guest shares of the orders in words. A part that has
+ * orders but rounds to 0% reads "menos de 1%" — MOKOO's 2 guest orders out of
+ * 630 read "0% sem cadastro" next to 26% + 73%, a zero for a count that is not
+ * zero. The guest part names its count then ("2 pedidos sem cadastro (menos
+ * de 1%)"). Null guest when there were none.
+ */
+export function customerMixShares(c: CustomerCounts): { returning: string; new: string; guest: string | null } {
+  const share = (n: number) => {
+    const p = c.orders > 0 ? (n / c.orders) * 100 : 0
+    return n > 0 && Math.round(p) === 0 ? null : pct0(p)
+  }
+  const guestPct = share(c.guestOrders)
+  return {
+    returning: share(c.returningOrders) ?? 'menos de 1%',
+    new: share(c.newOrders) ?? 'menos de 1%',
+    guest: c.guestOrders <= 0 ? null
+      : guestPct !== null ? `${guestPct} sem cadastro`
+        : `${plural(c.guestOrders, 'pedido', 'pedidos')} sem cadastro (menos de 1%)`,
+  }
 }
 
 export function buildCountriesVerdict(input: {
@@ -43,8 +66,15 @@ export function buildCountriesVerdict(input: {
   partialLabel: string | null
   dayLabel: string | null
   split?: boolean
+  /** One store with a known first sale: a window that ends before it reads
+   *  "Vende desde 7 nov", like the Resumo (components/campaigns/storeStart). */
+  firstSale?: BeforeStartInput | null
 }): Verdict {
   const { rows, totals, configured, periodPhrase, subjectOf } = input
+  const fs = input.firstSale
+  if (fs && isBeforeStart(fs.firstOrderDate, fs.range, { orders: totals.orders, revenue: totals.revenue, spend: totals.adSpend })) {
+    return beforeStartVerdict({ ...fs, rangeLabel: input.rangeLabel, dayLabel: input.dayLabel, totals, configured, split: input.split })
+  }
   const chips: VerdictChip[] = []
   const details: VerdictLine[] = []
   const excluded = input.excludedStores ?? []
@@ -84,10 +114,9 @@ export function buildCountriesVerdict(input: {
   details.push(line(`Vendeu para ${plural(countryCount, 'país', 'países')}`,
     small ? `; ${small === countryCount ? 'todos' : `${small} deles`} com menos de ${SMALL_SAMPLE} pedidos — amostra pequena para decidir por país.` : '.'))
   if (input.customers && input.customers.orders > 0) {
-    const c = input.customers
-    details.push(line({ text: pct0((c.returningOrders / c.orders) * 100), strong: true }, ' dos pedidos foram recompra, ',
-      { text: pct0((c.newOrders / c.orders) * 100), strong: true }, ' de clientes novos',
-      c.guestOrders ? ` e ${pct0((c.guestOrders / c.orders) * 100)} sem cadastro.` : '.'))
+    const mix = customerMixShares(input.customers)
+    details.push(line({ text: mix.returning, strong: true }, ' dos pedidos foram recompra, ',
+      { text: mix.new, strong: true }, ' de clientes novos', mix.guest ? ` e ${mix.guest}.` : '.'))
   }
   if (configured) {
     const judged = countries.filter(c => c.orders >= SMALL_SAMPLE && c.contributionMargin !== null)

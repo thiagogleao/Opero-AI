@@ -13,7 +13,19 @@ describe('creativeVerdict', () => {
   it('says why a big spender below break-even is not cut yet', () => {
     const v = creativeVerdict({ ...base, spend: 2484, roas: 1.3 })
     expect(v.signal).toBe('ok')
-    expect(v.reason).toMatch(/acima da linha de corte \(1\.20x\)/)
+    expect(v.reason).toBe('Abaixo do empate (1,50×), mas acima da linha de corte (1,20×)')
+  })
+  it('writes every number the pt-BR way (shown next to lib/format numbers)', () => {
+    expect(creativeVerdict({ ...base, roas: 0.96, spend: 1419.4, breakEven: 1.29 }).reason)
+      .toBe('ROAS 0,96× com $1.419 gastos — abaixo de 80% do empate (1,29×)')
+    expect(creativeVerdict({ ...base, roas: 1.1, spend: 45.5 }).reason)
+      .toBe('Abaixo do empate (1,50×), ainda com pouco gasto para cortar ($45,50 de $50)')
+    expect(creativeVerdict({ ...base, roas: 2.2, purchases: 1234 }).reason)
+      .toBe('ROAS 2,20× — 40% ou mais acima do empate (1,50×) com 1.234 vendas')
+    expect(creativeVerdict({ ...base, frequency: 3.62 }).reason).toBe('Frequência 3,6 no período — o público já viu demais')
+    for (const r of [0.5, 1.3, 1.6, 2.4].map(roas => creativeVerdict({ ...base, roas, frequency: 4 }).reason)) {
+      expect(r).not.toMatch(/\d\.\d(?!\d{2})|\dx\b|\$\d{1,3},\d{3}|(^|\s)-\d/)
+    }
   })
   it('scales 40% above break-even with enough sales', () => {
     expect(creativeVerdict({ ...base, roas: 2.2 }).signal).toBe('scale')

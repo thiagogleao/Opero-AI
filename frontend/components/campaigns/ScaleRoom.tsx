@@ -8,7 +8,9 @@
  * why. The rule is spelled out under the list. Server component.
  *
  * Props: { report: CampaignReport for the decision window; windowLabel: "10–16 nov";
- *          costsHref: link to the cost settings }
+ *          costsHref: link to the cost settings;
+ *          split?: boolean (partner view: the daily estimated profit is the
+ *            partner's half; margins, spend and ROAS stay whole) }
  */
 
 import type { CampaignAction } from '@/lib/campaignSignal'
@@ -16,6 +18,7 @@ import type { CampaignReport, CampaignRow } from '@/lib/data/campaigns'
 import { Block, ButtonLink, Chip, EmptyState, Icon, RoasGauge } from '@/components/ui'
 import { MiniBars } from '@/components/charts'
 import { formatDate, formatMoney, formatPct, formatRoas, plural } from '@/lib/format'
+import { SPLIT_SHARE } from '@/lib/views/verdict'
 import { ACTION_CHIP, ptText } from './text'
 import s from './campaigns.module.css'
 
@@ -27,10 +30,11 @@ const GROUP_TITLE: Record<CampaignAction, string> = {
   observar: 'Ainda sem sinal claro',
 }
 
-function DecisionRow({ row, breakEven }: { row: CampaignRow; breakEven: number | null }) {
+function DecisionRow({ row, breakEven, k }: { row: CampaignRow; breakEven: number | null; k: number }) {
   const d = row.decision
   const spec = d.action ? ACTION_CHIP[d.action] : null
-  const strip = d.days.map(x => (x.estimatedProfit === null ? null : x.estimatedProfit))
+  const strip = d.days.map(x => (x.estimatedProfit === null ? null : x.estimatedProfit * k))
+  const half = k !== 1 ? ' (sua parte)' : ''
   return (
     <div className={s.decision}>
       <div>
@@ -43,25 +47,29 @@ function DecisionRow({ row, breakEven }: { row: CampaignRow; breakEven: number |
       </div>
       <div className={s.dFigures}>
         <span>margem <b className={d.margin !== null && d.margin < 0 ? s.neg : undefined}>{formatPct(d.margin, { digits: 0 })}</b> · gasto <b>{formatMoney(d.spend)}</b> · <b>{d.purchases}</b> {d.purchases === 1 ? 'compra' : 'compras'}</span>
-        <RoasGauge roas={d.roas} breakEven={breakEven} size="mini" />
+        {/* Only campaigns with an action get here, and an action needs cost
+            settings and store sales in the window (decideCampaign): a missing
+            break-even can only mean product, shipping and fees ate the sales. */}
+        <RoasGauge roas={d.roas} breakEven={breakEven} reason={breakEven === null ? 'no_margin' : null} size="mini" />
       </div>
       <div className={s.strip}>
         <MiniBars
           values={strip}
           width={150}
-          ariaLabel={`Lucro estimado por dia de ${row.name}`}
+          ariaLabel={`Lucro estimado por dia de ${row.name}${half}`}
           tip={{
-            title: 'Lucro estimado por dia',
-            rows: d.days.map(x => [formatDate(x.date), x.estimatedProfit === null ? 'sem gasto' : formatMoney(x.estimatedProfit), x.estimatedProfit === null ? null : x.estimatedProfit >= 0 ? 'pos' : 'neg']),
+            title: `Lucro estimado por dia${half}`,
+            rows: d.days.map(x => [formatDate(x.date), x.estimatedProfit === null ? 'sem gasto' : formatMoney(x.estimatedProfit * k), x.estimatedProfit === null ? null : x.estimatedProfit >= 0 ? 'pos' : 'neg']),
           }}
         />
-        <span>lucro estimado, dia a dia</span>
+        <span>{k !== 1 ? 'sua parte do lucro estimado, dia a dia' : 'lucro estimado, dia a dia'}</span>
       </div>
     </div>
   )
 }
 
-export function ScaleRoom({ report, windowLabel, costsHref }: { report: CampaignReport; windowLabel: string; costsHref: string }) {
+export function ScaleRoom({ report, windowLabel, costsHref, split = false }: { report: CampaignReport; windowLabel: string; costsHref: string; split?: boolean }) {
+  const k = split ? SPLIT_SHARE : 1
   const rows = report.campaigns.filter(c => c.decision.spend > 0 || c.decision.basis !== 'sem_gasto')
   const acting = rows.filter(c => c.decision.action !== null)
   const paused = rows.filter(c => c.decision.basis === 'pausada')
@@ -109,7 +117,7 @@ export function ScaleRoom({ report, windowLabel, costsHref }: { report: Campaign
                   <span className="lbl">{GROUP_TITLE[a]}</span>
                   <span className={s.groupCount}>{list.length}</span>
                 </div>
-                {list.map(c => <DecisionRow key={c.campaignId ?? c.name} row={c} breakEven={be} />)}
+                {list.map(c => <DecisionRow key={c.campaignId ?? c.name} row={c} breakEven={be} k={k} />)}
               </div>
             )
           })}

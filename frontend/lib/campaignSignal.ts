@@ -29,6 +29,7 @@
  */
 
 import { eachDay, shiftDate, daysBetween, type DateRange } from './engine/dates'
+import { formatCount, formatMoney, formatPct } from './format'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -177,8 +178,14 @@ export function breakEvenRoas(contributionRate: number | null): number | null {
 const sum = <T>(xs: T[], f: (x: T) => number) => xs.reduce((s, x) => s + f(x), 0)
 const roasOf = (rev: number, spend: number) => (spend > 0 ? rev / spend : null)
 const pctChange = (now: number, before: number) => ((now - before) / Math.abs(before)) * 100
-const money = (n: number) => `$${Math.round(n).toLocaleString('en-US')}`
-const pct = (n: number) => `${n.toFixed(0)}%`
+// Every sentence here is shown as is on the desktop, the phone, in pushes and
+// to the AI, right next to numbers from lib/format: so pt-BR with a true minus
+// sign ("$1.234", "$45,50", "−10%"), never "$1,234" or "-10%".
+const money = (n: number) => formatMoney(n)
+/** A threshold the owner set: a round amount, never "$50,00". */
+const limit = (n: number) => formatMoney(n, { cents: 'never' })
+const pct = (n: number) => formatPct(n, { digits: 0 })
+const orderCount = (n: number) => `${formatCount(n)} ${Math.round(n) === 1 ? 'pedido' : 'pedidos'}`
 
 function totals(days: DecisionDay[]) {
   const spend = sum(days, d => d.spend)
@@ -308,7 +315,7 @@ export function decideCampaign(input: DecisionInput): CampaignDecision {
     return none('sem_margem', `A loja não teve vendas nos ${n} dias julgados — sem margem de contribuição para medir`)
   }
 
-  const volume = `${w.purchases.toFixed(0)} pedido${w.purchases === 1 ? '' : 's'} e ${money(w.spend)} em ${n} dias`
+  const volume = `${orderCount(w.purchases)} e ${money(w.spend)} em ${n} dias`
   const enough = w.purchases >= t.minOrders && w.spend >= t.minSpend
 
   if (enough && margin !== null) {
@@ -336,7 +343,7 @@ export function decideCampaign(input: DecisionInput): CampaignDecision {
         : `${money(w.spend)} em ${n} dias sem nenhuma venda atribuída pelo Meta`)
     }
   }
-  return act('observar', 'volume', `Pouco volume para julgar: ${volume} (mínimo ${t.minOrders} pedidos e ${money(t.minSpend)})`)
+  return act('observar', 'volume', `Pouco volume para julgar: ${volume} (mínimo ${orderCount(t.minOrders)} e ${limit(t.minSpend)})`)
 }
 
 // ─── Labels and ordering ──────────────────────────────────────────────────────
@@ -361,10 +368,10 @@ export function actionRank(a: CampaignAction | null): number {
 /** The rule behind each badge, in plain words, for a legend or tooltip. */
 export function describeThresholds(t: ScaleThresholds = DEFAULT_THRESHOLDS): Record<CampaignAction, string> {
   return {
-    escalar: `Margem de ${t.minMargin}% ou mais nos últimos ${t.windowDays} dias fechados, com pelo menos ${t.minOrders} pedidos e ${money(t.minSpend)} de gasto, sem queda forte do ROAS nos últimos ${RECENT_DAYS} dias.`,
-    manter: `Dá lucro, mas abaixo de ${t.minMargin}% de margem — ou passaria para escalar, mas o ROAS caiu ${COLLAPSE_DROP}% ou mais nos últimos ${RECENT_DAYS} dias.`,
-    cortar: `Margem de ${t.cutMargin}% ou pior com volume suficiente; ou ${money(t.minSpend)} gastos e o prejuízo continuaria mesmo com 50% mais vendas.`,
-    observar: `Entre ${t.cutMargin}% e 0% de margem, ou pouco volume para julgar (menos de ${t.minOrders} pedidos ou ${money(t.minSpend)}).`,
+    escalar: `Margem de ${pct(t.minMargin)} ou mais nos últimos ${t.windowDays} dias fechados, com pelo menos ${orderCount(t.minOrders)} e ${limit(t.minSpend)} de gasto, sem queda forte do ROAS nos últimos ${RECENT_DAYS} dias.`,
+    manter: `Dá lucro, mas abaixo de ${pct(t.minMargin)} de margem — ou passaria para escalar, mas o ROAS caiu ${pct(COLLAPSE_DROP)} ou mais nos últimos ${RECENT_DAYS} dias.`,
+    cortar: `Margem de ${pct(t.cutMargin)} ou pior com volume suficiente; ou ${limit(t.minSpend)} gastos e o prejuízo continuaria mesmo com 50% mais vendas.`,
+    observar: `Entre ${pct(t.cutMargin)} e 0% de margem, ou pouco volume para julgar (menos de ${orderCount(t.minOrders)} ou ${limit(t.minSpend)}).`,
   }
 }
 

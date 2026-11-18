@@ -7,7 +7,8 @@
  * keeps doing all the data work and formatting.
  *
  * Props:
- *   columns  { key; label: ReactNode; numeric?: boolean; width?: string|number; info?: ReactNode }[]
+ *   columns  { key; label: ReactNode; numeric?: boolean; width?: string|number; info?: ReactNode;
+ *            className?: string (on the header, every cell and the footer cell of the column) }[]
  *   rows     { key; cells: Record<key, ReactNode>; detail?: ReactNode (when set, the
  *            first cell becomes a toggle button); toggleLabel?: string (screen readers);
  *            tone?: 'mut' }[]
@@ -27,6 +28,7 @@ export interface ExpandableColumn {
   numeric?: boolean
   width?: string | number
   info?: ReactNode
+  className?: string
 }
 
 export interface ExpandableRow {
@@ -60,7 +62,7 @@ export function ExpandableTable({ columns, rows, caption, footer, empty }: {
         <thead>
           <tr>
             {columns.map(c => (
-              <th key={c.key} scope="col" className={cx(s.th, c.numeric && s.right)} style={c.width !== undefined ? { width: c.width } : undefined}>
+              <th key={c.key} scope="col" className={cx(s.th, c.numeric && s.right, c.className)} style={c.width !== undefined ? { width: c.width } : undefined}>
                 <span className={s.thInner}>
                   {c.label}
                   {c.info && <InfoTip label="Como é calculado">{c.info}</InfoTip>}
@@ -78,7 +80,7 @@ export function ExpandableTable({ columns, rows, caption, footer, empty }: {
                 {columns.map((c, i) => {
                   const content = r.cells[c.key] ?? null
                   return (
-                    <td key={c.key} className={cx(s.td, c.numeric && s.right, c.numeric && s.tdNum)}>
+                    <td key={c.key} className={cx(s.td, c.numeric && s.right, c.numeric && s.tdNum, c.className)}>
                       {i === 0 && r.detail ? (
                         <button
                           type="button"
@@ -113,7 +115,7 @@ export function ExpandableTable({ columns, rows, caption, footer, empty }: {
           <tfoot className={s.tfoot}>
             <tr>
               {columns.map(c => (
-                <td key={c.key} className={cx(s.td, c.numeric && s.right, c.numeric && s.tdNum)}>{footer[c.key] ?? null}</td>
+                <td key={c.key} className={cx(s.td, c.numeric && s.right, c.numeric && s.tdNum, c.className)}>{footer[c.key] ?? null}</td>
               ))}
             </tr>
           </tfoot>

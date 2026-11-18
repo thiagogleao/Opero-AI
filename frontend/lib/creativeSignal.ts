@@ -23,6 +23,8 @@
  *    period frequency is supplied (today: single-day windows).
  */
 
+import { formatCount, formatMoney, formatNumber, formatRoas } from './format'
+
 export type Signal = 'kill' | 'scale' | 'refresh' | 'ok'
 
 export interface CreativeVerdictInput {
@@ -49,6 +51,10 @@ export interface CreativeVerdict {
   /** Null when no recommendation applies (no spend, paused, shared account,
    *  no cost settings or no break-even). */
   signal: Signal | null
+  /** The chip's word for this ad (signalLabel): 'ok' splits into "Manter" (at
+   *  or above break-even) and "Abaixo do empate". Set whenever `signal` is;
+   *  absent without a signal (optional so rows built by hand stay valid). */
+  label?: string
   reason: string
 }
 
@@ -63,9 +69,19 @@ const SCALE_MIN_PURCHASES = 3
 /** Period frequency above this: the audience has seen the ad too often. */
 const FATIGUE_FREQUENCY = 3.5
 
-const x2 = (n: number) => `${n.toFixed(2)}x`
+// The reasons are shown as is on the desktop, the phone and to the AI, right
+// under a "ROAS 0,96×" from lib/format: so pt-BR here too, never "0.96x".
+const x2 = (n: number) => formatRoas(n)
+const money = (n: number) => formatMoney(n)
+/** A fixed floor of these rules: a round amount, never "$50,00". */
+const limit = (n: number) => formatMoney(n, { cents: 'never' })
 
 export function creativeVerdict(a: CreativeVerdictInput): CreativeVerdict {
+  const v = judge(a)
+  return v.signal ? { signal: v.signal, label: signalLabel(v.signal, a.roas, a.breakEven), reason: v.reason } : v
+}
+
+function judge(a: CreativeVerdictInput): Omit<CreativeVerdict, 'label'> {
   const spend = Math.max(0, Number(a.spend) || 0)
   if (spend <= 0 || a.roas === null) return { signal: null, reason: 'Sem gasto no período' }
   if (!a.running) return { signal: null, reason: 'Pausado — sem recomendação' }
@@ -77,20 +93,20 @@ export function creativeVerdict(a: CreativeVerdictInput): CreativeVerdict {
   }
   const be = a.breakEven
   if (spend >= KILL_SPEND_FLOOR && a.roas < be * KILL_ROAS_FACTOR) {
-    return { signal: 'kill', reason: `ROAS ${x2(a.roas)} com $${spend.toFixed(0)} gastos — abaixo de 80% do empate (${x2(be)})` }
+    return { signal: 'kill', reason: `ROAS ${x2(a.roas)} com ${money(spend)} gastos — abaixo de 80% do empate (${x2(be)})` }
   }
   if (spend >= SCALE_SPEND_FLOOR && a.purchases >= SCALE_MIN_PURCHASES && a.roas >= be * SCALE_ROAS_FACTOR) {
-    return { signal: 'scale', reason: `ROAS ${x2(a.roas)} — 40% ou mais acima do empate (${x2(be)}) com ${a.purchases.toFixed(0)} vendas` }
+    return { signal: 'scale', reason: `ROAS ${x2(a.roas)} — 40% ou mais acima do empate (${x2(be)}) com ${formatCount(a.purchases)} vendas` }
   }
   if (a.frequency !== null && a.frequency > FATIGUE_FREQUENCY) {
-    return { signal: 'refresh', reason: `Frequência ${a.frequency.toFixed(1)} no período — o público já viu demais` }
+    return { signal: 'refresh', reason: `Frequência ${formatNumber(a.frequency, 1)} no período — o público já viu demais` }
   }
   if (a.roas >= be) return { signal: 'ok', reason: `Acima do empate (${x2(be)})` }
   return {
     signal: 'ok',
     reason: spend >= KILL_SPEND_FLOOR
       ? `Abaixo do empate (${x2(be)}), mas acima da linha de corte (${x2(be * KILL_ROAS_FACTOR)})`
-      : `Abaixo do empate (${x2(be)}), ainda com pouco gasto para cortar ($${spend.toFixed(0)} de $${KILL_SPEND_FLOOR})`,
+      : `Abaixo do empate (${x2(be)}), ainda com pouco gasto para cortar (${money(spend)} de ${limit(KILL_SPEND_FLOOR)})`,
   }
 }
 
@@ -101,8 +117,27 @@ export function signalRank(s: Signal | null): number {
   return s === null ? 4 : SIGNAL_RANK[s]
 }
 
+/**
+ * The signal alone in words. 'ok' only means "no action now", which is true
+ * both above the break-even and below it with too little spend to cut — so
+ * its word here is the neutral "Sem ação". Wherever the ROAS is known use
+ * signalLabel (or CreativeVerdict.label): a neutral "OK" next to a ROAS of
+ * 0,00× and a red estimated loss read as approval.
+ */
 export const SIGNAL_LABEL: Record<Signal, string> = {
-  kill: 'Desligar', scale: 'Escalar', refresh: 'Trocar criativo', ok: 'OK',
+  kill: 'Desligar', scale: 'Escalar', refresh: 'Trocar criativo', ok: 'Sem ação',
+}
+
+/** Below the break-even, an 'ok' ad is waiting (too little spend to cut, or
+ *  still above the cut line), never approved. */
+export const BELOW_BREAK_EVEN_LABEL = 'Abaixo do empate'
+/** At or above the break-even: keep it running. */
+export const KEEP_LABEL = 'Manter'
+
+/** The word for one ad's signal, from its ROAS against the break-even. */
+export function signalLabel(signal: Signal, roas: number | null, breakEven: number | null): string {
+  if (signal !== 'ok') return SIGNAL_LABEL[signal]
+  return roas !== null && breakEven !== null && breakEven > 0 && roas < breakEven ? BELOW_BREAK_EVEN_LABEL : KEEP_LABEL
 }
 
 /** Why hook rate is null everywhere, for a tooltip. */

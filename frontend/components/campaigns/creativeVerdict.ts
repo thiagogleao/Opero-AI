@@ -15,6 +15,8 @@ const line = (...parts: (string | { text: string; strong?: boolean; tone?: 'pos'
   const ps = parts.map(p => (typeof p === 'string' ? { text: p } : p))
   return { parts: ps, text: ps.map(p => p.text).join('') }
 }
+/** A sentence without its closing period(s), so exactly one can be added. */
+const stripStop = (t: string) => t.trim().replace(/[.\s]+$/, '')
 
 export function buildCreativeVerdict(input: {
   detail: CreativeDetail
@@ -78,14 +80,21 @@ export function buildCreativeVerdict(input: {
     headline = `Este anúncio gastou ${formatMoney(c.spend)} ${periodPhrase} e o Meta credita ${formatMoney(c.purchaseValue)} a ele.`
   }
 
-  details.push(line({ text: ptText(c.verdict.reason), strong: true }, '.'))
+  // The reason may already end its sentence (the shared-account note does):
+  // one period, never "..". For a shared-account ad the reason IS that note
+  // (lib/creativeSignal returns sharedNote as the reason), so it is said here
+  // once and not repeated in the fine print below.
+  const reason = stripStop(ptText(c.verdict.reason))
+  details.push(line({ text: reason, strong: true }, '.'))
   details.push(line(`Gasto ${formatMoney(c.spend)} em ${plural(c.daysWithSpend, 'dia', 'dias')} · ${plural(c.purchases, 'compra atribuída', 'compras atribuídas')}`,
     c.cpa !== null ? ` · CPA ${formatMoney(c.cpa)}` : '', ` · vendas atribuídas ${formatMoney(c.purchaseValue)}.`))
   if (d.bestDay && d.worstDay) {
-    const val = (x: typeof d.bestDay) => (x!.estimatedProfit !== null ? formatMoney(x!.estimatedProfit) : `ROAS ${formatRoas(x!.roas)}`)
-    details.push(line(`Melhor dia ${formatDate(d.bestDay.date, input.today)} (${val(d.bestDay)}), pior dia ${formatDate(d.worstDay.date, input.today)} (${val(d.worstDay)}) — só dias com $10 ou mais de gasto.`))
+    // The partner's half, like the amount above and the page's day table.
+    const val = (x: typeof d.bestDay) => (x!.estimatedProfit !== null ? formatMoney(x!.estimatedProfit * k) : `ROAS ${formatRoas(x!.roas)}`)
+    const half = input.split && d.bestDay.estimatedProfit !== null ? ', sua parte do lucro estimado' : ''
+    details.push(line(`Melhor dia ${formatDate(d.bestDay.date, input.today)} (${val(d.bestDay)}), pior dia ${formatDate(d.worstDay.date, input.today)} (${val(d.worstDay)}) — só dias com $10 ou mais de gasto${half}.`))
   }
-  if (c.shared) notes.push(line(c.shared.note))
+  if (c.shared && stripStop(ptText(c.shared.note)) !== reason) notes.push(line(c.shared.note))
 
   if (est === null) {
     return {

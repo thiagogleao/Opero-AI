@@ -49,7 +49,7 @@ export function CustomersSplit({ split, today, rangeLabel }: { split: CustomerSp
           note={<>checkout sem cliente · <b>{formatMoney(split.guestRevenue)}</b></>}
           info="Pedidos sem cliente identificado: não dá para saber se é novo ou recompra." />
         <KpiCard label="Clientes" value={<Count value={split.customers} />}
-          note={<><b>{formatCount(split.newCustomers)}</b> novos · <b>{formatCount(split.returningCustomers)}</b> já conhecidos</>}
+          note={<><b>{formatCount(split.newCustomers)}</b> {split.newCustomers === 1 ? 'novo' : 'novos'} · <b>{formatCount(split.returningCustomers)}</b> {split.returningCustomers === 1 ? 'já conhecido' : 'já conhecidos'}</>}
           footnote={split.repeatOrdersOfNewCustomers > 0 ? `${plural(split.repeatOrdersOfNewCustomers, 'recompra', 'recompras')} de clientes que estrearam no período` : undefined} />
       </KpiGrid>
       <p className={`${s.small} ${s.gapTop}`}>
@@ -97,7 +97,7 @@ export function LtvBlock({ ltv, today }: { ltv: CustomerLtv; today: string }) {
         <KpiGrid>
           <KpiCard label="LTV médio" value={<Money value={ltv.avgLtv} />} note={<>em <b>{ltv.avgOrders === null ? '—' : ltv.avgOrders.toLocaleString('pt-BR', { maximumFractionDigits: 2 })}</b> {ltv.avgOrders !== null && ltv.avgOrders < 1.005 ? 'pedido' : 'pedidos'} por cliente</>} />
           <KpiCard label="Voltaram a comprar" value={<Pct value={ltv.repeatCustomerPct} />} note={<><b>{formatCount(ltv.repeatCustomers)}</b> de {formatCount(ltv.customers)} clientes</>} />
-          <KpiCard label="Receita identificada" value={<Money value={ltv.revenue} />} note={<><b>{formatCount(ltv.orders)}</b> pedidos de clientes com cadastro</>} />
+          <KpiCard label="Receita identificada" value={<Money value={ltv.revenue} />} note={<><b>{formatCount(ltv.orders)}</b> {ltv.orders === 1 ? 'pedido' : 'pedidos'} de clientes com cadastro</>} />
         </KpiGrid>
       </div>
       <DataTable caption="Clientes por número de pedidos, histórico completo" columns={columns} rows={rows} dense />
@@ -151,12 +151,21 @@ export function CustomersByStore({ stores, rangeLabel }: { stores: StoreCustomer
       info={'"Novo" = primeiro pedido do cliente nos pedidos que o Opero guardou de cada loja (as lojas começaram a ser coletadas em datas diferentes).'}
       flush
     >
-      <DataTable caption="Clientes por loja" columns={columns} rows={rows} initialSort={{ key: 'orders', dir: 'desc' }} dense />
+      {/* Long headers ("LTV médio (histórico)") wrap instead of pushing the
+          last column behind a scrollbar at 1024px. */}
+      <div className={s.wrapHeads}>
+        <DataTable caption="Clientes por loja" columns={columns} rows={rows} initialSort={{ key: 'orders', dir: 'desc' }} dense />
+      </div>
     </Block>
   )
 }
 
-export function FunnelBlock({ funnel, rangeLabel }: { funnel: FunnelReport; rangeLabel: string }) {
+export function FunnelBlock({ funnel, rangeLabel, sharedNote }: {
+  funnel: FunnelReport; rangeLabel: string
+  /** The shared-account campaigns left out of the steps, the capture and the
+   *  spend per order, in words (./sharedText), or null. */
+  sharedNote?: string | null
+}) {
   const steps = funnel.meta.steps
   const top = steps.length ? Math.max(...steps.map(x => x.value)) : 0
   const sh = funnel.shopify
@@ -197,6 +206,7 @@ export function FunnelBlock({ funnel, rangeLabel }: { funnel: FunnelReport; rang
           <span>O Meta diz ter visto <b>{formatPct(funnel.metaCapturePct, { digits: 0 })}</b> dos pedidos reais — captura, não conversão</span>
         )}
       </div>
+      {sharedNote && <p className={s.omitted}>{sharedNote}</p>}
       <p className={s.omitted}>Checkouts abandonados são só contados: os valores gravados neles não são confiáveis.</p>
       {funnel.notes.map((n, i) => <Callout key={i} tone="neu">{n}</Callout>)}
     </Block>

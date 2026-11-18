@@ -1,107 +1,25 @@
 /**
- * Campanhas in "Todas as lojas": the Meta spend of every store against its own
- * break-even, side by side, each row opening that store's campaigns. Campaigns
- * themselves are per store (one ad account, one margin), so the portfolio view
- * judges stores, not campaigns. Built from buildPortfolio rows (engine totals).
+ * Campanhas in "Todas as lojas": each store's ads against its own break-even,
+ * side by side, each row opening that store's campaigns. Campaigns themselves
+ * are per store (one ad account, one margin), so the portfolio view judges
+ * stores, not campaigns. Built from buildPortfolio rows (engine totals) and
+ * lib/data/campaigns getOwnAttribution (own vs shared-account campaigns).
  *
- * Exports buildPortfolioAdsVerdict (pure) and <PortfolioAdsTable> (server).
+ * The rules (channel ROAS, own-campaign ROAS atribuído) live in the pure
+ * ./portfolioAdsModel; this file renders them.
+ * Exports buildPortfolioAdsVerdict (re-export), <SharedAccountsCallout> and
+ * <PortfolioAdsTable> (server).
  */
 
 import type { PortfolioStoreRow } from '@/lib/views/portfolio'
 import type { SharedAdAccount } from '@/lib/attributionModels'
-import type { Verdict, VerdictChip, VerdictLine } from '@/lib/views/verdict'
-import { sumTotals } from '@/lib/views/verdict'
-import { Badge, Callout, DataTable, EmptyState, Money, Pct, type DataColumn, type DataRow } from '@/components/ui'
-import { RoasCell } from './RoasCell'
-import { formatMoney, formatRoas, plural } from '@/lib/format'
+import type { OwnAttribution } from '@/lib/data/campaigns'
+import { Badge, Callout, DataTable, EmptyState, Money, Pct, RoasGauge, type DataColumn, type DataRow } from '@/components/ui'
+import { formatMoney, formatPct, formatRoas, plural } from '@/lib/format'
+import { CHANNEL_SHORT, joinNames, storeAdsRow } from './portfolioAdsModel'
 import s from './campaigns.module.css'
 
-const line = (...parts: (string | { text: string; strong?: boolean; tone?: 'pos' | 'neg' | 'warn' })[]): VerdictLine => {
-  const ps = parts.map(p => (typeof p === 'string' ? { text: p } : p))
-  return { parts: ps, text: ps.map(p => p.text).join('') }
-}
-const joinNames = (xs: string[]) => (xs.length <= 1 ? xs.join('') : `${xs.slice(0, -1).join(', ')} e ${xs[xs.length - 1]}`)
-
-/** Does the store's whole revenue cover its Meta spend (ROAS da loja ≥ empate)? */
-export function coversMeta(r: Pick<PortfolioStoreRow, 'configured' | 'totals'>): boolean | null {
-  if (!r.configured || !(r.totals.metaSpend > 0)) return null
-  return r.totals.contribution >= r.totals.metaSpend
-}
-
-export function buildPortfolioAdsVerdict(input: {
-  stores: Pick<PortfolioStoreRow, 'id' | 'name' | 'configured' | 'totals'>[]
-  rangeLabel: string
-  periodPhrase: string
-  partialLabel: string | null
-  split?: boolean
-}): Verdict {
-  const { stores, periodPhrase } = input
-  const totals = sumTotals(stores.map(r => r.totals))
-  const spenders = stores.filter(r => r.totals.metaSpend > 0)
-  const judged = spenders.filter(r => r.configured)
-  const covering = judged.filter(r => coversMeta(r))
-  const below = judged.filter(r => !coversMeta(r))
-  const unconfigured = spenders.filter(r => !r.configured)
-  const chips: VerdictChip[] = []
-  const details: VerdictLine[] = []
-  // The partial clock is a chip of its own; the date line stays the range.
-  const when = input.rangeLabel
-  const base = {
-    when, totals, comparisonTotals: null, excluded: [], partial: !!input.partialLabel, split: !!input.split,
-    storeCount: stores.length, roas: null, early: false, fewOrders: false,
-  }
-
-  if (!spenders.length) {
-    chips.push({ code: 'sem_vendas', label: 'Sem gasto no Meta', tone: 'neu', icon: 'ring' })
-    return {
-      ...base, tone: 'neu', chips, headline: `Nenhuma loja gastou no Meta ${periodPhrase}.`,
-      amount: null, amountTone: 'neu', amountCaption: 'sem gasto com anúncios no período',
-      details: [line(`As lojas venderam ${formatMoney(totals.revenue)} ${periodPhrase} sem gasto no Meta.`)], notes: [], basis: 'none',
-    }
-  }
-
-  if (covering.length) chips.push({ code: 'lucro', label: `${covering.length} ${covering.length === 1 ? 'cobriu' : 'cobriram'} o Meta`, tone: 'pos', icon: 'up' })
-  if (below.length) chips.push({ code: 'prejuizo', label: `${below.length} abaixo do empate`, tone: 'neg', icon: 'down' })
-  if (unconfigured.length) chips.push({ code: 'sem_custos', label: unconfigured.length === 1 ? '1 loja sem custos' : `${unconfigured.length} lojas sem custos`, tone: 'cfg', icon: 'sliders' })
-  if (input.partialLabel) chips.push({ code: 'parcial', label: input.partialLabel, tone: 'info', icon: 'clock' })
-
-  const headline = judged.length === 0
-    ? `Suas lojas gastaram ${formatMoney(totals.metaSpend)} no Meta ${periodPhrase}, mas nenhuma delas tem custos para dizer se compensou.`
-    : below.length === 0
-      ? `Todas as lojas com custos cobriram o gasto no Meta ${periodPhrase}.`
-      : covering.length === 0
-        ? `Nenhuma loja cobriu o gasto no Meta ${periodPhrase}.`
-        : `${covering.length} de ${judged.length} lojas cobriram o gasto no Meta ${periodPhrase} — ${joinNames(below.map(r => r.name))} ${below.length === 1 ? 'ficou' : 'ficaram'} abaixo do empate.`
-
-  details.push(line('O Meta credita ', { text: formatMoney(totals.metaPurchaseValue), strong: true },
-    ` em vendas às campanhas (ROAS atribuído ${formatRoas(totals.metaRoas)}); as lojas venderam `,
-    { text: formatMoney(totals.revenue), strong: true }, ` no total (ROAS das lojas ${formatRoas(totals.roas)}).`))
-  details.push(line('"Cobrir o Meta" = as vendas da loja, depois de produto, frete e taxas, pagam o gasto no Meta: ROAS da loja no empate ou acima. Cada loja tem o seu empate.'))
-  if (unconfigured.length) {
-    details.push(line(`${joinNames(unconfigured.map(r => r.name))} ${unconfigured.length === 1 ? 'não tem' : 'não têm'} custos configurados: sem empate, só vendas − anúncios.`))
-  }
-  // Shopify's own ads stay out of every ROAS (lead's rule), so a store that
-  // advertises mostly there shows a huge "ROAS da loja" against a tiny Meta
-  // spend. Say so instead of letting it read as a great Meta result.
-  const shopHeavy = stores.filter(r => r.totals.shopSpend > 0 && r.totals.shopSpend > r.totals.metaSpend)
-  const notes: VerdictLine[] = shopHeavy.length
-    ? [line(`${joinNames(shopHeavy.map(r => `${r.name} (${formatMoney(r.totals.shopSpend)})`))} ${shopHeavy.length === 1 ? 'gastou' : 'gastaram'} mais em Anúncios Shopify do que no Meta: esse gasto fica fora do ROAS, que por isso sai alto.`)]
-    : []
-  const worst = below.length ? below.reduce((a, b) => (b.totals.contribution - b.totals.metaSpend < a.totals.contribution - a.totals.metaSpend ? b : a)) : null
-
-  return {
-    ...base,
-    tone: judged.length === 0 ? 'warn' : below.length === 0 ? 'pos' : covering.length === 0 ? 'neg' : 'warn',
-    chips,
-    headline,
-    amount: totals.metaSpend,
-    amountTone: 'neu',
-    amountCaption: `gastos no Meta em ${plural(spenders.length, 'loja', 'lojas')}${worst ? ` · pior: ${worst.name}` : ''}`,
-    details: details.slice(0, 3),
-    notes,
-    basis: 'none',
-  }
-}
+export { buildPortfolioAdsVerdict } from './portfolioAdsModel'
 
 export function SharedAccountsCallout({ pairs }: { pairs: SharedAdAccount[] }) {
   if (!pairs.length) return null
@@ -113,50 +31,92 @@ export function SharedAccountsCallout({ pairs }: { pairs: SharedAdAccount[] }) {
   )
 }
 
-export function PortfolioAdsTable({ stores, hrefFor, rangeLabel }: {
-  stores: PortfolioStoreRow[]; hrefFor: (storeId: string) => string; rangeLabel: string
+export function PortfolioAdsTable({ stores, attribution, pairs, hrefFor, rangeLabel }: {
+  stores: PortfolioStoreRow[]
+  /** Null when the own/shared split failed to load: its columns show "—". */
+  attribution: ReadonlyMap<string, OwnAttribution> | null
+  /** Shared-account pairs of the window: a store without ad spend that sells
+   *  on another store's ads says so instead of "sem gasto". */
+  pairs: SharedAdAccount[]
+  /** The row's link. Gets the whole row so it can keep the exact dates the
+   *  row was priced on (components/portfolio/model resumoLinkOverrides). */
+  hrefFor: (row: PortfolioStoreRow) => string
+  rangeLabel: string
 }) {
   const columns: DataColumn[] = [
     { key: 'store', label: 'Loja' },
-    { key: 'spend', label: 'Gasto Meta', numeric: true, sortable: true },
+    { key: 'spend', label: 'Gasto Meta', numeric: true, sortable: true, info: 'Todo o gasto no Meta que a contabilidade da loja carrega, inclusive campanhas de conta compartilhada.' },
     { key: 'revenue', label: 'Vendas', numeric: true, sortable: true, info: 'Tudo o que a loja vendeu no período (Shopify), creditado ao Meta ou não.' },
-    { key: 'roas', label: 'ROAS da loja', sortable: true, info: 'Vendas da loja (todas, creditadas ou não) ÷ gasto no Meta, contra o empate da própria loja (receita ÷ contribuição). A barra marca o empate de cada loja.' },
-    { key: 'pv', label: 'Atribuídas', numeric: true, sortable: true, info: 'Vendas atribuídas: o que o Meta credita às campanhas da loja. Compras impossíveis já descartadas.' },
-    { key: 'metaRoas', label: 'ROAS atribuído', numeric: true, sortable: true },
-    { key: 'credit', label: 'Crédito Meta', numeric: true, sortable: true, info: 'Vendas atribuídas ÷ vendas da loja. Acima de 100%: o Meta credita mais do que a loja vendeu.' },
-    { key: 'shop', label: 'Anúncios Shopify', numeric: true, sortable: true, info: 'Shop Campaigns, cobrados pela Shopify, fora do Meta: não entram no ROAS.' },
+    { key: 'roas', label: 'ROAS da loja', sortable: true, info: 'Vendas da loja (todas, creditadas ou não) ÷ gasto no canal em que ela anuncia — Meta, Anúncios Shopify ou os dois —, contra o empate da própria loja (receita ÷ contribuição): o mesmo ROAS do Resumo. Um canal com menos de 10% do gasto aparece como "só gasto": entra no lucro, fica fora do ROAS.' },
+    { key: 'pv', label: 'Atribuídas', numeric: true, sortable: true, info: 'O que o Meta credita às campanhas da própria loja. Campanhas de conta compartilhada (vendas em outra loja) ficam fora; o valor delas aparece embaixo. Compras impossíveis já descartadas.' },
+    { key: 'metaRoas', label: 'ROAS atribuído', numeric: true, sortable: true, info: 'Atribuídas ÷ gasto das campanhas da própria loja: o mesmo número da página de Campanhas da loja.' },
+    // Below ~1100px of table box these two fold under Atribuídas and Gasto
+    // Meta (campaigns.module.css, container query): the table is ~1150px, so
+    // even at 1440 the Shopify header was clipped, and at 1024 both columns
+    // sat behind an unseen scrollbar.
+    { key: 'credit', label: <span className={s.colCredit}>Crédito Meta</span>, numeric: true, sortable: true, info: 'Atribuídas ÷ vendas da loja. Acima de 100%: o Meta credita mais do que a loja vendeu.' },
+    { key: 'shop', label: <span className={s.colShop}>Shopify</span>, numeric: true, sortable: true, info: 'Anúncios Shopify (Shop Campaigns), cobrados pela Shopify, fora do Meta. Entram no ROAS da loja quando são o canal dela.' },
   ]
   const rows: DataRow[] = stores.map(r => {
     const t = r.totals
-    const credit = t.revenue > 0 ? (t.metaPurchaseValue / t.revenue) * 100 : null
+    const a = storeAdsRow(r, attribution ? attribution.get(r.id) ?? null : null)
+    const sellsVia = pairs.filter(p => p.salesStoreId === r.id).map(p => p.adStoreName)
     return {
       key: r.id,
-      href: hrefFor(r.id),
-      tone: t.metaSpend > 0 ? undefined : 'mut',
+      href: hrefFor(r),
+      tone: t.metaSpend > 0 || t.shopSpend > 0 ? undefined : 'mut',
       cells: {
         store: <span className={s.storeCell}><span className={s.nm}>{r.name}</span>{!r.configured && <Badge tone="cfg" icon="sliders">sem custos</Badge>}</span>,
-        spend: <Money value={t.metaSpend} />,
+        spend: (
+          <span>
+            <Money value={t.metaSpend} />
+            {a.shared && a.shared.spend > 0 && <span className={`${s.cellSub} ${s.cellSubWrap}`}>{formatMoney(a.shared.spend)} em conta compartilhada</span>}
+            {t.shopSpend > 0 && <span className={`${s.cellSub} ${s.inlineAds}`}>+ {formatMoney(t.shopSpend)} Anúncios Shopify</span>}
+          </span>
+        ),
         revenue: <Money value={t.revenue} />,
-        roas: t.metaSpend > 0 ? <RoasCell roas={t.roas} breakEven={r.configured ? t.breakEvenRoas : null} /> : <span className={s.muted}>sem gasto no Meta</span>,
-        pv: <Money value={t.metaPurchaseValue} />,
-        metaRoas: <span>{formatRoas(t.metaRoas)}</span>,
-        credit: <Pct value={credit} digits={0} />,
-        shop: <Money value={t.shopSpend} />,
+        roas: a.roas && a.channel ? (
+          <span className={s.roasStore}>
+            <RoasGauge roas={a.roas.roas} breakEven={r.configured ? t.breakEvenRoas : null} configured={r.configured}
+              revenue={t.revenue} contribution={t.contribution} label={CHANNEL_SHORT[a.channel]} size="mini" />
+            {a.sideSpend && (
+              <span className={s.cellSub} title="Canal com menos de 10% do gasto em anúncios: entra no lucro, fica fora do ROAS.">
+                + {a.sideSpend.label} <b className={s.num}>{formatMoney(a.sideSpend.spend)}</b> (só gasto)
+              </span>
+            )}
+          </span>
+        ) : (
+          <span className={s.why}>
+            {sellsVia.length ? `sem gasto próprio · vende com anúncios pagos pela ${joinNames([...new Set(sellsVia)])}` : 'sem gasto em anúncio'}
+          </span>
+        ),
+        pv: a.own ? (
+          <span>
+            <Money value={a.own.purchaseValue} />
+            {a.own.creditPct !== null && <span className={`${s.cellSub} ${s.inlineAds}`}>{formatPct(a.own.creditPct, { digits: 0 })} das vendas</span>}
+            {a.shared && a.shared.purchaseValue > 0 && <span className={`${s.cellSub} ${s.cellSubWrap}`}>fora: {formatMoney(a.shared.purchaseValue)} de conta compartilhada</span>}
+          </span>
+        ) : <span className={s.muted}>—</span>,
+        metaRoas: <span>{formatRoas(a.own?.roas ?? null)}</span>,
+        credit: <span className={s.colCredit}><Pct value={a.own?.creditPct ?? null} digits={0} /></span>,
+        shop: <span className={s.colShop}><Money value={t.shopSpend} /></span>,
       },
       sort: {
-        spend: t.metaSpend, revenue: t.revenue, roas: t.roas, pv: t.metaPurchaseValue, metaRoas: t.metaRoas,
-        credit, shop: t.shopSpend,
+        spend: t.metaSpend, revenue: t.revenue, roas: a.roas?.roas ?? null, pv: a.own?.purchaseValue ?? null, metaRoas: a.own?.roas ?? null,
+        credit: a.own?.creditPct ?? null, shop: t.shopSpend,
       },
     }
   })
   return (
-    <DataTable
-      caption={`Gasto no Meta por loja em ${rangeLabel}`}
-      columns={columns}
-      rows={rows}
-      initialSort={{ key: 'spend', dir: 'desc' }}
-      dense
-      empty={<EmptyState compact title="Nenhuma loja para mostrar" />}
-    />
+    <div className={s.adsBox}>
+      <DataTable
+        caption={`Anúncios por loja em ${rangeLabel}`}
+        columns={columns}
+        rows={rows}
+        initialSort={{ key: 'spend', dir: 'desc' }}
+        dense
+        empty={<EmptyState compact title="Nenhuma loja para mostrar" />}
+      />
+    </div>
   )
 }

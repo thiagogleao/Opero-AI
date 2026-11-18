@@ -94,7 +94,8 @@ export default async function CreativePage({ params, searchParams }: {
 
   const aside = (
     <div>
-      <AdThumb className={s.preview} sources={[c.creativeUrl, c.thumbnailUrl]} video={!!c.video} alt={`Imagem do anúncio ${c.name}`} iconSize={28} />
+      <AdThumb className={s.preview} sources={[c.creativeUrl, c.thumbnailUrl]} video={!!c.video} alt={`Imagem do anúncio ${c.name}`}
+        iconSize={20} expired={c.previewExpired} label compact />
       <dl className={`${s.meta} ${s.metaTop}`}>
         <dt>Status</dt><dd>{statusText(c)}</dd>
         <dt>Campanha</dt><dd>{c.campaignName ?? 'não sincronizada'}</dd>
@@ -113,7 +114,9 @@ export default async function CreativePage({ params, searchParams }: {
     { key: 'pv', label: 'Vendas atribuídas', numeric: true, sortable: true },
     { key: 'roas', label: 'ROAS', numeric: true, sortable: true },
     { key: 'ctr', label: 'CTR', numeric: true, sortable: true },
-    { key: 'est', label: 'Lucro estimado', numeric: true, sortable: true },
+    // Partner view: the same half as the chart above and the verdict, so a day
+    // never shows two amounts on one page.
+    { key: 'est', label: ctx.split ? 'Lucro estimado (sua parte)' : 'Lucro estimado', numeric: true, sortable: true },
   ]
   const rows: DataRow[] = detail.daily.map(d => ({
     key: d.date,
@@ -125,11 +128,11 @@ export default async function CreativePage({ params, searchParams }: {
       pv: <Money value={d.purchaseValue} />,
       roas: <span>{d.roas === null ? '—' : formatRoas(d.roas)}</span>,
       ctr: <Pct value={d.impressions > 0 ? (d.linkClicks / d.impressions) * 100 : null} digits={2} />,
-      est: d.estimatedProfit === null ? <span className="mut">—</span> : <Money value={d.estimatedProfit} />,
+      est: d.estimatedProfit === null ? <span className="mut">—</span> : <Money value={ctx.part(d.estimatedProfit)} />,
     },
     sort: {
       date: d.date, spend: d.spend, purchases: d.purchases, pv: d.purchaseValue, roas: d.roas,
-      ctr: d.impressions > 0 ? d.linkClicks / d.impressions : null, est: d.estimatedProfit,
+      ctr: d.impressions > 0 ? d.linkClicks / d.impressions : null, est: d.estimatedProfit === null ? null : ctx.part(d.estimatedProfit),
     },
   }))
 
@@ -184,7 +187,7 @@ export default async function CreativePage({ params, searchParams }: {
           )}
 
           {detail.configured && detail.contributionRate !== null && (
-            <Block title="Lucro estimado por dia" howTo="Barra acima da linha do zero = dia em que as vendas atribuídas, depois da margem da loja, pagaram o gasto do anúncio." info={detail.formula}>
+            <Block title={ctx.split ? 'Lucro estimado por dia (sua parte)' : 'Lucro estimado por dia'} howTo="Barra acima da linha do zero = dia em que as vendas atribuídas, depois da margem da loja, pagaram o gasto do anúncio." info={detail.formula}>
               <DailyProfitBars
                 days={detail.daily.map(d => ({ date: d.date, profit: ctx.part(d.estimatedProfit ?? 0), revenue: d.purchaseValue, metaSpend: d.spend, orders: d.purchases }))}
                 partialDate={ctx.partial ? ctx.today : null}

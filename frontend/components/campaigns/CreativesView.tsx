@@ -7,7 +7,9 @@
  * Server component (the table sorts on the client from pre-rendered cells).
  *
  * Props: { report: CreativesReport; hrefWith; rangeLabel; filter: { name; clearHref } | null;
- *          limit: number | null (rows shown; null = all); showAllHref: string }
+ *          limit: number | null (rows shown; null = all); showAllHref: string;
+ *          split?: boolean (partner view: estimated profit is the partner's half,
+ *            labelled "sua parte", as on the Resumo; spend and ROAS stay whole) }
  */
 
 import Link from 'next/link'
@@ -19,6 +21,7 @@ import {
   type DataColumn, type DataRow,
 } from '@/components/ui'
 import { formatMoney, formatPct, formatRoas, plural } from '@/lib/format'
+import { SPLIT_SHARE } from '@/lib/views/verdict'
 import { AD_VERDICT_RULE, adSignalChip, ptText } from './text'
 import { AdThumb } from './AdThumb'
 import { RoasCell } from './RoasCell'
@@ -29,7 +32,8 @@ const CARD_LIMIT = 12
 function Thumb({ ad, className, large }: { ad: CreativeRow; className: string; large?: boolean }) {
   // Cards want the full creative; table rows the small thumbnail.
   const sources = large ? [ad.creativeUrl, ad.thumbnailUrl] : [ad.thumbnailUrl, ad.creativeUrl]
-  return <AdThumb sources={sources} video={!!ad.video} className={className} />
+  // Cards have room to say why there is no picture; table rows keep it in the tooltip.
+  return <AdThumb sources={sources} video={!!ad.video} className={className} expired={ad.previewExpired} label={large} />
 }
 
 function VerdictChip({ ad, breakEven }: { ad: CreativeRow; breakEven: number | null }) {
@@ -38,7 +42,8 @@ function VerdictChip({ ad, breakEven }: { ad: CreativeRow; breakEven: number | n
   return <Chip tone={spec.tone} icon={spec.icon} size="sm">{spec.label}</Chip>
 }
 
-function AdCard({ ad, href, breakEven }: { ad: CreativeRow; href: string; breakEven: number | null }) {
+function AdCard({ ad, href, breakEven, k }: { ad: CreativeRow; href: string; breakEven: number | null; k: number }) {
+  const est = ad.estimatedProfit === null ? null : ad.estimatedProfit * k
   return (
     <Link href={href} className={s.card}>
       <Thumb ad={ad} className={s.thumb} large />
@@ -49,7 +54,7 @@ function AdCard({ ad, href, breakEven }: { ad: CreativeRow; href: string; breakE
         <span className={s.cardFigs}>
           <span>Gasto<b>{formatMoney(ad.spend)}</b></span>
           <span>ROAS<b>{formatRoas(ad.roas)}</b></span>
-          <span>Lucro est.<b className={ad.estimatedProfit !== null && ad.estimatedProfit < 0 ? s.neg : undefined}>{formatMoney(ad.estimatedProfit)}</b></span>
+          <span title={k !== 1 ? 'Sua parte (50%) do lucro estimado' : undefined}>{k !== 1 ? 'Sua parte' : 'Lucro est.'}<b className={est !== null && est < 0 ? s.neg : undefined}>{formatMoney(est)}</b></span>
         </span>
         <span className={s.why}>{ptText(ad.verdict.reason)}</span>
       </span>
@@ -57,15 +62,18 @@ function AdCard({ ad, href, breakEven }: { ad: CreativeRow; href: string; breakE
   )
 }
 
-export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, showAllHref }: {
+export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, showAllHref, split = false }: {
   report: CreativesReport
   hrefWith: (path: string) => string
   rangeLabel: string
   filter: { name: string; clearHref: string } | null
   limit: number | null
   showAllHref: string
+  split?: boolean
 }) {
   const be = report.configured ? report.breakEvenRoas : null
+  const k = split ? SPLIT_SHARE : 1
+  const est = (a: CreativeRow) => (a.estimatedProfit === null ? null : a.estimatedProfit * k)
   const ads = report.creatives
   const hrefOf = (ad: CreativeRow) => hrefWith(`/creatives/${encodeURIComponent(ad.adId)}`)
   const decide = ads.filter(a => a.verdict.signal === 'kill' || a.verdict.signal === 'scale' || a.verdict.signal === 'refresh')
@@ -82,11 +90,15 @@ export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, sho
     { key: 'ad', label: 'Anúncio' },
     { key: 'spend', label: 'Gasto', numeric: true, sortable: true },
     { key: 'purchases', label: 'Compras', numeric: true, sortable: true },
-    { key: 'ctr', label: 'CTR', numeric: true, sortable: true },
+    // CTR and Hook fold away below ~1100px of table box (campaigns.module.css):
+    // at 1024 Hook and the verdict column sat behind an unseen scrollbar. CTR
+    // then shows under Compras; hook rate is unavailable for every ad anyway,
+    // and the block's footer says so.
+    { key: 'ctr', label: <span className={s.colCtr}>CTR</span>, numeric: true, sortable: true },
     { key: 'roas', label: be !== null ? `ROAS × empate ${formatRoas(be)}` : 'ROAS', sortable: true, info: 'Vendas atribuídas pelo Meta ÷ gasto, contra o empate da loja (receita ÷ contribuição). Compras = compras que o Meta atribui ao anúncio; CTR = cliques no link ÷ impressões.' },
-    { key: 'est', label: 'Lucro est.', numeric: true, sortable: true, info: ptText(report.formula) },
+    { key: 'est', label: split ? 'Lucro est. (sua parte)' : 'Lucro est.', numeric: true, sortable: true, info: split ? `${ptText(report.formula)} Na visão de sócio, cada valor é a sua parte (50%).` : ptText(report.formula) },
     ...(singleDay ? [{ key: 'freq', label: 'Frequência', numeric: true, sortable: true, info: 'Impressões ÷ alcance do dia.' } as DataColumn] : []),
-    { key: 'hook', label: 'Hook', info: HOOK_RATE_UNAVAILABLE },
+    { key: 'hook', label: <span className={s.colHook}>Hook</span>, info: HOOK_RATE_UNAVAILABLE },
     { key: 'verdict', label: 'Veredito', sortable: true, info: AD_VERDICT_RULE },
   ]
   const rank = (a: CreativeRow) => (a.verdict.signal === 'kill' ? 0 : a.verdict.signal === 'scale' ? 1 : a.verdict.signal === 'refresh' ? 2 : a.verdict.signal === 'ok' ? 3 : 4)
@@ -108,23 +120,31 @@ export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, sho
         </span>
       ),
       spend: <Money value={a.spend} />,
-      purchases: <Count value={a.purchases} />,
-      ctr: <Pct value={a.ctr} digits={2} />,
+      purchases: <><Count value={a.purchases} />{a.ctr !== null && <span className={`${s.cellSub} ${s.inlineCtr}`}>CTR {formatPct(a.ctr, { digits: 2 })}</span>}</>,
+      ctr: <span className={s.colCtr}><Pct value={a.ctr} digits={2} /></span>,
       roas: a.shared ? <span className={s.why}>{formatRoas(a.roas)} · sem empate</span> : <RoasCell roas={a.roas} breakEven={be} paused={!a.running} />,
-      est: a.estimatedProfit === null ? <span className={s.muted}>—</span> : <Money value={a.estimatedProfit} />,
+      est: a.estimatedProfit === null ? <span className={s.muted}>—</span> : <Money value={est(a)} />,
       freq: <span>{a.frequency === null ? '—' : a.frequency.toLocaleString('pt-BR', { maximumFractionDigits: 1 })}</span>,
-      hook: a.video
-        ? <span className={s.unavailable} title={HOOK_RATE_UNAVAILABLE}>indisponível</span>
-        : <span className={s.muted}>imagem</span>,
+      hook: (
+        <span className={s.colHook}>
+          {a.video
+            ? <span className={s.unavailable} title={HOOK_RATE_UNAVAILABLE}>indisponível</span>
+            : <span className={s.muted}>imagem</span>}
+        </span>
+      ),
       verdict: <span className={s.verdictCell} title={ptText(a.verdict.reason)}>{a.verdict.signal && <VerdictChip ad={a} breakEven={be} />}<span className={s.why}>{ptText(a.verdict.reason)}</span></span>,
     },
     sort: {
       spend: a.spend, purchases: a.purchases, ctr: a.ctr, roas: a.roas,
-      est: a.estimatedProfit, freq: a.frequency, verdict: -rank(a),
+      est: est(a), freq: a.frequency, verdict: -rank(a),
     },
   }))
 
   const t = report.totals
+  // Ads of shared-account campaigns are in the list (their spend is in the
+  // books) but their credited sales mostly landed in another store: say how
+  // much of the list's attributed sales they are, as the verdict does.
+  const sharedValue = ads.filter(a => a.shared).reduce((sum, a) => sum + a.purchaseValue, 0)
   return (
     <div className={s.stack}>
       {filter && (
@@ -134,7 +154,7 @@ export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, sho
       )}
       <Block
         title="Anúncios que pedem decisão"
-        howTo={`Desligar ou escalar, pelo ROAS de ${rangeLabel} contra o empate da loja${be !== null ? ` (${formatRoas(be)})` : ''}. Os mais urgentes primeiro.`}
+        howTo={`Desligar ou escalar, pelo ROAS de ${rangeLabel} contra o empate da loja${be !== null ? ` (${formatRoas(be)})` : ''}. Os mais urgentes primeiro.${split ? ' "Sua parte" é a sua metade do lucro estimado do anúncio.' : ''}`}
         info="O mesmo veredito aparece no celular e no Copiloto. Anúncios pausados não recebem recomendação."
       >
         {!report.configured ? (
@@ -147,7 +167,7 @@ export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, sho
           </EmptyState>
         ) : (
           <div className={s.cards}>
-            {decide.slice(0, CARD_LIMIT).map(a => <AdCard key={a.adId} ad={a} href={hrefOf(a)} breakEven={be} />)}
+            {decide.slice(0, CARD_LIMIT).map(a => <AdCard key={a.adId} ad={a} href={hrefOf(a)} breakEven={be} k={k} />)}
           </div>
         )}
       </Block>
@@ -159,7 +179,7 @@ export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, sho
         flush
         footer={
           <>
-            <span><b>{plural(t.ads, 'anúncio', 'anúncios')}</b> com gasto ou venda · gasto <b className="num">{formatMoney(t.spend)}</b> · vendas atribuídas <b className="num">{formatMoney(t.purchaseValue)}</b></span>
+            <span><b>{plural(t.ads, 'anúncio', 'anúncios')}</b> com gasto ou venda · gasto <b className="num">{formatMoney(t.spend)}</b> · vendas atribuídas <b className="num">{formatMoney(t.purchaseValue)}</b>{sharedValue > 0 ? <>, das quais <b className="num">{formatMoney(sharedValue)}</b> em anúncios de conta compartilhada</> : null}</span>
             {report.reconciliation && Math.abs(report.reconciliation.gap) >= 0.01 && (
               <span className="warn">A lista e a contabilidade diferem em {formatMoney(report.reconciliation.gap)}.</span>
             )}
@@ -172,15 +192,17 @@ export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, sho
           </>
         }
       >
-        <DataTable
-          caption={`Anúncios em ${rangeLabel}`}
-          columns={columns}
-          rows={rows}
-          initialSort={report.configured ? { key: 'est', dir: 'desc' } : { key: 'spend', dir: 'desc' }}
-          maxHeight={720}
-          dense
-          empty={<EmptyState compact title="Nenhum anúncio com gasto no período" action={filter ? <ButtonLink href={filter.clearHref} size="sm">Ver todas as campanhas</ButtonLink> : undefined} />}
-        />
+        <div className={s.adsBox}>
+          <DataTable
+            caption={`Anúncios em ${rangeLabel}`}
+            columns={columns}
+            rows={rows}
+            initialSort={report.configured ? { key: 'est', dir: 'desc' } : { key: 'spend', dir: 'desc' }}
+            maxHeight={720}
+            dense
+            empty={<EmptyState compact title="Nenhum anúncio com gasto no período" action={filter ? <ButtonLink href={filter.clearHref} size="sm">Ver todas as campanhas</ButtonLink> : undefined} />}
+          />
+        </div>
       </Block>
     </div>
   )

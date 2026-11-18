@@ -8,6 +8,7 @@
 import type { PnL } from '@/lib/engine/pnl'
 import type { Verdict, VerdictChip, VerdictLine } from '@/lib/views/verdict'
 import { formatMoney, formatPct, plural } from '@/lib/format'
+import { beforeStartVerdict, isBeforeStart, type BeforeStartInput } from '@/components/campaigns/storeStart'
 
 export interface ProductLike {
   key: string
@@ -58,6 +59,9 @@ export function buildProductsVerdict(input: {
   partialLabel: string | null
   dayLabel: string | null
   split?: boolean
+  /** One store with a known first sale: a window that ends before it reads
+   *  "Vende desde 7 nov", like the Resumo (components/campaigns/storeStart). */
+  firstSale?: BeforeStartInput | null
 }): Verdict {
   const { products, totals, configured, periodPhrase, subject, subjectOf, subjectIn } = input
   const chips: VerdictChip[] = []
@@ -72,6 +76,10 @@ export function buildProductsVerdict(input: {
   if (input.dayLabel) chips.push({ code: 'dia_fuso', label: input.dayLabel, tone: 'info', icon: 'clock' })
 
   if (!products.length || totals.revenue <= 0) {
+    const fs = input.firstSale
+    if (fs && isBeforeStart(fs.firstOrderDate, fs.range, { orders: totals.orders, revenue: totals.revenue, spend: totals.adSpend })) {
+      return beforeStartVerdict({ ...fs, rangeLabel: input.rangeLabel, dayLabel: input.dayLabel, totals, configured, split: input.split })
+    }
     chips.unshift({ code: 'sem_vendas', label: input.partialLabel ? 'Sem vendas ainda' : 'Sem vendas no período', tone: 'neu', icon: 'ring' })
     return {
       ...base, tone: 'neu', chips, headline: `Nenhuma venda ${subjectIn} ${periodPhrase}.`,

@@ -146,7 +146,7 @@ export function ReconciliationLedger({ rec, rangeLabel, split, elsewhere }: {
       )}
       {elsewhere && elsewhere.spend > 0 && (
         <p className={`${s.small} ${s.recFoot}`}>
-          <b className="warn"><Icon name="alert" size={12} /> Fora desta conta:</b> {formatMoney(elsewhere.spend)} de campanhas pagas na conta da {elsewhere.stores.join(' e ')} trouxeram vendas para cá.
+          <b className="warn"><Icon name="alert" size={12} /> Fora desta conta:</b> {formatMoney(elsewhere.spend)} de gasto de campanhas pagas na conta da {elsewhere.stores.join(' e ')} que vendem sobretudo aqui (a campanha inteira; a Atribuição soma só os anúncios com pedido creditado nesta loja).
           Esse gasto está no lucro de lá, não neste — some as duas lojas para julgar.
         </p>
       )}

@@ -21,3 +21,23 @@
 .asideTitle { font-weight: 600; font-size: 15px; }
 .asideSub { font-size: 12.5px; color: var(--tx-3); margin-top: 2px; line-height: 1.4; }
 .asideFoot { margin-top: 12px; }
+
+/* ── Narrow table ──
+   With every column the table needs ~1140px; at 1024 the box is ~900px and
+   Margem and "Meta ligado" sat behind an inner scrollbar under 760px of rows,
+   with nothing on screen saying columns were missing. Below that width Unid.,
+   % vendas and Custos fold under Pedidos, Receita and Contribuição. DataTable
+   takes no class per column, so a marker class in the header and in every
+   cell (footer included) picks the column, whatever its position. */
+.tableBox { container-type: inline-size; min-width: 0; }
+/* Headers may wrap: only used when the table is a few pixels short of room. */
+.tableBox th { white-space: normal; }
+.colUnits, .colShare, .colCosts { display: contents; }
+.inline { display: none; }
+@container (max-width: 1139px) {
+  .tableBox th:has(.colUnits), .tableBox td:has(.colUnits),
+  .tableBox th:has(.colShare), .tableBox td:has(.colShare),
+  .tableBox th:has(.colCosts), .tableBox td:has(.colCosts) { display: none; }
+  .inline { display: block; margin-top: 2px; font: 400 11.5px/1.3 var(--sans); color: var(--tx-3); white-space: nowrap; letter-spacing: 0; }
+  .prodName, .prodSub { max-width: 220px; }
+}

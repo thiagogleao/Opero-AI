@@ -71,7 +71,9 @@
 .whyBlock { display: block; font-size: 11.5px; color: var(--tx-3); line-height: 1.35; margin-top: 2px; }
 
 /* ── Expandable table ── */
-.wrap { position: relative; overflow: auto; min-width: 0; }
+/* The box is a size container: the table changes shape by the room it has,
+   not by the viewport (the sidebar takes 232px above 1200px, 68px below). */
+.wrap { position: relative; overflow: auto; min-width: 0; container-type: inline-size; }
 .table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
 .caption { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 .th {
@@ -105,6 +107,17 @@
 .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: var(--tx-4); }
 .dotOn { background: var(--pos-m); }
 .verdictCell { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; max-width: 260px; }
+/* The verdict under the campaign name, only when the verdict column is hidden. */
+.inlineVerdict { display: none; }
+.inlineVerdictLabel { font: 600 9.5px/1.2 var(--sans); letter-spacing: .08em; text-transform: uppercase; color: var(--tx-4); }
+/* Below the table's natural width (~1080px with the verdict column) the
+   decision column would start off-screen: it moves under the campaign name
+   and the headers may wrap, so the numbers fit too (1024px: 906px of box). */
+@container (max-width: 1099px) {
+  .colVerdict { display: none; }
+  .inlineVerdict { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 8px; max-width: 340px; }
+  .th { white-space: normal; }
+}
 .why { font-size: 11.5px; color: var(--tx-3); line-height: 1.35; white-space: normal; }
 .trendPos { color: var(--pos); }
 .trendNeg { color: var(--neg); }
@@ -181,3 +194,35 @@
 .roasLine { font-size: 12px; white-space: nowrap; color: var(--tx-2); }
 .roasLine b { font: 500 12.5px var(--mono); color: var(--tx); }
 .kpiNa { font: 500 15px/1.6 var(--sans); letter-spacing: 0; color: var(--tx-3); }
+
+/* A short second line under a table figure ("$22.058 em conta compartilhada",
+   "+ Meta $59,84 (só gasto)"). */
+.cellSub { display: block; font: 400 11px/1.35 var(--sans); color: var(--tx-3); white-space: nowrap; margin-top: 2px; letter-spacing: 0; }
+.cellSub b { font-weight: 500; color: var(--tx-2); }
+/* Under a right-aligned figure: wraps instead of widening the column. */
+.cellSubWrap { white-space: normal; max-width: 118px; margin-left: auto; text-align: right; }
+/* The ROAS cell of "Anúncios por loja": two short lines, as on /overview. */
+.roasStore { display: flex; flex-direction: column; gap: 3px; min-width: 168px; max-width: 190px; }
+
+/* ── "Anúncios por loja" (Todas) in a narrow box ──
+   ~1150px with every column: 1142px of box at 1440 clipped the Shopify header,
+   and at 1024 (906px) Crédito Meta and Shopify sat behind an unseen scrollbar.
+   Headers may wrap (enough at 1440); below 1100px of box the two fold under
+   Atribuídas and Gasto Meta.
+   A marker class in the header and every cell picks the column. */
+.adsBox { container-type: inline-size; min-width: 0; }
+.adsBox th { white-space: normal; }
+.colCredit, .colShop { display: contents; }
+.inlineAds { display: none; }
+/* The creatives table ("Todos os anúncios") uses the same box: CTR folds under
+   Compras and Hook (unavailable for every ad) hides. */
+.colCtr, .colHook { display: contents; }
+.inlineCtr { display: none; }
+@container (max-width: 1099px) {
+  .adsBox th:has(.colCredit), .adsBox td:has(.colCredit),
+  .adsBox th:has(.colShop), .adsBox td:has(.colShop),
+  .adsBox th:has(.colCtr), .adsBox td:has(.colCtr),
+  .adsBox th:has(.colHook), .adsBox td:has(.colHook) { display: none; }
+  .inlineAds, .inlineCtr { display: block; }
+  .adsBox .adName, .adsBox .adSub { max-width: 190px; }
+}

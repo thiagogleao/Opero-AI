@@ -10,6 +10,8 @@ import { Block, Callout, Count, EmptyState, ErrorState, Icon, Money, Pct, Verdic
 import { HorizontalBars } from '@/components/charts'
 import { ProductTable, type SearchableRow } from '@/components/products/ProductTable'
 import { buildProductsVerdict, type ProductLike } from '@/components/products/productsVerdict'
+import { metaSpendSplitText } from '@/components/products/metaSpendSplit'
+import { loadFirstSale } from '@/components/campaigns/firstSale'
 import s from '@/components/products/products.module.css'
 
 /**
@@ -49,7 +51,10 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
     return <AppShell ctx={ctx}>{header}<EmptyState icon="store" title="Nenhuma loja para mostrar" /></AppShell>
   }
 
-  const loaded = await load(ctx).catch(err => { console.error('[products]', err); return null })
+  const [loaded, firstSale] = await Promise.all([
+    load(ctx).catch(err => { console.error('[products]', err); return null }),
+    loadFirstSale(ctx),
+  ])
   if (!loaded) {
     return (
       <AppShell ctx={ctx}>
@@ -66,7 +71,7 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
     subjectOf: all ? 'das suas lojas' : `da ${ctx.store?.name}`,
     subjectIn: all ? 'nas suas lojas' : `na ${ctx.store?.name}`,
     products: rows, totals, configured, contributionTotal, excludedStores, rangeLabel: ctx.rangeLabel, periodPhrase: ctx.periodPhrase,
-    partialLabel: ctx.partialLabel, dayLabel: opt?.dayLabel ?? null, split: ctx.split,
+    partialLabel: ctx.partialLabel, dayLabel: opt?.dayLabel ?? null, split: ctx.split, firstSale,
   })
 
   const money = (p: Row) => (configured ? p.contribution ?? 0 : p.revenue)
@@ -100,12 +105,16 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
 
   const columns: DataColumn[] = [
     { key: 'product', label: 'Produto' },
-    { key: 'units', label: 'Unid.', numeric: true, sortable: true },
+    // Units, share and costs fold into the orders, revenue and contribution
+    // cells below ~1140px of table box (products.module.css, container
+    // query): at 1024 the margin and "Meta ligado" columns started behind a
+    // scrollbar nobody saw.
+    { key: 'units', label: <span className={s.colUnits}>Unid.</span>, numeric: true, sortable: true },
     { key: 'orders', label: 'Pedidos', numeric: true, sortable: true },
     { key: 'revenue', label: 'Receita', numeric: true, sortable: true, info: REVENUE_NOTE },
-    { key: 'share', label: '% vendas', numeric: true, sortable: true },
+    { key: 'share', label: <span className={s.colShare}>% vendas</span>, numeric: true, sortable: true },
     ...(configured ? [
-      { key: 'costs', label: 'Custos', numeric: true, sortable: true },
+      { key: 'costs', label: <span className={s.colCosts}>Custos</span>, numeric: true, sortable: true },
       { key: 'contribution', label: 'Contribuição', numeric: true, sortable: true },
       { key: 'margin', label: 'Margem', numeric: true, sortable: true },
     ] as DataColumn[] : []),
@@ -130,12 +139,14 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
           </span>
         </span>
       ),
-      units: <Count value={p.units} />,
-      orders: <Count value={p.orders} />,
-      revenue: <Money value={p.revenue} />,
-      share: <Pct value={p.revenueShare} />,
-      costs: p.variableCosts === null ? <span className="mut">sem custos</span> : <Money value={p.variableCosts} tone="none" />,
-      contribution: p.contribution === null ? <span className="mut">—</span> : <Money value={p.contribution} />,
+      units: <span className={s.colUnits}><Count value={p.units} /></span>,
+      orders: <><Count value={p.orders} /><span className={s.inline}>{plural(p.units, 'unidade', 'unidades')}</span></>,
+      revenue: <><Money value={p.revenue} /><span className={s.inline}>{formatPct(p.revenueShare)} das vendas</span></>,
+      share: <span className={s.colShare}><Pct value={p.revenueShare} /></span>,
+      costs: <span className={s.colCosts}>{p.variableCosts === null ? <span className="mut">sem custos</span> : <Money value={p.variableCosts} tone="none" />}</span>,
+      contribution: p.contribution === null ? <span className="mut">—</span> : (
+        <><Money value={p.contribution} />{p.variableCosts !== null && <span className={s.inline}>custos {formatMoney(p.variableCosts)}</span>}</>
+      ),
       margin: <Pct value={p.contributionMargin} tone="auto" />,
       meta: p.attributedSpend !== null && p.attributedSpend > 0 ? <Money value={p.attributedSpend} /> : <span className="mut">—</span>,
     },
@@ -146,12 +157,12 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
   }))
   const footer: Record<string, ReactNode> = {
     product: <span>Total {all ? 'das lojas' : 'da loja'}</span>,
-    units: <Count value={totals.units} />,
-    orders: <Count value={totals.orders} />,
+    units: <span className={s.colUnits}><Count value={totals.units} /></span>,
+    orders: <><Count value={totals.orders} /><span className={s.inline}>{plural(totals.units, 'unidade', 'unidades')}</span></>,
     revenue: <Money value={totals.revenue} />,
-    share: <Pct value={totals.revenue > 0 ? 100 : null} />,
-    costs: <Money value={costsTotal} tone="none" />,
-    contribution: <Money value={contributionTotal} />,
+    share: <span className={s.colShare}><Pct value={totals.revenue > 0 ? 100 : null} /></span>,
+    costs: <span className={s.colCosts}><Money value={costsTotal} tone="none" /></span>,
+    contribution: <><Money value={contributionTotal} /><span className={s.inline}>custos {formatMoney(costsTotal)}</span></>,
     margin: <Pct value={excludedStores.length ? null : totals.contributionMargin} tone="auto" />,
     meta: attribution ? <Money value={attribution.attributedSpend} /> : null,
   }
@@ -174,27 +185,27 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
         footer={<>
           <span>Os produtos somam as vendas {all ? 'das lojas' : 'da loja'}: <b className="num">{formatMoney(totals.revenue)}</b> em <b className="num">{plural(totals.orders, 'pedido', 'pedidos')}</b>.</span>
           {attribution && (
-            <span>
-              Meta ligado = gasto dos anúncios que a jornada da Shopify liga aos pedidos de cada produto ({formatMoney(attribution.attributedSpend)}).
-              {attribution.unlinkedSpend > 0 ? ` ${formatMoney(attribution.unlinkedSpend)} do gasto no Meta não se liga a nenhum pedido do período.` : ''}
-              {attribution.billedElsewhere > 0 ? ` ${formatMoney(attribution.billedElsewhere)} disso foi pago na conta de outra loja.` : ''}
-            </span>
+            // Linked here + credited in another store + linked to nothing = the
+            // store's Meta spend in the books (EPOCH's October left $15.203 out).
+            <span>{metaSpendSplitText(attribution, totals.metaSpend, id => ctx.stores.find(x => x.id === id)?.name ?? null)}</span>
           )}
         </>}
       >
-        <ProductTable
-          // A new store or window starts with an empty search box.
-          key={`${ctx.params.loja ?? ''}:${ctx.range.from}:${ctx.range.to}`}
-          caption={`Produtos em ${ctx.rangeLabel}`}
-          noun={['produto', 'produtos']}
-          columns={columns}
-          rows={tableRows}
-          footer={footer}
-          initialSort={{ key: configured ? 'contribution' : 'revenue', dir: 'desc' }}
-          maxHeight={760}
-          dense
-          empty={<EmptyState compact title="Nenhum produto vendido no período" />}
-        />
+        <div className={s.tableBox}>
+          <ProductTable
+            // A new store or window starts with an empty search box.
+            key={`${ctx.params.loja ?? ''}:${ctx.range.from}:${ctx.range.to}`}
+            caption={`Produtos em ${ctx.rangeLabel}`}
+            noun={['produto', 'produtos']}
+            columns={columns}
+            rows={tableRows}
+            footer={footer}
+            initialSort={{ key: configured ? 'contribution' : 'revenue', dir: 'desc' }}
+            maxHeight={760}
+            dense
+            empty={<EmptyState compact title="Nenhum produto vendido no período" />}
+          />
+        </div>
       </Block>
     </AppShell>
   )

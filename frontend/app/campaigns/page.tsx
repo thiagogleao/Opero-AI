@@ -2,17 +2,19 @@ import { Suspense } from 'react'
 import type { Metadata } from 'next'
 import { getPageContext, type PageContext, type SearchParams } from '@/lib/views/page'
 import { buildPortfolio } from '@/lib/views/portfolio'
+import { todayInTz } from '@/lib/engine/dates'
+import { resumoLinkOverrides } from '@/components/portfolio/model'
 import { computeStorePnL, type StorePnL } from '@/lib/engine/pnl'
 import { formatRangeLabel, formatMoney, plural } from '@/lib/format'
 import { listStores, type StoreRef } from '@/lib/access'
 import { getAlertConfig } from '@/lib/alerts'
 import { getSharedAdAccounts } from '@/lib/attribution'
-import { decisionWindows, getCampaignReport, type CampaignReport } from '@/lib/data/campaigns'
+import { decisionWindows, getCampaignReport, getOwnAttribution, type CampaignReport } from '@/lib/data/campaigns'
 import { getCreativesReport } from '@/lib/data/creatives'
 import type { ScaleThresholds } from '@/lib/campaignSignal'
 import { AppShell, PageHeader, PeriodNote } from '@/components/shell'
 import { Block, Callout, EmptyState, ErrorState, RoasGauge, SkeletonBlock, Tabs, VerdictCard } from '@/components/ui'
-import { buildAdsVerdict } from '@/components/campaigns/adsVerdict'
+import { attributedRoasNote, buildAdsVerdict } from '@/components/campaigns/adsVerdict'
 import { ReconciliationLedger } from '@/components/campaigns/ReconciliationLedger'
 import { ScaleRoom } from '@/components/campaigns/ScaleRoom'
 import { CampaignTable } from '@/components/campaigns/CampaignTable'
@@ -20,6 +22,8 @@ import { CreativesView } from '@/components/campaigns/CreativesView'
 import { BilledElsewhere } from '@/components/campaigns/BilledElsewhere'
 import { PortfolioAdsTable, SharedAccountsCallout, buildPortfolioAdsVerdict } from '@/components/campaigns/PortfolioAds'
 import { storeMarginFromPnL } from '@/components/campaigns/margin'
+import { loadFirstSale } from '@/components/campaigns/firstSale'
+import type { BeforeStartInput } from '@/components/campaigns/storeStart'
 import s from '@/components/campaigns/campaigns.module.css'
 
 /**
@@ -77,6 +81,7 @@ async function StoreCampaigns({ ctx, store, tab, campaignId, showAll }: {
   const header = <PageHeader ctx={ctx} title={`Campanhas · ${store.name}`} />
 
   let pnl: StorePnL | null, report: CampaignReport, decisionReport: CampaignReport, storeNames: Map<string, string>
+  let firstSale: BeforeStartInput | null
   try {
     const [all, th] = await Promise.all([listStores(ctx.viewer, { includeArchived: true }), thresholds()])
     storeNames = new Map(all.map(x => [x.id, x.name]))
@@ -84,12 +89,13 @@ async function StoreCampaigns({ ctx, store, tab, campaignId, showAll }: {
     // The decision block always judges the last 7 closed days; when the page
     // shows another window, that window gets its own report so a campaign that
     // did not spend today still appears there.
-    const [p, r, d] = await Promise.all([
+    const [p, r, d, f] = await Promise.all([
       computeStorePnL(store.id, ctx.range, {}, ctx.now),
       getCampaignReport(store, ctx.range, opts),
       sameWindow ? Promise.resolve(null) : getCampaignReport(store, decision.window, opts),
+      loadFirstSale(ctx),
     ])
-    pnl = p; report = r; decisionReport = d ?? r
+    pnl = p; report = r; decisionReport = d ?? r; firstSale = f
   } catch (err) {
     console.error('[campaigns] report', err)
     return (
@@ -128,6 +134,7 @@ async function StoreCampaigns({ ctx, store, tab, campaignId, showAll }: {
     decision: { actions: decisionReport.totals.actions, rangeLabel: decisionLabel },
     billedElsewhere,
     split: ctx.split,
+    firstSale,
   })
   const shared = report.campaigns.filter(c => c.shared)
   const ownSpend = report.campaigns.filter(c => !c.shared).reduce((t, c) => t + c.spend, 0)
@@ -151,16 +158,14 @@ async function StoreCampaigns({ ctx, store, tab, campaignId, showAll }: {
         aside={<ReconciliationLedger rec={reconciliation} rangeLabel={ctx.rangeLabel} split={ctx.split} elsewhere={billedElsewhere} />}
         footer={report.totals.spend > 0 ? (
           <div>
-            <RoasGauge roas={ownSpend > 0 ? ownValue / ownSpend : null} breakEven={report.configured ? report.breakEvenRoas : null} label="ROAS atribuído" />
-            <p className={s.small}>
-              Vendas que o Meta credita às campanhas ÷ gasto. Fica abaixo do ROAS da loja quando há venda que o Meta não credita
-              (orgânico, e-mail, recompra), e sobe sozinho quando o gasto cai — julgue as campanhas por ele e a loja pelo lucro real.
-            </p>
+            <RoasGauge roas={ownSpend > 0 ? ownValue / ownSpend : null} breakEven={report.breakEvenRoas} configured={report.configured}
+              revenue={pnl.totals.revenue} contribution={pnl.totals.contribution} label="ROAS atribuído" />
+            <p className={s.small}>{attributedRoasNote({ sharedSpend: shared.reduce((t, c) => t + c.spend, 0), shopSpend: pnl.totals.shopSpend })}</p>
           </div>
         ) : undefined}
       />
-      <BilledElsewhere rows={report.billedElsewhere} storeName={store.name} hrefFor={id => ctx.hrefWith('/campaigns', { loja: id })} />
-      <ScaleRoom report={decisionReport} windowLabel={decisionLabel} costsHref={ctx.hrefWith('/profit')} />
+      <BilledElsewhere rows={report.billedElsewhere} storeName={store.name} rangeLabel={ctx.rangeLabel} hrefFor={id => otherStoreHref(ctx, id)} />
+      <ScaleRoom report={decisionReport} windowLabel={decisionLabel} costsHref={ctx.hrefWith('/profit')} split={ctx.split} />
       <Tabs
         ariaLabel="Campanhas ou criativos"
         active={tab}
@@ -202,6 +207,7 @@ async function TabContent({ ctx, store, tab, report, campaignId, showAll, storeN
         filter={filterRow ? { name: filterRow.name, clearHref: ctx.hrefWith('/campaigns?aba=criativos') } : null}
         limit={showAll ? null : TABLE_LIMIT}
         showAllHref={ctx.hrefWith(`/campaigns?aba=criativos${filterRow?.campaignId ? `&campanha=${encodeURIComponent(filterRow.campaignId)}` : ''}&mostrar=todos`)}
+        split={ctx.split}
       />
     )
   }
@@ -215,9 +221,20 @@ async function TabContent({ ctx, store, tab, report, campaignId, showAll, storeN
         ? <span>A lista soma <b className="num">{formatMoney(report.reconciliation.listedSpend)}</b>, o mesmo gasto no Meta que a contabilidade da loja carrega.</span>
         : <span className="warn">A lista soma {formatMoney(report.reconciliation.listedSpend)} e a contabilidade {formatMoney(report.reconciliation.engineMetaSpend)}.</span>}
     >
-      <CampaignTable report={report} creatives={creatives.creatives} hrefWith={p => ctx.hrefWith(p)} rangeLabel={ctx.rangeLabel} />
+      <CampaignTable report={report} creatives={creatives.creatives} hrefWith={p => ctx.hrefWith(p)} rangeLabel={ctx.rangeLabel} split={ctx.split} />
     </Block>
   )
+}
+
+/**
+ * A link to another store's Campanhas on the dates this page shows. The same
+ * `periodo` resolves on that store's own clock, which can be a day ahead
+ * (Tokyo after noon in Brasília); then the exact dates travel instead.
+ */
+function otherStoreHref(ctx: PageContext, storeId: string): string {
+  const other = ctx.stores.find(x => x.id === storeId)
+  const storeToday = other ? todayInTz(other.timezone, ctx.now) : ctx.today
+  return ctx.hrefWith('/campaigns', resumoLinkOverrides({ id: storeId, storeToday }, ctx))
 }
 
 async function AllStores({ ctx }: { ctx: PageContext }) {
@@ -226,6 +243,10 @@ async function AllStores({ ctx }: { ctx: PageContext }) {
   const loaded = await Promise.all([
     buildPortfolio(ctx.selected, ctx.period, ctx.params.de, ctx.params.ate, ctx.now, { liveFeed: false, chargebackHealth: false, freshness: false }),
     getSharedAdAccounts(ctx.storeIds, ctx.range, names).catch(err => { console.error('[campaigns] shared accounts', err); return [] }),
+    // Own vs shared-account campaigns per store, so ROAS atribuído follows
+    // the store pages' rule; on failure those columns say "—" instead of
+    // falling back to a mixed number.
+    getOwnAttribution(ctx.storeIds, ctx.range).catch(err => { console.error('[campaigns] own attribution', err); return null }),
   ]).catch(err => { console.error('[campaigns] all stores', err); return null })
   if (!loaded) {
     return (
@@ -235,9 +256,9 @@ async function AllStores({ ctx }: { ctx: PageContext }) {
       </AppShell>
     )
   }
-  const [view, pairs] = loaded
+  const [view, pairs, attribution] = loaded
   const verdict = buildPortfolioAdsVerdict({
-    stores: view.stores, rangeLabel: ctx.rangeLabel, periodPhrase: ctx.periodPhrase, partialLabel: ctx.partialLabel, split: ctx.split,
+    stores: view.stores, attribution, pairs, rangeLabel: ctx.rangeLabel, periodPhrase: ctx.periodPhrase, partialLabel: ctx.partialLabel, split: ctx.split,
   })
   return (
     <AppShell ctx={ctx}>
@@ -246,12 +267,18 @@ async function AllStores({ ctx }: { ctx: PageContext }) {
       <VerdictCard verdict={verdict} roas={false} />
       <SharedAccountsCallout pairs={pairs} />
       <Block
-        title="Meta por loja"
-        howTo="Cada loja contra o próprio empate. Clique numa loja para ver as campanhas, os conjuntos e os anúncios dela."
+        title="Anúncios por loja"
+        howTo="Cada loja contra o próprio empate, no canal em que anuncia (como no Resumo). Clique numa loja para ver as campanhas, os conjuntos e os anúncios dela."
         info="Campanhas, margens e vereditos são por loja: cada uma tem a sua conta de anúncio e o seu custo de produto."
         flush
       >
-        <PortfolioAdsTable stores={view.stores} rangeLabel={ctx.rangeLabel} hrefFor={id => ctx.hrefWith('/campaigns', { loja: id })} />
+        <PortfolioAdsTable
+          stores={view.stores} attribution={attribution} pairs={pairs} rangeLabel={ctx.rangeLabel}
+          // Each row is priced on Brasília's calendar dates; Hibikura's own
+          // "ontem" turns a day later at noon here. The link carries the exact
+          // dates then, so the page opened shows the row that was clicked.
+          hrefFor={row => ctx.hrefWith('/campaigns', resumoLinkOverrides(row, ctx))}
+        />
       </Block>
     </AppShell>
   )

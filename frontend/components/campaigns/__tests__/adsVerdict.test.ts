@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { PnL } from '@/lib/engine/pnl'
 import type { CampaignRow } from '@/lib/data/campaigns'
-import { buildAdsVerdict, buildReconciliation, type AdsWindow, type ReportForVerdict } from '../adsVerdict'
-import { actionCountsText, adSignalChip, ptText, trendSpec } from '../text'
+import { attributedRoasNote, buildAdsVerdict, buildReconciliation, noEmpateWhy, ownAttributedRoas, sharedCampaigns, uncreditedSources, type AdsWindow, type ReportForVerdict } from '../adsVerdict'
+import { actionCountsText, adSignalChip, phantomBadge, phantomNote, ptText, trendSpec } from '../text'
+import { creativeVerdict, signalLabel, SIGNAL_LABEL } from '@/lib/creativeSignal'
 
 const WINDOW: AdsWindow = {
   period: '7d', rangeLabel: '10–16 nov', periodPhrase: 'nos últimos 7 dias', partial: false,
@@ -136,6 +137,41 @@ describe('buildAdsVerdict', () => {
     expect(verdict.headline).toBe('A CAMP HALLOW não gastou no Meta nos últimos 7 dias.')
   })
 
+  it('calls the billed-elsewhere spend the whole campaign, not the ads that sold here', () => {
+    const p = pnl({ revenue: 9846.28, orders: 103 })
+    const r = report([], { reconciliation: { engineMetaSpend: 0, listedSpend: 0, gap: 0, unsyncedSpend: 0, phantomAdDays: 0, phantomValueDropped: 0 } })
+    const { verdict } = buildAdsVerdict({
+      storeName: 'CAMP HALLOW', report: r, pnl: p, window: WINDOW, decision: null,
+      billedElsewhere: { spend: 4545.78, campaigns: 1, stores: ['EPOCH'] },
+    })
+    const text = verdict.details.map(d => d.text).join(' ')
+    // Atribuição shows $2.954 for the ads credited with an order here; this
+    // line must not claim the $4.546 is what "brought sales here".
+    expect(text).not.toContain('trouxe vendas para cá')
+    expect(text).toContain('$4.546 de gasto da campanha inteira no período')
+  })
+
+  it('measures the store ROAS box on the Resumo\'s ad channel, not on Meta alone', () => {
+    // Dumpling 8jcp3a, 11–17 nov: $56 of Meta next to $1.796 of Shop Campaigns.
+    // Revenue ÷ Meta read "319× → no lucro"; the Resumo says 2,97× on Shopify ads.
+    const revenue = 5334.12, meta = 16.71, shop = 1796, contribution = revenue / 1.46
+    const p = pnl({
+      revenue, orders: 60, contribution, variableCosts: revenue - contribution, metaSpend: meta, shopSpend: shop,
+      adSpend: meta + shop, operatingProfit: contribution - meta - shop, roas: revenue / meta, breakEvenRoas: 1.46,
+    })
+    const rows = [row({ spend: meta, purchaseValue: 0 })]
+    const r = report(rows, { contributionRate: 1 / 1.46, breakEvenRoas: 1.46, storeRevenue: revenue,
+      reconciliation: { engineMetaSpend: meta, listedSpend: meta, gap: 0, unsyncedSpend: 0, phantomAdDays: 0, phantomValueDropped: 0 } })
+    const { verdict } = buildAdsVerdict({ storeName: 'Dumpling Squishy', report: r, pnl: p, window: WINDOW, decision: null })
+    expect(verdict.roas?.channel).toBe('shop')
+    expect(verdict.roas?.label).toBe('ROAS dos Anúncios Shopify')
+    expect(verdict.roas?.roas).toBeCloseTo(revenue / shop, 6)
+    expect(verdict.roas?.state).toBe('pos')
+    // A store whose ads are all Meta keeps the Meta ROAS.
+    expect(buildAdsVerdict({ storeName: 'X', report: report([row({ spend: 3000, purchaseValue: 4000 })]), pnl: store(), window: WINDOW, decision: null })
+      .verdict.roas).toMatchObject({ channel: 'meta', roas: 10000 / 3000 })
+  })
+
   it('judges a store without costs on revenue − ads, flagged', () => {
     const rows = [row({ spend: 819.5, purchaseValue: 160 })]
     const p = pnl({ revenue: 156.3, orders: 2, metaSpend: 819.5, adSpend: 819.5, roas: 156.3 / 819.5 })
@@ -174,6 +210,78 @@ describe('buildAdsVerdict', () => {
   })
 })
 
+describe('buildAdsVerdict — round-2 wording', () => {
+  /** EPOCH, 1–31 out (engine + getCampaignReport, read-only). */
+  function epochOct() {
+    const revenue = 42058.56, contribution = 33211.56, meta = 47220, shop = 366.68
+    const p = pnl({
+      revenue, orders: 381, contribution, variableCosts: revenue - contribution, metaSpend: meta, shopSpend: shop,
+      adSpend: meta + shop, operatingProfit: contribution - meta - shop, roas: revenue / meta, breakEvenRoas: revenue / contribution,
+    })
+    const flag = { accountId: 'act_3618880568247785', note: 'conta compartilhada.', journeyStoreId: null, journeyOrdersHere: 0, journeyOrdersTotal: 338 }
+    const rows = [
+      row({ spend: 25161.83, purchaseValue: 33909.66 }),
+      row({ campaignId: 'freddie', spend: 22058.17, purchaseValue: 39637.9, shared: flag }),
+    ]
+    const rate = contribution / revenue
+    const r = report(rows, {
+      contributionRate: rate, breakEvenRoas: revenue / contribution, storeRevenue: revenue,
+      reconciliation: { engineMetaSpend: meta, listedSpend: meta, gap: 0, unsyncedSpend: 0, phantomAdDays: 0, phantomValueDropped: 0 },
+    })
+    r.campaigns = rows.map(x => ({ ...x, estimatedProfit: x.shared ? null : x.purchaseValue * rate - x.spend }))
+    r.totals = { ...r.totals, estimatedProfit: 33909.66 * rate - 25161.83 }
+    return { p, r }
+  }
+
+  it('puts the same campaigns on both sides of the attributed-ROAS sentence', () => {
+    const { p, r } = epochOct()
+    const { verdict } = buildAdsVerdict({ storeName: 'EPOCH ®️', report: r, pnl: p, window: { ...WINDOW, periodPhrase: 'no mês passado' }, decision: null })
+    expect(verdict.details[0].text).toBe(
+      'Gasto no Meta: $25.162 em 1 campanha desta loja (mais $22.058 em 1 de conta compartilhada). '
+      + 'O Meta credita às da loja $33.910 em vendas — ROAS atribuído 1,35× contra empate 1,27×.',
+    )
+    // The judgement leaves out 47% of the spend, and says so up front.
+    expect(verdict.headline).toBe('As campanhas da EPOCH ®️ deram lucro no mês passado, pela atribuição do Meta, sem contar 47% do gasto (campanhas de conta compartilhada) — mas a loja inteira não cobriu o gasto com anúncios.')
+    expect(verdict.amountCaption).toBe('de lucro estimado das campanhas desta loja: vendas atribuídas × margem da loja − gasto')
+  })
+
+  it('keeps the plain sentence for a store without shared campaigns', () => {
+    const { verdict } = buildAdsVerdict({ storeName: 'MOKOO', report: report([row({ spend: 3000, purchaseValue: 4000 })]), pnl: store(), window: WINDOW, decision: null })
+    expect(verdict.details[0].text).toBe('Gasto no Meta: $3.000 em 1 campanha. O Meta credita a elas $4.000 em vendas — ROAS atribuído 1,33× contra empate 1,67×.')
+    expect(verdict.headline).not.toContain('sem contar')
+  })
+
+  it('gives the real reason when a store with costs has no break-even', () => {
+    // EPOCH at 09h10 on 18 nov: $347 on Meta, no order yet, costs set.
+    const rows = [row({ spend: 347.32 })]
+    const noSales = pnl({ metaSpend: 347.32, adSpend: 347.32, operatingProfit: -347.32, roas: 0 })
+    const r = report(rows, { breakEvenRoas: null, storeRevenue: 0,
+      reconciliation: { engineMetaSpend: 347.32, listedSpend: 347.32, gap: 0, unsyncedSpend: 0, phantomAdDays: 0, phantomValueDropped: 0 } })
+    const a = buildAdsVerdict({ storeName: 'EPOCH ®️', report: r, pnl: noSales, window: WINDOW, decision: null }).verdict
+    expect(a.details[0].text).toBe('Gasto no Meta: $347 em 1 campanha. O Meta credita a elas $0 em vendas — ROAS atribuído 0,00× (sem vendas no período, não há empate).')
+    expect(a.details[0].text).not.toContain('sem custos')
+
+    expect(noEmpateWhy(true, { revenue: 812, contribution: -40 })).toBe('as vendas não cobrem produto, frete e taxas: nenhum ROAS empata')
+    expect(noEmpateWhy(false, { revenue: 812, contribution: 812 })).toBe('sem custos, não há empate')
+  })
+
+  it('names Shopify ads first among the sales Meta does not credit', () => {
+    // Dumpling 8jcp3a, 17 nov: $6.229 sold, $59,84 of Meta, $1.867 of Shop Campaigns.
+    const revenue = 6229.42, meta = 59.84, shop = 1867.46, contribution = 4318.07
+    const p = pnl({
+      revenue, orders: 90, contribution, variableCosts: revenue - contribution, metaSpend: meta, shopSpend: shop,
+      adSpend: meta + shop, operatingProfit: contribution - meta - shop, roas: revenue / meta, breakEvenRoas: revenue / contribution,
+    })
+    const r = report([row({ spend: meta, purchaseValue: 54.11 })], { contributionRate: contribution / revenue, breakEvenRoas: revenue / contribution, storeRevenue: revenue,
+      reconciliation: { engineMetaSpend: meta, listedSpend: meta, gap: 0, unsyncedSpend: 0, phantomAdDays: 0, phantomValueDropped: 0 } })
+    const { verdict } = buildAdsVerdict({ storeName: 'Dumpling Squishy · 8jcp3a', report: r, pnl: p, window: WINDOW, decision: null })
+    expect(verdict.details[1].text).toBe('A loja vendeu $6.229 no total: 99% disso não é creditado a nenhuma campanha do Meta (Anúncios Shopify, com $1.867 de gasto no período; orgânico, e-mail, recompra ou venda que o pixel não viu).')
+    expect(uncreditedSources(0)).toBe('orgânico, e-mail, recompra ou venda que o pixel não viu')
+    expect(attributedRoasNote({ sharedSpend: 0, shopSpend: shop })).toContain('(Anúncios Shopify, orgânico, e-mail, recompra)')
+    expect(attributedRoasNote({ sharedSpend: 22058.17, shopSpend: 0 })).toContain('campanhas desta loja ÷ o gasto delas (os $22.058 das campanhas de conta compartilhada ficam fora)')
+  })
+})
+
 describe('text helpers', () => {
   it('turns en-US numbers in library sentences into pt-BR', () => {
     expect(ptText('ROAS 1.53x com $2,034 gastos')).toBe('ROAS 1,53× com $2.034 gastos')
@@ -190,9 +298,9 @@ describe('text helpers', () => {
   })
 
   it('never puts a check mark on an ad below the break-even', () => {
-    expect(adSignalChip('ok', 1.8, 1.5).label).toBe('OK')
+    expect(adSignalChip('ok', 1.8, 1.5).label).toBe('Manter')
     expect(adSignalChip('ok', 0, 1.5)).toEqual({ label: 'Abaixo do empate', tone: 'neu', icon: 'ring' })
-    expect(adSignalChip('ok', 1.2, null).label).toBe('OK')
+    expect(adSignalChip('ok', 1.2, null).label).toBe('Manter')
     expect(adSignalChip('kill', 0.5, 1.5).label).toBe('Desligar')
   })
 
@@ -201,5 +309,44 @@ describe('text helpers', () => {
       .toBe('1 campanha para cortar, nenhuma para escalar, 2 para manter e 1 para observar')
     expect(actionCountsText({ cortar: 0, escalar: 2, manter: 0, observar: 0 }))
       .toBe('nenhuma campanha para cortar, 2 para escalar, nenhuma para manter e nenhuma para observar')
+  })
+})
+
+describe('ownAttributedRoas (the Total row of the campaigns table)', () => {
+  it("is the verdict's ROAS atribuído: the store's own campaigns, shared-account ones left out", () => {
+    // EPOCH, October: $33.910 / $25.162 = 1,35×, not $73.548 / $47.220 = 1,56×.
+    const flag = { accountId: 'act_3618880568247785', note: 'n', journeyStoreId: null, journeyOrdersHere: 0, journeyOrdersTotal: 338 }
+    const rows = [
+      row({ spend: 25161.83, purchaseValue: 33909.66 }),
+      row({ campaignId: 'freddie', spend: 22058.17, purchaseValue: 39637.9, shared: flag }),
+    ]
+    const own = ownAttributedRoas({ campaigns: rows })
+    expect(own.roas).toBeCloseTo(1.3477, 3)
+    expect(own.spend).toBeCloseTo(25161.83, 2)
+    expect(sharedCampaigns({ campaigns: rows }).spend).toBeCloseTo(22058.17, 2)
+  })
+})
+
+describe('phantomBadge', () => {
+  it('says it in words, with no minus sign that reads as a loss', () => {
+    expect(phantomBadge(183000)).toBe('compra fantasma descartada ($183.000)')
+    expect(phantomBadge(183000)).not.toMatch(/[−-]\$/)
+    expect(phantomNote(183000)).toContain('$183.000 em compras impossíveis')
+  })
+})
+
+describe('ad signal words', () => {
+  it('never calls an ad below the break-even "OK", and is Portuguese everywhere', () => {
+    // Hibikura, 7 dias: ROAS 0,00× and 1,21× against 1,34×, under $50 spent.
+    const zero = creativeVerdict({ spend: 41.04, roas: 0, purchases: 0, breakEven: 1.34, frequency: null, running: true })
+    expect(zero.signal).toBe('ok')
+    expect(zero.label).toBe('Abaixo do empate')
+    expect(creativeVerdict({ spend: 43.75, roas: 1.21, purchases: 1, breakEven: 1.34, frequency: null, running: true }).label).toBe('Abaixo do empate')
+    expect(creativeVerdict({ spend: 60, roas: 1.39, purchases: 2, breakEven: 1.34, frequency: null, running: true }).label).toBe('Manter')
+    expect(creativeVerdict({ spend: 80, roas: 0.5, purchases: 0, breakEven: 1.34, frequency: null, running: true }).label).toBe('Desligar')
+    // No signal, no label.
+    expect(creativeVerdict({ spend: 0, roas: null, purchases: 0, breakEven: 1.34, frequency: null, running: true }).label).toBeUndefined()
+    expect(Object.values(SIGNAL_LABEL)).not.toContain('OK')
+    expect(signalLabel('ok', 0, 1.34)).toBe(adSignalChip('ok', 0, 1.34).label)
   })
 })

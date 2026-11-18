@@ -9,6 +9,9 @@
  * client ExpandableTable.
  *
  * Props: { report: CampaignReport; creatives: CreativeRow[]; hrefWith: (path) => string; rangeLabel;
+ *          split?: boolean (partner view: every estimated profit is the partner's
+ *            half, labelled "sua parte" — the same rule as the Resumo's campaigns
+ *            block and the verdict above; spend, sales and ROAS stay whole);
  *          adsPerAdset?: number (biggest ads shown per ad set, default 6) }
  */
 
@@ -18,9 +21,11 @@ import type { CampaignReport, CampaignRow } from '@/lib/data/campaigns'
 import type { CreativeRow } from '@/lib/data/creatives'
 import { Badge, Chip, Count, EmptyState, Money } from '@/components/ui'
 import { formatMoney, formatRoas, plural } from '@/lib/format'
+import { SPLIT_SHARE } from '@/lib/views/verdict'
 import { RoasCell } from './RoasCell'
+import { ownAttributedRoas, sharedCampaigns } from './adsVerdict'
 import { ExpandableTable, type ExpandableColumn, type ExpandableRow } from './ExpandableTable'
-import { ACTION_CHIP, adSignalChip, ptText, trendSpec } from './text'
+import { ACTION_CHIP, adSignalChip, phantomBadge, phantomNote, ptText, trendSpec } from './text'
 import s from './campaigns.module.css'
 
 const TREND_CLASS = { pos: s.trendPos, neg: s.trendNeg, neu: s.trendNeu, mut: s.trendMut } as const
@@ -62,8 +67,13 @@ function SignalCell({ ad, breakEven }: { ad: CreativeRow; breakEven: number | nu
   return <span title={ptText(ad.verdict.reason)}><Chip tone={spec.tone} icon={spec.icon} size="sm">{spec.label}</Chip></span>
 }
 
-function CampaignDetail({ row, ads, hrefWith, adsPerAdset, breakEven }: {
+/** The partner's half of an estimated profit (null stays null). */
+const share = (v: number | null, k: number) => (v === null ? null : v * k)
+
+function CampaignDetail({ row, ads, hrefWith, adsPerAdset, breakEven, k }: {
   row: CampaignRow; ads: CreativeRow[]; hrefWith: (path: string) => string; adsPerAdset: number; breakEven: number | null
+  /** SPLIT_SHARE in the partner view, else 1. */
+  k: number
 }) {
   const notes: ReactNode[] = []
   if (row.shared) notes.push(<p key="shared" className={s.detailNote}><b>Conta compartilhada.</b> {row.shared.note} O gasto continua nesta loja.</p>)
@@ -107,7 +117,7 @@ function CampaignDetail({ row, ads, hrefWith, adsPerAdset, breakEven }: {
             <th className={s.nr}>Gasto</th>
             <th className={s.nr}>Compras</th>
             <th className={s.nr}>ROAS</th>
-            <th className={s.nr}>Lucro estimado</th>
+            <th className={s.nr}>{k !== 1 ? 'Lucro estimado (sua parte)' : 'Lucro estimado'}</th>
             <th>Veredito do anúncio</th>
           </tr>
         </thead>
@@ -122,7 +132,7 @@ function CampaignDetail({ row, ads, hrefWith, adsPerAdset, breakEven }: {
                 <td className={s.nr}>{formatMoney(g.spend)}</td>
                 <td className={s.nr}>{g.purchases}</td>
                 <td className={s.nr}>{formatRoas(g.spend > 0 ? g.purchaseValue / g.spend : null)}</td>
-                <td className={`${s.nr} ${g.estimatedProfit !== null && g.estimatedProfit < 0 ? s.neg : ''}`}>{formatMoney(g.estimatedProfit)}</td>
+                <td className={`${s.nr} ${g.estimatedProfit !== null && g.estimatedProfit < 0 ? s.neg : ''}`}>{formatMoney(share(g.estimatedProfit, k))}</td>
                 <td />
               </tr>,
               ...shown.map(a => (
@@ -131,7 +141,7 @@ function CampaignDetail({ row, ads, hrefWith, adsPerAdset, breakEven }: {
                   <td className={s.nr}>{formatMoney(a.spend)}</td>
                   <td className={s.nr}>{a.purchases}</td>
                   <td className={s.nr}>{formatRoas(a.roas)}</td>
-                  <td className={`${s.nr} ${a.estimatedProfit !== null && a.estimatedProfit < 0 ? s.neg : ''}`}>{formatMoney(a.estimatedProfit)}</td>
+                  <td className={`${s.nr} ${a.estimatedProfit !== null && a.estimatedProfit < 0 ? s.neg : ''}`}>{formatMoney(share(a.estimatedProfit, k))}</td>
                   <td><SignalCell ad={a} breakEven={breakEven} /></td>
                 </tr>
               )),
@@ -151,10 +161,11 @@ function CampaignDetail({ row, ads, hrefWith, adsPerAdset, breakEven }: {
   )
 }
 
-export function CampaignTable({ report, creatives, hrefWith, rangeLabel, adsPerAdset = 6 }: {
-  report: CampaignReport; creatives: CreativeRow[]; hrefWith: (path: string) => string; rangeLabel: string; adsPerAdset?: number
+export function CampaignTable({ report, creatives, hrefWith, rangeLabel, split = false, adsPerAdset = 6 }: {
+  report: CampaignReport; creatives: CreativeRow[]; hrefWith: (path: string) => string; rangeLabel: string; split?: boolean; adsPerAdset?: number
 }) {
   const be = report.breakEvenRoas
+  const k = split ? SPLIT_SHARE : 1
   const byCampaign = new Map<string, CreativeRow[]>()
   for (const c of creatives) {
     if (!c.campaignId) continue
@@ -170,8 +181,11 @@ export function CampaignTable({ report, creatives, hrefWith, rangeLabel, adsPerA
     { key: 'purchases', label: 'Compras', numeric: true, info: 'Compras que o Meta atribui à campanha (pixel), não pedidos da Shopify.' },
     { key: 'pv', label: 'Vendas atribuídas', numeric: true, info: 'O que o Meta credita à campanha. Compras impossíveis (acima de $20.000 num dia de um anúncio) já foram descartadas.' },
     { key: 'roas', label: be !== null ? `ROAS × empate ${formatRoas(be)}` : 'ROAS', info: 'Vendas atribuídas ÷ gasto, contra o empate da loja no mesmo período (receita ÷ contribuição). Abaixo do empate, cada dólar gasto vira prejuízo.' },
-    { key: 'est', label: 'Lucro estimado', numeric: true, info: ptText(report.formula) },
-    { key: 'verdict', label: `Veredito · ${days} dias`, width: 240, info: `Veredito e tendência dos últimos ${days} dias fechados. A ação é julgada sempre nos últimos ${days} dias fechados, seja qual for o período da tabela; a regra está no bloco "Onde há folga para escalar". A tendência compara o ROAS desses ${days} dias com o dos ${days} anteriores, e só aparece quando os dois períodos tiveram gasto de verdade.` },
+    { key: 'est', label: split ? 'Lucro estimado (sua parte)' : 'Lucro estimado', numeric: true, info: split ? `${ptText(report.formula)} Na visão de sócio, cada valor é a sua parte (50%).` : ptText(report.formula) },
+    // Under ~1100px of table box the column hides and the same verdict shows
+    // under the campaign name (campaigns.module.css, container query): at
+    // 1024 and 1280 it used to start off-screen behind a thin scrollbar.
+    { key: 'verdict', label: `Veredito · ${days} dias`, width: 240, className: s.colVerdict, info: `Veredito e tendência dos últimos ${days} dias fechados. A ação é julgada sempre nos últimos ${days} dias fechados, seja qual for o período da tabela; a regra está no bloco "Onde há folga para escalar". A tendência compara o ROAS desses ${days} dias com o dos ${days} anteriores, e só aparece quando os dois períodos tiveram gasto de verdade.` },
   ]
 
   const rows: ExpandableRow[] = report.campaigns.map(c => {
@@ -185,14 +199,31 @@ export function CampaignTable({ report, creatives, hrefWith, rangeLabel, adsPerA
     if (!c.unsynced) subParts.push(<span key="n">{plural(c.adsets, 'conjunto', 'conjuntos')} · {plural(c.ads, 'anúncio', 'anúncios')}</span>)
     else subParts.push(<span key="n">{plural(c.unsyncedAds.length, 'anúncio', 'anúncios')}</span>)
     if (c.shared) subParts.push(<Badge key="sh" tone="warn" icon="alert" title={c.shared.note}>conta compartilhada</Badge>)
-    if (c.phantomValueDropped > 0) subParts.push(<Badge key="ph" tone="mut" title="Compras impossíveis descartadas">−{formatMoney(c.phantomValueDropped)} fantasma</Badge>)
+    // In words, no minus sign: next to the money columns "−$183.000" read as
+    // a loss. The amount is what Meta reported and was thrown away.
+    if (c.phantomValueDropped > 0) subParts.push(<Badge key="ph" tone="mut" title={phantomNote(c.phantomValueDropped)}>{phantomBadge(c.phantomValueDropped)}</Badge>)
+    const verdictTop = (
+      <span className={s.verdictTop}>
+        {spec ? <Chip tone={spec.tone} icon={spec.icon} size="sm">{spec.label}</Chip> : null}
+        <span className={`${s.trend} ${TREND_CLASS[trend.tone]}`} title={trend.title}>{trend.text}<span className="sr-only"> — {trend.title}</span></span>
+      </span>
+    )
     return {
       key: c.campaignId ?? `unsynced:${c.accountId ?? ''}`,
       tone: c.running ? undefined : 'mut',
       toggleLabel: c.unsynced ? 'os anúncios sem nome' : 'conjuntos e anúncios',
-      detail: <CampaignDetail row={c} ads={ads} hrefWith={hrefWith} adsPerAdset={adsPerAdset} breakEven={be} />,
+      detail: <CampaignDetail row={c} ads={ads} hrefWith={hrefWith} adsPerAdset={adsPerAdset} breakEven={be} k={k} />,
       cells: {
-        name: <><span className={s.cName}>{c.name}</span><span className={s.cSub}>{subParts}</span></>,
+        name: (
+          <>
+            <span className={s.cName}>{c.name}</span><span className={s.cSub}>{subParts}</span>
+            <span className={s.inlineVerdict}>
+              <span className={s.inlineVerdictLabel}>Veredito · {days} dias</span>
+              {verdictTop}
+              <span className={s.why}>{ptText(d.reason)}</span>
+            </span>
+          </>
+        ),
         spend: <Money value={c.spend} />,
         purchases: <Count value={c.purchases} />,
         pv: <Money value={c.purchaseValue} />,
@@ -203,13 +234,10 @@ export function CampaignTable({ report, creatives, hrefWith, rangeLabel, adsPerA
           : c.unsynced
             ? <span className={s.why}>{formatRoas(c.roas)} · sem campanha para julgar</span>
             : <RoasCell roas={c.roas} breakEven={be} paused={!c.running} />,
-        est: c.estimatedProfit === null ? <span className={s.muted}>—</span> : <Money value={c.estimatedProfit} />,
+        est: c.estimatedProfit === null ? <span className={s.muted}>—</span> : <Money value={c.estimatedProfit * k} />,
         verdict: (
           <span className={s.verdictCell}>
-            <span className={s.verdictTop}>
-              {spec ? <Chip tone={spec.tone} icon={spec.icon} size="sm">{spec.label}</Chip> : null}
-              <span className={`${s.trend} ${TREND_CLASS[trend.tone]}`} title={trend.title}>{trend.text}<span className="sr-only"> — {trend.title}</span></span>
-            </span>
+            {verdictTop}
             <span className={s.why}>{ptText(d.reason)}</span>
           </span>
         ),
@@ -218,6 +246,11 @@ export function CampaignTable({ report, creatives, hrefWith, rangeLabel, adsPerA
   })
 
   const t = report.totals
+  // The Total row's ROAS atribuído is the verdict's: the store's own campaigns
+  // only. Over every row, EPOCH's October read 1,56× (CAMP HALLOW's sales on
+  // the shared account counted) under the verdict's 1,35×, same label.
+  const own = ownAttributedRoas(report)
+  const sharedOut = sharedCampaigns(report)
   return (
     <ExpandableTable
       // A new store or window starts with every row closed (no open state
@@ -232,8 +265,13 @@ export function CampaignTable({ report, creatives, hrefWith, rangeLabel, adsPerA
         spend: <Money value={t.spend} />,
         purchases: <Count value={t.purchases} />,
         pv: <Money value={t.purchaseValue} />,
-        roas: <span className={s.why}>ROAS atribuído {formatRoas(t.roas)}{be !== null ? ` · empate ${formatRoas(be)}` : ''}</span>,
-        est: t.estimatedProfit === null ? <span className={s.muted}>—</span> : <Money value={t.estimatedProfit} />,
+        roas: (
+          <span className={s.why}>
+            ROAS atribuído {formatRoas(own.roas)}{be !== null ? ` · empate ${formatRoas(be)}` : ''}
+            {sharedOut.spend > 0 && <span className={s.whyBlock}>só as campanhas desta loja: sem {formatMoney(sharedOut.spend)} de conta compartilhada</span>}
+          </span>
+        ),
+        est: t.estimatedProfit === null ? <span className={s.muted}>—</span> : <Money value={t.estimatedProfit * k} />,
       }}
     />
   )

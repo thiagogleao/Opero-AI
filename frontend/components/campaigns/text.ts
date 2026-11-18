@@ -11,10 +11,10 @@
  */
 
 import type { CampaignAction, TrendArrow } from '@/lib/campaignSignal'
-import type { Signal } from '@/lib/creativeSignal'
+import { BELOW_BREAK_EVEN_LABEL, KEEP_LABEL, signalLabel, type Signal } from '@/lib/creativeSignal'
 import type { ChipTone } from '@/components/ui'
 import type { ChipIcon } from '@/lib/views/verdict'
-import { formatPct } from '@/lib/format'
+import { formatMoney, formatPct } from '@/lib/format'
 
 const THOUSANDS = '\u0001'
 
@@ -49,26 +49,25 @@ export const SIGNAL_CHIP: Record<Signal, ChipSpec> = {
   kill: { label: 'Desligar', tone: 'neg', icon: 'down' },
   scale: { label: 'Escalar', tone: 'pos', icon: 'up' },
   refresh: { label: 'Trocar criativo', tone: 'warn', icon: 'alert' },
-  ok: { label: 'OK', tone: 'neu', icon: 'check' },
+  ok: { label: KEEP_LABEL, tone: 'neu', icon: 'check' },
 }
 
 /**
- * The chip of one ad's verdict. The signal is the shared one (phone and
- * Copilot say the same), but 'ok' only means "no action": above the break-even
- * it reads OK; below it (too little spend to cut, or still above the cut line)
- * a check mark next to "Abaixo do empate" would contradict the reason, so the
- * chip says "Abaixo do empate" in a neutral tone instead.
+ * The chip of one ad's verdict. The signal and its word are the shared ones
+ * (lib/creativeSignal signalLabel, the phone says the same), but 'ok' only
+ * means "no action": at or above the break-even it reads "Manter"; below it
+ * (too little spend to cut, or still above the cut line) a check mark would
+ * contradict the reason, so it reads "Abaixo do empate" with a neutral ring.
  */
 export function adSignalChip(signal: Signal, roas: number | null, breakEven: number | null): ChipSpec {
-  if (signal === 'ok' && roas !== null && breakEven !== null && breakEven > 0 && roas < breakEven) {
-    return { label: 'Abaixo do empate', tone: 'neu', icon: 'ring' }
-  }
-  return SIGNAL_CHIP[signal]
+  const label = signalLabel(signal, roas, breakEven)
+  if (label === BELOW_BREAK_EVEN_LABEL) return { label, tone: 'neu', icon: 'ring' }
+  return { ...SIGNAL_CHIP[signal], label }
 }
 
 /** What the ad's chip column means, for the column's ⓘ. */
 export const AD_VERDICT_RULE =
-  'Desligar: ROAS abaixo de 80% do empate com $50 ou mais gastos. Escalar: 40% ou mais acima do empate, com $30 gastos e 3 compras. OK: sem ação, no empate ou acima. Abaixo do empate: sem ação ainda — pouco gasto para cortar, ou acima da linha de corte. Pausados e anúncios de conta compartilhada não recebem veredito.'
+  'Desligar: ROAS abaixo de 80% do empate com $50 ou mais gastos. Escalar: 40% ou mais acima do empate, com $30 gastos e 3 compras. Manter: sem ação, no empate ou acima. Abaixo do empate: sem ação ainda — pouco gasto para cortar, ou acima da linha de corte. Pausados e anúncios de conta compartilhada não recebem veredito.'
 
 export interface TrendSpec {
   /** "▲ 77%", "▼ 30%", "■ estável", "—". */
@@ -101,4 +100,18 @@ export function actionCountsText(actions: Record<CampaignAction, number>): strin
   // The first part carries the noun; when it is "nenhuma", name it on the next.
   if (actions.cortar === 0) parts[0] = 'nenhuma campanha para cortar'
   return `${parts.slice(0, -1).join(', ')} e ${parts[parts.length - 1]}`
+}
+
+/**
+ * The row badge for Meta's impossible purchases dropped from a campaign
+ * (above $20.000 on one ad-day, lib/engine/pnl PHANTOM_PURCHASE_VALUE). In
+ * words and without a minus sign: "−$183.000 fantasma" sat next to the money
+ * columns and read as a loss. The full sentence goes in the tooltip.
+ */
+export function phantomBadge(value: number): string {
+  return `compra fantasma descartada (${formatMoney(value)})`
+}
+
+export function phantomNote(value: number): string {
+  return `O Meta reportou ${formatMoney(value)} em compras impossíveis (acima de $20.000 num dia de um anúncio). Foram descartadas: não entram nas vendas atribuídas, no ROAS nem no lucro estimado.`
 }

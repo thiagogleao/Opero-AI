@@ -12,7 +12,7 @@ import type { ReactNode } from 'react'
 import type { CountryRow } from '@/lib/data/countries'
 import type { PnL } from '@/lib/engine/pnl'
 import { Badge, Count, DataTable, EmptyState, Money, Pct, type DataColumn, type DataRow } from '@/components/ui'
-import { formatMoney } from '@/lib/format'
+import { formatMoney, formatPct, plural } from '@/lib/format'
 import s from './countries.module.css'
 
 function CountryCell({ row }: { row: CountryRow }) {
@@ -40,7 +40,9 @@ export function CountryTable({ rows, totals, configured, rangeLabel, storesLabel
     { key: 'country', label: 'País' },
     { key: 'orders', label: 'Pedidos', numeric: true, sortable: true },
     { key: 'revenue', label: 'Receita', numeric: true, sortable: true },
-    { key: 'share', label: '% das vendas', numeric: true, sortable: true },
+    // Folds under Receita below ~1000px of table box (countries.module.css):
+    // at 1024 "Por pedido" started behind an unseen scrollbar.
+    { key: 'share', label: <span className={s.colShare}>% das vendas</span>, numeric: true, sortable: true },
     ...(configured ? [
       { key: 'costs', label: 'Custos', numeric: true, sortable: true, info: 'Produto, frete, taxas e extras de cada pedido, com o preço do fornecedor para o país de entrega.' },
       { key: 'contribution', label: 'Contribuição', numeric: true, sortable: true, info: 'Receita − custos variáveis, antes dos anúncios. Os anúncios não são divididos por país: a divisão do Meta não é confiável para isso.' },
@@ -54,8 +56,8 @@ export function CountryTable({ rows, totals, configured, rangeLabel, storesLabel
     cells: {
       country: <CountryCell row={r} />,
       orders: <Count value={r.orders} />,
-      revenue: <Money value={r.revenue} />,
-      share: <Pct value={r.revenueShare} />,
+      revenue: <><Money value={r.revenue} /><span className={s.inline}>{formatPct(r.revenueShare)} das vendas</span></>,
+      share: <span className={s.colShare}><Pct value={r.revenueShare} /></span>,
       costs: <Money value={r.variableCosts} tone="none" />,
       contribution: <Money value={r.contribution} />,
       margin: <Pct value={r.contributionMargin} tone="auto" />,
@@ -73,22 +75,24 @@ export function CountryTable({ rows, totals, configured, rangeLabel, storesLabel
     country: <span>Total{storesLabel ? ` ${storesLabel}` : ''}</span>,
     orders: <Count value={totals.orders} />,
     revenue: <Money value={totals.revenue} />,
-    share: <Pct value={totals.revenue > 0 ? 100 : null} />,
+    share: <span className={s.colShare}><Pct value={totals.revenue > 0 ? 100 : null} /></span>,
     costs: <Money value={totals.variableCosts} tone="none" />,
     contribution: <Money value={totals.contribution} />,
     margin: <Pct value={totals.contributionMargin} tone="auto" />,
     perOrder: <Money value={totals.orders > 0 ? totals.contribution / totals.orders : null} />,
   }
   return (
-    <DataTable
-      caption={`Contribuição por país em ${rangeLabel}`}
-      columns={columns}
-      rows={data}
-      footer={footer}
-      initialSort={{ key: 'revenue', dir: 'desc' }}
-      dense
-      empty={<EmptyState compact title="Nenhum pedido no período" />}
-    />
+    <div className={s.tableBox}>
+      <DataTable
+        caption={`Contribuição por país em ${rangeLabel}`}
+        columns={columns}
+        rows={data}
+        footer={footer}
+        initialSort={{ key: 'revenue', dir: 'desc' }}
+        dense
+        empty={<EmptyState compact title="Nenhum pedido no período" />}
+      />
+    </div>
   )
 }
 
@@ -139,6 +143,8 @@ export function MetaCountries({ rows, purchasesKnown, rangeLabel }: {
 export function coverageText(meta: { coveredSpend: number; totalSpend: number; coveragePct: number | null; missingDays: string[] }): string | null {
   if (!(meta.totalSpend > 0)) return null
   const pct = meta.coveragePct === null ? '—' : `${Math.round(meta.coveragePct)}%`
-  const missing = meta.missingDays.length ? ` Faltam ${meta.missingDays.length} ${meta.missingDays.length === 1 ? 'dia' : 'dias'} com gasto sem divisão por país.` : ''
+  const n = meta.missingDays.length
+  // The verb agrees with the count: "Falta 1 dia", "Faltam 12 dias".
+  const missing = n ? ` ${n === 1 ? 'Falta' : 'Faltam'} ${plural(n, 'dia', 'dias')} com gasto sem divisão por país.` : ''
   return `A divisão por país do Meta cobre ${pct} do gasto (${formatMoney(meta.coveredSpend)} de ${formatMoney(meta.totalSpend)}).${missing}`
 }

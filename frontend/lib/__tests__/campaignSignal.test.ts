@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  breakEvenRoas, campaignTrend, decideCampaign, estimateProfit, marginPct,
+  breakEvenRoas, campaignTrend, decideCampaign, DEFAULT_THRESHOLDS, describeThresholds, estimateProfit, marginPct,
   type DecisionDay, type DecisionInput,
 } from '../campaignSignal'
 import { eachDay } from '../engine/dates'
@@ -134,6 +134,38 @@ describe('decideCampaign', () => {
     const days = flat(WINDOW, 50, 1000 / 7, 2)
     days[6] = { ...days[6], spend: 0 }
     expect(decideCampaign(input({ status: null, days })).basis).toBe('pausada')
+  })
+})
+
+describe('reasons and rules are written the pt-BR way', () => {
+  // Shown as is on the desktop, the phone and in pushes, next to lib/format
+  // numbers: "$1,234" and "-10%" read wrong beside "$1.234" and "−10%".
+  // A dot followed by exactly one or two digits is a decimal ("1.53"); with
+  // three it is a pt-BR thousands dot ("$10.500").
+  const enUS = /\d\.\d(?!\d{2})|\dx\b|\$\d{1,3},\d{3}|\$\d{4,}|(^|[\s(])-\d/
+
+  it('the decision sentences', () => {
+    const cut = decideCampaign(input({ days: flat(WINDOW, 50, 490 / 7, 2) }))
+    expect(cut.reason).toBe('Margem de −11% em 7 dias — está queimando dinheiro')
+    const big = decideCampaign(input({ days: flat(WINDOW, 1500, 0, 0) }))
+    expect(big.reason).toBe('$10.500 em 7 dias sem nenhuma venda atribuída pelo Meta')
+    const few = decideCampaign(input({ days: flat(WINDOW, 6.5, 20, 1) }))
+    expect(few.reason).toBe('Pouco volume para julgar: 7 pedidos e $45,50 em 7 dias (mínimo 10 pedidos e $150)')
+    const one = decideCampaign(input({ days: [{ date: WINDOW.to, spend: 20, revenue: 30, purchases: 1 }] }))
+    expect(one.reason).toBe('Pouco volume para julgar: 1 pedido e $20,00 em 7 dias (mínimo 10 pedidos e $150)')
+    const better = decideCampaign(input({ days: [...flat(PREVIOUS, 50, 100, 1), ...flat(WINDOW, 50, 150, 2)] }))
+    expect(better.notes).toEqual(['ROAS 50% melhor que nos 7 dias anteriores'])
+    for (const d of [cut, big, few, one, better, decideCampaign(input())]) {
+      for (const t of [d.reason, ...d.notes]) expect(t, t).not.toMatch(enUS)
+    }
+  })
+
+  it('the rule legend', () => {
+    const rules = describeThresholds({ ...DEFAULT_THRESHOLDS, minSpend: 1500 })
+    expect(rules.observar).toBe('Entre −10% e 0% de margem, ou pouco volume para julgar (menos de 10 pedidos ou $1.500).')
+    expect(rules.cortar).toBe('Margem de −10% ou pior com volume suficiente; ou $1.500 gastos e o prejuízo continuaria mesmo com 50% mais vendas.')
+    expect(describeThresholds({ ...DEFAULT_THRESHOLDS, minSpend: 50 }).escalar).toContain('com pelo menos 10 pedidos e $50 de gasto')
+    for (const t of Object.values(rules)) expect(t, t).not.toMatch(enUS)
   })
 })
 

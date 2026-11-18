@@ -5,16 +5,18 @@ import { computePnL, type CountryPnL, type PnL } from '@/lib/engine/pnl'
 import type { StoreRef } from '@/lib/access'
 import { getCountryReport, rollUpCountries, TERRITORIES_NOTE, type CountryReport, type CountryRow } from '@/lib/data/countries'
 import { getCustomerLtv, getCustomerSplit, type CustomerSplit } from '@/lib/data/customers'
-import { buildMetaSteps, getFunnel, META_STEPS, type FunnelReport, type MetaStepKey } from '@/lib/data/funnel'
+import { getFunnel, sumFunnels, type FunnelReport } from '@/lib/data/funnel'
 import { sumTotals } from '@/lib/views/verdict'
-import { formatMoney, formatPct } from '@/lib/format'
+import { formatMoney, formatPct, plural } from '@/lib/format'
 import { AppShell, PageHeader, PeriodNote } from '@/components/shell'
 import { Block, Callout, EmptyState, ErrorState, SkeletonBlock, VerdictCard } from '@/components/ui'
 import { HorizontalBars } from '@/components/charts'
 import { CountryTable, MetaCountries, coverageText } from '@/components/countries/CountryTables'
 import { CustomersByStore, CustomersSplit, FunnelBlock, LtvBlock, type StoreCustomers } from '@/components/countries/CustomerBlocks'
 import { buildCountriesVerdict } from '@/components/countries/countriesVerdict'
-import { countryCounts, foldCountryRows, meaningfulCountries } from '@/components/countries/fold'
+import { countryCounts, foldCountryRows } from '@/components/countries/fold'
+import { sharedLeftOutText } from '@/components/countries/sharedText'
+import { loadFirstSale } from '@/components/campaigns/firstSale'
 import s from '@/components/countries/countries.module.css'
 
 /**
@@ -46,6 +48,7 @@ export default async function CountriesPage({ searchParams }: { searchParams: Pr
     // tells how many countries had orders.
     getCountryReport(store, ctx.range, { limit: 250 }),
     getCustomerSplit(store, ctx.range),
+    loadFirstSale(ctx),
   ]).catch(err => { console.error('[countries]', err); return null })
   if (!loaded || !loaded[0]) {
     return (
@@ -55,17 +58,19 @@ export default async function CountriesPage({ searchParams }: { searchParams: Pr
       </AppShell>
     )
   }
-  const [report, split] = loaded as [CountryReport, CustomerSplit]
-  const all = meaningfulCountries(report.rows)
+  const [report, split, firstSale] = loaded as [CountryReport, CustomerSplit, Awaited<ReturnType<typeof loadFirstSale>>]
+  const all = report.rows
   const rows = foldCountryRows(all, ROWS, report.totals.revenue)
   const opt = ctx.storeOptions.find(o => o.id === store.id)
   const verdict = buildCountriesVerdict({
     subjectOf: `da ${store.name}`, subjectIn: `na ${store.name}`, rows, counts: countryCounts(all), totals: report.totals,
     configured: report.configured, customers: split, rangeLabel: ctx.rangeLabel, periodPhrase: ctx.periodPhrase,
-    partialLabel: ctx.partialLabel, dayLabel: opt?.dayLabel ?? null, split: ctx.split,
+    partialLabel: ctx.partialLabel, dayLabel: opt?.dayLabel ?? null, split: ctx.split, firstSale,
   })
   const notes = report.notes.filter(n => n !== TERRITORIES_NOTE)
   const coverage = coverageText(report.meta)
+  const nameOf = (id: string) => ctx.stores.find(x => x.id === id)?.name ?? null
+  const metaShared = report.sharedLeftOut ? sharedLeftOutText(report.sharedLeftOut, nameOf, 'das colunas do Meta e da captura') : null
 
   return (
     <AppShell ctx={ctx}>
@@ -90,7 +95,10 @@ export default async function CountriesPage({ searchParams }: { searchParams: Pr
         howTo={CAVEAT_LINE}
         info={report.meta.caveat}
         flush
-        footer={coverage ? <span>{coverage}</span> : undefined}
+        footer={coverage || metaShared ? <>
+          {metaShared && <span>{metaShared}</span>}
+          {coverage && <span>{coverage}</span>}
+        </> : undefined}
       >
         <MetaCountries rows={rows} purchasesKnown rangeLabel={ctx.rangeLabel} />
       </Block>
@@ -124,7 +132,7 @@ function CountryAside({ rows, totals, configured, rangeLabel }: { rows: CountryR
         items={top.map(r => {
           const v = configured ? r.contribution : r.revenue
           return {
-            key: r.country, label: r.name, sub: `${r.orders} ${r.orders === 1 ? 'pedido' : 'pedidos'}${r.smallSample ? ' · amostra pequena' : ''}`,
+            key: r.country, label: r.name, sub: `${plural(r.orders, 'pedido', 'pedidos')}${r.smallSample ? ' · amostra pequena' : ''}`,
             value: v, tone: v < 0 ? 'neg' : configured ? 'pos' : 'neu', note: formatPct(base > 0 ? (v / base) * 100 : null, { digits: 0 }),
           }
         })}
@@ -143,7 +151,9 @@ async function StoreLtv({ store, today }: { store: StoreRef; today: string }) {
 async function StoreFunnel({ store, ctx }: { store: StoreRef; ctx: PageContext }) {
   const funnel = await getFunnel(store, ctx.range).catch(err => { console.error('[countries] funnel', err); return null })
   if (!funnel) return <Block title="Funil"><ErrorState compact /></Block>
-  return <FunnelBlock funnel={funnel} rangeLabel={ctx.rangeLabel} />
+  const nameOf = (id: string) => ctx.stores.find(x => x.id === id)?.name ?? null
+  const sharedNote = funnel.sharedLeftOut ? sharedLeftOutText(funnel.sharedLeftOut, nameOf, 'do funil, da captura e do gasto por pedido') : null
+  return <FunnelBlock funnel={funnel} rangeLabel={ctx.rangeLabel} sharedNote={sharedNote} />
 }
 
 // ─── Todas as lojas ──────────────────────────────────────────────────────────
@@ -179,7 +189,7 @@ async function AllStores({ ctx }: { ctx: PageContext }) {
   const configured = priced.length > 0
   const totals = sumTotals(judged.map(p => p.totals))
   const summed = sumCountries(judged.map(p => p.countries ?? []))
-  const full = meaningfulCountries(rollUpCountries(summed, totals.revenue, summed.length))
+  const full = rollUpCountries(summed, totals.revenue, summed.length)
   const rows = foldCountryRows(full, ROWS, totals.revenue)
   const counts = countryCounts(full)
   // Named as "fora da soma" only when they sold something; a store without
@@ -236,34 +246,14 @@ async function AllCustomers({ stores, rangeLabel, ctx }: { stores: StoreRef[]; r
   return (
     <>
       <CustomersByStore stores={customers} rangeLabel={rangeLabel} />
-      {funnels.length > 0 && <FunnelBlock funnel={sumFunnels(funnels, ctx)} rangeLabel={rangeLabel} />}
+      {funnels.length > 0 && <SummedFunnel funnels={funnels} ctx={ctx} rangeLabel={rangeLabel} />}
     </>
   )
 }
 
-/** One funnel for several stores: Meta's step counts and Shopify's counts add
- *  up; the rates are recomputed by the same rule (lib/data/funnel). */
-function sumFunnels(list: FunnelReport[], ctx: PageContext): FunnelReport {
-  const values = Object.fromEntries(META_STEPS.map(s => [s.key, 0])) as Record<MetaStepKey, number>
-  let spend = 0, orders = 0, abandoned = 0
-  for (const f of list) {
-    spend += f.spend
-    orders += f.shopify.orders
-    abandoned += f.shopify.abandonedCheckouts
-    for (const st of f.meta.steps) values[st.key] += st.value
-  }
-  return {
-    storeId: 'todas',
-    range: ctx.range,
-    spend,
-    meta: buildMetaSteps(values, spend),
-    shopify: {
-      orders, abandonedCheckouts: abandoned,
-      abandonmentPct: orders + abandoned > 0 ? (abandoned / (orders + abandoned)) * 100 : null,
-      costPerOrder: orders > 0 && spend > 0 ? spend / orders : null,
-    },
-    metaCapturePct: orders > 0 && spend > 0 ? (values.purchases / orders) * 100 : null,
-    notes: [...new Set(list.flatMap(f => f.notes))],
-  }
+function SummedFunnel({ funnels, ctx, rangeLabel }: { funnels: FunnelReport[]; ctx: PageContext; rangeLabel: string }) {
+  const funnel = sumFunnels(funnels, new Set(ctx.storeIds), ctx.range)
+  const nameOf = (id: string) => ctx.stores.find(x => x.id === id)?.name ?? null
+  const sharedNote = funnel.sharedLeftOut ? sharedLeftOutText(funnel.sharedLeftOut, nameOf, 'do funil, da captura e do gasto por pedido') : null
+  return <FunnelBlock funnel={funnel} rangeLabel={rangeLabel} sharedNote={sharedNote} />
 }
-
