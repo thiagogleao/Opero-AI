@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from 'next/server'
 import { errorResponse, readJson, storeFromBody, storeParam, targetStore, viewerOrThrow } from '@/lib/integrations/http'
 import { listExtraAccountsLegacy, listStoreAdAccounts } from '@/lib/integrations/adAccounts'
 import { linkAdAccount } from '@/lib/integrations/fbConnect'
+import { refuseIfArchived } from '../../_lib/archivedStore'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -30,13 +31,15 @@ export async function GET(req: NextRequest) {
  *   → { ok: true, account: StoreAdAccount, backfillFrom, warning }
  *
  * Links an extra account with a typed token (typically a system-user token,
- * which never expires). Same rules as POST /api/facebook/accounts, role "extra".
+ * which never expires). Same rules as POST /api/facebook/accounts, role "extra"
+ * (an archived store: 409 store_archived).
  */
 export async function POST(req: NextRequest) {
   try {
     const viewer = await viewerOrThrow()
     const body = await readJson(req)
     const store = await targetStore(viewer, storeFromBody(body))
+    refuseIfArchived(store)
     const linked = await linkAdAccount(viewer, store, {
       adAccountId: body.fb_ad_account_id,
       role: 'extra',

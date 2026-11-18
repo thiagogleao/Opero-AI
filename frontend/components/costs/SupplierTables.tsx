@@ -16,7 +16,7 @@ import { toNumber } from '@/lib/data/profitConfig'
 import { addUnique, dropRow, patchRow, setCogs, without, type Update } from './edit'
 import { newId, rowKey, type CostForm, type StepRow, type TierRow } from './form'
 import {
-  DateField, Msgs, NumField, ProductChips, ProductPicker, Radio, RemoveButton, TextField, useMessages, usePrefixMessages,
+  DateField, EditOnly, Msgs, NumField, ProductChips, ProductPicker, Radio, RemoveButton, TextField, useMessages, usePrefixMessages,
   type CatalogueItem,
 } from './fields'
 import s from './costs.module.css'
@@ -56,6 +56,7 @@ export function SupplierTablesSection({ form, update, catalogue, nameOf, today }
           />
         ))}
         <Msgs errors={errors} />
+        <EditOnly>
         <div className={s.addRow}>
           <Button size="sm" onClick={() => update(f => setCogs(f, {
             price_tiers: [...f.cogs.price_tiers, {
@@ -68,6 +69,7 @@ export function SupplierTablesSection({ form, update, catalogue, nameOf, today }
             }],
           }))}>Adicionar tabela</Button>
         </div>
+        </EditOnly>
       </div>
     </Block>
   )
@@ -97,7 +99,7 @@ function TierCard({ tier, today, catalogue, nameOf, onChange, onRemove }: {
             <Badge tone={future ? 'neu' : 'mut'}>{future ? 'começa' : 'desde'} {formatDate(tier.effective_from, today)}</Badge>
           )}
         </div>
-        <Button size="sm" variant="ghost" icon="x" onClick={onRemove}>Remover tabela</Button>
+        <EditOnly><Button size="sm" variant="ghost" icon="x" onClick={onRemove}>Remover tabela</Button></EditOnly>
       </div>
 
       <div className={s.fieldGrid}>
@@ -133,12 +135,14 @@ function TierCard({ tier, today, catalogue, nameOf, onChange, onRemove }: {
           {tier.steps.map(st => <StepInput key={st._id} tierKey={k} step={st} onChange={p => setStep(st._id, p)} onRemove={() => onChange({ steps: dropRow(tier.steps, st._id) })} />)}
         </div>
         <Msgs errors={general.errors} warnings={general.warnings} />
+        <EditOnly>
         <div className={s.inline}>
           <Button size="sm" variant="ghost" onClick={() => {
             const next = Math.max(0, ...tier.steps.map(x => toNumber(x.units) ?? 0)) + 1
             onChange({ steps: [...tier.steps, { _id: newId('s'), units: String(next), price: '' }] })
           }}>Adicionar faixa</Button>
         </div>
+        </EditOnly>
       </div>
 
       <div className={s.fieldGrid}>
@@ -159,11 +163,9 @@ function StepInput({ tierKey, step, onChange, onRemove }: {
 }) {
   const u = step.units.trim()
   const m = useMessages(`${tierKey}.order_prices.${u}`, `${tierKey}.step#${step._id}`)
-  // The validator says "preço inválido" for a box that is merely empty (a new
-  // card starts with three empty steps): ask for the price instead.
-  const errors = step.price.trim() === '' && u
-    ? [...new Set(m.errors.map(e => (e.startsWith('Preço inválido') ? `Informe o preço do pedido com ${u} unidade(s).` : e)))]
-    : m.errors
+  // An empty box says "Informe o preço…" and a bad value "Preço inválido…",
+  // straight from the validator (lib/data/profitConfig.ts).
+  const errors = m.errors
   const unitsLabel = `Unidades no pedido (faixa)`
   return (
     <div className={s.step}>

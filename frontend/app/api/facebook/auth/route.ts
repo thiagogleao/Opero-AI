@@ -12,6 +12,7 @@ export const dynamic = 'force-dynamic'
 
 /**
  * GET /api/facebook/auth?store=<id>&mode=main|extra[&return=/settings]
+ *   (`return` may carry the page's periodo/de/ate/parte; see safeReturnTo)
  *
  * Starts the Facebook OAuth for one store. The target store, the mode and the
  * viewer travel in a signed, expiring state (lib/integrations/oauthState), not
@@ -19,7 +20,9 @@ export const dynamic = 'force-dynamic'
  * (the current settings links do not send it). `mode=add_extra` is accepted
  * as an alias of `extra`.
  *
- * 404 when the store is not the viewer's; not signed in → /sign-in.
+ * Refusals (archived store: consultation only; app not configured) come back
+ * as `<return>?fb_error=<code>&loja=<id>`. 404 when the store is not the
+ * viewer's; not signed in → /sign-in.
  */
 export async function GET(req: NextRequest) {
   const origin = appOrigin(req)
@@ -33,7 +36,8 @@ export async function GET(req: NextRequest) {
     const back = (code: string) => {
       const u = new URL(returnTo, origin)
       u.searchParams.set('fb_error', code)
-      u.searchParams.set('store', store.id)
+      // The site's store key, so the banner shows on this store's screen.
+      u.searchParams.set('loja', store.id)
       return NextResponse.redirect(u)
     }
     if (store.archived) return back('store_archived')

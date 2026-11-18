@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from 'next/server'
 import { errorResponse, readJson, storeFromBody, storeParam, viewerOrThrow } from '@/lib/integrations/http'
 import { linkAdAccount, pickerFor, storeForFacebook } from '@/lib/integrations/fbConnect'
 import { FB_PENDING_COOKIE } from '@/lib/integrations/pending'
+import { refuseIfArchived } from '../../_lib/archivedStore'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -48,6 +49,8 @@ export async function POST(req: NextRequest) {
     const body = await readJson(req)
     const pending = req.cookies.get(FB_PENDING_COOKIE)?.value
     const store = await storeForFacebook(viewer, storeFromBody(body), pending)
+    // Consultation only: refused before Meta is asked about the account.
+    refuseIfArchived(store)
     const role = body.role === 'extra' ? 'extra' : body.role === 'main' ? 'main' : null
     const linked = await linkAdAccount(viewer, store, {
       adAccountId: body.fb_ad_account_id ?? body.adAccountId,

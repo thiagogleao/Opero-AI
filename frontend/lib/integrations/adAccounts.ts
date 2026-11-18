@@ -47,12 +47,16 @@ export async function listStoreAdAccounts(storeId: string): Promise<StoreAdAccou
   // their account.
   // "30 dias" = the 30 complete days ending yesterday in the store's own
   // timezone, the same window the rest of the app calls "30 dias".
+  // "last" is the last day the account SPENT: the collector writes $0.00 rows
+  // for days an ad ran without spending, and counting those said the ads were
+  // still spending after they stopped (and contradicted the Resumo, which
+  // reads spend > 0 too: components/portfolio/data.ts loadLastActivity).
   const spend = await query<{ acct: string | null; spend30d: number; last: string | null }>(
     `SELECT m.fb_ad_account_id AS acct,
             COALESCE(SUM(m.spend) FILTER (
               WHERE m.date BETWEEN (now() AT TIME ZONE t.timezone)::date - 30
                                AND (now() AT TIME ZONE t.timezone)::date - 1), 0)::float8 AS spend30d,
-            MAX(m.date)::text AS last
+            (MAX(m.date) FILTER (WHERE m.spend > 0))::text AS last
        FROM fb_ad_daily_metrics m JOIN tenants t ON t.id = m.tenant_id
       WHERE m.tenant_id = $1
       GROUP BY 1`,

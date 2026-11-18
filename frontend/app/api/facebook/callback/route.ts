@@ -4,7 +4,7 @@ import { attachAdAccount } from '@/lib/integrations/adAccounts'
 import { storeCredentials } from '@/lib/integrations/credentials'
 import { exchangeCodeForLongToken, facebookApp, listAdAccounts } from '@/lib/integrations/facebook'
 import { appOrigin, errorResponse, flowCookie, HttpError } from '@/lib/integrations/http'
-import { LEGACY_OAUTH_COOKIES, NONCE_COOKIE, readOAuthState, viewerKey } from '@/lib/integrations/oauthState'
+import { LEGACY_OAUTH_COOKIES, NONCE_COOKIE, readOAuthState, returnState, viewerKey } from '@/lib/integrations/oauthState'
 import { FB_PENDING_COOKIE, FB_PENDING_TTL_SECONDS, sealPending } from '@/lib/integrations/pending'
 
 export const runtime = 'nodejs'
@@ -21,10 +21,13 @@ export const dynamic = 'force-dynamic'
  *    and it would not replace the store's current main account with another,
  *    it is linked right away.
  *
- * Exits: `<return>?fb_connected=true&store=<id>` on success, the picker
- * (/facebook/accounts or /facebook/extra-accounts, `?store=<id>`) to choose,
- * or `<return>?fb_error=<code>&store=<id>` — and every exit clears the flow
- * cookies, so a cancelled flow can never steer the next one.
+ * Exits: `<return>?fb_connected=true&loja=<id>` on success, the picker
+ * (/facebook/accounts or /facebook/extra-accounts, `?loja=<id>`) to choose,
+ * or `<return>?fb_error=<code>&loja=<id>` — `loja` being the site's store key,
+ * so the banner shows on that store's screen. Every exit clears the flow
+ * cookies, so a cancelled flow can never steer the next one. A store archived
+ * while the dialog was open is refused (store_archived: consultation only)
+ * before the code is exchanged.
  */
 export async function GET(req: NextRequest) {
   const origin = appOrigin(req)
@@ -45,7 +48,7 @@ export async function GET(req: NextRequest) {
     for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v)
     return NextResponse.redirect(u)
   }
-  const fail = (code: string) => finish(to(returnTo, st?.storeId ? { fb_error: code, store: st.storeId } : { fb_error: code }))
+  const fail = (code: string) => finish(to(returnTo, st?.storeId ? { fb_error: code, loja: st.storeId } : { fb_error: code }))
 
   try {
     if (!st || !st.storeId) return fail('invalid_state')
@@ -53,6 +56,7 @@ export async function GET(req: NextRequest) {
     if (!viewer) return finish(NextResponse.redirect(new URL('/sign-in', origin)))
     if (viewerKey(viewer) !== st.viewer) return finish(NextResponse.json({ error: 'Loja não encontrada', code: 'not_found' }, { status: 404 }))
     const store = await requireStore(viewer, st.storeId)
+    if (store.archived) return fail('store_archived')
 
     if (sp.get('error') || !sp.get('code')) return fail('access_denied')
     const app = facebookApp()
@@ -74,7 +78,7 @@ export async function GET(req: NextRequest) {
       try {
         await attachAdAccount(viewer, store, { adAccountId: only.id, role: mode, token: exchanged.token })
         // 'true', the value the current Settings screen tests for.
-        return finish(to(returnTo, { fb_connected: 'true', store: store.id }))
+        return finish(to(returnTo, { fb_connected: 'true', loja: store.id }))
       } catch (err) {
         // A rule stopped the automatic link (already linked elsewhere, would
         // replace a permanent token…): let the picker explain it.
@@ -84,7 +88,9 @@ export async function GET(req: NextRequest) {
 
     const pending = sealPending({ viewer: st.viewer, storeId: store.id, mode, token: exchanged.token })
     const picker = mode === 'extra' ? '/facebook/extra-accounts' : '/facebook/accounts'
-    return finish(to(picker, accounts.length === 0 ? { store: store.id, manual: 'true' } : { store: store.id }), pending)
+    // The picker keeps the period the flow started on, so its way back does too.
+    const keep = returnState(returnTo)
+    return finish(to(picker, accounts.length === 0 ? { ...keep, loja: store.id, manual: 'true' } : { ...keep, loja: store.id }), pending)
   } catch (err) {
     const res = errorResponse(err)
     if (res.status === 404 || res.status === 401) return finish(NextResponse.json(await res.json(), { status: res.status }))

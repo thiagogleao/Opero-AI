@@ -22,7 +22,7 @@ import { formatMoney, plural } from '@/lib/format'
 import { addUnique, dropRow, patchRow, setCogs, without, type Update } from './edit'
 import { productKey, rowKey, newId, type CostForm } from './form'
 import {
-  Check, Msgs, NumField, ProductChips, ProductPicker, RemoveButton, SelectField, searchCatalogue, useMessages,
+  Check, EditOnly, Msgs, NumField, ProductChips, ProductPicker, RemoveButton, SelectField, searchCatalogue, useMessages, useReadOnly,
   type CatalogueItem,
 } from './fields'
 import s from './costs.module.css'
@@ -296,6 +296,9 @@ function ProductRow({ item, value, source, defaultCost, units, free, flash, onCo
 function VolumeDiscounts({ form, update }: { form: CostForm; update: Update }) {
   const rows = form.cogs.volume_discounts
   const [open, setOpen] = useState(rows.length > 0)
+  const ro = useReadOnly()
+  // Read-only with no discount: there is nothing to show behind the link.
+  if (!open && ro) return null
   if (!open) {
     return (
       <div>
@@ -330,11 +333,13 @@ function VolumeDiscounts({ form, update }: { form: CostForm; update: Update }) {
           )
         })}
       </div>
+      <EditOnly>
       <div className={s.addRow}>
         <Button size="sm" onClick={() => update(f => setCogs(f, {
           volume_discounts: [...f.cogs.volume_discounts, { _id: newId('v'), min_units: '', discount_type: 'pct', discount_value: '' }],
         }))}>Adicionar faixa</Button>
       </div>
+      </EditOnly>
     </div>
   )
 }

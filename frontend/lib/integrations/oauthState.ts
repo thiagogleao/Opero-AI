@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
 import type { Viewer } from '../access'
+import { isIsoDate, isPeriod } from '../engine/dates'
 import { sameString, signPayload, verifyPayload } from './keys'
 
 /**
@@ -24,7 +25,8 @@ export interface OAuthState {
   storeId: string | null
   /** shopify: 'reconnect' | 'add'. facebook: 'main' | 'extra'. */
   mode: string
-  /** Where to send the person back (always a path from RETURN_PATHS). */
+  /** Where to send the person back (a path from RETURN_PATHS, with its
+   *  validated period state: see safeReturnTo). */
   returnTo: string
   /** Shopify: the validated *.myshopify.com domain the flow was started for. */
   shop?: string
@@ -77,6 +79,41 @@ export function readOAuthState(
  *  so a crafted `return` can never turn these routes into an open redirect. */
 export const RETURN_PATHS = ['/settings', '/settings/chaves', '/onboarding', '/'] as const
 
+const LOCAL = 'http://opero.invalid'
+
+/**
+ * Where a flow sends the person back: one of RETURN_PATHS, plus the site's
+ * period state (periodo, de/ate with periodo=custom, parte=50) so the screen
+ * comes back on the window it left from. Every other key is dropped (the
+ * callbacks set loja and their own flags) and each kept value is validated,
+ * so nothing free-form rides in the signed state or the redirect.
+ */
 export function safeReturnTo(raw: string | null | undefined, fallback: (typeof RETURN_PATHS)[number]): string {
-  return raw && (RETURN_PATHS as readonly string[]).includes(raw) ? raw : fallback
+  if (!raw || !raw.startsWith('/') || raw.startsWith('//') || raw.includes('\\')) return fallback
+  let u: URL
+  try { u = new URL(raw, LOCAL) } catch { return fallback }
+  if (u.origin !== LOCAL || !(RETURN_PATHS as readonly string[]).includes(u.pathname)) return fallback
+  const out = new URLSearchParams()
+  const periodo = u.searchParams.get('periodo')
+  const de = u.searchParams.get('de')
+  const ate = u.searchParams.get('ate')
+  if (periodo === 'custom') {
+    if (isIsoDate(de) && isIsoDate(ate)) { out.set('periodo', periodo); out.set('de', de); out.set('ate', ate) }
+  } else if (isPeriod(periodo)) {
+    out.set('periodo', periodo)
+  }
+  if (u.searchParams.get('parte') === '50') out.set('parte', '50')
+  const qs = out.toString()
+  return qs ? `${u.pathname}?${qs}` : u.pathname
+}
+
+/** The path of a safeReturnTo value, without its period state. */
+export function returnPathname(returnTo: string): string {
+  return returnTo.split('?', 1)[0]
+}
+
+/** The period state a safeReturnTo value carries, to pass on to a next screen. */
+export function returnState(returnTo: string): Record<string, string> {
+  const q = returnTo.split('?', 2)[1]
+  return q ? Object.fromEntries(new URLSearchParams(q)) : {}
 }

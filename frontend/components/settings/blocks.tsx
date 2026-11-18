@@ -8,7 +8,7 @@ import 'server-only'
 
 import type { ReactNode } from 'react'
 import { listStores, type StoreRef, type Viewer } from '@/lib/access'
-import { formatDate, formatRelativeTime, formatTimeInTz, plural, tzCity } from '@/lib/format'
+import { formatDate, formatRelativeTime, formatTimeInTz, tzCity } from '@/lib/format'
 import { shiftDate, todayInTz } from '@/lib/engine/dates'
 import { listStoreAdAccounts } from '@/lib/integrations/adAccounts'
 import { facebookHealth, shopifyHealth } from '@/lib/integrations/health'
@@ -17,8 +17,10 @@ import type { StoreShopifyHealth, SyncStatus } from '@/lib/integrations/types'
 import { Block, Callout, Chip, ErrorState, Icon } from '@/components/ui'
 import { AdAccounts, type AccountRow } from './AdAccounts'
 import { AnchorButton } from './AnchorButton'
-import { FACEBOOK_ERROR, SHOPIFY_ERROR, shortError } from './messages'
+import { FACEBOOK_ERROR, SHOPIFY_ERROR } from './messages'
+import { SyncErrorsLine } from './SyncErrorsLine'
 import { StoresList } from './StoresList'
+import { storeDay } from './storeDay'
 import { ButtonLink } from '@/components/ui'
 import s from './settings.module.css'
 
@@ -89,7 +91,7 @@ export async function StoreInfoBlock({ store, today }: { store: StoreRef; today:
           <span>{sum.currency ?? '—'}</span>
           <small>{sum.currency && sum.currency !== 'USD' ? 'Os pedidos chegam convertidos: o Opero mostra tudo em US$.' : 'O Opero mostra tudo em US$.'}</small>
         </dd>
-        <dt>No Opero desde</dt><dd>{formatDate(sum.createdAt.slice(0, 10), today)}</dd>
+        <dt>No Opero desde</dt><dd>{formatDate(storeDay(sum.createdAt, sum.timezone), today)}</dd>
         <dt>Situação</dt>
         <dd>
           <span className={s.inline}>
@@ -123,9 +125,7 @@ function syncLine(sync: SyncStatus | null, now: Date, what: string): ReactNode {
         {!ok && sync.lastSuccessAt ? ` · último sucesso ${formatRelativeTime(sync.lastSuccessAt, now)}` : ''}
         {!ok && !sync.lastSuccessAt ? ' · nenhum sucesso em 7 dias' : ''}
       </span>
-      {sync.errors24h > 0 && (
-        <span className="neg">{plural(sync.errors24h, 'erro', 'erros')} nas últimas 24 h{sync.lastError ? <> · último erro registrado: “{shortError(sync.lastError)}”</> : ''}</span>
-      )}
+      <SyncErrorsLine e={sync} one="erro" many="erros" />
     </>
   )
 }
@@ -140,12 +140,14 @@ function brasiliaWhen(at: string, now: Date): string {
   return `${label} às ${formatTimeInTz(at, tz)}`
 }
 
-/** One store's Shopify connection: type, live check, last collection, the fix. */
+/** One store's Shopify connection: type, live check, last collection, the fix.
+ *  `returnTo`: the page the reauthorization comes back to, with its URL state
+ *  (/settings or /settings/chaves; the auth route keeps only the period). */
 export function ShopifyHealthItem({ h, now, settingsKeysHref, returnTo }: {
-  h: StoreShopifyHealth; now: Date; settingsKeysHref: string | null; returnTo: '/settings' | '/settings/chaves'
+  h: StoreShopifyHealth; now: Date; settingsKeysHref: string | null; returnTo: string
 }) {
   const st = SHOPIFY_STATUS[h.status]
-  const reauth = `/api/shopify/auth?store=${encodeURIComponent(h.id)}&mode=reconnect&return=${returnTo}`
+  const reauth = `/api/shopify/auth?store=${encodeURIComponent(h.id)}&mode=reconnect&return=${encodeURIComponent(returnTo)}`
   return (
     <div className={s.facts}>
       <div className={s.inline}>
@@ -187,7 +189,7 @@ export function ShopifyHealthItem({ h, now, settingsKeysHref, returnTo }: {
   )
 }
 
-export async function ShopifyBlock({ store, keysHref, now }: { store: StoreRef; keysHref: string; now: Date }) {
+export async function ShopifyBlock({ store, keysHref, returnTo, now }: { store: StoreRef; keysHref: string; returnTo: string; now: Date }) {
   let h: StoreShopifyHealth | undefined
   try {
     ;[h] = await shopifyHealth([store])
@@ -201,7 +203,7 @@ export async function ShopifyBlock({ store, keysHref, now }: { store: StoreRef; 
       howTo="Testada agora, com a chave guardada: diz se os pedidos continuam entrando e o que fazer quando não."
       info="O teste lê a loja na Shopify com a chave guardada (só leitura) e junta com o que o coletor registrou nas últimas coletas."
     >
-      {h ? <ShopifyHealthItem h={h} now={now} settingsKeysHref={keysHref} returnTo="/settings" /> : (
+      {h ? <ShopifyHealthItem h={h} now={now} settingsKeysHref={keysHref} returnTo={returnTo} /> : (
         <ErrorState compact title="O teste da Shopify não respondeu">Nada foi alterado. Recarregue a página para testar de novo.</ErrorState>
       )}
     </Block>
@@ -210,7 +212,7 @@ export async function ShopifyBlock({ store, keysHref, now }: { store: StoreRef; 
 
 // ─── Facebook / Meta ──────────────────────────────────────────────────────────
 
-export async function FacebookBlock({ store, today, now }: { store: StoreRef; today: string; now: Date }) {
+export async function FacebookBlock({ store, today, now, returnTo }: { store: StoreRef; today: string; now: Date; returnTo: string }) {
   const [accountsRes, healthRes] = await Promise.allSettled([listStoreAdAccounts(store.id), facebookHealth(store)])
   if (accountsRes.status === 'rejected') {
     console.error('[ajustes] ad accounts', accountsRes.reason)
@@ -234,6 +236,7 @@ export async function FacebookBlock({ store, today, now }: { store: StoreRef; to
         key={store.id}
         storeId={store.id}
         storeName={store.name}
+        returnTo={returnTo}
         archived={store.archived}
         today={today}
         accounts={rows}
@@ -245,8 +248,8 @@ export async function FacebookBlock({ store, today, now }: { store: StoreRef; to
 
 // ─── Lojas ────────────────────────────────────────────────────────────────────
 
-export async function StoresBlock({ viewer, currentId, hrefFor, addHref }: {
-  viewer: Viewer; currentId: string | null; hrefFor: (id: string) => string; addHref: string
+export async function StoresBlock({ viewer, currentId, today, hrefFor, addHref }: {
+  viewer: Viewer; currentId: string | null; today: string; hrefFor: (id: string) => string; addHref: string
 }) {
   let items
   try {
@@ -254,7 +257,10 @@ export async function StoresBlock({ viewer, currentId, hrefFor, addHref }: {
     const sums = await loadStoreSummaries(refs)
     items = sums.map(sm => ({
       id: sm.id, name: sm.name, domain: sm.domain, city: tzCity(sm.timezone),
-      archived: sm.archived, archivedAt: sm.archivedAt, current: sm.id === currentId,
+      // The archive instant as a calendar date in the store's own timezone:
+      // the UTC date is already "tomorrow" after 21h in Brazil.
+      archived: sm.archived, archivedOn: sm.archivedAt ? storeDay(sm.archivedAt, sm.timezone) : null,
+      current: sm.id === currentId,
       shopifyConnected: sm.shopify.connected, facebookConnected: !!sm.facebook.mainAdAccountId || sm.facebook.activeExtraAccounts > 0,
       href: hrefFor(sm.id),
     }))
@@ -268,7 +274,7 @@ export async function StoresBlock({ viewer, currentId, hrefFor, addHref }: {
       title="Lojas"
       howTo={viewer.kind === 'owner' ? 'Todas as lojas do Opero. Arquivar tira a loja das somas e da sincronização sem apagar nada.' : 'As lojas da sua conta. Arquivar tira a loja das somas e da sincronização sem apagar nada.'}
     >
-      <StoresList stores={items} addHref={addHref} />
+      <StoresList stores={items} today={today} addHref={addHref} />
     </Block>
   )
 }

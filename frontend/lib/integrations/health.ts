@@ -6,6 +6,9 @@ import { fingerprint } from './keys'
 import { fetchShopInfo, readGrantedScopes, REQUIRED_SCOPES } from './shopify'
 import type { AdAccountHealth, StoreFacebookHealth, StoreShopifyHealth, SyncStatus } from './types'
 import { isoSql } from './sql'
+import { accountRuns, summarizeRuns, type SyncRun, type SyncSource } from './syncErrors'
+
+export { sanitizeError } from './syncErrors'
 
 /**
  * Health = does it work, not "is a value stored". The old badges showed ✓ for
@@ -14,51 +17,39 @@ import { isoSql } from './sql'
  * what the collector last recorded in sync_runs.
  */
 
-/** Strip anything credential-shaped and keep the first useful line. */
-export function sanitizeError(msg: string | null | undefined): string | null {
-  if (!msg) return null
-  const m = /Message:\s*(.+)/.exec(msg)
-  let s = (m ? m[1] : msg).trim().split('\n')[0]
-  s = s
-    .replace(/EA[A-Za-z0-9]{20,}/g, '[token]')
-    .replace(/shp(at|ca|pa|ss|ua)_[A-Za-z0-9]+/g, '[token]')
-    .replace(/access_token=[^&\s'"]+/gi, 'access_token=[token]')
-    .replace(/client_secret=[^&\s'"]+/gi, 'client_secret=[secret]')
-  return s.slice(0, 200) || null
-}
-
-interface RunRow { tenant_id: string; status: string; at: string; error_message: string | null }
-
-/** Latest status, last success and 24h errors of one source for some stores. */
-export async function syncStatus(storeIds: string[], source: 'shopify' | 'facebook'): Promise<Map<string, SyncStatus & { errorTexts: string[] }>> {
-  const out = new Map<string, SyncStatus & { errorTexts: string[] }>()
+/** The last 7 days of runs of one source, per store, newest first. */
+async function loadRuns(storeIds: string[], source: SyncSource): Promise<Map<string, SyncRun[]>> {
+  const out = new Map<string, SyncRun[]>()
   if (storeIds.length === 0) return out
-  const rows = await query<RunRow>(
-    `SELECT tenant_id, status, ${isoSql('started_at')} AS at, error_message
-       FROM sync_runs
-      WHERE tenant_id = ANY($1::text[]) AND source = $2 AND started_at > now() - interval '7 days'
-      ORDER BY started_at DESC`,
+  // account_id arrives with the v2 migration; to_jsonb reads it when the
+  // column exists and gives null before, so this query works on both schemas.
+  const rows = await query<SyncRun & { tenant_id: string }>(
+    `SELECT r.tenant_id, r.status, ${isoSql('r.started_at')} AS at, r.error_message,
+            to_jsonb(r)->>'account_id' AS account_id
+       FROM sync_runs r
+      WHERE r.tenant_id = ANY($1::text[]) AND r.source = $2 AND r.started_at > now() - interval '7 days'
+      ORDER BY r.started_at DESC`,
     [storeIds, source],
   )
-  const dayAgo = Date.now() - 86_400_000
-  for (const r of rows) {
-    let s = out.get(r.tenant_id)
-    if (!s) {
-      s = { status: r.status, at: r.at, lastSuccessAt: null, errors24h: 0, lastError: null, errorTexts: [] }
-      out.set(r.tenant_id, s)
-    }
-    if (r.status === 'success' && !s.lastSuccessAt) s.lastSuccessAt = r.at
-    if (r.status === 'error' && Date.parse(r.at) > dayAgo) {
-      s.errors24h++
-      if (!s.lastError) s.lastError = sanitizeError(r.error_message)
-      if (r.error_message) s.errorTexts.push(r.error_message)
-    }
+  for (const { tenant_id, ...run } of rows) {
+    const list = out.get(tenant_id)
+    if (list) list.push(run)
+    else out.set(tenant_id, [run])
   }
   return out
 }
 
-const publicSync = (s: (SyncStatus & { errorTexts: string[] }) | undefined): SyncStatus | null =>
-  s ? { status: s.status, at: s.at, lastSuccessAt: s.lastSuccessAt, errors24h: s.errors24h, lastError: s.lastError } : null
+/** Latest status, last success and 24 h errors (in words, and whether a later
+ *  success settled them) of one source for some stores. */
+export async function syncStatus(storeIds: string[], source: SyncSource): Promise<Map<string, SyncStatus>> {
+  const runs = await loadRuns(storeIds, source)
+  const out = new Map<string, SyncStatus>()
+  for (const [id, list] of runs) {
+    const sum = summarizeRuns(list, source)
+    if (sum) out.set(id, sum)
+  }
+  return out
+}
 
 export async function shopifyHealth(stores: StoreRef[]): Promise<StoreShopifyHealth[]> {
   const syncs = await syncStatus(stores.map(s => s.id), 'shopify')
@@ -69,7 +60,7 @@ export async function shopifyHealth(stores: StoreRef[]): Promise<StoreShopifyHea
       connection: c?.devDashboard ? 'dev_dashboard' as const : c?.shopifyToken ? 'token' as const : 'none' as const,
       fingerprint: c?.shopifyToken ? fingerprint(c.shopifyToken) : null,
       tokenExpiresAt: c?.devDashboard ? c.shopifyTokenExpiresAt : null,
-      lastSync: publicSync(syncs.get(s.id)),
+      lastSync: syncs.get(s.id) ?? null,
     }
     if (!c?.shopifyDomain || !c.shopifyToken) {
       return { ...base, status: 'missing', httpStatus: null, missingScopes: [], scopeCount: 0 }
@@ -92,19 +83,22 @@ export async function shopifyHealth(stores: StoreRef[]): Promise<StoreShopifyHea
 }
 
 export async function facebookHealth(store: StoreRef): Promise<StoreFacebookHealth> {
-  const [c, extras, syncs] = await Promise.all([
-    storeCredentials(store.id), extraAccountCredentials(store.id), syncStatus([store.id], 'facebook'),
+  const [c, extras, runsByStore] = await Promise.all([
+    storeCredentials(store.id), extraAccountCredentials(store.id), loadRuns([store.id], 'facebook'),
   ])
-  const sync = syncs.get(store.id)
+  const runs = runsByStore.get(store.id) ?? []
   const slots: { adAccountId: string; role: 'main' | 'extra'; token: string | null; syncing: boolean }[] = []
   if (c?.fbAdAccountId) slots.push({ adAccountId: c.fbAdAccountId, role: 'main', token: c.fbToken, syncing: !!c.fbToken })
   for (const e of extras) slots.push({ adAccountId: e.adAccountId, role: 'extra', token: e.token || null, syncing: e.active })
+  // The collector runs once per collected account: with a single one, every
+  // run of the store is that account's.
+  const collected = slots.filter(s => s.syncing).length
 
   const accounts = await Promise.all(slots.map(async (slot): Promise<AdAccountHealth> => {
     const [graph, tokenInfo] = slot.token
       ? await Promise.all([readAdAccount(slot.token, slot.adAccountId), inspectToken(slot.token)])
       : [null, null]
-    const mine = (sync?.errorTexts ?? []).filter(t => t.includes(slot.adAccountId))
+    const own = summarizeRuns(accountRuns(runs, slot.adAccountId, slot.syncing ? collected : 0), 'facebook')
     return {
       adAccountId: slot.adAccountId,
       role: slot.role,
@@ -113,9 +107,21 @@ export async function facebookHealth(store: StoreRef): Promise<StoreFacebookHeal
       accountStatus: graph?.account_status ?? null,
       readable: !!graph,
       tokenInfo,
-      errors24h: mine.length,
-      lastError: sanitizeError(mine[0]),
+      errors24h: own?.errors24h ?? 0,
+      lastError: own?.lastError ?? null,
+      lastErrorText: own?.lastErrorText ?? null,
+      lastErrorAt: own?.lastErrorAt ?? null,
+      errorsResolved: own?.errorsResolved ?? false,
     }
   }))
-  return { storeId: store.id, storeName: store.name, checkedAt: new Date().toISOString(), lastSync: publicSync(sync), accounts }
+
+  const lastSync = summarizeRuns(runs, 'facebook')
+  if (lastSync && lastSync.errors24h > 0 && collected > 1) {
+    // Several accounts share the store's runs: the latest success may be
+    // another account's. Settled only when each account's own runs say so,
+    // which needs sync_runs.account_id (v2 migration).
+    lastSync.errorsResolved = lastSync.errorsResolved && runs.some(r => r.account_id)
+      && accounts.every(a => a.errors24h === 0 || a.errorsResolved)
+  }
+  return { storeId: store.id, storeName: store.name, checkedAt: new Date().toISOString(), lastSync, accounts }
 }

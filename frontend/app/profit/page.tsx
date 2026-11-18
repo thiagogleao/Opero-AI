@@ -5,6 +5,8 @@
  * Server page: the store and the window come from the URL (getPageContext,
  * one store), the saved settings, the catalogue and the saved settings' P&L
  * are read here once; the editor (client) only previews drafts and saves.
+ * An archived store opens read-only (consultation only): the editor shows the
+ * saved settings and their preview, with one line saying why nothing can change.
  */
 
 import { Suspense } from 'react'
@@ -14,8 +16,10 @@ import { Callout, EmptyState, ErrorState, SkeletonBlock } from '@/components/ui'
 import { CostsEditor } from '@/components/costs/CostsEditor'
 import { loadCatalogue, loadCurrency, loadSavedCosts, loadSavedPreview } from '@/components/costs/load'
 import s from '@/components/costs/costs.module.css'
+import { storePageMetadata } from '@/components/settings/pageMetadata'
 
 export const dynamic = 'force-dynamic'
+export const generateMetadata = storePageMetadata('Custos')
 
 /** The domain code pill, unless the name already ends with it ("Dumpling Squishy · 8jcp3a"). */
 function pillCode(store: { name: string; domain: string | null } | null): string | null {
@@ -107,6 +111,7 @@ async function Editor({ ctx }: { ctx: PageContext }) {
       initialPreviewError={previewError}
       catalogue={catalogue}
       split={ctx.split}
+      restoreHref={ctx.hrefWith('/settings#lojas')}
     />
   )
 }

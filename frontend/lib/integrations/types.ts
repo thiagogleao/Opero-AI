@@ -131,8 +131,13 @@ export interface SyncStatus {
   lastSuccessAt: string | null
   /** Error runs in the last 24h. */
   errors24h: number
-  /** Short, sanitized message of the latest error in the last 24h. */
+  /** Short, sanitized message of the latest error in the last 24h (to quote). */
   lastError: string | null
+  /** That error in Portuguese when it is a known one (syncErrors.describeSyncError), else null. */
+  lastErrorText: string | null
+  lastErrorAt: string | null
+  /** Every error of the last 24h was followed by a successful collection. */
+  errorsResolved: boolean
 }
 
 export interface AdAccountHealth {
@@ -144,9 +149,14 @@ export interface AdAccountHealth {
   /** The account's token can read it right now. */
   readable: boolean
   tokenInfo: FacebookTokenInfo | null
-  /** Collector errors in the last 24h that name this account. */
+  /** Collector errors in the last 24h of this account (see syncErrors.accountRuns). */
   errors24h: number
   lastError: string | null
+  lastErrorText: string | null
+  lastErrorAt: string | null
+  /** A later successful collection of this same account settled every error
+   *  (false when that cannot be known: several accounts and no account_id). */
+  errorsResolved: boolean
 }
 
 export interface StoreFacebookHealth {

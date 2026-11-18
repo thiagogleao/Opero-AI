@@ -4,6 +4,7 @@ import { errorResponse, HttpError, readJson, viewerOrThrow } from '@/lib/integra
 import { linkAdAccount, pickerFor } from '@/lib/integrations/fbConnect'
 import { viewerKey } from '@/lib/integrations/oauthState'
 import { FB_PENDING_COOKIE, readPending } from '@/lib/integrations/pending'
+import { refuseIfArchived } from '../../../_lib/archivedStore'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -38,6 +39,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const { viewer, raw, pending, store } = await pendingStore(req)
+    refuseIfArchived(store)
     const body = await readJson(req)
     const linked = await linkAdAccount(viewer, store, {
       adAccountId: body.fb_ad_account_id,

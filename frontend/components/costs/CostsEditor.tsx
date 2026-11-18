@@ -16,6 +16,11 @@
  *  - M9: saves went to whatever store was active at save time. The store id
  *    travels with every request, and this component is keyed by it.
  *  - PE17/L3: index keys and uncontrolled inputs (see form.ts).
+ *
+ * An archived store opens read-only (owner decision: consultation only). The
+ * saved settings and their preview are shown; nothing can be typed, added or
+ * removed (ReadOnlyContext), no draft from this tab is applied, there is no
+ * save bar, and PUT /api/profit refuses it anyway (409 store_archived).
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -30,7 +35,8 @@ import { formatMoney, formatTimeInTz, plural } from '@/lib/format'
 import type { PnL } from '@/lib/engine/pnl'
 import { CountryPricesSection, OrderFeesSection } from './CountryCosts'
 import { clearDraft, useStoredDraft, writeDraft } from './draftStore'
-import { MessagesContext, type CatalogueItem } from './fields'
+import { MessagesContext, ReadOnlyContext, type CatalogueItem } from './fields'
+import { ArchivedNote } from '../settings/ArchivedNote'
 import {
   changedSections, clientIssues, joinPt, messagesByField, ptMessage, toForm, toPayload, type CostForm, type PayloadIndex,
 } from './form'
@@ -51,6 +57,8 @@ export interface CostsEditorProps {
   initialPreviewError: string | null
   catalogue: CatalogueItem[]
   split: boolean
+  /** Ajustes → Lojas of this store, where an archived store is restored. */
+  restoreHref: string
 }
 
 interface Notice {
@@ -93,17 +101,24 @@ function failure(res: Response, body: ProfitApiError | null): string {
 export function CostsEditor(props: CostsEditorProps) {
   const { store, window: win, today, catalogue, split } = props
   const router = useRouter()
+  const readOnly = store.archived
 
   const [saved, setSaved] = useState(props.saved)
   const baseForm = useMemo(() => toForm(saved.config), [saved.config])
+  // A read-only screen shows what is saved: never a draft left in this tab.
   const stored = useStoredDraft(store.id)
-  const restorable = stored && stored.version === saved.version ? stored.form : null
-  const staleDraft = stored && stored.version !== saved.version ? stored : null
+  const restorable = !readOnly && stored && stored.version === saved.version ? stored.form : null
+  const staleDraft = !readOnly && stored && stored.version !== saved.version ? stored : null
   // The form on screen: the user's edits, else a draft restored from this tab,
   // else the saved settings.
   const [edits, setEdits] = useState<CostForm | null>(null)
   const form = edits ?? restorable ?? baseForm
-  const update = useCallback((fn: (f: CostForm) => CostForm) => setEdits(prev => fn(prev ?? form)), [form])
+  const update = useCallback((fn: (f: CostForm) => CostForm) => {
+    // Belt and braces: the read-only inputs cannot call this, but nothing may
+    // turn an archived store's screen into a draft.
+    if (readOnly) return
+    setEdits(prev => fn(prev ?? form))
+  }, [form, readOnly])
 
   const catalogueNames = useMemo(() => Object.fromEntries(catalogue.map(c => [c.id, c.title])), [catalogue])
   const productNames = form.cogs.productNames
@@ -142,7 +157,7 @@ export function CostsEditor(props: CostsEditorProps) {
     return () => clearTimeout(t)
   }, [edits, savedJson, saved.version, store.id, catalogueNames])
 
-  useLeaveGuard(dirty, `Há alterações não salvas nos custos de ${store.name}. Sair mesmo assim? Elas ficam guardadas nesta aba até você voltar.`)
+  useLeaveGuard(dirty && !readOnly, `Há alterações não salvas nos custos de ${store.name}. Sair mesmo assim? Elas ficam guardadas nesta aba até você voltar.`, store.id)
 
   // ── Live preview of the draft ──
   const periodKey = `${win.period}|${win.from}|${win.to}`
@@ -224,6 +239,11 @@ export function CostsEditor(props: CostsEditorProps) {
         setNotice({ tone: 'neg', title: body.error || 'A configuração foi recusada.', list: (body.issues ?? []).map(i => ptMessage(i.message)).slice(0, 8) })
         return
       }
+      if (body?.code === 'store_archived') {
+        // Archived in another tab since this screen loaded: consultation only.
+        setNotice({ tone: 'neg', title: 'Não foi salvo: a loja está arquivada', body: failure(res, body) })
+        return
+      }
       if (res.status === 409) {
         setNotice({
           tone: 'warn',
@@ -272,13 +292,15 @@ export function CostsEditor(props: CostsEditorProps) {
   const savedIssues = props.saved.issues
 
   return (
+    <ReadOnlyContext.Provider value={readOnly}>
     <MessagesContext.Provider value={messages}>
-      <div className={s.layout}>
+      <div className={`${s.layout} ${readOnly ? s.readOnly : ''}`}>
         <div className={s.main}>
+          {readOnly && <ArchivedNote name={store.name} restoreHref={props.restoreHref} what="os custos não podem ser alterados" />}
           {!saved.configured && (
             <Callout tone="warn" title="Custos não configurados">
-              Hoje {store.name} aparece em todas as telas como <b>vendas − anúncios</b>, que não é lucro. Preencha ao menos o
-              custo padrão por produto e as taxas, confira a prévia e salve.
+              Hoje {store.name} aparece em todas as telas como <b>vendas − anúncios</b>, que não é lucro.
+              {!readOnly && ' Preencha ao menos o custo padrão por produto e as taxas, confira a prévia e salve.'}
             </Callout>
           )}
           {store.currency && store.currency !== 'USD' && (
@@ -286,14 +308,9 @@ export function CostsEditor(props: CostsEditorProps) {
               Os pedidos chegam convertidos em dólar. Preencha todos os custos em <b>US$</b>.
             </Callout>
           )}
-          {store.archived && (
-            <Callout tone="neu" title="Loja arquivada">
-              Ela não sincroniza mais. Alterar os custos muda os números do histórico dela.
-            </Callout>
-          )}
           {savedIssues.length > 0 && (
             <Callout tone="warn" title={`A configuração salva tem ${plural(savedIssues.length, 'entrada inválida', 'entradas inválidas')}`}>
-              Elas foram deixadas de fora desta tela e da prévia. Ao salvar, saem da configuração de vez:
+              Elas foram deixadas de fora desta tela e da prévia.{readOnly ? '' : ' Ao salvar, saem da configuração de vez:'}
               <ul className={s.issueList}>{savedIssues.slice(0, 6).map((i, k) => <li key={k}><code>{i.path}</code>: {ptMessage(i.message)}</li>)}</ul>
             </Callout>
           )}
@@ -347,7 +364,7 @@ export function CostsEditor(props: CostsEditorProps) {
           <ShippingSection form={form} update={update} />
           <ExtrasSection form={form} update={update} />
 
-          {(dirty || saving) && (
+          {(dirty || saving) && !readOnly && (
             <div className={s.saveBar} role="region" aria-label="Alterações não salvas">
               <div className={s.saveText}>
                 <b>Alterações não salvas em {store.name}</b>
@@ -394,10 +411,11 @@ export function CostsEditor(props: CostsEditorProps) {
               : displayed.period === 'custom' ? displayed.label : PERIODS.find(p => p.key === displayed.period)?.label ?? displayed.label}
             partialLabel={shownIsCurrent ? win.partialLabel : null}
             split={split}
-            onFocusProduct={focusProduct}
+            onFocusProduct={readOnly ? undefined : focusProduct}
           />
         </aside>
       </div>
     </MessagesContext.Provider>
+    </ReadOnlyContext.Provider>
   )
 }

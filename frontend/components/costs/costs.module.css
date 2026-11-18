@@ -187,3 +187,12 @@
 .sub { font-size: 12.5px; color: var(--tx-3); line-height: 1.5; }
 .sub b { color: var(--tx-2); font-weight: 500; }
 .issueList { margin: 6px 0 0 16px; display: flex; flex-direction: column; gap: 3px; }
+
+/* ── Read-only (archived store: consultation only) ── values to read, not boxes
+   waiting for input. The add/remove controls are not rendered at all. */
+.readOnly .box { background: transparent; border-style: dashed; }
+.readOnly .box:focus-within { border-color: var(--line-2); box-shadow: none; }
+.readOnly .input { cursor: default; }
+.readOnly .select, .readOnly .select:disabled { cursor: default; color: var(--tx); opacity: 1; }
+.readOnly .selectWrap svg { display: none; }
+.readOnly .check, .readOnly .check input { cursor: default; }

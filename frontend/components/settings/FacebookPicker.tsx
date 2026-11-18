@@ -19,11 +19,26 @@ import { startBackfill } from './backfill'
 import { FACEBOOK_ERROR, FB_RETURN_KEY, accountStatusText, callApi, nothingChanged } from './messages'
 import s from './settings.module.css'
 
+/** Onboarding's hint ("/onboarding?periodo=30d") → back to its import step,
+ *  on the same period; anything else → Ajustes. Only the period keys of the
+ *  hint are kept: it is a hint, not a place to send someone. */
 function returnPath(storeId: string, fallback: string): string {
   try {
     const raw = window.sessionStorage.getItem(FB_RETURN_KEY)
     window.sessionStorage.removeItem(FB_RETURN_KEY)
-    if (raw === '/onboarding') return `/onboarding?store=${encodeURIComponent(storeId)}&fb_connected=true`
+    if (raw?.startsWith('/onboarding') && !raw.startsWith('//')) {
+      const hint = new URL(raw, window.location.origin)
+      if (hint.origin === window.location.origin && hint.pathname === '/onboarding') {
+        const q = new URLSearchParams()
+        for (const k of ['periodo', 'de', 'ate', 'parte']) {
+          const v = hint.searchParams.get(k)
+          if (v) q.set(k, v)
+        }
+        q.set('loja', storeId)
+        q.set('fb_connected', 'true')
+        return `/onboarding?${q}`
+      }
+    }
   } catch { /* storage disabled */ }
   return fallback
 }

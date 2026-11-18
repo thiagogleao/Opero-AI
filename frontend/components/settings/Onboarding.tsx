@@ -16,10 +16,12 @@
  */
 
 import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
+import { REFERENCE_TZ } from '@/lib/engine/dates'
 import { Button, ButtonLink, Callout, Chip } from '@/components/ui'
 import { AnchorButton } from './AnchorButton'
 import { FACEBOOK_ERROR, FB_RETURN_KEY, SHOPIFY_ERROR, callApi, nothingChanged } from './messages'
 import { explainShopifyKey } from './ShopifyKeyForm'
+import { clampStart, dateBounds, withState } from './wizardState'
 import s from './settings.module.css'
 
 export interface OnboardingStore { id: string; name: string; domain: string | null; timezone: string }
@@ -37,16 +39,9 @@ function writeSaved(v: Saved) {
   try { window.sessionStorage.setItem(STATE_KEY, JSON.stringify(v)) } catch { /* storage disabled */ }
 }
 
-const MAX_DAYS_BACK = 399
 const noopSubscribe = () => () => {}
 
-function isoDaysAgo(days: number): string {
-  const d = new Date()
-  d.setDate(d.getDate() - days)
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-}
-
-export function OnboardingWizard({ initialStore, initialStep, startDate: initialStartDate, shopifyError, fbError, fbConnected, isOwner }: {
+export function OnboardingWizard({ initialStore, initialStep, startDate: initialStartDate, shopifyError, fbError, fbConnected, isOwner, now, keep }: {
   initialStore: OnboardingStore | null
   initialStep: Step
   startDate: string | null
@@ -54,6 +49,10 @@ export function OnboardingWizard({ initialStore, initialStep, startDate: initial
   fbError: string | null
   fbConnected: boolean
   isOwner: boolean
+  /** ISO time of the server render: the date input's bounds come from it. */
+  now: string
+  /** The site's period state as a query string ("periodo=30d"), kept in every link out. */
+  keep: string
 }) {
   const [step, setStep] = useState<Step>(initialStep)
   const [store, setStore] = useState<OnboardingStore | null>(initialStore)
@@ -69,6 +68,8 @@ export function OnboardingWizard({ initialStore, initialStep, startDate: initial
   const startDate = dateEdit ?? initialStartDate ?? savedDate ?? ''
 
   const remember = useCallback((st: OnboardingStore, date: string) => writeSaved({ storeId: st.id, startDate: date }), [])
+  // OAuth flows started here come back here, on the same period.
+  const back = withState('/onboarding', keep)
 
   return (
     <div className={s.wizardBody}>
@@ -85,6 +86,8 @@ export function OnboardingWizard({ initialStore, initialStep, startDate: initial
           error={shopifyError}
           startDate={startDate}
           onStartDate={setStartDate}
+          bounds={dateBounds(now, REFERENCE_TZ)}
+          returnTo={back}
           isOwner={isOwner}
           onConnected={(st, created) => { setStore(st); setWasThere(!created); remember(st, startDate); setStep('facebook') }}
         />
@@ -94,11 +97,12 @@ export function OnboardingWizard({ initialStore, initialStep, startDate: initial
           store={store}
           wasThere={wasThere}
           error={fbError}
-          onBeforeOAuth={() => { remember(store, startDate); try { window.sessionStorage.setItem(FB_RETURN_KEY, '/onboarding') } catch { /* ignore */ } }}
+          returnTo={back}
+          onBeforeOAuth={() => { remember(store, startDate); try { window.sessionStorage.setItem(FB_RETURN_KEY, back) } catch { /* ignore */ } }}
           onDone={() => setStep('import')}
         />
       )}
-      {step === 'import' && store && <ImportStep store={store} startDate={startDate} fbConnected={fbConnected} />}
+      {step === 'import' && store && <ImportStep store={store} startDate={startDate} fbConnected={fbConnected} now={now} keep={keep} />}
       {step !== 'shopify' && !store && (
         <Callout tone="neg" title="Loja não encontrada">Volte ao primeiro passo e conecte a loja de novo.</Callout>
       )}
@@ -108,8 +112,11 @@ export function OnboardingWizard({ initialStore, initialStep, startDate: initial
 
 // ─── 1. Shopify ───────────────────────────────────────────────────────────────
 
-function ShopifyStep({ error, startDate, onStartDate, isOwner, onConnected }: {
-  error: string | null; startDate: string; onStartDate: (v: string) => void; isOwner: boolean
+function ShopifyStep({ error, startDate, onStartDate, bounds, returnTo, isOwner, onConnected }: {
+  error: string | null; startDate: string; onStartDate: (v: string) => void
+  /** The store's timezone is not known yet: Brazil's day bounds the input. */
+  bounds: { min: string; max: string }
+  returnTo: string; isOwner: boolean
   onConnected: (st: OnboardingStore, created: boolean) => void
 }) {
   const [method, setMethod] = useState<Method>('dev')
@@ -121,7 +128,6 @@ function ShopifyStep({ error, startDate, onStartDate, isOwner, onConnected }: {
   const [fail, setFail] = useState<string | null>(error ? SHOPIFY_ERROR[error] ?? `Erro: ${error}` : null)
 
   const domain = shop.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '')
-  const minDate = isoDaysAgo(MAX_DAYS_BACK)
   const hint = method === 'token' ? explainShopifyKey(token, 'token') : method === 'dev' ? explainShopifyKey(secret, 'secret') : null
   const ready = !!domain && (method === 'oauth' || (method === 'dev' ? !!clientId.trim() && !!secret.trim() : !!token.trim() && !hint))
 
@@ -139,7 +145,7 @@ function ShopifyStep({ error, startDate, onStartDate, isOwner, onConnected }: {
     onConnected({ id: st.id, name: st.name, domain: st.domain, timezone: st.timezone }, r.data.created)
   }
 
-  const oauthHref = `/api/shopify/auth?shop=${encodeURIComponent(domain)}&mode=add&return=/onboarding${startDate ? `&storeStartDate=${startDate}` : ''}`
+  const oauthHref = `/api/shopify/auth?shop=${encodeURIComponent(domain)}&mode=add&return=${encodeURIComponent(returnTo)}${startDate ? `&storeStartDate=${startDate}` : ''}`
 
   return (
     <div className={s.form}>
@@ -160,7 +166,7 @@ function ShopifyStep({ error, startDate, onStartDate, isOwner, onConnected }: {
         </label>
         <label className={s.field}>
           <span className={s.label}>Desde quando importar <span className="mut">(opcional)</span></span>
-          <input className={`${s.input} ${s.date}`} type="date" value={startDate} min={minDate} max={isoDaysAgo(0)} onChange={e => onStartDate(e.target.value)} />
+          <input className={`${s.input} ${s.date}`} type="date" value={startDate} min={bounds.min} max={bounds.max} onChange={e => onStartDate(e.target.value)} />
           <span className={s.hint}>Ex.: quando a loja abriu. Vazio: os últimos 90 dias. No máximo cerca de 13 meses para trás.</span>
         </label>
       </div>
@@ -218,8 +224,8 @@ function ShopifyStep({ error, startDate, onStartDate, isOwner, onConnected }: {
 
 // ─── 2. Facebook ──────────────────────────────────────────────────────────────
 
-function FacebookStep({ store, wasThere, error, onBeforeOAuth, onDone }: {
-  store: OnboardingStore; wasThere: boolean; error: string | null; onBeforeOAuth: () => void; onDone: () => void
+function FacebookStep({ store, wasThere, error, returnTo, onBeforeOAuth, onDone }: {
+  store: OnboardingStore; wasThere: boolean; error: string | null; returnTo: string; onBeforeOAuth: () => void; onDone: () => void
 }) {
   const [account, setAccount] = useState('')
   const [token, setToken] = useState('')
@@ -249,7 +255,7 @@ function FacebookStep({ store, wasThere, error, onBeforeOAuth, onDone }: {
       {fail && <Callout tone="neg" title="A conta não foi ligada">{fail}</Callout>}
       <div className={s.inline}>
         <span onClickCapture={onBeforeOAuth}>
-          <AnchorButton href={`/api/facebook/auth?store=${encodeURIComponent(store.id)}&mode=main&return=/onboarding`} variant="primary" size="md" icon="external">Conectar com o Facebook</AnchorButton>
+          <AnchorButton href={`/api/facebook/auth?store=${encodeURIComponent(store.id)}&mode=main&return=${encodeURIComponent(returnTo)}`} variant="primary" size="md" icon="external">Conectar com o Facebook</AnchorButton>
         </span>
         <Button variant="ghost" onClick={onDone}>Pular por enquanto</Button>
       </div>
@@ -289,7 +295,9 @@ function laneState(lane: Lane | null, startedAt: string, job: Job | undefined, w
   return { label: what, tone: 'run', text: lane.busy || lane.lastStatus === 'running' ? 'importando…' : 'na fila…' }
 }
 
-function ImportStep({ store, startDate, fbConnected }: { store: OnboardingStore; startDate: string; fbConnected: boolean }) {
+function ImportStep({ store, startDate, fbConnected, now, keep }: {
+  store: OnboardingStore; startDate: string; fbConnected: boolean; now: string; keep: string
+}) {
   const [phase, setPhase] = useState<'idle' | 'starting' | 'running' | 'refused'>('idle')
   const [refusal, setRefusal] = useState<string | null>(null)
   const [jobs, setJobs] = useState<Job[]>([])
@@ -297,7 +305,10 @@ function ImportStep({ store, startDate, fbConnected }: { store: OnboardingStore;
   const [fresh, setFresh] = useState<Freshness | null>(null)
   const [pollError, setPollError] = useState<string | null>(null)
 
-  const from = startDate && startDate < isoDaysAgo(MAX_DAYS_BACK) ? isoDaysAgo(MAX_DAYS_BACK) : startDate
+  // Clamped to what the import route accepts, in the store's own day (it
+  // checks the dates in the store's timezone).
+  const bounds = dateBounds(now, store.timezone)
+  const from = clampStart(startDate, bounds)
 
   async function start() {
     setPhase('starting')
@@ -339,7 +350,7 @@ function ImportStep({ store, startDate, fbConnected }: { store: OnboardingStore;
       <div>
         <div style={{ fontWeight: 600, fontSize: 15 }}>Importar os dados de {store.name}</div>
         <p className={s.sub}>
-          {from ? <>Pedidos e anúncios desde <b>{from.slice(8, 10)}/{from.slice(5, 7)}/{from.slice(0, 4)}</b>{from !== startDate ? ' (o máximo que dá para buscar)' : ''}.</> : <>Os últimos 90 dias de pedidos e anúncios.</>}
+          {from ? <>Pedidos e anúncios desde <b>{from.slice(8, 10)}/{from.slice(5, 7)}/{from.slice(0, 4)}</b>{from !== startDate ? (startDate > bounds.max ? ' (hoje, no fuso da loja)' : ' (o máximo que dá para buscar)') : ''}.</> : <>Os últimos 90 dias de pedidos e anúncios.</>}
           {fbConnected && ' O Facebook foi conectado.'}
         </p>
       </div>
@@ -368,8 +379,8 @@ function ImportStep({ store, startDate, fbConnected }: { store: OnboardingStore;
       )}
 
       <div className={s.inline} style={{ marginTop: 4 }}>
-        <ButtonLink href={`/profit?loja=${encodeURIComponent(store.id)}`} variant={finished ? 'primary' : 'secondary'} icon="coin">Configurar os custos</ButtonLink>
-        <ButtonLink href={`/?loja=${encodeURIComponent(store.id)}`} variant="ghost">Ir para o Resumo</ButtonLink>
+        <ButtonLink href={withState('/profit', keep, { loja: store.id })} variant={finished ? 'primary' : 'secondary'} icon="coin">Configurar os custos</ButtonLink>
+        <ButtonLink href={withState('/', keep, { loja: store.id })} variant="ghost">Ir para o Resumo</ButtonLink>
       </div>
       <p className={s.sub}>Sem os custos configurados, a loja aparece como <b>vendas − anúncios</b>, que não é lucro.</p>
     </div>

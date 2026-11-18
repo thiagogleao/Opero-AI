@@ -6,7 +6,7 @@ import { Block, Button } from '@/components/ui'
 import { dropRow, patchRow, setCogs, setShipping, setShopify, addUnique, without, type Update } from './edit'
 import { newId, rowKey, type CostForm, type ExtraRow, type FrequencyKey, type RateRow } from './form'
 import {
-  CountryField, Msgs, NumField, ProductChips, ProductPicker, Radio, RemoveButton, SelectField, TextField, countryName,
+  CountryField, EditOnly, Msgs, NumField, ProductChips, ProductPicker, Radio, RemoveButton, SelectField, TextField, countryName,
   useMessages, usePrefixMessages, type CatalogueItem,
 } from './fields'
 import s from './costs.module.css'
@@ -93,11 +93,13 @@ export function ShippingSection({ form, update }: { form: CostForm; update: Upda
           )}
           {sh.rates.map(r => <RateLine key={r._id} row={r} onChange={p => set(r._id, p)} onRemove={() => update(f => setShipping(f, { rates: dropRow(f.shipping.rates, r._id) }))} />)}
         </div>
-        <div className={s.addRow}>
-          <Button size="sm" onClick={() => update(f => setShipping(f, {
-            rates: [...f.shipping.rates, { _id: newId('r'), country_code: '', name: '', cost_usd: '' }],
-          }))}>Adicionar frete por país</Button>
-        </div>
+        <EditOnly>
+          <div className={s.addRow}>
+            <Button size="sm" onClick={() => update(f => setShipping(f, {
+              rates: [...f.shipping.rates, { _id: newId('r'), country_code: '', name: '', cost_usd: '' }],
+            }))}>Adicionar frete por país</Button>
+          </div>
+        </EditOnly>
       </div>
     </Block>
   )
@@ -140,11 +142,13 @@ export function ExtrasSection({ form, update }: { form: CostForm; update: Update
         )}
         {rows.map(r => <ExtraLine key={r._id} row={r} onChange={p => set(r._id, p)} onRemove={() => update(f => ({ ...f, extra_costs: dropRow(f.extra_costs, r._id) }))} />)}
       </div>
-      <div className={s.addRow}>
-        <Button size="sm" onClick={() => update(f => ({
-          ...f, extra_costs: [...f.extra_costs, { _id: newId('e'), name: '', amount_usd: '', frequency: 'monthly' }],
-        }))}>Adicionar custo</Button>
-      </div>
+      <EditOnly>
+        <div className={s.addRow}>
+          <Button size="sm" onClick={() => update(f => ({
+            ...f, extra_costs: [...f.extra_costs, { _id: newId('e'), name: '', amount_usd: '', frequency: 'monthly' }],
+          }))}>Adicionar custo</Button>
+        </div>
+      </EditOnly>
     </Block>
   )
 }

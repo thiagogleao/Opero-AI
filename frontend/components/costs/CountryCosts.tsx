@@ -16,7 +16,7 @@ import { toNumber } from '@/lib/data/profitConfig'
 import { dropRow, patchRow, setCogs, type Update } from './edit'
 import { newId, rowKey, type CostForm, type CountryListRow, type CountryPriceRow, type OrderFeeRow } from './form'
 import {
-  CountryField, DateField, Msgs, NumField, ProductPicker, RemoveButton, TextField, countryName, useMessages, usePrefixMessages,
+  CountryField, DateField, EditOnly, Msgs, NumField, ProductPicker, RemoveButton, TextField, countryName, useMessages, usePrefixMessages,
   type CatalogueItem,
 } from './fields'
 import { Icon } from '@/components/ui'
@@ -97,7 +97,7 @@ function CountryList({ list, name, open, onToggle, onChange, onRemove }: {
             )}
           </span>
         </button>
-        <Button size="sm" variant="ghost" icon="x" onClick={onRemove}>Remover lista</Button>
+        <EditOnly><Button size="sm" variant="ghost" icon="x" onClick={onRemove}>Remover lista</Button></EditOnly>
       </div>
       {open && (
         <div className={s.clistBody}>
@@ -109,9 +109,11 @@ function CountryList({ list, name, open, onToggle, onChange, onRemove }: {
             ))}
           </div>
           <Msgs errors={head.errors} warnings={head.warnings} />
-          <div className={s.addRow}>
-            <Button size="sm" variant="ghost" onClick={() => onChange({ prices: [...list.prices, { _id: newId('p'), country: '', price: '' }] })}>Adicionar país</Button>
-          </div>
+          <EditOnly>
+            <div className={s.addRow}>
+              <Button size="sm" variant="ghost" onClick={() => onChange({ prices: [...list.prices, { _id: newId('p'), country: '', price: '' }] })}>Adicionar país</Button>
+            </div>
+          </EditOnly>
         </div>
       )}
     </div>
@@ -122,11 +124,9 @@ function CountryPriceLine({ listKey, row, onChange, onRemove }: {
   listKey: string; row: CountryPriceRow; onChange: (p: Partial<CountryPriceRow>) => void; onRemove: () => void
 }) {
   const raw = row.country.trim()
-  const m = useMessages(`${listKey}.prices.${raw}`, `${listKey}.prices.${raw.toUpperCase()}`, `${listKey}.price#${row._id}`)
-  // An empty price box is not "inválido": ask for it.
-  const errors = row.price.trim() === '' && raw
-    ? [...new Set(m.errors.map(e => (e.startsWith('Preço inválido') ? `Informe o preço para ${raw.toUpperCase()}.` : e)))]
-    : m.errors
+  // The typed code and its upper case are usually the same key: read it once.
+  const m = useMessages(...new Set([`${listKey}.prices.${raw}`, `${listKey}.prices.${raw.toUpperCase()}`, `${listKey}.price#${row._id}`]))
+  const errors = m.errors
   return (
     <div className={`${s.row} ${s.colsCountry}`}>
       <CountryField small value={row.country} onChange={v => onChange({ country: v })} k={`${listKey}.prices.${raw}`} />
@@ -155,11 +155,13 @@ export function OrderFeesSection({ form, update }: { form: CostForm; update: Upd
         )}
         {rows.map(r => <OrderFeeLine key={r._id} row={r} onChange={p => set(r._id, p)} onRemove={() => update(f => setCogs(f, { order_fees: dropRow(f.cogs.order_fees, r._id) }))} />)}
       </div>
-      <div className={s.addRow}>
-        <Button size="sm" onClick={() => update(f => setCogs(f, {
-          order_fees: [...f.cogs.order_fees, { _id: newId('f'), country_code: '', name: '', amount_usd: '', effective_from: '' }],
-        }))}>Adicionar taxa</Button>
-      </div>
+      <EditOnly>
+        <div className={s.addRow}>
+          <Button size="sm" onClick={() => update(f => setCogs(f, {
+            order_fees: [...f.cogs.order_fees, { _id: newId('f'), country_code: '', name: '', amount_usd: '', effective_from: '' }],
+          }))}>Adicionar taxa</Button>
+        </div>
+      </EditOnly>
     </Block>
   )
 }

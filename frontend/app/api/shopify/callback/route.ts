@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server'
 import { ACTIVE_STORE_COOKIE, getViewer, requireStore } from '@/lib/access'
 import { appOrigin, errorResponse, HttpError } from '@/lib/integrations/http'
-import { LEGACY_OAUTH_COOKIES, NONCE_COOKIE, readOAuthState, viewerKey } from '@/lib/integrations/oauthState'
+import { LEGACY_OAUTH_COOKIES, NONCE_COOKIE, readOAuthState, returnPathname, viewerKey } from '@/lib/integrations/oauthState'
 import { exchangeAuthCode, fetchShopInfo, normalizeShopDomain, partnersApp, verifyShopifyHmac } from '@/lib/integrations/shopify'
 import { connectShopify } from '@/lib/integrations/stores'
 
@@ -21,9 +21,12 @@ export const dynamic = 'force-dynamic'
  *  6. connectShopify(): reconnect touches only the viewer's own store with this
  *     domain; add refuses a domain registered in another account.
  *
- * Success → `<return>?shopify_connected=true&store=<id>`; failure →
- * `<return>?shopify_error=<code>` (on /onboarding also `error=<code>`) — back where the flow started, never a
- * success banner after a failed save. The active store changes only in the
+ * Success → `<return>?shopify_connected=true&loja=<id>`; failure →
+ * `<return>?shopify_error=<code>&loja=<id>` (on /onboarding also `error=<code>`)
+ * — back where the flow started, on that store's screen (`loja` is the site's
+ * store key), never a success banner after a failed save. A store archived
+ * while the merchant was on Shopify is refused (store_archived) before the
+ * code is exchanged. The active store changes only in the
  * "add" flow (a new store, or the account's existing store with that domain):
  * the onboarding screen continues with the Facebook step on the active store.
  */
@@ -42,8 +45,8 @@ export async function GET(req: NextRequest) {
   const fail = (code: string) => {
     const u = new URL(returnTo, origin)
     u.searchParams.set('shopify_error', code)
-    if (st?.storeId) u.searchParams.set('store', st.storeId)
-    if (returnTo === '/onboarding') {
+    if (st?.storeId) u.searchParams.set('loja', st.storeId)
+    if (returnPathname(returnTo) === '/onboarding') {
       if (st?.mode === 'add') u.searchParams.set('addStore', 'true')
       // The current onboarding screen reads `error`; without it a failed
       // connect would land back on the form with no message at all.
@@ -57,7 +60,8 @@ export async function GET(req: NextRequest) {
     const viewer = await getViewer()
     if (!viewer) return finish(NextResponse.redirect(new URL('/sign-in', origin)))
     if (viewerKey(viewer) !== st.viewer) return finish(NextResponse.json({ error: 'Loja não encontrada', code: 'not_found' }, { status: 404 }))
-    if (st.storeId) await requireStore(viewer, st.storeId)
+    // An archived store is for consultation only.
+    if (st.storeId && (await requireStore(viewer, st.storeId)).archived) return fail('store_archived')
 
     const shop = normalizeShopDomain(sp.get('shop'))
     if (!shop || shop !== st.shop) return fail('invalid_shop')
@@ -89,8 +93,8 @@ export async function GET(req: NextRequest) {
     const u = new URL(returnTo, origin)
     // 'true', the value the current onboarding and settings screens test for.
     u.searchParams.set('shopify_connected', 'true')
-    u.searchParams.set('store', storeId)
-    if (returnTo === '/onboarding') {
+    u.searchParams.set('loja', storeId)
+    if (returnPathname(returnTo) === '/onboarding') {
       // What the current onboarding screen reads to continue with Facebook.
       if (st.mode === 'add') u.searchParams.set('addStore', 'true')
       if (st.startDate) u.searchParams.set('storeStartDate', st.startDate)

@@ -47,7 +47,7 @@ export function ShopifyKeyForm({ storeId, storeName, domain, connection, archive
   const [pending, setPending] = useState(false)
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null)
 
-  if (archived) return <p className={s.sub}>Loja arquivada: desarquive em Ajustes → Lojas para reconectar.</p>
+  if (archived) return <p className={s.sub}>Loja arquivada, só para consulta: a chave não pode ser trocada. Para reconectar, desarquive em Ajustes → Lojas.</p>
   if (!domain) return <p className={s.sub}>Loja sem domínio da Shopify.</p>
 
   const hints = kind === 'dev'

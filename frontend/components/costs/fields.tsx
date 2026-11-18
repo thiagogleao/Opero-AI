@@ -7,6 +7,11 @@
  *
  * Field messages come from MessagesContext, keyed by the stable field keys of
  * form.ts ("cogs.price_tiers#t3.order_prices.2"), so a message follows its row.
+ *
+ * ReadOnlyContext turns the whole screen into a view (an archived store is for
+ * consultation only): values stay visible and searchable, inputs cannot
+ * change, and the controls that only add or remove (pickers, ×, "Adicionar…")
+ * are not rendered.
  */
 
 import { createContext, useContext, useId, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -48,6 +53,20 @@ export function Msgs({ errors, warnings, id }: { errors: string[]; warnings?: st
   )
 }
 
+// ─── Read-only (archived store) ─────────────────────────────────────────────
+
+export const ReadOnlyContext = createContext(false)
+
+export function useReadOnly(): boolean {
+  return useContext(ReadOnlyContext)
+}
+
+/** Renders its children only when the screen can be edited (add/remove controls). */
+export function EditOnly({ children }: { children: ReactNode }) {
+  const ro = useContext(ReadOnlyContext)
+  return ro ? null : <>{children}</>
+}
+
 // ─── Inputs ───────────────────────────────────────────────────────────────────
 
 interface BaseProps {
@@ -82,6 +101,7 @@ export function NumField({ value, onChange, prefix, suffix, placeholder, k, labe
   value: string; onChange: (v: string) => void; prefix?: string; suffix?: string; placeholder?: string; width?: number | string
 }) {
   const id = useId()
+  const ro = useReadOnly()
   const { errors, warnings } = useMessages(...keysOf(k))
   return (
     <Shell id={id} label={label} hint={hint} msgsId={`${id}-m`} errors={errors} warnings={warnings} quiet={quiet}>
@@ -92,6 +112,7 @@ export function NumField({ value, onChange, prefix, suffix, placeholder, k, labe
           className={`${s.input} ${s.num}`}
           inputMode="decimal"
           autoComplete="off"
+          readOnly={ro}
           value={value}
           placeholder={placeholder}
           aria-label={ariaLabel}
@@ -109,6 +130,7 @@ export function TextField({ value, onChange, placeholder, k, label, hint, ariaLa
   value: string; onChange: (v: string) => void; placeholder?: string; maxLength?: number; upper?: boolean; mono?: boolean
 }) {
   const id = useId()
+  const ro = useReadOnly()
   const { errors, warnings } = useMessages(...keysOf(k))
   return (
     <Shell id={id} label={label} hint={hint} msgsId={`${id}-m`} errors={errors} warnings={warnings} quiet={quiet}>
@@ -117,6 +139,7 @@ export function TextField({ value, onChange, placeholder, k, label, hint, ariaLa
           id={id}
           className={s.input}
           style={mono ? { fontFamily: 'var(--mono)' } : undefined}
+          readOnly={ro}
           value={value}
           maxLength={maxLength}
           placeholder={placeholder}
@@ -134,6 +157,7 @@ export function TextField({ value, onChange, placeholder, k, label, hint, ariaLa
 
 export function DateField({ value, onChange, k, label, hint, ariaLabel, small, quiet }: BaseProps & { value: string; onChange: (v: string) => void }) {
   const id = useId()
+  const ro = useReadOnly()
   const { errors, warnings } = useMessages(...keysOf(k))
   return (
     <Shell id={id} label={label} hint={hint} msgsId={`${id}-m`} errors={errors} warnings={warnings} quiet={quiet}>
@@ -142,6 +166,7 @@ export function DateField({ value, onChange, k, label, hint, ariaLabel, small, q
           id={id}
           type="date"
           className={`${s.input} ${s.date}`}
+          readOnly={ro}
           value={value}
           aria-label={ariaLabel}
           aria-invalid={errors.length ? true : undefined}
@@ -156,12 +181,13 @@ export function SelectField<T extends string>({ value, onChange, options, k, lab
   value: T; onChange: (v: T) => void; options: { value: T; label: string }[]
 }) {
   const id = useId()
+  const ro = useReadOnly()
   const { errors, warnings } = useMessages(...keysOf(k))
   return (
     <Shell id={id} label={label} msgsId={`${id}-m`} errors={errors} warnings={warnings} quiet={quiet}>
       <div className={`${s.box} ${errors.length ? s.boxErr : ''} ${small ? s.boxSm : ''}`}>
         <span className={s.selectWrap}>
-          <select id={id} className={s.select} value={value} aria-label={ariaLabel} onChange={e => onChange(e.target.value as T)}>
+          <select id={id} className={s.select} value={value} disabled={ro} aria-label={ariaLabel} onChange={e => onChange(e.target.value as T)}>
             {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
           <Icon name="chev" size={13} />
@@ -192,6 +218,7 @@ export function countryName(code: string): string | null {
 /** Two-letter code input with the country's name beside it. */
 export function CountryField({ value, onChange, k, ariaLabel, small }: BaseProps & { value: string; onChange: (v: string) => void }) {
   const id = useId()
+  const ro = useReadOnly()
   const { errors } = useMessages(...keysOf(k))
   return (
     <div className={s.field}>
@@ -202,6 +229,7 @@ export function CountryField({ value, onChange, k, ariaLabel, small }: BaseProps
           style={{ fontFamily: 'var(--mono)', textTransform: 'uppercase', letterSpacing: '.04em' }}
           value={value}
           maxLength={2}
+          readOnly={ro}
           placeholder="US"
           aria-label={ariaLabel ?? 'País (2 letras)'}
           aria-invalid={errors.length ? true : undefined}
@@ -246,7 +274,10 @@ export function ProductPicker({ catalogue, exclude, onPick, placeholder = 'Busca
   const ex = useMemo(() => new Set(exclude ?? []), [exclude])
   const results = useMemo(() => searchCatalogue(catalogue, q, ex), [catalogue, q, ex])
   const pick = (pid: string) => { onPick(pid); setQ(''); setActive(0) }
+  const ro = useReadOnly()
 
+  // Its only job is adding a product.
+  if (ro) return null
   return (
     <div
       className={s.picker}
@@ -302,13 +333,14 @@ export function ProductPicker({ catalogue, exclude, onPick, placeholder = 'Busca
 export function ProductChips({ ids, nameOf, onRemove, empty }: {
   ids: string[]; nameOf: (id: string) => string; onRemove: (id: string) => void; empty?: ReactNode
 }) {
+  const ro = useReadOnly()
   if (!ids.length) return empty ? <div className={s.empty}>{empty}</div> : null
   return (
     <div className={s.chips}>
       {ids.map(id => (
         <span key={id} className={s.pchip} title={id}>
           <span>{nameOf(id)}</span>
-          <button type="button" aria-label={`Tirar ${nameOf(id)}`} onClick={() => onRemove(id)}><Icon name="x" size={11} /></button>
+          {!ro && <button type="button" aria-label={`Tirar ${nameOf(id)}`} onClick={() => onRemove(id)}><Icon name="x" size={11} /></button>}
         </span>
       ))}
     </div>
@@ -316,6 +348,9 @@ export function ProductChips({ ids, nameOf, onRemove, empty }: {
 }
 
 export function RemoveButton({ label, onClick }: { label: string; onClick: () => void }) {
+  const ro = useReadOnly()
+  // An empty cell keeps the row grid aligned.
+  if (ro) return <span aria-hidden="true" />
   return (
     <button
       type="button"
@@ -330,9 +365,10 @@ export function RemoveButton({ label, onClick }: { label: string; onClick: () =>
 }
 
 export function Check({ checked, onChange, children }: { checked: boolean; onChange: (v: boolean) => void; children: ReactNode }) {
+  const ro = useReadOnly()
   return (
     <label className={s.check}>
-      <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} />
+      <input type="checkbox" checked={checked} disabled={ro} onChange={e => onChange(e.target.checked)} />
       {children}
     </label>
   )
@@ -341,9 +377,10 @@ export function Check({ checked, onChange, children }: { checked: boolean; onCha
 export function Radio<T extends string>({ name, value, current, onChange, children }: {
   name: string; value: T; current: T; onChange: (v: T) => void; children: ReactNode
 }) {
+  const ro = useReadOnly()
   return (
     <label className={s.check}>
-      <input type="radio" name={name} checked={current === value} onChange={() => onChange(value)} />
+      <input type="radio" name={name} checked={current === value} disabled={ro} onChange={() => onChange(value)} />
       {children}
     </label>
   )

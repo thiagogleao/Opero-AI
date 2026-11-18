@@ -30,7 +30,8 @@ export function PreviewPanel({ preview, busy, error, onRetry, dirty, periodLabel
   /** "parcial · até 13h38" (store clock) when the preview shown is the page's window. */
   partialLabel: string | null
   split: boolean
-  onFocusProduct: (id: string) => void
+  /** "definir custo" beside an unpriced product; omitted on a read-only screen. */
+  onFocusProduct?: (id: string) => void
 }) {
   if (!preview) {
     return (
@@ -228,7 +229,7 @@ function CostLines({ preview, saved, busy }: { preview: ProfitPreviewResponse; s
   )
 }
 
-function Coverage({ preview, onFocusProduct, busy }: { preview: ProfitPreviewResponse; onFocusProduct: (id: string) => void; busy: boolean }) {
+function Coverage({ preview, onFocusProduct, busy }: { preview: ProfitPreviewResponse; onFocusProduct?: (id: string) => void; busy: boolean }) {
   const cov = preview.breakdown.coverage!
   return (
     <Card pad="md" className={busy ? s.pvBusy : undefined}>
@@ -247,12 +248,12 @@ function Coverage({ preview, onFocusProduct, busy }: { preview: ProfitPreviewRes
         </div>
         {cov.unpricedUnits > 0 && (
           <Callout tone="warn" title={`${plural(cov.unpricedUnits, 'unidade caiu', 'unidades caíram')} no custo padrão (${formatMoney(cov.defaultCostUsd, { cents: 'always' })})`}>
-            Produtos vendidos sem preço próprio. Se o custo real for outro, defina o preço deles:
+            Produtos vendidos sem preço próprio.{onFocusProduct ? ' Se o custo real for outro, defina o preço deles:' : ''}
             <ul className={s.issueList} style={{ listStyle: 'none', marginLeft: 0 }}>
               {cov.unpriced.slice(0, 6).map(u => (
                 <li key={u.key} className={s.inline} style={{ justifyContent: 'space-between' }}>
                   <span>{u.title} <span className="num mut">· {u.units} un.</span></span>
-                  {u.productId && <button type="button" className={s.linkBtn} onClick={() => onFocusProduct(u.productId!)}>definir custo</button>}
+                  {u.productId && onFocusProduct && <button type="button" className={s.linkBtn} onClick={() => onFocusProduct(u.productId!)}>definir custo</button>}
                 </li>
               ))}
             </ul>

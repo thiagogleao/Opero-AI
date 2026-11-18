@@ -3,6 +3,7 @@ import { errorResponse, HttpError, readJson, storeFromBody, storeParam, targetSt
 import { linkAdAccount, storeForFacebook } from '@/lib/integrations/fbConnect'
 import { FB_PENDING_COOKIE } from '@/lib/integrations/pending'
 import { setOnboarded, storeSummary } from '@/lib/integrations/stores'
+import { refuseIfArchived } from '../_lib/archivedStore'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -38,7 +39,8 @@ export async function GET(req: NextRequest) {
  *  - onboarded: boolean.
  * Shopify credentials are not accepted here (POST /api/shopify/connect), and
  * the timezone is not editable: it comes from Shopify and the collector
- * rewrites it on every sync.
+ * rewrites it on every sync. An archived store is refused whole (409
+ * store_archived): it is kept for consultation only.
  */
 export async function POST(req: NextRequest) {
   try {
@@ -50,6 +52,8 @@ export async function POST(req: NextRequest) {
     const store = body.fb_ad_account_id
       ? await storeForFacebook(viewer, storeFromBody(body), pending)
       : await targetStore(viewer, storeFromBody(body))
+    // Consultation only: before Meta is asked anything about the account.
+    refuseIfArchived(store)
 
     if ('timezone' in body) {
       throw new HttpError(400, 'timezone_read_only', `O fuso vem da Shopify (${store.timezone}) e não pode ser alterado aqui.`)

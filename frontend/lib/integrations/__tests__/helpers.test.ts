@@ -1,7 +1,7 @@
 import crypto from 'node:crypto'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { fingerprint, seal, signPayload, unseal, verifyPayload } from '../keys'
-import { createOAuthState, readOAuthState, safeReturnTo, viewerKey } from '../oauthState'
+import { createOAuthState, readOAuthState, returnPathname, returnState, safeReturnTo, viewerKey } from '../oauthState'
 import { adminApiUrl, normalizeShopDomain, SHOPIFY_API_VERSION, verifyShopifyHmac } from '../shopify'
 import { normalizeAdAccountId } from '../facebook'
 import { clientIp, unlockTarget } from '../request'
@@ -59,7 +59,21 @@ describe('OAuth state', () => {
     expect(safeReturnTo('/settings/chaves', '/settings')).toBe('/settings/chaves')
     expect(safeReturnTo('https://evil.example', '/settings')).toBe('/settings')
     expect(safeReturnTo('//evil.example', '/onboarding')).toBe('/onboarding')
+    expect(safeReturnTo('/\\evil.example', '/settings')).toBe('/settings')
+    expect(safeReturnTo('/settings/../m', '/settings')).toBe('/settings')
+    expect(safeReturnTo('/elsewhere?periodo=30d', '/settings')).toBe('/settings')
     expect(viewerKey({ kind: 'owner' })).toBe('owner')
+  })
+
+  it('a return path keeps only the validated period state', () => {
+    expect(safeReturnTo('/settings?loja=abc&periodo=30d&parte=50&x=1', '/settings')).toBe('/settings?periodo=30d&parte=50')
+    expect(safeReturnTo('/onboarding?periodo=custom&de=2026-10-27&ate=2026-11-04', '/onboarding'))
+      .toBe('/onboarding?periodo=custom&de=2026-10-27&ate=2026-11-04')
+    expect(safeReturnTo('/settings?periodo=custom&de=2026-10-27', '/settings')).toBe('/settings')
+    expect(safeReturnTo('/settings?periodo=forever&parte=1', '/settings')).toBe('/settings')
+    expect(returnPathname('/onboarding?periodo=30d')).toBe('/onboarding')
+    expect(returnState('/settings?periodo=30d&parte=50')).toEqual({ periodo: '30d', parte: '50' })
+    expect(returnState('/settings')).toEqual({})
   })
 
   it('a pending Facebook login is bound to its viewer and store', () => {

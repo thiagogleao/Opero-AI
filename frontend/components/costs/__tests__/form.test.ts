@@ -163,3 +163,28 @@ describe('ptMessage', () => {
     expect(m.warnings.get('cogs.default_cost_usd')).toEqual(['de $3,50'])
   })
 })
+
+describe('price cells: an empty one asks for the price, a bad one is invalid', () => {
+  const messages = (r: ReturnType<typeof parseProfitConfig>) => Object.fromEntries(r.issues.map(i => [i.path, i.message]))
+
+  it('says so straight from the validator, for a supplier step left empty', () => {
+    const f = toForm(sample())
+    f.cogs.price_tiers[0].steps.push({ _id: 'e', units: '3', price: '' }, { _id: 'b', units: '4', price: 'abc' })
+    const m = messages(parseProfitConfig(toPayload(f).config))
+    expect(m['cogs.price_tiers[0].order_prices.3']).toBe('Informe o preço do pedido com 3 unidade(s).')
+    expect(m['cogs.price_tiers[0].order_prices.4']).toBe('Preço inválido para 4 unidade(s).')
+  })
+
+  it('and for a country price left empty', () => {
+    const f = toForm(sample())
+    f.cogs.country_prices[0].prices.push({ _id: 'e', country: 'FR', price: '' }, { _id: 'n', country: 'IT', price: '-1' })
+    const m = messages(parseProfitConfig(toPayload(f).config))
+    expect(m['cogs.country_prices[0].prices.FR']).toBe('Informe o preço para FR.')
+    expect(m['cogs.country_prices[0].prices.IT']).toBe('Preço inválido para IT.')
+  })
+
+  it('treats a blank string like an empty cell (an API caller, not the form)', () => {
+    const r = parseProfitConfig({ cogs: { price_tiers: [{ effective_from: '2026-11-01', order_prices: { 1: '  ', 2: 9 }, extra_unit_usd: 0 }] } })
+    expect(messages(r)['cogs.price_tiers[0].order_prices.1']).toBe('Informe o preço do pedido com 1 unidade(s).')
+  })
+})

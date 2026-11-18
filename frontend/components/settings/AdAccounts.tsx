@@ -9,17 +9,19 @@
  * answer, then re-reads the page (router.refresh) so the list is the
  * database's, not an optimistic guess (A24). Pausing stops collection only —
  * the account's spend stays in profit for every period (A2), and the screen
- * says so before and after.
+ * says so before and after. An archived store is consultation only: the
+ * accounts and their health are listed, with no action at all.
  */
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Badge, Button, Callout, Chip, Money } from '@/components/ui'
 import type { AdAccountHealth, StoreAdAccount } from '@/lib/integrations/types'
-import { formatDate, plural } from '@/lib/format'
+import { formatDate } from '@/lib/format'
 import { AnchorButton } from './AnchorButton'
 import { ConfirmDialog } from './ConfirmDialog'
-import { FACEBOOK_ERROR, FB_RETURN_KEY, accountStatusText, callApi, shortError } from './messages'
+import { FACEBOOK_ERROR, FB_RETURN_KEY, accountStatusText, callApi } from './messages'
+import { SyncErrorsLine } from './SyncErrorsLine'
 import { startBackfill } from './backfill'
 import s from './settings.module.css'
 
@@ -29,9 +31,11 @@ export interface AccountRow extends StoreAdAccount {
 
 type Pending = { kind: 'pause' | 'remove'; row: AccountRow } | null
 
-export function AdAccounts({ storeId, storeName, archived, today, accounts, healthError }: {
+export function AdAccounts({ storeId, storeName, returnTo, archived, today, accounts, healthError }: {
   storeId: string
   storeName: string
+  /** Ajustes with its URL state: where a Facebook login started here comes back. */
+  returnTo: string
   archived: boolean
   today: string
   accounts: AccountRow[]
@@ -92,7 +96,7 @@ export function AdAccounts({ storeId, storeName, archived, today, accounts, heal
     router.refresh()
   }
 
-  const oauth = (mode: 'main' | 'extra') => `/api/facebook/auth?store=${encodeURIComponent(storeId)}&mode=${mode}&return=/settings`
+  const oauth = (mode: 'main' | 'extra') => `/api/facebook/auth?store=${encodeURIComponent(storeId)}&mode=${mode}&return=${encodeURIComponent(returnTo)}`
 
   // A Facebook login started here comes back here, even if an abandoned
   // onboarding left its return hint in this tab.
@@ -100,9 +104,8 @@ export function AdAccounts({ storeId, storeName, archived, today, accounts, heal
 
   return (
     <div className={s.stack} onClickCapture={e => { if ((e.target as Element).closest?.('a[href^="/api/facebook/auth"]')) clearReturnHint() }}>
-      {archived && (
-        <Callout tone="neu" title="Loja arquivada">Ela não sincroniza. Para ligar ou trocar contas, desarquive a loja primeiro.</Callout>
-      )}
+      {/* An archived store is read-only: the page's one line says why, and
+          no action below is offered (the server refuses them anyway). */}
       {healthError && <Callout tone="warn" title="Saúde das contas indisponível">{healthError} A lista abaixo vem do banco.</Callout>}
       {result && (
         <Callout tone={result.ok ? 'info' : 'neg'} icon={result.ok ? 'check' : undefined}>
@@ -139,7 +142,7 @@ export function AdAccounts({ storeId, storeName, archived, today, accounts, heal
         {extras.length === 0 && <p className={s.sub}>Nenhuma conta extra. Use uma quando a loja anuncia também por outra conta de anúncio.</p>}
         {extras.map(row => (
           <AccountItem key={row.adAccountId} row={row} label={label(row)} today={today}>
-            {renaming?.id === row.id ? (
+            {archived ? null : renaming?.id === row.id ? (
               <div className={s.inline}>
                 <input
                   className={s.input} style={{ maxWidth: 260 }} value={renaming.value} aria-label="Apelido da conta"
@@ -153,7 +156,7 @@ export function AdAccounts({ storeId, storeName, archived, today, accounts, heal
               <div className={s.actions}>
                 {row.syncing
                   ? <Button size="sm" onClick={() => { setDialogError(null); setConfirm({ kind: 'pause', row }) }}>Pausar coleta</Button>
-                  : <Button size="sm" pending={busy === `active-${row.id}`} disabled={archived || !row.hasToken} onClick={() => setActive(row, true)}>Retomar coleta</Button>}
+                  : <Button size="sm" pending={busy === `active-${row.id}`} disabled={!row.hasToken} onClick={() => setActive(row, true)}>Retomar coleta</Button>}
                 <Button size="sm" variant="ghost" onClick={() => setRenaming({ id: row.id!, value: row.nickname ?? '' })}>Renomear</Button>
                 <Button size="sm" variant="ghost" onClick={() => { setDialogError(null); setConfirm({ kind: 'remove', row }) }}>Desligar da loja</Button>
               </div>
@@ -242,11 +245,7 @@ function AccountItem({ row, label, today, children }: { row: AccountRow; label: 
                   : 'Validade do token desconhecida.'}
               </span>
             )}
-            {h.errors24h > 0 && (
-              <span className="neg">
-                {plural(h.errors24h, 'erro de coleta', 'erros de coleta')} nas últimas 24 h{h.lastError ? <> · último erro registrado: “{shortError(h.lastError)}”</> : ''}
-              </span>
-            )}
+            <SyncErrorsLine e={h} one="erro de coleta" many="erros de coleta" />
           </div>
         )}
         {children}

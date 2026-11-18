@@ -91,6 +91,8 @@ export function defaultProfitConfig(): ProfitConfig {
 type Obj = Record<string, unknown>
 const isObj = (v: unknown): v is Obj => !!v && typeof v === 'object' && !Array.isArray(v)
 const absent = (v: unknown) => v === undefined || v === null
+/** A cell left empty in the form (sent as null, or a blank string). */
+const isBlank = (v: unknown) => absent(v) || (typeof v === 'string' && v.trim() === '')
 
 /** A finite number, or a plain decimal string ("2.9", "2,9") from a form
  *  input. Anything else, the empty string included, is not a number. */
@@ -251,7 +253,10 @@ function parseTier(ctx: Ctx, x: unknown, p: string): CogsPriceTier | null {
       }
       const price = toNumber(raw)
       if (price === null || price < 0) {
-        ctx.err(`${p}.order_prices.${units}`, `Preço inválido para ${units} unidade(s).`)
+        // An empty box (a new card starts with three) is missing, not wrong.
+        ctx.err(`${p}.order_prices.${units}`, isBlank(raw)
+          ? `Informe o preço do pedido com ${units} unidade(s).`
+          : `Preço inválido para ${units} unidade(s).`)
         ok = false
         continue
       }
@@ -325,7 +330,11 @@ function parseCountryPrices(ctx: Ctx, x: unknown, p: string): CountryPriceList |
     const cc = toCountry(k)
     if (!cc) { ctx.err(`${p}.prices.${k}`, MSG.country); ok = false; continue }
     const price = toNumber(raw)
-    if (price === null || price < 0) { ctx.err(`${p}.prices.${cc}`, `Preço inválido para ${cc}.`); ok = false; continue }
+    if (price === null || price < 0) {
+      ctx.err(`${p}.prices.${cc}`, isBlank(raw) ? `Informe o preço para ${cc}.` : `Preço inválido para ${cc}.`)
+      ok = false
+      continue
+    }
     prices[cc] = price
   }
   if (!id) {
@@ -882,6 +891,9 @@ export interface ProfitSaveResponse {
  *  the current `version`), 413 body too large, 422 invalid settings. */
 export interface ProfitApiError {
   error: string
+  /** Set when the refusal is not about a field: 'store_archived' (an archived
+   *  store is for consultation only), as opposed to a 409 version conflict. */
+  code?: string
   issues?: ConfigIssue[]
   warnings?: ConfigIssue[]
   version?: string

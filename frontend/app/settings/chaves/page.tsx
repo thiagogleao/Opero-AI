@@ -18,8 +18,10 @@ import { Block, ButtonLink, EmptyState, ErrorState, SkeletonBlock } from '@/comp
 import { ReturnBanner, ShopifyHealthItem } from '@/components/settings/blocks'
 import { ShopifyKeyForm } from '@/components/settings/ShopifyKeyForm'
 import s from '@/components/settings/settings.module.css'
+import { storePageMetadata } from '@/components/settings/pageMetadata'
 
 export const dynamic = 'force-dynamic'
+export const generateMetadata = storePageMetadata('Chaves da Shopify', { legacyStoreKey: true })
 
 const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v)
 
@@ -43,7 +45,7 @@ export default async function KeysPage({ searchParams }: { searchParams: Promise
         <EmptyState icon="store" title="Nenhuma loja">Conecte uma loja em Ajustes.</EmptyState>
       ) : (
         <Suspense fallback={<SkeletonBlock lines={6} height={160} />}>
-          <KeysList viewer={ctx.viewer} currentId={ctx.store?.id ?? null} now={ctx.now} />
+          <KeysList viewer={ctx.viewer} currentId={ctx.store?.id ?? null} now={ctx.now} returnTo={ctx.hrefWith('/settings/chaves')} />
         </Suspense>
       )}
       <HowTo />
@@ -51,7 +53,7 @@ export default async function KeysPage({ searchParams }: { searchParams: Promise
   )
 }
 
-async function KeysList({ viewer, currentId, now }: { viewer: Parameters<typeof listStores>[0]; currentId: string | null; now: Date }) {
+async function KeysList({ viewer, currentId, now, returnTo }: { viewer: Parameters<typeof listStores>[0]; currentId: string | null; now: Date; returnTo: string }) {
   let stores: StoreRef[]
   let health
   try {
@@ -79,7 +81,7 @@ async function KeysList({ viewer, currentId, now }: { viewer: Parameters<typeof 
         return (
           <Block key={st.id} title={st.name} eyebrow={st.id === currentId ? 'Loja aberta' : undefined} howTo={<span className={s.mono}>{st.domain ?? 'sem domínio'}</span>}>
             <div className={s.stack}>
-              <ShopifyHealthItem h={h} now={now} settingsKeysHref={null} returnTo="/settings/chaves" />
+              <ShopifyHealthItem h={h} now={now} settingsKeysHref={null} returnTo={returnTo} />
               <ShopifyKeyForm storeId={st.id} storeName={st.name} domain={st.domain} connection={h.connection} archived={st.archived} />
             </div>
           </Block>

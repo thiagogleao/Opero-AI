@@ -3,7 +3,7 @@ import { getViewer, listStores, requireStore } from '@/lib/access'
 import { storeCredentials } from '@/lib/integrations/credentials'
 import { accountForNewStore, appOrigin, errorResponse, flowCookie, HttpError, storeParam } from '@/lib/integrations/http'
 import {
-  createOAuthState, LEGACY_OAUTH_COOKIES, NONCE_COOKIE, OAUTH_TTL_SECONDS, safeReturnTo, viewerKey,
+  createOAuthState, LEGACY_OAUTH_COOKIES, NONCE_COOKIE, OAUTH_TTL_SECONDS, returnPathname, safeReturnTo, viewerKey,
 } from '@/lib/integrations/oauthState'
 import { normalizeShopDomain, partnersApp, SHOPIFY_SCOPES } from '@/lib/integrations/shopify'
 
@@ -13,6 +13,7 @@ export const dynamic = 'force-dynamic'
 /**
  * GET /api/shopify/auth?shop=<handle or domain>&mode=reconnect|add&store=<id>
  *                      [&return=/settings|/settings/chaves|/onboarding][&storeStartDate=YYYY-MM-DD]
+ *   (`return` may carry the page's periodo/de/ate/parte; see safeReturnTo)
  *
  * Starts the Partners-app OAuth (the app in SHOPIFY_CLIENT_ID/SECRET).
  *  - reconnect: `store` (or, for the current links, the viewer's store with
@@ -26,18 +27,23 @@ export const dynamic = 'force-dynamic'
  *
  * Client ID and Secret are never accepted in the URL (it ends up in browser
  * history and access logs): 400. `shop` must be a *.myshopify.com domain.
- * Errors come back as `<return>?shopify_error=<code>`.
+ * Errors come back as `<return>?shopify_error=<code>` (a reconnect also with
+ * `loja=<id>`); an archived store is refused with store_archived in both modes.
  */
 export async function GET(req: NextRequest) {
   const origin = appOrigin(req)
   const sp = new URL(req.url).searchParams
   const mode = sp.get('mode') === 'reconnect' || sp.get('reconnect') === '1' ? 'reconnect' : 'add'
   const returnTo = safeReturnTo(sp.get('return'), mode === 'reconnect' ? '/settings' : '/onboarding')
+  // `loja` (the site's store key) names the store the failure is about, so the
+  // banner shows on that store's screen, not on whatever store was open last.
+  let storeId: string | null = null
   const back = (code: string) => {
     const u = new URL(returnTo, origin)
     u.searchParams.set('shopify_error', code)
+    if (storeId && mode === 'reconnect') u.searchParams.set('loja', storeId)
     // What the current onboarding screen reads to show the failure.
-    if (returnTo === '/onboarding') u.searchParams.set('error', code)
+    if (returnPathname(returnTo) === '/onboarding') u.searchParams.set('error', code)
     return NextResponse.redirect(u)
   }
 
@@ -51,12 +57,13 @@ export async function GET(req: NextRequest) {
 
     let shop = normalizeShopDomain(sp.get('shop'))
     const explicitStore = storeParam(new URL(req.url))
-    let storeId: string | null = null
 
     if (mode === 'reconnect') {
       if (explicitStore) {
         const store = await requireStore(viewer, explicitStore)
         storeId = store.id
+        // An archived store is for consultation only.
+        if (store.archived) return back('store_archived')
         // The store's own domain when the link does not repeat it.
         if (!sp.get('shop')) shop = normalizeShopDomain(store.domain)
       } else {
@@ -64,6 +71,7 @@ export async function GET(req: NextRequest) {
         const mine = (await listStores(viewer, { includeArchived: true })).find(s => s.domain?.toLowerCase() === shop)
         if (!mine) return errorResponse(new HttpError(404, 'not_found', 'Loja não encontrada'))
         storeId = mine.id
+        if (mine.archived) return back('store_archived')
       }
     } else {
       if (!shop) return back('invalid_shop')

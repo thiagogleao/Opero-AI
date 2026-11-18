@@ -8,6 +8,8 @@ import { canonicalJson, NO_CONFIG_VERSION } from '@/lib/data/profitConfig'
 const STORES = [
   { id: 'store-a', name: 'Loja A', shopName: 'Loja A', domain: 'a.myshopify.com', timezone: 'America/Sao_Paulo', archived: false, userId: 'u1' },
   { id: 'store-b', name: 'Loja B', shopName: 'Loja B', domain: 'b.myshopify.com', timezone: 'Asia/Tokyo', archived: false, userId: 'u2' },
+  // Archived: consultation only.
+  { id: 'store-c', name: 'Loja C', shopName: 'Loja C', domain: 'c.myshopify.com', timezone: 'America/Sao_Paulo', archived: true, userId: 'u1' },
 ]
 
 const db = vi.hoisted(() => ({
@@ -114,6 +116,7 @@ beforeEach(() => {
   engine.calls = []
   viewer.current = { kind: 'partner', userId: 'u1' }
   db.rows.set('store-a', canonicalJson(savedConfig()))
+  db.rows.set('store-c', canonicalJson(savedConfig()))
 })
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -221,6 +224,42 @@ describe('PUT', () => {
     expect((await put({ baseVersion: 'x', config: {} })).status).toBe(400)
     const bad = await PUT(new Request('http://x/api/profit', { method: 'PUT', body: '{nope' }))
     expect(bad.status).toBe(400)
+  })
+})
+
+describe('an archived store (consultation only)', () => {
+  it('refuses every save with 409 store_archived and a Portuguese sentence, writing nothing', async () => {
+    const baseVersion = await currentVersion('store-c')
+    const before = db.rows.get('store-c')
+    const res = await put({ storeId: 'store-c', baseVersion, config: { cogs: { default_cost_usd: 12 } } })
+    expect(res.status).toBe(409)
+    const j = await res.json()
+    expect(j.code).toBe('store_archived')
+    expect(j.error).toMatch(/Loja C está arquivada e fica só para consulta/)
+    expect(j.error).toMatch(/desarquive/)
+    // Not a version conflict: no version to retry with.
+    expect(j.version).toBeUndefined()
+    expect(db.writes).toBe(0)
+    expect(db.rows.get('store-c')).toBe(before)
+  })
+
+  it('refuses it for the owner too, before looking at the body', async () => {
+    viewer.current = { kind: 'owner' }
+    const res = await put({ storeId: 'store-c', config: 'not even an object' })
+    expect(res.status).toBe(409)
+    expect((await res.json()).code).toBe('store_archived')
+    expect(db.writes).toBe(0)
+  })
+
+  it('still reads its settings and previews them', async () => {
+    const g = await get('?store=store-c')
+    expect(g.status).toBe(200)
+    const gj = await g.json()
+    expect(gj.store.archived).toBe(true)
+    expect(gj.config.cogs.default_cost_usd).toBe(7.8)
+    const p = await post({ storeId: 'store-c', period: 'custom', from: '2026-11-01', to: '2026-11-10' })
+    expect(p.status).toBe(200)
+    expect((await p.json()).totals.cogs).toBe(78)
   })
 })
 

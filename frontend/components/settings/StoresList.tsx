@@ -14,6 +14,7 @@ import { useRouter } from 'next/navigation'
 import { Avatar, Badge, Button, ButtonLink, Callout, Chip } from '@/components/ui'
 import { ConfirmDialog } from './ConfirmDialog'
 import { callApi, nothingChanged } from './messages'
+import { formatDate } from '@/lib/format'
 import s from './settings.module.css'
 
 export interface StoreListItem {
@@ -22,7 +23,8 @@ export interface StoreListItem {
   domain: string | null
   city: string
   archived: boolean
-  archivedAt: string | null
+  /** YYYY-MM-DD in the store's timezone (resolved on the server). */
+  archivedOn: string | null
   current: boolean
   shopifyConnected: boolean
   facebookConnected: boolean
@@ -30,7 +32,7 @@ export interface StoreListItem {
   href: string
 }
 
-export function StoresList({ stores, addHref }: { stores: StoreListItem[]; addHref: string }) {
+export function StoresList({ stores, today, addHref }: { stores: StoreListItem[]; today: string; addHref: string }) {
   const router = useRouter()
   const [target, setTarget] = useState<{ store: StoreListItem; archive: boolean } | null>(null)
   const [pending, setPending] = useState(false)
@@ -71,7 +73,7 @@ export function StoresList({ stores, addHref }: { stores: StoreListItem[]; addHr
           </div>
           <div className={s.sub}>
             {st.domain ?? 'sem domínio'} · {st.city}
-            {st.archivedAt ? ` · arquivada em ${st.archivedAt.slice(8, 10)}/${st.archivedAt.slice(5, 7)}/${st.archivedAt.slice(0, 4)}` : ''}
+            {st.archivedOn ? ` · arquivada em ${formatDate(st.archivedOn, today)}` : ''}
           </div>
         </div>
       </div>

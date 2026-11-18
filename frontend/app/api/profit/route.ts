@@ -4,6 +4,7 @@
  *   GET  ?store=<id>                     → ProfitConfigResponse
  *   POST { storeId?, config?, period?, from?, to? } → ProfitPreviewResponse
  *   PUT  { storeId, baseVersion, config }           → ProfitSaveResponse
+ *        (409 { code: 'store_archived' } for an archived store: consultation only)
  *
  * Types and the validation rules live in lib/data/profitConfig.ts.
  *
@@ -29,6 +30,7 @@ import {
   type ConfigIssue, type ProfitApiError, type ProfitConfig, type ProfitConfigResponse, type ProfitPreviewResponse,
   type ProfitSaveResponse, type ProfitStoreSummary,
 } from '@/lib/data/profitConfig'
+import { archivedStoreMessage, STORE_ARCHIVED } from '../_lib/archivedStore'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -210,6 +212,9 @@ export async function PUT(req: Request) {
     // Partners may edit their own stores and the owner every store: the same
     // rule as seeing them.
     const store = await requireStore(viewer, body.storeId)
+    // An archived store is for consultation only (owner decision): its saved
+    // settings stay readable (GET) and previewable (POST), never rewritten.
+    if (store.archived) return fail(409, archivedStoreMessage(store.name), { code: STORE_ARCHIVED })
     if (!body.config || typeof body.config !== 'object' || Array.isArray(body.config)) {
       return fail(400, 'Envie a configuração (config) como objeto.', { issues: [{ path: 'config', message: 'Envie a configuração.' }] })
     }
