@@ -1,0 +1,98 @@
+/* InsightsCard: the AI reading inside a Block. */
+
+.skel { display: grid; gap: 8px; padding: 4px 0; }
+
+.idle { display: grid; gap: var(--s3); }
+.lead { font-size: 13.5px; line-height: 1.55; color: var(--tx-2); max-width: 720px; }
+.lead b { color: var(--tx); font-weight: 600; }
+.note { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--tx-3); }
+.cta { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }
+.small { font-size: 12px; color: var(--tx-3); }
+
+.progress {
+  display: flex; align-items: center; gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  border-radius: var(--r-ctl);
+  background: var(--info-bg);
+  border: 1px solid var(--line-2);
+}
+.phase { flex: 1; font-size: 13px; color: var(--tx); }
+.elapsed { color: var(--tx-3); }
+.spin {
+  width: 14px; height: 14px; border-radius: 50%; flex: none;
+  border: 1.8px solid var(--info); border-right-color: transparent;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.retry { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; margin-top: var(--s2); }
+
+.result { display: grid; gap: var(--s4); margin-top: 2px; }
+/* Grid items default to min-width:auto: one long unbreakable line (a chip, a
+   product name) would widen the whole card past a phone screen. */
+.result > *, .headline > * { min-width: 0; }
+.dim { opacity: .62; margin-top: var(--s4); }
+.meta { display: flex; align-items: center; gap: 6px var(--s3); flex-wrap: wrap; font-size: 12px; color: var(--tx-3); }
+
+.headline {
+  display: grid; gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  border-radius: 12px;
+  background: var(--card-2);
+  border: 1px solid var(--line);
+}
+.stats { display: flex; flex-wrap: wrap; gap: var(--s3) var(--s7); }
+.stats > div { display: grid; gap: 4px; min-width: 0; }
+.stats dd { font: 500 16px/1.25 var(--mono); font-variant-numeric: tabular-nums; color: var(--tx); }
+.stats .roas dd { font: inherit; }
+.sub { font: 400 12px/1.3 var(--sans); color: var(--tx-3); }
+.share {
+  display: flex; align-items: baseline; gap: 6px var(--s2); flex-wrap: wrap;
+  padding-top: var(--s3);
+  border-top: 1px dashed var(--line-2);
+  font-size: 13px; color: var(--tx-2);
+}
+.share svg { align-self: center; color: var(--info); }
+.share > span:nth-of-type(1) { font-weight: 600; color: var(--tx); }
+.shareValue { font-size: 15px; font-weight: 500; }
+.cfg { display: flex; align-items: center; gap: 6px var(--s2); flex-wrap: wrap; }
+
+.summary { font-size: 14px; line-height: 1.6; color: var(--tx); max-width: 860px; overflow-wrap: anywhere; }
+
+.cards { list-style: none; display: grid; gap: var(--s3); grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr)); }
+.card {
+  display: flex; flex-direction: column; gap: var(--s2);
+  padding: var(--s3) var(--s4) var(--s4);
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  min-width: 0;
+  /* Model text quotes campaign and ad names, which often have no spaces
+     ("CBO-MOOMILK-GLOBAL_ADV+_0123…"): break them instead of widening the
+     card past a phone screen (390px: the page grew to 477px). */
+  overflow-wrap: anywhere;
+}
+.cardHead { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.cardTitle { font: 600 14px/1.35 var(--sans); color: var(--tx); }
+.target { font-size: 12px; color: var(--tx-3); overflow-wrap: anywhere; }
+.detail { font-size: 13px; line-height: 1.55; color: var(--tx-2); }
+.action { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 1.5; color: var(--tx); }
+.action svg { flex: none; margin-top: 3px; color: var(--info); }
+.action b { font-weight: 600; }
+.evidence {
+  display: grid; gap: 4px;
+  padding: var(--s2) var(--s3);
+  border-radius: var(--r-sm);
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+/* A label too long for the row pushes the value to the next line (right
+   aligned) instead of breaking the number ("$1.969," / "00" on a phone). */
+.evidence > div { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 2px var(--s3); font-size: 12.5px; }
+.evidence dt { color: var(--tx-3); min-width: 0; }
+.evidence dd { display: flex; align-items: center; gap: 6px; color: var(--tx); text-align: right; margin-left: auto; max-width: 100%; overflow-wrap: break-word; }
+.unverified dd > span:first-child { color: var(--warn); }
+.sample { margin-top: auto; font-size: 12px; color: var(--tx-3); }
+
+.gaps { display: grid; gap: 6px; }
+.gaps ul { padding-left: 18px; font-size: 12.5px; line-height: 1.5; color: var(--tx-3); overflow-wrap: anywhere; }
+.gaps li + li { margin-top: 2px; }
