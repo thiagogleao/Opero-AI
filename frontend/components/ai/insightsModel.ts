@@ -58,44 +58,13 @@ export function lacksClosedDay(from: string, storeTz: string, now: Date = new Da
 
 /**
  * The ROAS the headline shows, measured on the same ad spend as the Resumo
- * page's ROAS card (lib/views/store `adChannelOf` / `channelRoas`, a server
- * module this client file cannot import: it pulls in the database). The
- * headline's own `roas` is revenue ÷ Meta spend only; for Dumpling 8jcp3a on
- * 11–17 nov that read 319,64× ($59,74 of Meta next to $6.436 of Shopify ads)
- * while the page beside it said 2,97×. A parity test keeps this in step.
+ * page's ROAS card: the one shared rule of lib/views/adChannel (pure, so this
+ * client file can import it). The headline's own `roas` is revenue ÷ Meta
+ * spend only; for Dumpling 8jcp3a on 11–17 nov that read 319,64× ($59,74 of
+ * Meta next to $6.436 of Shopify ads) while the page beside it said 2,97×.
+ * Re-exported so InsightsCard keeps importing from here.
  */
-export type AdChannel = 'meta' | 'shop' | 'both'
-
-/** Below this share of the ad spend a second channel is a side cost (same value as lib/views/store). */
-const MINOR_CHANNEL_SHARE = 0.1
-
-/** The headline types its spends as nullable; a missing spend is no spend. */
-interface Spends { metaSpend: number | null; shopSpend: number | null }
-
-export function adChannelOf(h: Spends): AdChannel | null {
-  const meta = h.metaSpend ?? 0
-  const shop = h.shopSpend ?? 0
-  const total = meta + shop
-  if (!(total > 0)) return null
-  if (shop <= 0 || shop < total * MINOR_CHANNEL_SHARE) return meta > 0 ? 'meta' : 'shop'
-  if (meta <= 0 || meta < total * MINOR_CHANNEL_SHARE) return 'shop'
-  return 'both'
-}
-
-export function channelRoas(h: Spends & { revenue: number | null }): number | null {
-  const meta = h.metaSpend ?? 0
-  const shop = h.shopSpend ?? 0
-  const ch = adChannelOf(h)
-  const spend = ch === 'both' ? meta + shop : ch === 'meta' ? meta : ch === 'shop' ? shop : 0
-  return spend > 0 && h.revenue !== null ? h.revenue / spend : null
-}
-
-/** The label above the headline ROAS, in the page's words (StoreKpis). */
-export const ROAS_LABEL: Record<AdChannel, string> = {
-  meta: 'ROAS do Meta',
-  shop: 'ROAS dos Anúncios Shopify',
-  both: 'ROAS dos anúncios (Meta + Shopify)',
-}
+export { adChannelOf, channelRoas, ROAS_LABEL, type AdChannel } from '@/lib/views/adChannel'
 
 export const KIND: Record<InsightCard['kind'], { label: string; tone: ChipTone; icon: IconName }> = {
   parar: { label: 'Parar', tone: 'neg', icon: 'down' },

@@ -52,10 +52,11 @@ const INFO = (
 const UNVERIFIED_TIP = 'Este número não aparece na planilha de fatos que a IA recebeu. Confira na tela antes de agir.'
 
 /** One short sentence per state change for screen readers (the card itself
- *  is too long to be a live region). */
-function announce(state: InsightsState): string {
+ *  is too long to be a live region). The region is always in the DOM, empty
+ *  while checking or idle, so a screen reader hears each later change. */
+function liveMessage(state: InsightsState): string {
   switch (state.kind) {
-    case 'generating': return PHASE_TEXT[state.phase]
+    case 'generating': return PHASE_TEXT[state.phase] ?? 'Gerando a leitura…'
     case 'ready': return state.cached ? 'Leitura guardada carregada.' : 'Leitura pronta.'
     case 'failed':
     case 'unavailable':
@@ -89,6 +90,8 @@ export function InsightsCard({ storeId, from, to, split }: InsightsCardProps) {
     ? state.window
     : state.kind === 'ready' ? state.result.window : null
 
+  const idleNote = state.kind === 'idle' ? windowNote(state.window) : null
+
   const actions = state.kind === 'ready'
     ? <Button size="sm" variant="ghost" icon="refresh" onClick={regenerate}>Gerar de novo</Button>
     : null
@@ -112,7 +115,7 @@ export function InsightsCard({ storeId, from, to, split }: InsightsCardProps) {
       actions={actions}
       footer={footer}
     >
-      <p className="sr-only" aria-live="polite">{announce(state)}</p>
+      <p className="sr-only" aria-live="polite" aria-atomic="true">{liveMessage(state)}</p>
       <div aria-busy={state.kind === 'checking' || generating}>
         {state.kind === 'checking' && (
           <div className={s.skel} aria-label="Procurando leitura guardada">
@@ -140,7 +143,7 @@ export function InsightsCard({ storeId, from, to, split }: InsightsCardProps) {
               A IA lê os números desta loja em <b>{state.window.label}</b> e aponta o que mudou e o que fazer,
               dizendo em quantos pedidos ou dólares cada conclusão se apoia.
             </p>
-            {windowNote(state.window) && <p className={s.note}><Icon name="clock" size={13} />{windowNote(state.window)}</p>}
+            {idleNote && <p className={s.note}><Icon name="clock" size={13} />{idleNote}</p>}
             <div className={s.cta}>
               <Button variant="primary" icon="sparkle" onClick={generate}>Gerar leitura de {state.window.label}</Button>
               <span className={s.small}>Leva até 1 minuto. Fica guardada por 6 horas.</span>
@@ -152,7 +155,7 @@ export function InsightsCard({ storeId, from, to, split }: InsightsCardProps) {
           <div className={s.progress}>
             <span className={s.spin} aria-hidden="true" />
             <span className={s.phase}>
-              {PHASE_TEXT[state.phase]}
+              {PHASE_TEXT[state.phase] ?? 'Gerando a leitura…'}
               <span className={`${s.elapsed} num`}> · {Math.max(0, Math.floor((now - state.startedAt) / 1000))} s</span>
             </span>
             <Button size="sm" variant="ghost" icon="x" onClick={cancel}>Cancelar</Button>
@@ -188,6 +191,8 @@ function Result({ result, cached, now, dim }: { result: InsightsResult; cached: 
   const generated = Date.parse(result.generatedAt)
   const age = formatRelativeTime(result.generatedAt, new Date(Math.max(now, Number.isNaN(generated) ? now : generated)))
   const note = windowNote(result.window)
+  const insights = result.insights ?? []
+  const gaps = result.dataGaps ?? []
   return (
     <div className={dim ? `${s.result} ${s.dim}` : s.result}>
       <div className={s.meta}>
@@ -196,22 +201,22 @@ function Result({ result, cached, now, dim }: { result: InsightsResult; cached: 
         {note && <span>{note}</span>}
       </div>
 
-      <Headline h={result.headline} split={result.split} />
+      {result.headline && <Headline h={result.headline} split={result.split} />}
 
       <p className={s.summary}>{result.summary}</p>
 
-      {result.insights.length === 0
+      {insights.length === 0
         ? (
             <EmptyState compact icon="check" title="Nada pedindo ação">
               A IA não viu neste período nada que justifique mudar algo agora.
             </EmptyState>
           )
-        : <ol className={s.cards}>{result.insights.map((c, i) => <Insight key={`${i}-${c.title}`} card={c} />)}</ol>}
+        : <ol className={s.cards}>{insights.map((c, i) => <Insight key={`${i}-${c.title}`} card={c} />)}</ol>}
 
-      {result.dataGaps.length > 0 && (
+      {gaps.length > 0 && (
         <div className={s.gaps}>
           <div className="lbl">O que estes dados não permitem dizer</div>
-          <ul>{result.dataGaps.map(g => <li key={g}>{g}</li>)}</ul>
+          <ul>{gaps.map((g, i) => <li key={`${i}-${g}`}>{g}</li>)}</ul>
         </div>
       )}
     </div>
@@ -240,7 +245,7 @@ function Headline({ h, split }: { h: InsightsHeadline; split: boolean }) {
         )}
         <div className={s.roas}>
           <dt className="lbl">{channel ? ROAS_LABEL[channel] : 'ROAS'}</dt>
-          <dd><RoasGauge roas={channelRoas(h)} breakEven={h.breakEvenRoas} size="mini" label="" /></dd>
+          <dd><RoasGauge roas={channelRoas(h)} breakEven={h.breakEvenRoas} configured={h.configured} revenue={h.revenue} size="mini" label="" /></dd>
         </div>
       </dl>
       {split && h.partnerProfit !== null && (
@@ -262,13 +267,18 @@ function Headline({ h, split }: { h: InsightsHeadline; split: boolean }) {
 }
 
 function Insight({ card }: { card: InsightCard }) {
-  const k = KIND[card.kind]
-  const target = card.target.type !== 'loja' && card.target.name ? `${TARGET[card.target.type]} · ${card.target.name}` : null
+  // The server validates the card's shape; an unknown kind or target type (a
+  // newer server, an old cached reading) still renders, as a plain diagnosis.
+  const k = KIND[card.kind] ?? KIND.diagnostico
+  const confidence = CONFIDENCE[card.confidence]
+  const t = card.target
+  const target = t && t.type !== 'loja' && t.name ? `${TARGET[t.type] ?? 'Alvo'} · ${t.name}` : null
+  const evidence = card.evidence ?? []
   return (
     <li className={s.card}>
       <div className={s.cardHead}>
         <Chip tone={k.tone} icon={k.icon} size="sm">{k.label}</Chip>
-        <Badge tone="mut">{CONFIDENCE[card.confidence]}</Badge>
+        {confidence && <Badge tone="mut">{confidence}</Badge>}
         {!card.verified && <Badge tone="warn" icon="alert" title={UNVERIFIED_TIP}>número não conferido</Badge>}
       </div>
       <h4 className={s.cardTitle}>{card.title}</h4>
@@ -277,9 +287,9 @@ function Insight({ card }: { card: InsightCard }) {
       {card.action && (
         <p className={s.action}><Icon name="arrowRight" size={14} /><span><b>O que fazer:</b> {card.action}</span></p>
       )}
-      {card.evidence.length > 0 && (
+      {evidence.length > 0 && (
         <dl className={s.evidence}>
-          {card.evidence.map((e, i) => (
+          {evidence.map((e, i) => (
             <div key={`${i}-${e.label}`} className={e.verified ? undefined : s.unverified}>
               <dt>{e.label}</dt>
               <dd>

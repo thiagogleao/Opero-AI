@@ -22,6 +22,17 @@ export function internalHref(url: string | null | undefined): string | null {
   // Control characters and backslashes can make a browser read another host.
   if (/[\u0000-\u001f\u007f\\]/.test(u)) return null
   const path = u.split(/[?#]/, 1)[0]
+  // Check the path the browser will really open, not the raw text: dot
+  // segments ("/campaigns/../api/…", "/m/%2e%2e/api/…") pass a first-segment
+  // check and are then resolved by the browser and <Link> into an API route.
+  // Any path the URL parser rewrites (dot segments, characters it re-encodes)
+  // is refused rather than guessed at.
+  // An encoded dot, slash or backslash has no use in a page link and may be
+  // decoded by a later hop ("/overview/..%2fapi/export").
+  if (/%(2e|2f|5c)/i.test(path)) return null
+  let resolved: URL
+  try { resolved = new URL(u, 'http://app.invalid') } catch { return null }
+  if (resolved.origin !== 'http://app.invalid' || resolved.pathname !== path) return null
   const [, first = '', second = ''] = path.split('/')
   if (!PAGES.has(first)) return null
   if (NEEDS_ID.has(first) && !second) return null
@@ -32,12 +43,16 @@ export function internalHref(url: string | null | undefined): string | null {
 const PAGE_STATE = ['loja', 'periodo', 'de', 'ate', 'parte'] as const
 
 /**
- * An app link from an answer, carrying the store and period on screen: a bare
- * "/campaigns" would open the campaigns of the browser's default store, not
- * the store the conversation is about. Keys the link already has win; the
+ * An app link from an answer, carrying the store the conversation is about
+ * and the period on screen: a bare "/campaigns" would open the campaigns of
+ * the browser's default store. The store is `storeId` (the conversation's),
+ * not the address's `loja`: on "Todas" the conversation is about the store
+ * picked in the drawer, while the address says loja=todas — or, after the
+ * sidebar link from a store's Resumo, that previous store's id — so an answer
+ * about Glooty linked to MOKOO's campaigns. Keys the link already has win; the
  * phone (/m) has its own state and is left alone.
  */
-export function withPageState(href: string, currentSearch: string): string {
+export function withPageState(href: string, currentSearch: string, storeId: string | null = null): string {
   const hashAt = href.indexOf('#')
   const hash = hashAt >= 0 ? href.slice(hashAt) : ''
   const noHash = hashAt >= 0 ? href.slice(0, hashAt) : href
@@ -46,7 +61,7 @@ export function withPageState(href: string, currentSearch: string): string {
   const out = new URLSearchParams(query)
   const current = new URLSearchParams(currentSearch)
   for (const k of PAGE_STATE) {
-    const v = current.get(k)
+    const v = k === 'loja' && storeId ? storeId : current.get(k)
     if (v !== null && !out.has(k)) out.set(k, v)
   }
   const qs = out.toString()

@@ -17,7 +17,8 @@
  *    cleared turn no longer exists.
  */
 
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useIsomorphicLayoutEffect } from './useIsomorphicLayoutEffect'
 import type { ChatEvent } from '@/lib/ai/chat'
 import {
   applyChatEvent, historyFor, isOpen, parseSaved, STORAGE_KEY, toSaved,
@@ -86,7 +87,7 @@ export function useCopilotChat(pageStoreId: string | null, split: boolean) {
   // …and stop paying for the answer nobody will read (also on unmount). At
   // commit, not after paint: a frame of the old stream (the `start` with the
   // old store's name) must not land after the conversation was cleared.
-  useLayoutEffect(() => {
+  useIsomorphicLayoutEffect(() => {
     const ref = abortRef
     return () => { ref.current?.abort() }
   }, [storeId, split])

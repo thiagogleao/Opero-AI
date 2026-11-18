@@ -95,6 +95,21 @@ describe('internalHref (AI18)', () => {
     expect(internalHref('/campaigns\n//x')).toBeNull()
   })
 
+  it('judges the path the browser opens, not the raw text (dot segments)', () => {
+    // Each of these passed the first-segment check and resolved to an API route.
+    expect(internalHref('/campaigns/../api/facebook/auth?store=x&mode=main')).toBeNull()
+    expect(internalHref('/campaigns/%2e%2e/api/mobile/unlock')).toBeNull()
+    expect(internalHref('/campaigns/.%2E/api/mobile/unlock')).toBeNull()
+    expect(internalHref('/m/../api/export?period=90d')).toBeNull()
+    expect(internalHref('/overview/..%2fapi/export')).toBeNull()
+    expect(internalHref('/creatives/..')).toBeNull()
+    expect(internalHref('/campaigns/./x')).toBeNull()
+    // Dots in the query are not path segments and stay allowed.
+    expect(internalHref('/campaigns?q=../api')).toBe('/campaigns?q=../api')
+    expect(internalHref('/products/')).toBe('/products/')
+    expect(internalHref('/m')).toBe('/m')
+  })
+
   it('drops a page that needs an id when it has none', () => {
     expect(internalHref('/creatives')).toBeNull()
     expect(internalHref('/creatives/120249395069380003')).toBe('/creatives/120249395069380003')
@@ -107,6 +122,19 @@ describe('internalHref (AI18)', () => {
     expect(withPageState('/products?loja=glooty#top', on)).toBe('/products?loja=glooty&periodo=custom&de=2026-11-01&ate=2026-11-12&parte=50#top')
     expect(withPageState('/m', on)).toBe('/m')
     expect(withPageState('/campaigns', '')).toBe('/campaigns')
+  })
+
+  it("opens the conversation's store, not the address's loja", () => {
+    // "Todas as lojas" reached from MOKOO's Resumo keeps MOKOO's id in the
+    // address; the drawer's conversation is about Glooty.
+    const todas = '?loja=user_3CVoVQYfnj1Ljnm3tf0iHP40fxX&periodo=yesterday'
+    const glooty = '5071bfb6-0000-0000-0000-000000000000'
+    expect(withPageState('/campaigns', todas, glooty)).toBe(`/campaigns?loja=${glooty}&periodo=yesterday`)
+    expect(withPageState('/products', '?loja=todas&periodo=7d', glooty)).toBe(`/products?loja=${glooty}&periodo=7d`)
+    // A link that names its store keeps it; no conversation store: the address.
+    expect(withPageState('/campaigns?loja=other', todas, glooty)).toBe('/campaigns?loja=other&periodo=yesterday')
+    expect(withPageState('/campaigns', todas, null)).toBe(`/campaigns${todas}`)
+    expect(withPageState('/m', todas, glooty)).toBe('/m')
   })
 })
 
@@ -229,5 +257,17 @@ describe('headline ROAS basis', () => {
     expect(adChannelOf(cases[2])).toBe('both')
     expect(channelRoas(cases[2])).toBeCloseTo(2.312, 3) // not 7,76×
     expect(adChannelOf(cases[4])).toBeNull()
+  })
+})
+
+describe('useIsomorphicLayoutEffect', () => {
+  it('is one hook fixed when the module loads (useEffect without a window)', async () => {
+    // The constant, not a per-render choice: React reported a change in hook
+    // order in CopilotLauncher when the slot held useEffect in one render and
+    // useLayoutEffect in the next.
+    const React = await import('react')
+    const { useIsomorphicLayoutEffect } = await import('../useIsomorphicLayoutEffect')
+    expect(typeof window).toBe('undefined')
+    expect(useIsomorphicLayoutEffect).toBe(React.useEffect)
   })
 })

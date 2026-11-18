@@ -12,7 +12,8 @@
  * called scrollIntoView on every token and dragged the whole dashboard).
  */
 
-import { useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import { useIsomorphicLayoutEffect } from './useIsomorphicLayoutEffect'
 import { Button, Callout, EmptyState } from '@/components/ui/Card'
 import { Chip } from '@/components/ui/Chip'
 import { Icon } from '@/components/ui/Icon'
@@ -117,7 +118,7 @@ export function CopilotDrawer({ id, chat, pageStoreId, from, to, split, onClose,
     return () => document.removeEventListener('keydown', onKey)
   }, [onClose, id])
 
-  useLayoutEffect(() => {
+  useIsomorphicLayoutEffect(() => {
     const el = listRef.current
     if (el && stick.current) el.scrollTop = el.scrollHeight
   }, [turns])
@@ -208,7 +209,7 @@ export function CopilotDrawer({ id, chat, pageStoreId, from, to, split, onClose,
 
         {turns.map((t, i) => t.role === 'user'
           ? <div key={t.id} className={s.user}><p>{t.text}</p></div>
-          : <Answer key={t.id} turn={t} canRetry={i === turns.length - 1 && !chat.busy} onRetry={() => { stick.current = true; chat.retry(t.id) }} />)}
+          : <Answer key={t.id} turn={t} storeId={chat.storeId} canRetry={i === turns.length - 1 && !chat.busy} onRetry={() => { stick.current = true; chat.retry(t.id) }} />)}
       </div>
 
       <form className={s.composer} onSubmit={onSubmit}>
@@ -302,14 +303,14 @@ function Tools({ tools }: { tools: ToolActivity[] }) {
   )
 }
 
-function Answer({ turn, canRetry, onRetry }: { turn: AssistantTurn; canRetry: boolean; onRetry: () => void }) {
+function Answer({ turn, storeId, canRetry, onRetry }: { turn: AssistantTurn; storeId: string | null; canRetry: boolean; onRetry: () => void }) {
   const open = turn.status === 'waiting' || turn.status === 'streaming'
   const runningTool = turn.tools.find(t => t.status === 'running')
   return (
     <div className={s.answer}>
       {turn.tools.length > 0 && <Tools tools={turn.tools} />}
       {turn.text
-        ? <SafeMarkdown>{turn.text}</SafeMarkdown>
+        ? <SafeMarkdown storeId={storeId}>{turn.text}</SafeMarkdown>
         : open && (
             <p className={s.thinking}>
               <span className={s.spin} aria-hidden="true" />

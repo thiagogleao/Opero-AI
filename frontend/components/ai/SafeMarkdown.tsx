@@ -8,14 +8,17 @@
  *  - only text elements are kept (allow-list): no images, so an answer can
  *    never make the browser fetch a URL carrying data;
  *  - a link survives only when it points to a page of this app (links.ts),
- *    and it keeps the store and period on screen; any other link, and every
- *    bare URL, is shown as plain text.
+ *    and it opens the store the conversation is about (`storeId`) with the
+ *    period on screen; any other link, and every bare URL, is shown as plain
+ *    text.
  * Tables (GFM) scroll sideways inside the drawer instead of widening it.
  *
- * Props: { children: string; className? }
+ * Props: { children: string; storeId: string | null — the conversation's store
+ *         (useCopilotChat storeId), never read from the address; className? }
  */
 
 import Link from 'next/link'
+import { useMemo } from 'react'
 import Markdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { internalHref, withPageState } from './links'
@@ -29,16 +32,18 @@ const ALLOWED = [
 
 const heading: Components['h1'] = ({ children }) => <p className={s.h}>{children}</p>
 
-const COMPONENTS: Components = {
-  a: ({ href, children }) => {
-    const to = internalHref(href)
-    if (!to) return <span>{children}</span>
-    // Keep the store and period on screen (the answers render in the drawer,
-    // on the client only, so reading the address here never differs from a
-    // server render).
-    const search = typeof window === 'undefined' ? '' : window.location.search
-    return <Link href={withPageState(to, search)} className={s.link}>{children}</Link>
-  },
+/** The link renderer for one conversation's store. */
+const linkFor = (storeId: string | null): Components['a'] => function AnswerLink({ href, children }) {
+  const to = internalHref(href)
+  if (!to) return <span>{children}</span>
+  // The conversation's store and the period on screen (the answers render in
+  // the drawer, on the client only, so reading the address here never differs
+  // from a server render).
+  const search = typeof window === 'undefined' ? '' : window.location.search
+  return <Link href={withPageState(to, search, storeId)} className={s.link}>{children}</Link>
+}
+
+const COMPONENTS: Omit<Components, 'a'> = {
   h1: heading, h2: heading, h3: heading, h4: heading, h5: heading, h6: heading,
   table: ({ children }) => (
     <div className={s.tableWrap} tabIndex={0} role="region" aria-label="Tabela da resposta">
@@ -50,7 +55,8 @@ const COMPONENTS: Components = {
 /** The URL kept on a link: only app pages (everything else becomes text). */
 const urlTransform = (url: string) => internalHref(url) ?? ''
 
-export function SafeMarkdown({ children, className }: { children: string; className?: string }) {
+export function SafeMarkdown({ children, storeId, className }: { children: string; storeId: string | null; className?: string }) {
+  const components = useMemo<Components>(() => ({ ...COMPONENTS, a: linkFor(storeId) }), [storeId])
   return (
     <div className={className ? `${s.md} ${className}` : s.md}>
       <Markdown
@@ -59,7 +65,7 @@ export function SafeMarkdown({ children, className }: { children: string; classN
         allowedElements={ALLOWED}
         unwrapDisallowed
         urlTransform={urlTransform}
-        components={COMPONENTS}
+        components={components}
       >
         {children}
       </Markdown>

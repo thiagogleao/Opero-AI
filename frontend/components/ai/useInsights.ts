@@ -18,7 +18,8 @@
  *    shown as such without the request the server would refuse.
  */
 
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useIsomorphicLayoutEffect } from './useIsomorphicLayoutEffect'
 import type { InsightsEvent, InsightsResult, InsightsWindowInfo } from '@/lib/ai/insights/run'
 import { describeAiError, type UiError } from './errors'
 import {
@@ -71,7 +72,7 @@ export function useInsights({ storeId, from, to, split }: InsightsRequest) {
   // At commit (before paint, before any late response can run): record the
   // new key and abort the previous key's generation, which the server then
   // stops. Also on unmount.
-  useLayoutEffect(() => {
+  useIsomorphicLayoutEffect(() => {
     keyRef.current = key
     return () => { genRef.current?.abort() }
   }, [key])
