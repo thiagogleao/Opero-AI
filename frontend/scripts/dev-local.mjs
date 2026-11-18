@@ -38,7 +38,11 @@ env.NEXT_PUBLIC_APP_URL = `http://localhost:${port}`
 if (process.env.OPERO_TMP) { env.TMP = env.TEMP = env.TMPDIR = process.env.OPERO_TMP }
 // A throwaway owner token for this local run only, so the real magic-link
 // secret never has to be typed, pasted or printed to unlock a laptop.
-env.MOBILE_ACCESS_TOKEN = crypto.randomBytes(32).toString('base64url')
+// OPERO_LOCAL_TOKEN keeps the same throwaway token across restarts (it must be
+// 32+ characters and is only ever valid on this local server).
+env.MOBILE_ACCESS_TOKEN = (process.env.OPERO_LOCAL_TOKEN?.length ?? 0) >= 32
+  ? process.env.OPERO_LOCAL_TOKEN
+  : crypto.randomBytes(32).toString('base64url')
 console.log(`[dev-local] owner view: http://localhost:${port}/api/mobile/unlock?k=${env.MOBILE_ACCESS_TOKEN}&to=desktop`)
 console.log(`[dev-local] phone view: http://localhost:${port}/api/mobile/unlock?k=${env.MOBILE_ACCESS_TOKEN}`)
 
