@@ -1,0 +1,53 @@
+.trigger {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid var(--line-2);
+  display: inline-grid;
+  place-items: center;
+  font: 600 9.5px/1 var(--mono);
+  color: var(--tx-3);
+  cursor: help;
+  flex: none;
+  vertical-align: middle;
+  background: transparent;
+  padding: 0;
+  transition: border-color .12s, color .12s;
+}
+.trigger:hover, .trigger[aria-expanded='true'] { border-color: var(--tx-3); color: var(--tx); }
+/* Bigger touch target without a bigger glyph. */
+.trigger { position: relative; }
+.trigger::after { content: ''; position: absolute; inset: -8px; }
+
+.textTrigger {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: help;
+  text-decoration: underline dotted var(--tx-4);
+  text-underline-offset: 3px;
+}
+
+.tip {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 1000;
+  max-width: 320px;
+  background: var(--tip-bg);
+  border: 1px solid var(--tip-line);
+  border-radius: 8px;
+  padding: 9px 11px;
+  font: 400 12px/1.5 var(--sans);
+  color: var(--tx-2);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .5);
+  text-align: left;
+  white-space: normal;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.tip[hidden] { display: none; }
+.tip b, .tip strong { color: var(--tx); font-weight: 600; }
+.tip p + p { margin-top: 5px; }

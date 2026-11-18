@@ -1,0 +1,106 @@
+/* ── Shared SVG chart styles ── */
+.svg { display: block; width: 100%; height: auto; overflow: visible; font-family: var(--mono); font-size: 11px; fill: var(--tx-3); }
+.svgFixed { display: block; overflow: visible; font-family: var(--mono); font-size: 11px; fill: var(--tx-3); }
+.sans { font-family: var(--sans); }
+.mono { font-family: var(--mono); }
+.strong { fill: var(--tx); font-weight: 500; }
+.tx2 { fill: var(--tx-2); }
+.txPos { fill: var(--pos); }
+.txNeg { fill: var(--neg); }
+.txInfo { fill: var(--info); }
+.txNeu { fill: var(--neu); }
+
+.grid { stroke: var(--grid); stroke-width: 1; }
+.zero { stroke: var(--zero); stroke-width: 1.25; }
+.monthTick { stroke: var(--grid); }
+
+.barPos { fill: var(--pos-m); }
+.barNeg { fill: var(--neg-m); }
+.barPosSoft { fill: rgba(31, 163, 111, .38); }
+.barNegSoft { fill: rgba(224, 100, 92, .38); }
+.barPartial { stroke: rgba(127, 178, 238, .8); stroke-width: 1.2; stroke-dasharray: 3 2; }
+.hatchBg { fill: rgba(127, 178, 238, .06); }
+.hatchLine { stroke: rgba(127, 178, 238, .6); stroke-width: 1.6; }
+.futureLine { stroke: rgba(130, 141, 153, .14); stroke-width: 1.2; }
+.band { fill: rgba(142, 167, 196, .06); stroke: rgba(142, 167, 196, .22); }
+
+.col { cursor: default; outline: none; }
+.col .hit { fill: transparent; }
+.col:hover .bar, .col[data-active] .bar { opacity: .78; }
+.col:focus-visible .hit { stroke: var(--info); stroke-width: 1.5; fill: rgba(127, 178, 238, .06); }
+
+/* Lines */
+.linePos { fill: none; stroke: var(--pos-m); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.lineNeg { fill: none; stroke: var(--neg-m); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.areaPos { fill: rgba(31, 163, 111, .16); }
+.areaNeg { fill: rgba(224, 100, 92, .18); }
+.refLine { fill: none; stroke: var(--neu); stroke-width: 1.2; stroke-dasharray: 4 3; opacity: .85; }
+.nowLine { stroke: var(--info); stroke-width: 1; stroke-dasharray: 2 2; }
+.dotPos { fill: var(--pos-m); stroke: var(--card); stroke-width: 2; }
+.dotNeg { fill: var(--neg-m); stroke: var(--card); stroke-width: 2; }
+.ordersBar { fill: rgba(142, 167, 196, .45); }
+.crossHit { fill: transparent; }
+.hourCol { outline: none; }
+.hourCol .hit { fill: transparent; }
+.hourCol:hover .hit, .hourCol[data-active] .hit { fill: rgba(142, 167, 196, .07); }
+.hourCol:focus-visible .hit { stroke: var(--info); stroke-width: 1.2; }
+
+/* Sparkline / mini bars */
+.sparkLine { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.toneNeu { stroke: var(--neu); fill: var(--neu); }
+.tonePos { stroke: var(--pos-m); fill: var(--pos-m); }
+.toneNeg { stroke: var(--neg-m); fill: var(--neg-m); }
+.toneMeta { stroke: var(--c-meta); fill: var(--c-meta); }
+.toneShop { stroke: var(--c-shop); fill: var(--c-shop); }
+.toneCogs { stroke: var(--c-cogs); fill: var(--c-cogs); }
+.sparkArea { stroke: none; opacity: .12; }
+.sparkDot { stroke: none; }
+.miniShade { fill: rgba(142, 167, 196, .07); }
+.miniNull { fill: var(--tx-4); opacity: .35; }
+
+/* Horizontal bars (HTML) */
+.hbars { list-style: none; display: flex; flex-direction: column; }
+.hrow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(70px, 34%) auto; align-items: center; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); }
+.hrow:first-child { border-top: 0; }
+.hlabel { min-width: 0; font-size: 13px; color: var(--tx); }
+.hlabel small { display: block; font-size: 11.5px; color: var(--tx-3); margin-top: 1px; }
+.htrack { height: 6px; border-radius: 3px; background: var(--grid); overflow: hidden; }
+.hfill { display: block; height: 100%; border-radius: 3px; background: var(--neu); }
+.hfill.pos { background: var(--pos-m); }
+.hfill.neg { background: var(--neg-m); }
+.hfill.meta { background: var(--c-meta); }
+.hfill.shop { background: var(--c-shop); }
+.hfill.cogs { background: var(--c-cogs); }
+.hfill.mut { background: var(--tx-4); }
+.hvalue { text-align: right; font: 500 13px/1.2 var(--mono); color: var(--tx); white-space: nowrap; }
+.hvalue small { display: block; font: 400 11.5px/1.3 var(--mono); color: var(--tx-3); }
+
+/* ── Tooltip bubble (ChartTips) ── */
+.tipsBox { position: relative; min-width: 0; }
+.bubble {
+  position: fixed; left: 0; top: 0; z-index: 1000;
+  pointer-events: none;
+  max-width: 300px; min-width: 170px;
+  background: var(--tip-bg); border: 1px solid var(--tip-line); border-radius: 8px;
+  padding: 9px 11px; font: 400 12px/1.45 var(--sans); color: var(--tx-2);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .5);
+}
+.bubbleTitle { font-weight: 600; color: var(--tx); margin-bottom: 4px; font-size: 12.5px; }
+.bubbleRow { display: flex; justify-content: space-between; gap: 18px; }
+.bubbleRow span:last-child { font-family: var(--mono); color: var(--tx); font-variant-numeric: tabular-nums; }
+.bubbleRow .pos { color: var(--pos); }
+.bubbleRow .neg { color: var(--neg); }
+.bubbleRow .warn { color: var(--warn); }
+.bubbleNote { margin-top: 5px; color: var(--tx-3); font-size: 11.5px; }
+
+/* Legend */
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; font-size: 12px; color: var(--tx-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.legend i { width: 10px; height: 10px; border-radius: 2px; display: block; flex: none; }
+.lgPos { background: var(--pos-m); }
+.lgNeg { background: var(--neg-m); }
+.lgPartial { border: 1px solid rgba(127, 178, 238, .7); background-image: repeating-linear-gradient(135deg, rgba(127, 178, 238, .6) 0 1.5px, transparent 1.5px 4px); }
+.lgBand { background: rgba(142, 167, 196, .12); border: 1px solid rgba(142, 167, 196, .35); }
+.lgRef { height: 0 !important; border-top: 1.5px dashed var(--neu); border-radius: 0 !important; width: 14px !important; }
+.lgNow { height: 0 !important; border-top: 1.5px dashed var(--info); border-radius: 0 !important; width: 14px !important; }
+.noStroke { stroke: none !important; }

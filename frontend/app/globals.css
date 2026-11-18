@@ -1,56 +1,179 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+/*
+ * Opero v2 — global styles and design tokens ("C + A escuro", dark only).
+ *
+ * STYLING RULE (read before writing UI):
+ *  - Components style themselves with CSS Modules (Foo.module.css next to
+ *    Foo.tsx). Tailwind is NOT used: it was never wired (no @import), and
+ *    tailwind.config.ts was deleted. Do not add utility classes.
+ *  - Every colour, radius, font and space comes from the CSS variables below.
+ *    Never hard-code a hex in a module: add a token here instead (tell the
+ *    ui-foundation owner).
+ *  - The only global classes are the handful under "Utilities" (.num, .lbl,
+ *    .serif, .pos/.neg/.mut, .sr-only). Everything else lives in a module.
+ *  - Numbers are always IBM Plex Mono with tabular figures (.num or
+ *    var(--mono)); text is IBM Plex Sans; Fraunces only for verdict headlines.
+ *  - Green = profit, coral = loss, steel blue = neutral data, amber only for
+ *    warnings and always with an icon and words. Never colour alone.
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* Surfaces (from direction A) */
+  --bg: #08090c;
+  --panel: #0d1014;
+  --card: #11151a;
+  --card-2: #151a20;
+  --hover: #181e25;
+
+  /* Lines */
+  --line: #1c2229;
+  --line-2: #272e37;
+  --grid: #1a2027;
+  --zero: #3b4550;
+
+  /* Text */
+  --tx: #e7ebef;
+  --tx-2: #a7b1bc;
+  --tx-3: #828d99;
+  --tx-4: #5d6772;
+
+  /* Meaning */
+  --pos: #4fcb98;
+  --pos-m: #1fa36f;
+  --pos-bg: rgba(31, 163, 111, .13);
+  --neg: #f2837a;
+  --neg-m: #e0645c;
+  --neg-bg: rgba(224, 100, 92, .13);
+  --neu: #8ea7c4;
+  --neu-bg: rgba(142, 167, 196, .10);
+  --warn: #e5b65e;
+  --warn-bg: rgba(229, 182, 94, .12);
+  --info: #7fb2ee;
+  --info-bg: rgba(127, 178, 238, .12);
+
+  /* Cost colours (BreakdownBar, legends, KPI swatches) */
+  --c-cogs: #9085e9;
+  --c-fees: #c98500;
+  --c-shop: #d55181;
+  --c-meta: #3987e5;
+  --c-profit: #1fa36f;
+  /* Additions for lines the palette does not name: shipping (a darker
+     product hue, it is part of what the supplier bills) and fixed costs
+     (grey: they do not move with sales). */
+  --c-ship: #6a60c4;
+  --c-fixed: #5d6772;
+
+  /* Tooltip surface */
+  --tip-bg: #1b2128;
+  --tip-line: #333c47;
+
+  /* Radii (from direction C): cards ~16px, controls ~10px */
+  --r-card: 16px;
+  --r-ctl: 10px;
+  --r-sm: 6px;
+  --r-xs: 4px;
+  --r-pill: 999px;
+
+  /* Spacing, 4px scale */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s7: 32px;
+  --s8: 48px;
+  --s9: 64px;
+
+  /* Fonts: the --font-* variables are set by next/font in app/layout.tsx */
+  --sans: var(--font-plex-sans), 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono: var(--font-plex-mono), 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --serif: var(--font-fraunces), 'Fraunces', Georgia, 'Times New Roman', serif;
+
+  /* Focus ring, used by every interactive element */
+  --focus: 0 0 0 2px var(--bg), 0 0 0 4px var(--info);
+
+  /* Layout */
+  --sidebar-w: 232px;
+  --topbar-h: 56px;
+  --content-max: 1360px;
+
+  /* ── Legacy aliases ─────────────────────────────────────────────────────
+     The old pages (DashboardLayout & co.) read these names until the final
+     cleanup deletes them. Mapped onto the new palette so they stay legible;
+     new code must not use them. */
+  --bg-surface: var(--card);
+  --bg-sidebar: var(--panel);
+  --bg-input: rgba(255, 255, 255, .04);
+  --bg-hover: var(--hover);
+  --border: var(--line);
+  --border-strong: var(--line-2);
+  --text-primary: var(--tx);
+  --text-secondary: var(--tx);
+  --text-muted: var(--tx-2);
+  --text-dim: var(--tx-3);
+  --text-faint: var(--tx-3);
+  --text-ghost: var(--tx-4);
+  --scrollbar-track: var(--panel);
+  --scrollbar-thumb: var(--line-2);
+  --scrollbar-hover: var(--tx-4);
+}
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
-/* ── Dark theme (default) ───────────────────────────────────────────── */
-:root, [data-theme="dark"] {
-  --bg:            #0B0D0F;
-  --bg-surface:    #111318;
-  --bg-sidebar:    #0F1115;
-  --bg-input:      rgba(255,255,255,0.04);
-  --bg-hover:      rgba(255,255,255,0.05);
-  --border:        #1E2028;
-  --border-strong: #2A2D38;
-  --text-primary:  #F4F4F5;
-  --text-secondary:#E4E4E7;
-  --text-muted:    #A1A1AA;
-  --text-dim:      #71717A;
-  --text-faint:    #52525B;
-  --text-ghost:    #3F3F46;
-  --scrollbar-track: #111318;
-  --scrollbar-thumb: #2A2D38;
-  --scrollbar-hover: #3F4251;
-}
-
-/* ── Light theme ────────────────────────────────────────────────────── */
-[data-theme="light"] {
-  --bg:            #F4F4F5;
-  --bg-surface:    #FFFFFF;
-  --bg-sidebar:    #FAFAFA;
-  --bg-input:      rgba(0,0,0,0.04);
-  --bg-hover:      rgba(0,0,0,0.04);
-  --border:        #E4E4E7;
-  --border-strong: #D4D4D8;
-  --text-primary:  #18181B;
-  --text-secondary:#27272A;
-  --text-muted:    #52525B;
-  --text-dim:      #71717A;
-  --text-faint:    #A1A1AA;
-  --text-ghost:    #D4D4D8;
-  --scrollbar-track: #F4F4F5;
-  --scrollbar-thumb: #D4D4D8;
-  --scrollbar-hover: #A1A1AA;
-}
+html { background: var(--bg); }
 
 body {
-  background-color: var(--bg);
-  color: var(--text-primary);
-  font-family: 'Inter', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--tx);
+  font: 14px/1.45 var(--sans);
   -webkit-font-smoothing: antialiased;
-  transition: background-color 0.2s, color 0.2s;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: var(--scrollbar-track); }
-::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
+b, strong { font-weight: 600; }
+a { color: inherit; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { background: none; border: 0; cursor: pointer; }
+table { border-collapse: collapse; width: 100%; }
+svg { display: block; }
+
+/* One visible focus style everywhere (keyboard only). */
+:focus { outline: none; }
+:focus-visible { outline: none; box-shadow: var(--focus); border-radius: var(--r-xs); }
+svg :focus-visible { box-shadow: none; outline: 2px solid var(--info); outline-offset: 1px; }
+
+::selection { background: rgba(127, 178, 238, .28); }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--tx-4); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* ── Utilities (the only global classes) ─────────────────────────────── */
+
+/* Any number on screen. */
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+/* Small uppercase grey label ("LUCRO REAL · 10–16 NOV"). */
+.lbl { font: 600 10.5px/1.25 var(--sans); letter-spacing: .09em; text-transform: uppercase; color: var(--tx-3); }
+/* Verdict voice. */
+.serif { font-family: var(--serif); font-optical-sizing: auto; }
+.pos { color: var(--pos); }
+.neg { color: var(--neg); }
+.warn { color: var(--warn); }
+.info { color: var(--info); }
+.mut { color: var(--tx-3); }
+.sec2 { color: var(--tx-2); }
+.nw { white-space: nowrap; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+/* Keyframes: define them inside the module that uses them (CSS Modules
+   renames animation names, so a global @keyframes would not match). */

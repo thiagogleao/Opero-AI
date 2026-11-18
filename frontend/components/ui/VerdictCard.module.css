@@ -1,0 +1,54 @@
+.card { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); overflow: hidden; }
+.single { grid-template-columns: minmax(0, 1fr); }
+.left { padding: 24px 28px 24px; min-width: 0; }
+.right { padding: 22px 24px; background: var(--card-2); border-left: 1px solid var(--line); min-width: 0; }
+
+.chips { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.when { font-size: 12.5px; color: var(--tx-3); margin-left: 4px; }
+
+.headline {
+  font-family: var(--serif);
+  font-optical-sizing: auto;
+  font-weight: 500;
+  font-size: 28px;
+  line-height: 1.22;
+  letter-spacing: -.012em;
+  color: var(--tx);
+  margin-top: 16px;
+  max-width: 640px;
+  text-wrap: pretty;
+}
+
+.hero { display: flex; align-items: baseline; gap: 14px; margin-top: 18px; flex-wrap: wrap; }
+.amount { font: 500 52px/1 var(--mono); letter-spacing: -.035em; color: var(--tx); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.amountPos { color: var(--pos); }
+.amountNeg { color: var(--neg); }
+.amountNone { font-size: 40px; color: var(--tx-3); }
+.caption { font-size: 13.5px; color: var(--tx-2); font-weight: 500; max-width: 240px; line-height: 1.35; }
+
+.details { list-style: none; margin-top: 16px; display: flex; flex-direction: column; gap: 6px; max-width: 640px; }
+.details li { font-size: 14.5px; line-height: 1.55; color: var(--tx-2); }
+
+.roasBox { margin-top: 20px; background: var(--card-2); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px 12px; max-width: 560px; }
+.roasExplain { font-size: 12px; color: var(--tx-3); margin-top: 8px; line-height: 1.5; }
+
+.notes { margin-top: 16px; display: grid; grid-template-columns: auto 1fr; gap: 8px; align-items: start; font-size: 12px; line-height: 1.5; color: var(--tx-3); max-width: 640px; }
+.notes svg { margin-top: 2px; color: var(--tx-3); }
+.notes p + p { margin-top: 2px; }
+.notes strong { color: var(--tx-2); font-weight: 600; }
+.footer { margin-top: 16px; }
+
+/* Phone / narrow: one column, smaller type. */
+.compact { grid-template-columns: minmax(0, 1fr); }
+.compact .left { padding: 16px 16px 18px; }
+.compact .right { border-left: 0; border-top: 1px solid var(--line); padding: 16px; }
+.compact .headline { font-size: 22px; line-height: 1.25; margin-top: 12px; }
+.compact .amount { font-size: 42px; }
+.compact .hero { margin-top: 14px; gap: 10px; }
+.compact .caption { font-size: 12.5px; }
+.compact .details li { font-size: 13px; }
+
+@media (max-width: 1100px) {
+  .card:not(.single) { grid-template-columns: minmax(0, 1fr); }
+  .card:not(.single) .right { border-left: 0; border-top: 1px solid var(--line); }
+}

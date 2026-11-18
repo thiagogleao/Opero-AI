@@ -1,0 +1,27 @@
+.section { display: flex; flex-direction: column; gap: 12px; scroll-margin-top: 80px; }
+.h2 { font: 600 13px/1.2 var(--sans); letter-spacing: .09em; text-transform: uppercase; color: var(--tx-3); display: flex; align-items: baseline; gap: 10px; }
+.h2 code { font: 500 11.5px var(--mono); color: var(--tx-4); text-transform: none; letter-spacing: 0; }
+.row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 10px; }
+.sw { font-size: 11px; color: var(--tx-2); line-height: 1.35; }
+.sw i { display: block; height: 34px; border-radius: 8px; margin-bottom: 6px; border: 1px solid var(--line-2); }
+.sw b { display: block; color: var(--tx); font: 500 11px var(--mono); }
+.type { display: grid; gap: 10px; }
+.typeRow { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; border-top: 1px solid var(--line); padding-top: 10px; }
+.typeRow span:last-child { font-size: 12px; color: var(--tx-3); }
+.serif { font-family: var(--serif); font-size: 26px; font-weight: 500; }
+.bigNum { font: 500 40px/1 var(--mono); letter-spacing: -.03em; }
+.phone { width: 390px; max-width: 100%; display: flex; flex-direction: column; gap: 12px; padding: 14px; border: 1px dashed var(--line-2); border-radius: 22px; background: var(--bg); }
+.phoneRow { display: grid; grid-template-columns: 30px 1fr auto; gap: 12px; padding: 12px 14px; border-top: 1px solid var(--line); align-items: start; }
+.phoneRow:first-child { border-top: 0; }
+.phoneRow b { font-size: 13.5px; }
+.phoneRow small { display: block; font-size: 11.5px; color: var(--tx-3); margin-top: 2px; }
+.phoneVal { text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 5px; }
+.check { font: 400 12px/1.6 var(--mono); color: var(--tx-3); }
+.check b { color: var(--tx); font-weight: 500; }
+.toc { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12.5px; }
+.toc a { color: var(--tx-3); text-decoration: none; }
+.toc a:hover { color: var(--tx); }
+@media (max-width: 1100px) { .grid2, .grid3 { grid-template-columns: minmax(0, 1fr); } }
