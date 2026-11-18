@@ -86,7 +86,7 @@ describe('buildAttributionVerdict', () => {
     // headline must not say every ad sale went through EPOCH's account.
     expect(v.headline).not.toContain('as vendas que vieram de anúncios')
     expect(v.hero.caption).toContain('pelo primeiro clique')
-    expect(v.details[1].text).toBe('O gasto desses anúncios ($3.948) está nos livros da EPOCH: some as duas lojas para julgar o resultado.')
+    expect(v.details[1].text).toBe('O gasto dos anúncios que trouxeram esses pedidos ($3.948) está nos livros da EPOCH: só esses anúncios — em Campanhas aparece o gasto das campanhas inteiras. Some as duas lojas para julgar o resultado.')
     // No duplicated "conta compartilhada" chip: the state already says it.
     expect(v.chips.map(c => c.key)).toEqual(['shared_account'])
     expect(v.gapPct).toBeNull()

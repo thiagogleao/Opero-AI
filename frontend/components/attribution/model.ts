@@ -5,23 +5,30 @@
  */
 
 import type { CreativeAttribution, Model } from '@/lib/attributionModels'
-import { formatClock, formatDate, formatNumber } from '@/lib/format'
+import type { PnL } from '@/lib/engine/pnl'
+import { liveSignedUrl } from '@/lib/data/metaCdn'
+import { CHANNEL_LABEL, type AdChannel } from '@/lib/views/adChannel'
+import { formatClock, formatDate, formatMoney, formatNumber } from '@/lib/format'
 
 /** URL key of the credit model (Portuguese, like loja/periodo). */
 export const MODEL_KEY = 'modelo'
 
 const TO_PARAM: Record<Model, string> = { first: 'primeiro', last: 'ultimo', linear: 'dividido' }
-const FROM_PARAM: Record<string, Model> = {
-  primeiro: 'first', ultimo: 'last', dividido: 'linear',
+// A Map, not an object literal: a URL value is a key here, and "constructor"
+// or "__proto__" looked up on a plain object returned Object's own members —
+// truthy, so they became the model and crashed the verdict (MODEL_TEXT had no
+// entry for them).
+const FROM_PARAM: ReadonlyMap<string, Model> = new Map<string, Model>([
+  ['primeiro', 'first'], ['ultimo', 'last'], ['dividido', 'linear'],
   // The old page's values, so a bookmark from before still opens the same view.
-  first: 'first', last: 'last', linear: 'linear',
-}
+  ['first', 'first'], ['last', 'last'], ['linear', 'linear'],
+])
 
 export const DEFAULT_MODEL: Model = 'first'
 
 export function modelFromParam(v: string | string[] | undefined | null): Model {
   const raw = Array.isArray(v) ? v[0] : v
-  return (raw && FROM_PARAM[raw.trim().toLowerCase()]) || DEFAULT_MODEL
+  return (typeof raw === 'string' ? FROM_PARAM.get(raw.trim().toLowerCase()) : undefined) ?? DEFAULT_MODEL
 }
 
 export function modelParam(m: Model): string {
@@ -183,14 +190,8 @@ export function formatLocalStamp(local: string | null | undefined, today?: strin
  * placeholder without a failed request per row.
  */
 export function liveThumbnail(url: string | null | undefined, now: Date): string | null {
-  if (!url) return null
-  try {
-    const oe = new URL(url).searchParams.get('oe')
-    if (oe && /^[0-9a-f]{6,10}$/i.test(oe) && parseInt(oe, 16) * 1000 <= now.getTime()) return null
-    return url
-  } catch {
-    return null
-  }
+  // One rule for every screen (lib/data/metaCdn).
+  return liveSignedUrl(url, now)
 }
 
 /** "/products/capy-chef" from a landing URL; null when there is nothing useful. */
@@ -205,4 +206,23 @@ export function landingPath(url: string | null | undefined): string | null {
   } catch {
     return null
   }
+}
+
+// ─── The store ROAS tile ─────────────────────────────────────────────────────
+
+/** What the store ROAS tile needs from the engine (same store, same window). */
+export type StoreRoasTotals = Pick<PnL, 'revenue' | 'contribution' | 'metaSpend' | 'shopSpend' | 'breakEvenRoas'>
+
+/** "ROAS da loja", plus the channel when it is not Meta alone: on this page
+ *  "ROAS do Meta" (the Resumo's name for the Meta case) would read as the
+ *  "ROAS que o Meta declara" tile next to it. */
+export function storeRoasLabel(channel: AdChannel | null): string {
+  return channel && channel !== 'meta' ? `ROAS da loja · ${CHANNEL_LABEL[channel]}` : 'ROAS da loja'
+}
+
+/** The other channel's spend left out of the ratio, in words; null when none. */
+export function leftOutSpend(t: Pick<StoreRoasTotals, 'metaSpend' | 'shopSpend'>, channel: AdChannel | null): string | null {
+  if (channel === 'meta' && t.shopSpend > 0.005) return `${formatMoney(t.shopSpend)} de Anúncios Shopify ficam fora deste ROAS e entram no lucro.`
+  if (channel === 'shop' && t.metaSpend > 0.005) return `${formatMoney(t.metaSpend)} de Meta ficam fora deste ROAS e entram no lucro.`
+  return null
 }

@@ -28,6 +28,7 @@ import type { IconName } from '@/components/ui/Icon'
 import type { ChipTone } from '@/components/ui/Chip'
 import { formatMoney, formatPct, plural } from '@/lib/format'
 import { MODEL_TEXT } from './model'
+import { beforeStartText, isBeforeStart, type BeforeStartInput } from '@/components/campaigns/storeStart'
 
 /** Within ±10% Meta and Shopify "batem": attribution windows alone move that much. */
 export const MATCH_BAND_PCT = 10
@@ -73,6 +74,9 @@ export interface AttributionVerdictInput {
   shared: SharedAdAccount[]
   /** "há 12 min" — when the journey collector last ran (null: unknown). */
   journeysAge?: string | null
+  /** The store's first sale: a window that ends before it, with nothing in
+   *  it, reads "Vende desde 7 nov" like the Resumo (campaigns/storeStart). */
+  firstSale?: BeforeStartInput | null
 }
 
 export interface AttributionVerdict {
@@ -137,6 +141,18 @@ export function buildAttributionVerdict(input: AttributionVerdictInput): Attribu
   const sharedIn = input.shared.filter(p => p.salesStoreId === storeId && p.adStoreId !== storeId)
   const sharedOut = input.shared.filter(p => p.adStoreId === storeId && p.salesStoreId !== storeId)
   const state = stateOf(t, sales, sharedIn)
+  const fs = input.firstSale
+  if (state === 'no_sales' && fs && t.orders <= 0 && isBeforeStart(fs.firstOrderDate, fs.range, { orders: sales.orders, revenue: sales.revenue, spend: t.spend })) {
+    const text = beforeStartText(fs)
+    return {
+      state, chips: [{ key: 'before_start', label: text.chip, tone: 'info', icon: 'clock' }],
+      when: `${input.rangeLabel} · ${MODEL_TEXT[input.model].label}`,
+      headline: text.headline,
+      hero: { value: '—', tone: 'mut', caption: text.caption },
+      details: [text.detail], notes: [],
+      gapPct: null, gapAmount: null, fewOrders: false, withoutAd: 0,
+    }
+  }
 
   const J = t.journeyRevenueOwnAds
   const M = t.metaRevenue
@@ -233,7 +249,10 @@ export function buildAttributionVerdict(input: AttributionVerdictInput): Attribu
       : line('A loja vendeu ', b(formatMoney(sales.revenue)), ' em ', b(plural(sales.orders, 'pedido', 'pedidos')), ` ${phrase}; nenhum passou por anúncio identificado.`))
   }
   if (state === 'shared_account') {
-    details.push(line('O gasto desses anúncios (', b(formatMoney(t.sharedSpend)), ') está nos livros da ', b(adStoreName), ': some as duas lojas para julgar o resultado.'))
+    // Only the ads credited with an order here: Campanhas lists the whole
+    // campaigns' spend (CAMP 30d: $2.954 here, $4.546 there), so say which.
+    details.push(line('O gasto dos anúncios que trouxeram esses pedidos (', b(formatMoney(t.sharedSpend)), ') está nos livros da ', b(adStoreName),
+      ': só esses anúncios — em Campanhas aparece o gasto das campanhas inteiras. Some as duas lojas para julgar o resultado.'))
   } else if (t.siblingOrders > 0.05 && t.siblingRevenue > CENT) {
     // Named with the model: the shared-account note counts any visit on the
     // path (66 CAMP orders for EPOCH 30d), this line the credited ones (59).

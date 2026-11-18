@@ -23,6 +23,7 @@ import { Reconciliation } from './Reconciliation'
 import { SharedAccountNote } from './SharedAccountNote'
 import { SourceBars } from './SourceBars'
 import { buildAttributionVerdict } from './verdict'
+import { loadFirstSale } from '@/components/campaigns/firstSale'
 
 /** Rows in the creative table; the rest are summed into "outros". */
 export const CREATIVE_LIMIT = 40
@@ -56,6 +57,7 @@ export async function AttributionReportSection({ ctx, model }: { ctx: PageContex
       // just drops the reminder.
       getSharedAdAccountsForStore(store.id, { from: shiftDate(ctx.range.to, -(SHARED_LOOKBACK_DAYS - 1)), to: ctx.range.to }, nameMap)
         .catch((e: unknown): SharedAdAccount[] => { console.error('[attribution] shared lookback', e); return [] }),
+      loadFirstSale(ctx),
     ])
   } catch (e) {
     console.error('[attribution] report', e)
@@ -67,7 +69,7 @@ export async function AttributionReportSection({ ctx, model }: { ctx: PageContex
       </Card>
     )
   }
-  const [report, pnl, recent] = data
+  const [report, pnl, recent, firstSale] = data
   const t = report.totals
   const sales = { revenue: pnl?.totals.revenue ?? 0, orders: pnl?.totals.orders ?? 0 }
   const verdict = buildAttributionVerdict({
@@ -83,6 +85,7 @@ export async function AttributionReportSection({ ctx, model }: { ctx: PageContex
     phantom: report.phantom,
     shared: report.sharedAccounts,
     journeysAge: report.coverage.journeysUpdatedAt ? formatRelativeTime(report.coverage.journeysUpdatedAt, ctx.now) : null,
+    firstSale,
   })
   const sharedAdStore = report.sharedAccounts.find(p => p.salesStoreId === store.id)?.adStoreName ?? null
   const hrefs = Object.fromEntries(MODEL_ORDER.map(m => [m, modelHref(ctx, m)])) as Record<Model, string>
@@ -97,8 +100,8 @@ export async function AttributionReportSection({ ctx, model }: { ctx: PageContex
       {(t.spend > 0.005 || t.metaRevenue > 0.005) && (
         <AttributionKpis
           totals={t}
-          storeRoas={pnl?.totals.roas ?? null}
-          breakEven={pnl?.configured ? pnl.totals.breakEvenRoas : null}
+          store={pnl?.totals ?? null}
+          configured={!!pnl?.configured}
           sharedAdStore={sharedAdStore}
         />
       )}

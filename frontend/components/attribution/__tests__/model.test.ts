@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { adGap, conversionDelay, formatLocalStamp, formatOrders, landingPath, liveThumbnail, modelFromParam, modelParam, ordersLabel, sourceLabel } from '../model'
+import { adGap, conversionDelay, formatLocalStamp, formatOrders, landingPath, leftOutSpend, liveThumbnail, modelFromParam, modelParam, ordersLabel, sourceLabel, storeRoasLabel } from '../model'
+import { adChannelOf, channelRoas } from '@/lib/views/adChannel'
 
 describe('model URL key', () => {
   it('reads the Portuguese values, the old English ones, and defaults to first click', () => {
@@ -93,5 +94,36 @@ describe('small formats', () => {
     expect(landingPath('https://mokoo.co/products/mokoo%E2%84%A2-sea-friends-blind-box')).toBe('/products/mokoo™-sea-friends-blind-box')
     expect(landingPath('https://mokoo.co/products/bad%E0%A4%A')).toBe('/products/bad%E0%A4%A')
     expect(landingPath(null)).toBeNull()
+  })
+})
+
+describe('the store ROAS tile', () => {
+  it('uses the Resumo\'s ad channel: Dumpling 8jcp3a is judged on its Shopify ads, not 319× on $16 of Meta', () => {
+    const t = { revenue: 5334.12, contribution: 3653.5, metaSpend: 16.71, shopSpend: 1796, breakEvenRoas: 1.46 }
+    const ch = adChannelOf(t)
+    expect(ch).toBe('shop')
+    expect(channelRoas(t)).toBeCloseTo(5334.12 / 1796, 6)
+    expect(storeRoasLabel(ch)).toBe('ROAS da loja · Anúncios Shopify')
+    expect(leftOutSpend(t, ch)).toBe('$16,71 de Meta ficam fora deste ROAS e entram no lucro.')
+  })
+
+  it('keeps "ROAS da loja" for Meta alone and names a minor Shopify spend', () => {
+    const t = { revenue: 11057.83, contribution: 7313.25, metaSpend: 5925.22, shopSpend: 193.66, breakEvenRoas: 1.51 }
+    const ch = adChannelOf(t)
+    expect(ch).toBe('meta')
+    expect(storeRoasLabel(ch)).toBe('ROAS da loja')
+    expect(channelRoas(t)).toBeCloseTo(11057.83 / 5925.22, 6)
+    expect(leftOutSpend(t, ch)).toBe('$194 de Anúncios Shopify ficam fora deste ROAS e entram no lucro.')
+    expect(storeRoasLabel('both')).toBe('ROAS da loja · Meta + Shopify')
+    expect(leftOutSpend({ metaSpend: 900, shopSpend: 300 }, 'both')).toBeNull()
+  })
+})
+
+describe('modelFromParam with keys of Object.prototype', () => {
+  it('falls back to the default model for anything that is not its own key', () => {
+    for (const k of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf', 'isPrototypeOf', '__defineGetter__']) {
+      expect(modelFromParam(k)).toBe('first')
+    }
+    expect(modelFromParam(' Ultimo ')).toBe('last')
   })
 })
