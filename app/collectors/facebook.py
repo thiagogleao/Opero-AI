@@ -6,9 +6,12 @@ Two phases, recorded as separate sync_runs sources so one cannot hide the other:
                         requested days, plus minimal ad/adset/campaign rows for
                         any ad the structure tables do not know yet;
   'facebook_structure'  campaigns, ad sets, ads (creatives fetched only for new
-                        or changed ads) and the four breakdowns for the last
-                        14 days of the window. A breakdown that fails makes the
-                        run 'partial' and names the breakdown.
+                        or changed ads), then every ad the store has metrics
+                        for but fb_ads still does not know, read by id (see
+                        _backfill_catalog), and the four breakdowns for the
+                        last 14 days of the window. A breakdown or a catalog
+                        backfill that fails makes the run 'partial' and says
+                        which.
 
 Guarantees:
   - an account whose account_status is not 1 (disabled, closed, unsettled) is
@@ -37,11 +40,11 @@ from sqlalchemy.orm import Session
 
 from app.collectors.base import BaseCollector
 from app.collectors.facebook_mapping import (
-    BREAKDOWN_FIELDS, BREAKDOWNS, INSIGHT_FIELDS, parse_breakdown, parse_daily_insight,
-    structure_from_insights,
+    AD_FIELDS_BY_ID, BREAKDOWN_FIELDS, BREAKDOWNS, INSIGHT_FIELDS, catalog_from_ads, graph_ts,
+    parse_breakdown, parse_daily_insight, structure_from_insights,
 )
 from app.collectors.redact import redact
-from app.collectors.upsert import upsert
+from app.collectors.upsert import choose_conflict, unique_sets, upsert
 
 logger = logging.getLogger(__name__)
 
@@ -60,15 +63,44 @@ THROTTLE_BUDGET = 240
 # A known-dead account is re-checked once a day, in case it was reactivated.
 DEAD_RECHECK = timedelta(hours=24)
 
+# Conflict keys for fb_ads, tenant-safe first (see upsert.py).
+AD_KEYS = [["tenant_id", "ad_id"], ["ad_id"]]
+# Graph's ceiling for one GET /?ids= request.
+IDS_PER_REQUEST = 50
+# Uncatalogued ads read by id in one pass, biggest spend first. A routine pass
+# finds none; the cap bounds the first pass after a long gap and the ids Meta
+# no longer serves (deleted long ago), which are asked again on every pass.
+CATALOG_BACKFILL_MAX = 300
+# Graph's answer for an id it will not serve (deleted, never existed, another
+# account's): 100 "Unsupported get request" on a single id, 803 for an alias.
+UNREADABLE_ID_CODES = {100, 803}
 
-def graph_ts(value: Optional[str]) -> Optional[datetime]:
-    """Graph timestamps look like 2026-11-10T12:00:00+0000."""
-    if not value:
-        return None
-    try:
-        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S%z")
-    except (ValueError, TypeError):
-        return None
+
+def uncatalogued_ads_query(tenant_id: str, account_id: str, since: Optional[date], until: Optional[date],
+                           per_store_key: bool, limit: int = CATALOG_BACKFILL_MAX) -> tuple[str, dict]:
+    """Ads this store has metrics for, on this account (or untagged: rows
+    collected before runs tagged their account), that fb_ads cannot show.
+
+    While fb_ads is keyed on ad_id alone, a row another store owns already
+    names the ad and cannot be written for this store anyway (upsert's owner
+    guard), so only ads with no row at all count. Once the key is (tenant_id,
+    ad_id), an ad counts until this store has its own row."""
+    owner = " AND a.tenant_id = m.tenant_id" if per_store_key else ""
+    where = ["m.tenant_id = :t", "(m.fb_ad_account_id = :acct OR m.fb_ad_account_id IS NULL)"]
+    params: dict = {"t": tenant_id, "acct": account_id, "n": limit}
+    if since:
+        where.append("m.date >= :since")
+        params["since"] = since
+    if until:
+        where.append("m.date <= :until")
+        params["until"] = until
+    sql = (
+        "SELECT m.ad_id FROM fb_ad_daily_metrics m "
+        f"WHERE {' AND '.join(where)} "
+        f"AND NOT EXISTS (SELECT 1 FROM fb_ads a WHERE a.ad_id = m.ad_id{owner}) "
+        "GROUP BY m.ad_id ORDER BY SUM(m.spend) DESC NULLS LAST, MAX(m.date) DESC, m.ad_id LIMIT :n"
+    )
+    return sql, params
 
 
 def normalize_account(raw: str) -> str:
@@ -178,6 +210,9 @@ class FacebookCollector(BaseCollector):
     def _run(self, date_from: date, date_to: date) -> None:
         if self.phase == "structure":
             self._sync_structure()
+            # The whole store history from the cut, not just this window: the
+            # gap this closes is ads whose spend is days or months old.
+            self._backfill_catalog(self.collect_from, None)
             bd_from = max(date_from, date_to - timedelta(days=BREAKDOWN_MAX_DAYS - 1))
             self._collect_breakdowns(bd_from, date_to)
         else:
@@ -233,7 +268,7 @@ class FacebookCollector(BaseCollector):
         return raw
 
     def _upsert_structure(self, ads: list[dict], adsets: list[dict], campaigns: list[dict]) -> None:
-        upsert(self.session, "fb_ads", self.inject_tenant(ads), [["tenant_id", "ad_id"], ["ad_id"]])
+        upsert(self.session, "fb_ads", self.inject_tenant(ads), AD_KEYS)
         upsert(self.session, "fb_adsets", self.inject_tenant(adsets), [["tenant_id", "adset_id"], ["adset_id"]])
         camp = [{**c, "account_id": self.account_id} for c in campaigns]
         upsert(self.session, "fb_campaigns", self.inject_tenant(camp), [["tenant_id", "campaign_id"], ["campaign_id"]])
@@ -274,8 +309,84 @@ class FacebookCollector(BaseCollector):
                 "created_time": graph_ts(ad.get("created_time")), "updated_time": graph_ts(ad.get("updated_time")),
                 "synced_at": now, **c,
             })
-        self.records += upsert(self.session, "fb_ads", self.inject_tenant(rows),
-                               [["tenant_id", "ad_id"], ["ad_id"]])
+        self.records += upsert(self.session, "fb_ads", self.inject_tenant(rows), AD_KEYS)
+
+    # ── Catalog backfill (ads with metrics but no fb_ads row) ───────────────
+
+    def _backfill_catalog(self, since: Optional[date], until: Optional[date]) -> None:
+        """Give every ad this store has metrics for a catalog row.
+
+        Campaign views reach spend through fb_ads; an ad without a row shows as
+        "não sincronizado". The account listing misses two kinds of ads: those
+        created after the last structure pass (the old scheduler never ran one,
+        so Glooty's 59 ads from 10-11 nov, $445 of its spend, had none) and
+        archived or deleted ones, which /ads does not list by default (MOKOO:
+        5 archived May ads). Both are read by id here, parents expanded.
+
+        Secondary to the money: a failure here is named on the run and never
+        stops the breakdowns."""
+        try:
+            ids = self._uncatalogued_ads(since, until)
+            if not ids:
+                return
+            ads = self._ads_by_id(ids)
+            written = 0
+            if ads:
+                creative = self._creatives(ads)
+                ad_rows, adset_rows, camp_rows = catalog_from_ads(ads, self.account_id, datetime.now(timezone.utc))
+                ad_rows = [{**r, **creative.get(r["ad_id"], {})} for r in ad_rows]
+                upsert(self.session, "fb_campaigns", self.inject_tenant(camp_rows),
+                       [["tenant_id", "campaign_id"], ["campaign_id"]])
+                upsert(self.session, "fb_adsets", self.inject_tenant(adset_rows),
+                       [["tenant_id", "adset_id"], ["adset_id"]])
+                written = upsert(self.session, "fb_ads", self.inject_tenant(ad_rows), AD_KEYS)
+                self.records += written
+            unread = sorted(set(ids) - {str(a["id"]) for a in ads})
+            logger.info("[facebook] catálogo: %d anúncios com métricas e sem cadastro, %d gravados por id%s",
+                        len(ids), written,
+                        f"; {len(unread)} que o Meta não devolve (ex.: {', '.join(unread[:3])})" if unread else "")
+        except Exception as exc:  # noqa: BLE001 — reported on the run, never fatal
+            self._safe_rollback()
+            msg = f"catálogo de anúncios por id falhou: {describe_meta_error(exc) or redact(exc, 160)}"
+            logger.error("[facebook] %s", msg)
+            if self.allow_partial:
+                self.failures.append(msg)
+            else:
+                self.warn(msg)
+
+    def _uncatalogued_ads(self, since: Optional[date], until: Optional[date]) -> list[str]:
+        per_store = "tenant_id" in (choose_conflict(AD_KEYS, unique_sets(self.session, "fb_ads")) or [])
+        sql, params = uncatalogued_ads_query(self.tenant_id, self.account_id, since, until, per_store)
+        return [str(r[0]) for r in self.session.execute(text(sql), params)]
+
+    def _ads_by_id(self, ids: list[str]) -> list[dict]:
+        """Ads read by id, IDS_PER_REQUEST per call. One id Meta will not
+        serve fails the whole ?ids= call (code 100), so such a chunk is asked
+        again one id at a time and the unreadable ids are left out."""
+        fields = ",".join(AD_FIELDS_BY_ID)
+        found: list[dict] = []
+        for i in range(0, len(ids), IDS_PER_REQUEST):
+            chunk = ids[i:i + IDS_PER_REQUEST]
+            try:
+                found.extend(self._get_ids(chunk, fields).values())
+                continue
+            except FacebookRequestError as exc:
+                if exc.api_error_code() not in UNREADABLE_ID_CODES:
+                    raise
+            if len(chunk) == 1:
+                continue
+            for one in chunk:
+                try:
+                    found.extend(self._get_ids([one], fields).values())
+                except FacebookRequestError as exc:
+                    if exc.api_error_code() not in UNREADABLE_ID_CODES:
+                        raise
+        return [a for a in found if isinstance(a, dict) and a.get("id")]
+
+    def _get_ids(self, ids: list[str], fields: str) -> dict:
+        """GET /?ids=a,b&fields=… → {id: object}. Throttling is slept through."""
+        return self._throttled(lambda: self.api.call(
+            "GET", ("",), params={"ids": ",".join(ids), "fields": fields}).json())
 
     def _scope_ads(self, ads: list[dict]) -> list[dict]:
         """With a collect_from cut, keep only this store's ads: those it has

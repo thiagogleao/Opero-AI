@@ -18,6 +18,7 @@ Rules that each fixed a wrong number:
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional
 
 # Must equal PHANTOM_PURCHASE_VALUE in frontend/lib/engine/pnl.ts.
@@ -48,6 +49,25 @@ BREAKDOWNS = [
     ("placement", ["publisher_platform", "platform_position"]),
     ("age_gender", ["age", "gender"]),
 ]
+
+# An ad read on its own (GET /?ids=…). The parents come expanded in the same
+# call, so an ad whose campaign or ad set the account listing no longer shows
+# (archived) still lands with names and a campaign row.
+AD_FIELDS_BY_ID = [
+    "id", "name", "status", "effective_status", "account_id", "adset_id", "campaign_id",
+    "creative{id}", "created_time", "updated_time",
+    "adset{id,name,status}", "campaign{id,name,status,objective}",
+]
+
+
+def graph_ts(value: Optional[str]) -> Optional[datetime]:
+    """Graph timestamps look like 2026-11-10T12:00:00+0000."""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S%z")
+    except (ValueError, TypeError):
+        return None
 
 
 def to_int(value, default: int = 0) -> int:
@@ -203,3 +223,50 @@ def structure_from_insights(raw: list[dict]) -> tuple[list[dict], list[dict], li
         if i.get("campaign_id"):
             campaigns[str(i["campaign_id"])] = {"campaign_id": str(i["campaign_id"]), "name": i.get("campaign_name")}
     return list(ads.values()), list(adsets.values()), list(campaigns.values())
+
+
+def catalog_from_ads(ads: list[dict], fallback_account: Optional[str],
+                     synced_at: datetime) -> tuple[list[dict], list[dict], list[dict]]:
+    """Full fb_ads / fb_adsets / fb_campaigns rows for ads read by id
+    (AD_FIELDS_BY_ID). The campaign is filed under the ad's own account
+    (Meta's account_id, without the act_ prefix), falling back to the account
+    being collected. Creative details are merged in by the caller."""
+    ad_rows: dict[str, dict] = {}
+    adsets: dict[str, dict] = {}
+    campaigns: dict[str, dict] = {}
+    for ad in ads:
+        ad_id = ad.get("id")
+        if not ad_id:
+            continue
+        adset = ad.get("adset") or {}
+        campaign = ad.get("campaign") or {}
+        adset_id = ad.get("adset_id") or adset.get("id")
+        campaign_id = ad.get("campaign_id") or campaign.get("id")
+        ad_rows[str(ad_id)] = {
+            "ad_id": str(ad_id), "name": ad.get("name"), "status": ad.get("status"),
+            "effective_status": ad.get("effective_status"),
+            "adset_id": adset_id, "adset_name": adset.get("name"),
+            "campaign_id": campaign_id, "campaign_name": campaign.get("name"),
+            "created_time": graph_ts(ad.get("created_time")), "updated_time": graph_ts(ad.get("updated_time")),
+            "synced_at": synced_at,
+        }
+        # Parents may already have a row from the listing; a field the
+        # expansion did not bring must not blank it (upsert writes every key
+        # the row carries, NULL included).
+        if adset_id:
+            adsets[str(adset_id)] = _present({
+                "adset_id": str(adset_id), "campaign_id": campaign_id, "name": adset.get("name"),
+                "status": adset.get("status"), "synced_at": synced_at,
+            })
+        if campaign_id:
+            account = f"act_{ad['account_id']}" if ad.get("account_id") else fallback_account
+            campaigns[str(campaign_id)] = _present({
+                "campaign_id": str(campaign_id), "account_id": account, "name": campaign.get("name"),
+                "status": campaign.get("status"), "objective": campaign.get("objective"),
+                "synced_at": synced_at,
+            })
+    return list(ad_rows.values()), list(adsets.values()), list(campaigns.values())
+
+
+def _present(row: dict) -> dict:
+    return {k: v for k, v in row.items() if v is not None}
