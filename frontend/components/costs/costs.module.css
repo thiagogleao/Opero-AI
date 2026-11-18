@@ -1,0 +1,189 @@
+/* Cost screen (Custos). Tokens only; keyframes live here (CSS Modules). */
+
+/* ── Page layout: editor + sticky preview ── */
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 16px; align-items: start; }
+.main { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.aside { position: sticky; top: calc(var(--topbar-h) + 12px); display: flex; flex-direction: column; gap: 12px; min-width: 0; max-height: calc(100vh - var(--topbar-h) - 24px); overflow-y: auto; scrollbar-width: thin; }
+@media (max-width: 1199px) {
+  .layout { grid-template-columns: minmax(0, 1fr); }
+  /* One column (tablet, phone): the result opens the page, as every page opens
+     with its verdict; the form follows; the long breakdown cards (ledger, cost
+     lines, coverage) come after the form instead of above hundreds of product
+     rows. The preview's cards become items of this grid to be reordered. */
+  .aside, .aside > .pv { display: contents; }
+  .aside > *, .aside > .pv > * { order: 1; }
+  .aside > :not(.pv), .aside > .pv > :first-child { order: -1; }
+}
+
+.toc { display: flex; flex-wrap: wrap; gap: 6px; }
+.toc a {
+  font-size: 12px; color: var(--tx-2); text-decoration: none;
+  padding: 4px 10px; border-radius: var(--r-pill); border: 1px solid var(--line-2); background: var(--card);
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.toc a:hover { color: var(--tx); border-color: var(--tx-4); }
+.tocDot { width: 6px; height: 6px; border-radius: 50%; background: var(--warn); }
+.tocErr { background: var(--neg); }
+
+/* ── Fields ── */
+.fieldGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 14px 16px; }
+.field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.fieldLabel { font-size: 12.5px; font-weight: 500; color: var(--tx-2); display: flex; align-items: center; gap: 6px; }
+.fieldHint { font-size: 11.5px; line-height: 1.4; color: var(--tx-3); }
+.box {
+  display: flex; align-items: center; min-width: 0;
+  height: 32px; border-radius: var(--r-ctl);
+  background: var(--panel); border: 1px solid var(--line-2);
+  transition: border-color .12s;
+}
+.box:focus-within { border-color: var(--info); box-shadow: 0 0 0 1px var(--info); }
+.boxErr { border-color: var(--neg-m); }
+.boxSm { height: 28px; border-radius: 8px; }
+.affix { font: 500 12px/1 var(--mono); color: var(--tx-3); padding: 0 0 0 10px; flex: none; white-space: nowrap; }
+.affixR { padding: 0 10px 0 0; }
+.input {
+  flex: 1 1 auto; min-width: 0; height: 100%;
+  background: transparent; border: 0; outline: none;
+  padding: 0 10px; font-size: 13px; color: var(--tx);
+}
+.input::placeholder { color: var(--tx-4); }
+.input:focus-visible { box-shadow: none; }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
+.date { color-scheme: dark; font-family: var(--mono); font-size: 12.5px; }
+.select { appearance: none; background: transparent; border: 0; height: 100%; padding: 0 26px 0 10px; font-size: 13px; color: var(--tx); outline: none; cursor: pointer; width: 100%; }
+.select option { background: var(--card); color: var(--tx); }
+.selectWrap { position: relative; flex: 1; height: 100%; display: flex; }
+.selectWrap svg { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); pointer-events: none; color: var(--tx-3); }
+
+.msg { display: flex; gap: 6px; align-items: flex-start; font-size: 11.5px; line-height: 1.4; }
+.msg svg { margin-top: 1px; }
+.msgErr { color: var(--neg); }
+.msgWarn { color: var(--warn); }
+
+.check { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--tx-2); cursor: pointer; user-select: none; }
+.check input { accent-color: var(--pos-m); width: 15px; height: 15px; cursor: pointer; }
+
+.radioRow { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+
+/* ── Row lists (order fees, shipping, extras, country prices) ── */
+.rows { display: flex; flex-direction: column; }
+.rowHead, .row { display: grid; gap: 8px; align-items: start; }
+.rowHead { font: 600 10.5px/1.25 var(--sans); letter-spacing: .09em; text-transform: uppercase; color: var(--tx-3); padding: 0 0 6px; }
+.row { padding: 6px 0; border-top: 1px solid var(--line); }
+.row:first-of-type { border-top: 0; }
+.rowMsgs { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 3px; }
+.cellNote { font-size: 11.5px; color: var(--tx-3); padding-top: 7px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.addRow { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.empty { font-size: 12.5px; color: var(--tx-3); padding: 6px 0; }
+
+.colsFee { grid-template-columns: 96px minmax(0, 1fr) 120px 150px 32px; }
+.colsRate { grid-template-columns: 96px minmax(0, 1fr) 120px 32px; }
+.colsExtra { grid-template-columns: minmax(0, 1fr) 130px 150px 32px; }
+.colsVolume { grid-template-columns: 130px 170px 130px 32px; }
+.colsCountry { grid-template-columns: 96px minmax(0, 1fr) 120px 32px; }
+@media (max-width: 640px) {
+  .colsFee, .colsRate, .colsExtra, .colsVolume, .colsCountry { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .rowHead { display: none; }
+}
+
+/* ── Supplier cards ── */
+.cards { display: flex; flex-direction: column; gap: 12px; }
+.card { border: 1px solid var(--line-2); border-radius: 12px; background: var(--card-2); padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
+.cardHead { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.cardTitle { font-weight: 600; font-size: 13.5px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* Wide enough for a price with cents ("21,28"): at 150px the box left 38px for
+   the number and "11,6" showed as "11". */
+.steps { display: grid; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); gap: 8px 12px; }
+.step { display: grid; grid-template-columns: 72px minmax(0, 1fr) 28px; gap: 6px; align-items: center; }
+.boxSm .input { padding: 0 8px; }
+.stepMsgs { grid-column: 1 / -1; }
+
+/* ── Products ── */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.pchip {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
+  font-size: 12px; color: var(--tx); padding: 3px 4px 3px 9px;
+  border-radius: var(--r-pill); background: var(--panel); border: 1px solid var(--line-2);
+}
+.pchip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+.pchip button { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; color: var(--tx-3); }
+.pchip button:hover { color: var(--tx); background: var(--hover); }
+
+.picker { position: relative; max-width: 420px; width: 100%; }
+.pickList {
+  position: absolute; z-index: 20; left: 0; right: 0; top: calc(100% + 4px);
+  max-height: 280px; overflow-y: auto; list-style: none;
+  background: var(--card-2); border: 1px solid var(--line-2); border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .45); padding: 4px;
+}
+.pickItem { display: flex; justify-content: space-between; gap: 10px; padding: 7px 10px; border-radius: 8px; font-size: 12.5px; cursor: pointer; }
+.pickItem[aria-selected='true'], .pickItem:hover { background: var(--hover); }
+.pickItem small { font: 500 11px var(--mono); color: var(--tx-4); white-space: nowrap; }
+
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+.search { max-width: 320px; flex: 1 1 220px; }
+.segWrap { max-width: 100%; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+
+.ptable { width: 100%; border-collapse: collapse; }
+.ptable th { font: 600 10.5px/1.25 var(--sans); letter-spacing: .09em; text-transform: uppercase; color: var(--tx-3); text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.ptable td { padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 13px; }
+.ptable tr:last-child td { border-bottom: 0; }
+.ptable tr[data-flash='true'] td { animation: flash 1.6s ease-out; }
+@keyframes flash { 0% { background: var(--info-bg); } 100% { background: transparent; } }
+.pname { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.pname b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
+.pname small { font: 500 11px var(--mono); color: var(--tx-4); }
+.pcost { width: 150px; }
+.pfree { width: 110px; }
+.more { display: flex; justify-content: center; padding: 12px; border-top: 1px solid var(--line); }
+.tableWrap { overflow-x: auto; }
+
+/* ── Country lists ── */
+.clist { border: 1px solid var(--line-2); border-radius: 12px; background: var(--card-2); }
+.clistHead { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 14px; flex-wrap: wrap; }
+.clistBody { padding: 4px 14px 12px; border-top: 1px solid var(--line); }
+
+/* ── Preview ── */
+.pv { display: flex; flex-direction: column; gap: 12px; }
+.pvHead { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+.pvBig { font: 500 34px/1.05 var(--mono); letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
+.pvCap { font-size: 12.5px; color: var(--tx-2); margin-top: 4px; }
+.pvBusy { opacity: .55; transition: opacity .15s; }
+.compare { display: grid; grid-template-columns: auto 1fr 1fr; gap: 6px 12px; font-size: 12.5px; align-items: baseline; }
+.compare .k { color: var(--tx-3); }
+.compare .v { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
+.compareHead { font: 600 10.5px/1.25 var(--sans); letter-spacing: .09em; text-transform: uppercase; color: var(--tx-3); text-align: right; }
+.lines { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.lines th { font: 600 10px/1.25 var(--sans); letter-spacing: .09em; text-transform: uppercase; color: var(--tx-3); text-align: right; padding: 4px 0 6px 8px; }
+.lines th:first-child { text-align: left; padding-left: 0; }
+.lines td { padding: 5px 0 5px 8px; border-top: 1px solid var(--line); text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.lines td:first-child { text-align: left; padding-left: 0; font-family: var(--sans); white-space: normal; color: var(--tx-2); }
+.lines tr.total td { font-weight: 600; color: var(--tx); }
+.diffUp { color: var(--neg); }
+.diffDown { color: var(--pos); }
+.coverage { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
+.covRow { display: flex; justify-content: space-between; gap: 10px; }
+.covRow span:last-child { font-family: var(--mono); color: var(--tx-2); white-space: nowrap; }
+.linkBtn { color: var(--info); font-size: 12.5px; text-decoration: underline; text-underline-offset: 2px; }
+.linkBtn:hover { color: var(--tx); }
+
+/* ── Save bar ── */
+.saveBar {
+  position: sticky; bottom: 12px; z-index: 30;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding: 10px 14px; border-radius: 14px;
+  background: var(--card-2); border: 1px solid var(--line-2);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .5);
+}
+.saveText { font-size: 12.5px; color: var(--tx-2); display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.saveText b { color: var(--tx); font-weight: 600; }
+.saveActions { display: flex; gap: 8px; align-items: center; }
+
+.remove { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; color: var(--tx-3); flex: none; }
+.remove:hover { color: var(--neg); background: var(--neg-bg); }
+
+.stack { display: flex; flex-direction: column; gap: 10px; }
+.inline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.sub { font-size: 12.5px; color: var(--tx-3); line-height: 1.5; }
+.sub b { color: var(--tx-2); font-weight: 500; }
+.issueList { margin: 6px 0 0 16px; display: flex; flex-direction: column; gap: 3px; }

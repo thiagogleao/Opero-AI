@@ -1,437 +1,115 @@
-'use client'
-import { useState, useEffect, useCallback } from 'react'
-import Link from 'next/link'
-import { motion } from 'framer-motion'
-import Sidebar from '@/components/Sidebar'
+/**
+ * Ajustes → Chaves da Shopify (/settings/chaves): every store's Shopify
+ * connection, tested live, with the right way to fix each one.
+ *
+ * Fixes from the audit: the Client Secret no longer travels in a URL (POST
+ * /api/shopify/connect), a Dev Dashboard store reconnects with Client ID +
+ * Secret (its token lasts 24 h and is re-minted by the collector — a pasted
+ * token would die within a day), statuses "expired" and "unreachable" have
+ * words, and only a fingerprint of the stored key is shown.
+ */
 
-type TokenStatus = 'ok' | 'invalid' | 'missing' | 'error' | 'unreachable'
+import { Suspense } from 'react'
+import { listStores, type StoreRef } from '@/lib/access'
+import { shopifyHealth } from '@/lib/integrations/health'
+import { getPageContext, type SearchParams } from '@/lib/views/page'
+import { AppShell, PageHeader } from '@/components/shell'
+import { Block, ButtonLink, EmptyState, ErrorState, SkeletonBlock } from '@/components/ui'
+import { ReturnBanner, ShopifyHealthItem } from '@/components/settings/blocks'
+import { ShopifyKeyForm } from '@/components/settings/ShopifyKeyForm'
+import s from '@/components/settings/settings.module.css'
 
-interface StoreHealth {
-  id: string
-  name: string
-  domain: string | null
-  masked: string | null
-  status: TokenStatus
-  httpStatus: number | null
-  missingScopes?: { handle: string; why: string }[]
-  scopeCount?: number
-}
+export const dynamic = 'force-dynamic'
 
-const STATUS_LABEL: Record<TokenStatus, string> = {
-  ok:          'Conectada',
-  invalid:     'Chave revogada',
-  missing:     'Sem chave',
-  error:       'Erro na Shopify',
-  unreachable: 'Sem resposta',
-}
+const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v)
 
-const STATUS_COLOR: Record<TokenStatus, { fg: string; bg: string; border: string }> = {
-  ok:          { fg: '#10B981', bg: 'rgba(16,185,129,0.10)', border: 'rgba(16,185,129,0.28)' },
-  invalid:     { fg: '#F43F5E', bg: 'rgba(244,63,94,0.10)',  border: 'rgba(244,63,94,0.28)'  },
-  missing:     { fg: '#F43F5E', bg: 'rgba(244,63,94,0.10)',  border: 'rgba(244,63,94,0.28)'  },
-  error:       { fg: '#F59E0B', bg: 'rgba(245,158,11,0.10)', border: 'rgba(245,158,11,0.28)' },
-  unreachable: { fg: '#F59E0B', bg: 'rgba(245,158,11,0.10)', border: 'rgba(245,158,11,0.28)' },
-}
+export default async function KeysPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
+  const sp = await searchParams
+  // The Shopify callback comes back with ?store=<id> (the store just reconnected).
+  const ctx = await getPageContext({ ...sp, loja: one(sp.loja) ?? one(sp.store) }, { scope: 'store' })
+  const flags = { shopify_connected: one(sp.shopify_connected), shopify_error: one(sp.shopify_error) }
 
-/** Shopify hands out several key shapes and only one of them opens the Admin
- *  API. Catching the common mix-ups here saves a round trip that would come
- *  back as a bare "token inválido" and explain nothing. */
-function explainToken(raw: string): string | null {
-  const t = raw.trim()
-  if (!t) return null
-
-  // shpss_ is handled separately — it drives the OAuth flow instead.
-  if (t.startsWith('shpss_')) return null
-
-  if (t.startsWith('shpsa_') || t.startsWith('shppa_'))
-    return 'Essa é uma chave do app, não o token de acesso da loja. Procure o campo Admin API access token, que começa com shpat_.'
-
-  if (/^[0-9a-f]{32}$/i.test(t))
-    return 'Isso parece o Client ID do app. Cole a Client secret (shpss_) aqui e o Client ID no campo que vai aparecer.'
-
-  if (!t.startsWith('shpat_') && !t.startsWith('shpca_'))
-    return 'O token de acesso da Shopify começa com shpat_. Confira se copiou o campo Admin API access token.'
-
-  return null
-}
-
-function Section({ title, delay = 0, children }: { title: string; delay?: number; children: React.ReactNode }) {
   return (
-    <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay }}
-      style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 12, overflow: 'hidden', marginBottom: 16 }}>
-      <div style={{ padding: '12px 20px', borderBottom: '1px solid var(--border)', background: 'rgba(139,92,246,0.04)' }}>
-        <p style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-faint)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>{title}</p>
-      </div>
-      <div style={{ padding: 20 }}>{children}</div>
-    </motion.div>
+    <AppShell ctx={ctx}>
+      <PageHeader
+        ctx={ctx}
+        title="Chaves da Shopify"
+        code={null}
+        sub="Cada chave é testada agora na Shopify, não só conferida no banco"
+        actions={<ButtonLink href={ctx.hrefWith('/settings')} size="sm" variant="ghost">Voltar para Ajustes</ButtonLink>}
+      />
+      <ReturnBanner params={flags} />
+      {ctx.stores.length === 0 && !ctx.store ? (
+        <EmptyState icon="store" title="Nenhuma loja">Conecte uma loja em Ajustes.</EmptyState>
+      ) : (
+        <Suspense fallback={<SkeletonBlock lines={6} height={160} />}>
+          <KeysList viewer={ctx.viewer} currentId={ctx.store?.id ?? null} now={ctx.now} />
+        </Suspense>
+      )}
+      <HowTo />
+    </AppShell>
   )
 }
 
-function StatusPill({ status }: { status: TokenStatus }) {
-  const c = STATUS_COLOR[status]
-  return (
-    <span style={{
-      padding: '3px 9px', fontSize: 11, fontWeight: 600, borderRadius: 6,
-      background: c.bg, color: c.fg, border: `1px solid ${c.border}`, whiteSpace: 'nowrap',
-    }}>
-      {status === 'ok' ? '✓' : status === 'invalid' || status === 'missing' ? '✗' : '⚠'} {STATUS_LABEL[status]}
-    </span>
-  )
-}
-
-export default function KeysPage() {
-  const [stores,   setStores]   = useState<StoreHealth[] | null>(null)
-  const [checking, setChecking] = useState(false)
-  const [drafts,   setDrafts]   = useState<Record<string, string>>({})
-  const [apiKeys,  setApiKeys]  = useState<Record<string, string>>({})
-  const [saving,   setSaving]   = useState<string | null>(null)
-  const [result,   setResult]   = useState<Record<string, { ok: boolean; msg: string }>>({})
-
-  /** A shpss_ secret can't authenticate a request, but it is exactly what the
-   *  OAuth exchange needs to be signed with. Hand it to /api/shopify/auth,
-   *  which carries the pair through to the callback in a cookie, and let
-   *  Shopify mint a real access token at the end. */
-  function connectViaOAuth(store: StoreHealth) {
-    const secret = (drafts[store.id] ?? '').trim()
-    const key    = (apiKeys[store.id] ?? '').trim()
-    if (!store.domain || !secret || !key) return
-
-    const url = new URL('/api/shopify/auth', window.location.origin)
-    url.searchParams.set('shop', store.domain)
-    url.searchParams.set('reconnect', '1')
-    url.searchParams.set('clientId', key)
-    url.searchParams.set('clientSecret', secret)
-    window.location.href = url.toString()
+async function KeysList({ viewer, currentId, now }: { viewer: Parameters<typeof listStores>[0]; currentId: string | null; now: Date }) {
+  let stores: StoreRef[]
+  let health
+  try {
+    const all = await listStores(viewer, { includeArchived: true })
+    // Active stores, plus the store open in the shell if it is archived.
+    stores = all.filter(st => !st.archived || st.id === currentId)
+    stores.sort((a, b) => Number(b.id === currentId) - Number(a.id === currentId))
+    health = await shopifyHealth(stores)
+  } catch (err) {
+    console.error('[chaves] health', err instanceof Error ? err.message : err)
+    return <ErrorState title="O teste das chaves não respondeu">Nada foi alterado. Recarregue a página para testar de novo.</ErrorState>
   }
-
-  const check = useCallback(async () => {
-    setChecking(true)
-    try {
-      const res  = await fetch('/api/shopify/token-health', { cache: 'no-store' })
-      const data = await res.json()
-      setStores(data.stores ?? [])
-    } catch {
-      setStores([])
-    } finally {
-      setChecking(false)
-    }
-  }, [])
-
-  useEffect(() => { check() }, [check])
-
-  async function save(store: StoreHealth) {
-    const token = (drafts[store.id] ?? '').trim()
-    if (!token || !store.domain) return
-
-    setSaving(store.id)
-    setResult(r => ({ ...r, [store.id]: { ok: false, msg: '' } }))
-
-    try {
-      const res  = await fetch('/api/shopify/connect-manual', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ domain: store.domain, accessToken: token }),
-      })
-      const data = await res.json()
-
-      if (res.ok) {
-        setResult(r => ({ ...r, [store.id]: { ok: true, msg: 'Chave validada e salva.' } }))
-        setDrafts(d => ({ ...d, [store.id]: '' }))
-        check()
-      } else {
-        setResult(r => ({ ...r, [store.id]: { ok: false, msg: data.error || 'Falha ao salvar.' } }))
-      }
-    } catch {
-      setResult(r => ({ ...r, [store.id]: { ok: false, msg: 'Erro de conexão.' } }))
-    } finally {
-      setSaving(null)
-    }
-  }
-
-  const broken = stores?.filter(s => s.status === 'invalid' || s.status === 'missing') ?? []
-
+  const broken = health.filter(h => h.status === 'invalid' || h.status === 'missing' || h.status === 'expired')
   return (
-    <div style={{ display: 'flex', minHeight: '100vh', backgroundColor: 'var(--bg)' }}>
-      <Sidebar active="/settings" />
-
-      <main style={{ marginLeft: 56, flex: 1, padding: '28px 32px', maxWidth: 860 }}>
-
-        {/* Header */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24, gap: 16, flexWrap: 'wrap' }}>
-          <div>
-            <Link href="/settings" style={{ fontSize: 12, color: 'var(--text-faint)', textDecoration: 'none' }}>
-              ← Configurações
-            </Link>
-            <h1 style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-primary)', letterSpacing: '-0.4px', marginTop: 6 }}>
-              Atualizar chaves
-            </h1>
-            <p style={{ color: 'var(--text-faint)', fontSize: 13, marginTop: 3 }}>
-              Cada chave é testada na Shopify agora, não apenas conferida no banco.
-            </p>
-          </div>
-
-          <button onClick={check} disabled={checking}
-            style={{
-              padding: '7px 13px', fontSize: 12, fontWeight: 600, borderRadius: 8,
-              border: '1px solid var(--border-strong)', background: 'var(--bg-input)',
-              color: 'var(--text-muted)', cursor: checking ? 'wait' : 'pointer', whiteSpace: 'nowrap',
-            }}>
-            {checking ? 'Testando…' : '↻ Testar novamente'}
-          </button>
+    <>
+      {broken.length > 0 && (
+        <div role="note" className={s.sub}>
+          <b className="neg">{broken.length === 1 ? '1 loja não está coletando pedidos' : `${broken.length} lojas não estão coletando pedidos`}:</b>{' '}
+          {broken.map(b => b.name).join(', ')}. Os pedidos novos delas não entram até a chave ser trocada.
         </div>
-
-        {/* Alert when something is broken */}
-        {broken.length > 0 && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}
-            style={{
-              background: 'rgba(244,63,94,0.07)', border: '1px solid rgba(244,63,94,0.22)',
-              borderRadius: 10, padding: '14px 18px', marginBottom: 16,
-            }}>
-            <p style={{ fontSize: 13, fontWeight: 600, color: '#F43F5E', margin: 0 }}>
-              {broken.length === 1
-                ? '1 loja parou de sincronizar'
-                : `${broken.length} lojas pararam de sincronizar`}
-            </p>
-            <p style={{ fontSize: 12.5, color: 'var(--text-muted)', margin: '6px 0 0', lineHeight: 1.55 }}>
-              A chave de acesso da Shopify não expira sozinha. Um 401 significa que ela foi
-              revogada — é o que acontece quando o app é reinstalado, os escopos mudam, ou as
-              credenciais são rotacionadas. Gere uma nova e cole abaixo.
-            </p>
-          </motion.div>
-        )}
-
-        {/* Stores */}
-        <Section title="Shopify — chave de acesso por loja">
-          {stores === null ? (
-            <p style={{ fontSize: 13, color: 'var(--text-faint)', margin: 0 }}>Testando as chaves…</p>
-          ) : stores.length === 0 ? (
-            <p style={{ fontSize: 13, color: 'var(--text-faint)', margin: 0 }}>Nenhuma loja conectada.</p>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              {stores.map(store => {
-                const needs = store.status === 'invalid' || store.status === 'missing'
-                const res   = result[store.id]
-                const draft    = (drafts[store.id] ?? '').trim()
-                const isSecret = draft.startsWith('shpss_')
-                const hint     = explainToken(draft)
-                const ready    = draft.length > 0 && !hint && !isSecret
-                const keyDraft = (apiKeys[store.id] ?? '').trim()
-                return (
-                  <div key={store.id}
-                    style={{
-                      border: `1px solid ${needs ? 'rgba(244,63,94,0.22)' : 'var(--border)'}`,
-                      borderRadius: 10, padding: 16,
-                      background: needs ? 'rgba(244,63,94,0.03)' : 'transparent',
-                    }}>
-
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-                      <div style={{ minWidth: 0 }}>
-                        <p style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>
-                          {store.name}
-                        </p>
-                        <p style={{ fontSize: 12, color: 'var(--text-faint)', margin: '2px 0 0', fontFamily: 'ui-monospace, monospace', wordBreak: 'break-all' }}>
-                          {store.domain || 'sem domínio'}
-                          {store.masked && <span style={{ marginLeft: 8, opacity: 0.7 }}>· {store.masked}</span>}
-                        </p>
-                      </div>
-                      <StatusPill status={store.status} />
-                    </div>
-
-                    {/* A working token can still be blind. Scopes are frozen at
-                        the moment the token was issued, so widening them in the
-                        Shopify admin changes nothing until the app is
-                        reinstalled — which is not obvious from "Conectada". */}
-                    {store.status === 'ok' && (store.missingScopes?.length ?? 0) > 0 && (
-                      <div style={{
-                        marginTop: 8, padding: '8px 12px', borderRadius: 8,
-                        background: 'rgba(245,158,11,0.08)', border: '1px dashed rgba(245,158,11,0.32)',
-                      }}>
-                        <p style={{ fontSize: 12, color: '#F59E0B', margin: 0, fontWeight: 600 }}>
-                          Conectada, mas sem permissão para: {store.missingScopes!.map(s => s.why).join(', ')}
-                        </p>
-                        <p style={{ fontSize: 11, color: 'var(--text-dim)', margin: '4px 0 0', lineHeight: 1.5 }}>
-                          O token carrega as permissões de quando foi criado ({store.scopeCount} escopos).
-                          Marcar a permissão no painel da Shopify não muda este token — é preciso
-                          reinstalar o app privado para gerar um novo e colar aqui.
-                        </p>
-                        <p style={{ fontSize: 10.5, color: 'var(--text-faint)', margin: '4px 0 0', fontFamily: 'monospace' }}>
-                          {store.missingScopes!.map(s => s.handle).join(' · ')}
-                        </p>
-                        {/* Reauthorising through the app's own credentials is all
-                            this needs — no key, no secret, no pasting. */}
-                        <a
-                          href={`/api/shopify/auth?shop=${encodeURIComponent(store.domain ?? '')}&reconnect=1`}
-                          style={{
-                            display: 'inline-block', marginTop: 8, padding: '7px 14px',
-                            borderRadius: 8, background: 'rgba(245,158,11,0.16)',
-                            border: '1px solid rgba(245,158,11,0.4)', color: '#F59E0B',
-                            fontSize: 12, fontWeight: 600, textDecoration: 'none',
-                          }}
-                        >
-                          Reautorizar esta loja
-                        </a>
-                        {/* The Opero app only installs on stores in the same
-                            Partners organisation. Everywhere else Shopify
-                            answers "This installation link can't be used",
-                            which explains nothing and offers no way forward. */}
-                        <p style={{ fontSize: 10.5, color: 'var(--text-faint)', margin: '6px 0 0', lineHeight: 1.5 }}>
-                          Se o Shopify responder <i>&quot;This installation link can&apos;t be used&quot;</i>, esta loja
-                          usa um app privado próprio. Nesse caso: Configurações → Apps e canais de venda →
-                          Desenvolver apps → abra o app → Admin API → marque <code>read_shopify_payments_disputes</code> →
-                          reinstale → copie o token novo e cole no campo abaixo.
-                        </p>
-                      </div>
-                    )}
-
-                    {store.status === 'error' && store.httpStatus && (
-                      <p style={{ fontSize: 11.5, color: '#F59E0B', margin: '8px 0 0' }}>
-                        A Shopify respondeu HTTP {store.httpStatus}. Se persistir, a loja pode estar
-                        suspensa ou o domínio mudou.
-                      </p>
-                    )}
-
-                    {store.domain && (
-                      <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-                        <input
-                          id={`token-${store.id}`}
-                          type="password"
-                          autoComplete="off"
-                          spellCheck={false}
-                          placeholder="shpss_… ou shpat_…"
-                          value={drafts[store.id] ?? ''}
-                          onChange={e => setDrafts(d => ({ ...d, [store.id]: e.target.value }))}
-                          onKeyDown={e => { if (e.key === 'Enter' && ready) save(store) }}
-                          style={{
-                            flex: '1 1 220px', minWidth: 0, background: 'var(--bg-input)',
-                            border: `1px solid ${hint ? 'rgba(245,158,11,0.45)' : 'var(--border-strong)'}`,
-                            borderRadius: 7,
-                            padding: '7px 10px', fontSize: 12.5, color: 'var(--text-primary)',
-                            outline: 'none', fontFamily: 'ui-monospace, monospace',
-                          }} />
-                        <button
-                          onClick={() => save(store)}
-                          disabled={saving === store.id || !ready}
-                          style={{
-                            padding: '7px 15px', fontSize: 12, fontWeight: 600, borderRadius: 7, border: 'none',
-                            background: ready ? 'rgba(16,185,129,0.15)' : 'var(--bg-input)',
-                            color: ready ? '#10B981' : 'var(--text-faint)',
-                            cursor: saving === store.id ? 'wait' : ready ? 'pointer' : 'not-allowed',
-                            whiteSpace: 'nowrap',
-                          }}>
-                          {saving === store.id ? 'Validando…' : 'Salvar chave'}
-                        </button>
-                      </div>
-                    )}
-
-                    {hint && (
-                      <p style={{ fontSize: 12, margin: '8px 0 0', color: '#F59E0B', lineHeight: 1.55 }}>
-                        {hint}
-                      </p>
-                    )}
-
-                    {/* shpss_ path — sign the OAuth exchange with the app secret */}
-                    {isSecret && store.domain && (
-                      <div style={{
-                        marginTop: 10, padding: 14, borderRadius: 8,
-                        background: 'rgba(139,92,246,0.06)', border: '1px solid rgba(139,92,246,0.22)',
-                      }}>
-                        <p style={{ fontSize: 12.5, color: 'var(--text-muted)', margin: 0, lineHeight: 1.6 }}>
-                          Essa é a <strong style={{ color: 'var(--text-primary)' }}>Client secret</strong> do app. Ela não
-                          autentica chamadas sozinha, mas assina a autorização — informe o <strong style={{ color: 'var(--text-primary)' }}>Client ID</strong> do
-                          mesmo app e a Shopify emite o token de acesso no fim.
-                        </p>
-                        <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
-                          <input
-                            id={`apikey-${store.id}`}
-                            type="text"
-                            autoComplete="off"
-                            spellCheck={false}
-                            placeholder="Client ID"
-                            value={apiKeys[store.id] ?? ''}
-                            onChange={e => setApiKeys(k => ({ ...k, [store.id]: e.target.value }))}
-                            onKeyDown={e => { if (e.key === 'Enter' && keyDraft) connectViaOAuth(store) }}
-                            style={{
-                              flex: '1 1 200px', minWidth: 0, background: 'var(--bg-input)',
-                              border: '1px solid var(--border-strong)', borderRadius: 7,
-                              padding: '7px 10px', fontSize: 12.5, color: 'var(--text-primary)',
-                              outline: 'none', fontFamily: 'ui-monospace, monospace',
-                            }} />
-                          <button
-                            onClick={() => connectViaOAuth(store)}
-                            disabled={!keyDraft}
-                            style={{
-                              padding: '7px 15px', fontSize: 12, fontWeight: 600, borderRadius: 7, border: 'none',
-                              background: keyDraft ? 'rgba(139,92,246,0.18)' : 'var(--bg-input)',
-                              color: keyDraft ? '#A78BFA' : 'var(--text-faint)',
-                              cursor: keyDraft ? 'pointer' : 'not-allowed', whiteSpace: 'nowrap',
-                            }}>
-                            Autorizar na Shopify
-                          </button>
-                        </div>
-                        <p style={{ fontSize: 11.5, color: 'var(--text-faint)', margin: '9px 0 0', lineHeight: 1.55 }}>
-                          O Client ID fica logo acima da Client secret, na mesma tela do app. Você vai para
-                          a Shopify autorizar e volta com a loja reconectada.
-                        </p>
-                      </div>
-                    )}
-
-                    {res?.msg && (
-                      <p style={{ fontSize: 12, margin: '8px 0 0', color: res.ok ? '#10B981' : '#F43F5E' }}>
-                        {res.ok ? '✓ ' : '✗ '}{res.msg}
-                      </p>
-                    )}
-                  </div>
-                )
-              })}
+      )}
+      {stores.map(st => {
+        const h = health.find(x => x.id === st.id)
+        if (!h) return null
+        return (
+          <Block key={st.id} title={st.name} eyebrow={st.id === currentId ? 'Loja aberta' : undefined} howTo={<span className={s.mono}>{st.domain ?? 'sem domínio'}</span>}>
+            <div className={s.stack}>
+              <ShopifyHealthItem h={h} now={now} settingsKeysHref={null} returnTo="/settings/chaves" />
+              <ShopifyKeyForm storeId={st.id} storeName={st.name} domain={st.domain} connection={h.connection} archived={st.archived} />
             </div>
-          )}
-        </Section>
+          </Block>
+        )
+      })}
+    </>
+  )
+}
 
-        {/* Where to find it */}
-        <Section title="Onde gerar a chave" delay={0.06}>
-          <ol style={{ margin: 0, paddingLeft: 20, fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.85 }}>
-            <li>No admin da loja: <strong style={{ color: 'var(--text-primary)' }}>Settings → Apps and sales channels → Develop apps</strong></li>
-            <li>Abra o app do Opero, ou <strong style={{ color: 'var(--text-primary)' }}>Create an app</strong> se ainda não existir nessa loja</li>
-            <li>Em <strong style={{ color: 'var(--text-primary)' }}>Configure Admin API scopes</strong>, marque ao menos <code style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11.5 }}>read_orders</code>, <code style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11.5 }}>read_products</code>, <code style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11.5 }}>read_customers</code>, <code style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11.5 }}>read_analytics</code>, <code style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11.5 }}>read_reports</code>, <code style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11.5 }}>read_fulfillments</code> → <strong style={{ color: 'var(--text-primary)' }}>Save</strong></li>
-            <li><strong style={{ color: 'var(--text-primary)' }}>Install app</strong></li>
-            <li>Aba <strong style={{ color: 'var(--text-primary)' }}>API credentials</strong> e copie o que estiver lá</li>
-            <li>Cole aqui, na loja correspondente</li>
-          </ol>
-          <p style={{ fontSize: 12.5, color: 'var(--text-faint)', margin: '14px 0 0', lineHeight: 1.6 }}>
-            Você vai encontrar uma de duas coisas, e a página aceita as duas:
-          </p>
-          <ul style={{ margin: '8px 0 0', paddingLeft: 20, fontSize: 12.5, color: 'var(--text-faint)', lineHeight: 1.7 }}>
-            <li>
-              <strong style={{ color: 'var(--text-muted)' }}>Admin API access token</strong> (<code style={{ fontFamily: 'ui-monospace, monospace' }}>shpat_</code>) —
-              é gravado direto. Só aparece uma vez; se já foi revelado e ninguém copiou, reinstale o app.
-            </li>
-            <li>
-              <strong style={{ color: 'var(--text-muted)' }}>Client ID e Client secret</strong> (<code style={{ fontFamily: 'ui-monospace, monospace' }}>shpss_</code>) —
-              cole a secret e a página pede o Client ID, depois a Shopify emite o token pra você.
-            </li>
-          </ul>
-          <p style={{ fontSize: 12.5, color: 'var(--text-faint)', margin: '10px 0 0', lineHeight: 1.6 }}>
-            Um app por loja mantém as credenciais isoladas: rotacionar ou reinstalar numa loja não
-            derruba as outras.
-          </p>
-        </Section>
-
-        {/* After reconnecting */}
-        <Section title="Depois de reconectar" delay={0.12}>
-          <p style={{ fontSize: 13, color: 'var(--text-muted)', margin: 0, lineHeight: 1.7 }}>
-            Os pedidos que chegaram enquanto a chave estava revogada <strong style={{ color: 'var(--text-primary)' }}>não
-            entram sozinhos</strong> — o coletor não volta em pedidos já processados. No painel, use a seta
-            ao lado do botão de atualizar e escolha <strong style={{ color: 'var(--text-primary)' }}>Re-sincronizar
-            período</strong>, com pelo menos 7 dias, para preencher o intervalo.
-          </p>
-          <p style={{ fontSize: 12.5, color: 'var(--text-faint)', margin: '12px 0 0', lineHeight: 1.6 }}>
-            Rotacionar as credenciais também troca o <code style={{ fontFamily: 'ui-monospace, monospace' }}>SHOPIFY_CLIENT_SECRET</code>,
-            usado só para conectar lojas novas pelo fluxo automático. A coleta de dados não depende
-            dele, mas vale atualizar no ambiente para não travar o próximo cadastro.
-          </p>
-        </Section>
-
-      </main>
+function HowTo() {
+  return (
+    <div className={s.grid2}>
+      <Block title="Onde pegar o Client ID e o Secret (app do Dev Dashboard)" howTo="O jeito atual de criar um app da Shopify. O token dura 24 h; o Opero renova sozinho com o par.">
+        <ol className={s.ol}>
+          <li>Entre no <b>Dev Dashboard</b> da Shopify (dev.shopify.com) com a conta dona do app.</li>
+          <li>Abra o app instalado nesta loja (ou crie um e instale na loja com as permissões de leitura de pedidos, produtos e disputas).</li>
+          <li>Na página de credenciais do app, copie o <b>Client ID</b> e o <b>Client secret</b> (começa com <code>shpss_</code>).</li>
+          <li>Cole os dois na loja correspondente acima e clique em <b>Testar e salvar</b>.</li>
+        </ol>
+        <p className={s.sub} style={{ marginTop: 10 }}>Se a coleta parar de novo, o mais provável é que o app tenha sido recriado: o par antigo deixa de valer e precisa ser trocado aqui.</p>
+      </Block>
+      <Block title="Onde pegar o token (app próprio da loja)" howTo="Apps antigos criados no admin da loja. O token não expira; para se o app for reinstalado.">
+        <ol className={s.ol}>
+          <li>No admin da loja: <b>Configurações → Apps e canais de venda → Desenvolver apps</b>.</li>
+          <li>Abra o app do Opero e confira as permissões de leitura (<code>read_orders</code>, <code>read_products</code>, <code>read_shopify_payments_disputes</code>).</li>
+          <li>Em <b>Credenciais da API</b>, copie o <b>Admin API access token</b> (<code>shpat_</code>). Ele só aparece uma vez; se ninguém copiou, reinstale o app.</li>
+          <li>Cole na loja correspondente, na opção “Token do app”.</li>
+        </ol>
+        <p className={s.sub} style={{ marginTop: 10 }}>Permissões ficam congeladas no token: marcar uma permissão nova não muda um token que já existe. Reinstale o app ou use “Reautorizar pelo app Opero”.</p>
+      </Block>
     </div>
   )
 }
