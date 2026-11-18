@@ -1,152 +1,206 @@
-import { auth } from '@clerk/nextjs/server'
-import { redirect } from 'next/navigation'
-import { getActiveTenantId } from '@/lib/activeStore'
-import { getCreativeDetail, getTenantTimezone } from '@/lib/queries'
-import Sidebar from '@/components/Sidebar'
-import Link from 'next/link'
-import CreativeDetailCharts from '@/components/CreativeDetailCharts'
+import type { Metadata } from 'next'
+import { notFound } from 'next/navigation'
+import { getPageContext, type SearchParams } from '@/lib/views/page'
+import { computeStorePnL } from '@/lib/engine/pnl'
+import { listStores } from '@/lib/access'
+import { getCreativeDetail, type CreativeDetail, type CreativeRow } from '@/lib/data/creatives'
+import { FREQUENCY_UNAVAILABLE, HOOK_RATE_UNAVAILABLE } from '@/lib/creativeSignal'
+import { formatDate, formatMoney, formatNumber, formatPct, formatRoas, formatWeekdayDate, plural } from '@/lib/format'
+import { EARLY_DAY_MINUTES } from '@/lib/views/verdict'
+import { AppShell, PageHeader } from '@/components/shell'
+import {
+  Block, ButtonLink, Card, Count, DataTable, EmptyState, ErrorState, KpiCard, KpiGrid, Money, Pct,
+  VerdictCard, type DataColumn, type DataRow,
+} from '@/components/ui'
+import { DailyProfitBars } from '@/components/charts'
+import { buildCreativeVerdict } from '@/components/campaigns/creativeVerdict'
+import { storeMarginFromPnL } from '@/components/campaigns/margin'
+import { AdThumb } from '@/components/campaigns/AdThumb'
+import { RoasCell } from '@/components/campaigns/RoasCell'
+import s from '@/components/campaigns/campaigns.module.css'
 
-export const revalidate = 0
+/**
+ * One ad: its verdict (the shared ad verdict), its numbers and its day-by-day
+ * over the SAME period the dashboard shows (loja/periodo/de/ate come from the
+ * URL through getPageContext, and every link here keeps them). An ad of this
+ * store with no spend in the period says so; another store's ad is a 404.
+ */
 
-function dateInTz(d: Date, tz: string) {
-  return d.toLocaleDateString('en-CA', { timeZone: tz })
+export const metadata: Metadata = { title: 'Criativo' }
+
+/** Meta's effective_status values, in words. An ad whose own status is ACTIVE
+ *  but that does not run has its ad set or campaign paused. */
+const STATUS_TEXT: Record<string, string> = {
+  PAUSED: 'pausado',
+  DELETED: 'excluído',
+  ARCHIVED: 'arquivado',
+  DISAPPROVED: 'reprovado pelo Meta',
+  PENDING_REVIEW: 'em revisão no Meta',
+  IN_PROCESS: 'em processamento no Meta',
+  WITH_ISSUES: 'com problemas no Meta',
+  CAMPAIGN_PAUSED: 'campanha pausada',
+  ADSET_PAUSED: 'conjunto pausado',
 }
 
-interface Props {
-  params: Promise<{ id: string }>
-  searchParams: Promise<{ from?: string; to?: string }>
+function statusText(c: Pick<CreativeRow, 'running' | 'status' | 'known'>): string {
+  if (c.running) return 'ativo'
+  if (!c.known || !c.status) return 'sem gasto no último dia · ainda não sincronizado'
+  const st = c.status.toUpperCase()
+  if (st === 'ACTIVE') return 'parado: campanha ou conjunto pausado'
+  return STATUS_TEXT[st] ?? 'parado'
 }
 
-export default async function CreativeDetailPage({ params, searchParams }: Props) {
-  const { userId } = await auth()
-  if (!userId) redirect('/sign-in')
+export default async function CreativePage({ params, searchParams }: {
+  params: Promise<{ id: string }>; searchParams: Promise<SearchParams>
+}) {
+  const [{ id }, sp] = await Promise.all([params, searchParams])
+  const ctx = await getPageContext(sp, { scope: 'store' })
+  const store = ctx.store
+  if (!store) notFound()
+  const adId = decodeURIComponent(id)
+  const backHref = ctx.hrefWith('/campaigns?aba=criativos')
 
-  let tenantId: string
-  try { tenantId = await getActiveTenantId(userId) } catch { redirect('/onboarding') }
-
-  const { id }  = await params
-  const tz      = await getTenantTimezone(tenantId)
-  const now     = new Date()
-  const sp      = await searchParams
-  const dateTo   = sp.to   ?? dateInTz(now, tz)
-  const dateFrom = sp.from ?? dateInTz(new Date(now.getTime() - 29 * 86400000), tz)
-
-  const { summary, daily } = await getCreativeDetail(tenantId, id, dateFrom, dateTo)
-
-  if (!summary) {
+  let detail: CreativeDetail | null
+  let pnl: Awaited<ReturnType<typeof computeStorePnL>>
+  try {
+    const [all, p] = await Promise.all([
+      listStores(ctx.viewer, { includeArchived: true }),
+      computeStorePnL(store.id, ctx.range, {}, ctx.now),
+    ])
+    pnl = p
+    detail = await getCreativeDetail(store, adId, ctx.range, {
+      storeNames: new Map(all.map(x => [x.id, x.name])), margin: storeMarginFromPnL(ctx.range, p), now: ctx.now,
+    })
+  } catch (err) {
+    console.error('[creative] detail', err)
     return (
-      <div style={{ display: 'flex', minHeight: '100vh', backgroundColor: 'var(--bg)' }}>
-        <Sidebar active="/" />
-        <main style={{ marginLeft: 56, flex: 1, padding: '28px 32px' }}>
-          <Link href="/" style={{ fontSize: 12, color: 'var(--text-ghost)', textDecoration: 'none' }}>← Dashboard</Link>
-          <p style={{ color: 'var(--text-faint)', marginTop: 40, textAlign: 'center' }}>Criativo não encontrado</p>
-        </main>
-      </div>
+      <AppShell ctx={ctx}>
+        <PageHeader ctx={ctx} title="Criativo" />
+        <ErrorState title="Não foi possível carregar este anúncio" action={<ButtonLink href={backHref} size="sm">Voltar aos criativos</ButtonLink>} />
+      </AppShell>
     )
   }
+  // Never another store's ad: lib/data/creatives returns null for it.
+  if (!detail || !pnl) notFound()
 
-  const s = summary
-  const isVideo = (s.video_plays ?? 0) > 0
+  const c = detail.creative
+  const verdict = buildCreativeVerdict({
+    detail, storeTotals: pnl.totals, rangeLabel: ctx.rangeLabel, periodPhrase: ctx.periodPhrase,
+    partialLabel: ctx.partialLabel, today: ctx.today, split: ctx.split,
+    early: ctx.period === 'today' && ctx.partial && ctx.minutesIntoDay < EARLY_DAY_MINUTES,
+  })
+  const be = detail.breakEvenRoas
+  const single = ctx.range.from === ctx.range.to
 
-  const videoSteps = isVideo ? [
-    { label: 'Hook', desc: '% que assistiu', value: s.hook_rate },
-    { label: 'P25', desc: '25% do vídeo', value: s.hold_rate_25 },
-    { label: 'P50', desc: '50% do vídeo', value: s.hold_rate_50 },
-    { label: 'P75', desc: '75% do vídeo', value: s.hold_rate_75 },
-    { label: 'P100', desc: 'Completou', value: s.hold_rate_100 },
-  ].filter(step => step.value !== null) : []
+  const aside = (
+    <div>
+      <AdThumb className={s.preview} sources={[c.creativeUrl, c.thumbnailUrl]} video={!!c.video} alt={`Imagem do anúncio ${c.name}`} iconSize={28} />
+      <dl className={`${s.meta} ${s.metaTop}`}>
+        <dt>Status</dt><dd>{statusText(c)}</dd>
+        <dt>Campanha</dt><dd>{c.campaignName ?? 'não sincronizada'}</dd>
+        <dt>Conjunto</dt><dd>{c.adsetName ?? '—'}</dd>
+        <dt>Formato</dt><dd>{c.video ? 'vídeo' : 'imagem'}</dd>
+        {c.landingUrl && <><dt>Destino</dt><dd><a href={c.landingUrl} target="_blank" rel="noopener noreferrer">{c.landingUrl.replace(/^https?:\/\//, '')}</a></dd></>}
+        <dt>ID</dt><dd className="num">{c.adId}</dd>
+      </dl>
+    </div>
+  )
+
+  const columns: DataColumn[] = [
+    { key: 'date', label: 'Dia' },
+    { key: 'spend', label: 'Gasto', numeric: true, sortable: true },
+    { key: 'purchases', label: 'Compras', numeric: true, sortable: true },
+    { key: 'pv', label: 'Vendas atribuídas', numeric: true, sortable: true },
+    { key: 'roas', label: 'ROAS', numeric: true, sortable: true },
+    { key: 'ctr', label: 'CTR', numeric: true, sortable: true },
+    { key: 'est', label: 'Lucro estimado', numeric: true, sortable: true },
+  ]
+  const rows: DataRow[] = detail.daily.map(d => ({
+    key: d.date,
+    tone: d.spend > 0 ? undefined : 'mut',
+    cells: {
+      date: <span>{formatWeekdayDate(d.date, ctx.today)}{d.date === ctx.today ? <span className="mut"> · parcial</span> : null}</span>,
+      spend: <Money value={d.spend} />,
+      purchases: <Count value={d.purchases} />,
+      pv: <Money value={d.purchaseValue} />,
+      roas: <span>{d.roas === null ? '—' : formatRoas(d.roas)}</span>,
+      ctr: <Pct value={d.impressions > 0 ? (d.linkClicks / d.impressions) * 100 : null} digits={2} />,
+      est: d.estimatedProfit === null ? <span className="mut">—</span> : <Money value={d.estimatedProfit} />,
+    },
+    sort: {
+      date: d.date, spend: d.spend, purchases: d.purchases, pv: d.purchaseValue, roas: d.roas,
+      ctr: d.impressions > 0 ? d.linkClicks / d.impressions : null, est: d.estimatedProfit,
+    },
+  }))
 
   return (
-    <div style={{ display: 'flex', minHeight: '100vh', backgroundColor: 'var(--bg)' }}>
-      <Sidebar active="/" />
-      <main style={{ marginLeft: 56, flex: 1, padding: '28px 32px' }}>
-        {/* Breadcrumb */}
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 20, fontSize: 12, color: 'var(--text-ghost)' }}>
-          <Link href="/" style={{ color: 'var(--text-ghost)', textDecoration: 'none' }}>Dashboard</Link>
-          <span>›</span>
-          <span style={{ color: 'var(--text-dim)' }}>Criativo #{id}</span>
-        </div>
+    <AppShell ctx={ctx}>
+      <PageHeader
+        ctx={ctx}
+        title={c.name}
+        sub={<>{ctx.period === 'custom' ? <b className="num">{ctx.rangeLabel}</b> : <><b>{ctx.periodLabel}</b> · <span className="num">{ctx.rangeLabel}</span></>} · criativo da {store.name}</>}
+        actions={<ButtonLink href={backHref} size="sm" icon="camp">Todos os criativos</ButtonLink>}
+      />
+      <VerdictCard verdict={verdict} aside={aside} />
 
-        <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr', gap: 16, alignItems: 'start' }}>
-          {/* Left: creative preview + summary */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {/* Creative preview */}
-            <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 12, overflow: 'hidden' }}>
-              {(s.thumbnail_url || s.creative_url) ? (
-                <img
-                  src={s.thumbnail_url ?? s.creative_url ?? ''}
-                  alt={s.name}
-                  style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', display: 'block' }}
-                />
-              ) : (
-                <div style={{ width: '100%', aspectRatio: '1', background: 'var(--bg)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <span style={{ fontSize: 32, opacity: 0.3 }}>{isVideo ? '▶' : '🖼'}</span>
-                </div>
-              )}
-              <div style={{ padding: '12px 14px' }}>
-                <p style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 4 }}>{s.name}</p>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  <span style={{ fontSize: 10, color: 'var(--text-ghost)', fontFamily: 'monospace', background: 'var(--bg)', borderRadius: 3, padding: '1px 5px', border: '1px solid var(--border)' }}>{id}</span>
-                  {isVideo && <span style={{ fontSize: 10, color: '#3B82F6', background: 'rgba(59,130,246,0.12)', borderRadius: 3, padding: '1px 5px' }}>▶ Vídeo</span>}
-                  <span style={{ fontSize: 10, color: s.status === 'ACTIVE' ? '#10B981' : 'var(--text-ghost)', background: s.status === 'ACTIVE' ? 'rgba(16,185,129,0.12)' : 'var(--bg)', borderRadius: 3, padding: '1px 5px' }}>{s.status}</span>
-                </div>
-                {s.landing_url && (
-                  <a href={s.landing_url} target="_blank" rel="noopener noreferrer"
-                    style={{ display: 'block', marginTop: 8, fontSize: 10, color: '#3B82F6', textDecoration: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {s.landing_url}
-                  </a>
-                )}
+      {!detail.hasSpend ? (
+        <Card pad="md">
+          <EmptyState
+            title="Sem gasto neste período"
+            action={<ButtonLink href={ctx.hrefWith(`/creatives/${encodeURIComponent(c.adId)}`, { periodo: '30d' })} size="sm">Ver os últimos 30 dias</ButtonLink>}
+          >
+            O anúncio é desta loja, mas não teve gasto entre {formatDate(ctx.range.from, ctx.today)} e {formatDate(ctx.range.to, ctx.today)}.
+          </EmptyState>
+        </Card>
+      ) : (
+        <>
+          <KpiGrid>
+            <KpiCard label="Gasto" swatch="meta" value={<Money value={c.spend} />} note={<>{plural(c.daysWithSpend, 'dia', 'dias')} com gasto · CPM <b>{formatMoney(c.cpm)}</b></>} />
+            <KpiCard label="Vendas atribuídas" value={<Money value={c.purchaseValue} />} note={<><b>{c.purchases}</b> {c.purchases === 1 ? 'compra' : 'compras'} · CPA <b>{formatMoney(c.cpa)}</b></>}
+              info="O que o Meta credita a este anúncio. Compras impossíveis (acima de $20.000 num dia de um anúncio) já foram descartadas." />
+            <KpiCard label="ROAS" value={<span>{formatRoas(c.roas)}</span>} note={<RoasCell roas={c.roas} breakEven={be} paused={!c.running} showValue={false} />}
+              info="Vendas atribuídas ÷ gasto, contra o empate da loja no mesmo período (receita ÷ contribuição)." />
+            <KpiCard label="Cliques" value={<span>{formatPct(c.ctr, { digits: 2 })}</span>} note={<><b>{formatNumber(c.linkClicks)}</b> cliques no link · CPC <b>{formatMoney(c.cpc)}</b></>}
+              info="CTR = cliques no link ÷ impressões." />
+            <KpiCard label="Frequência" tone={c.frequency === null ? 'mut' : undefined}
+              value={c.frequency === null ? <span className={s.kpiNa}>indisponível</span> : <span>{c.frequency.toLocaleString('pt-BR', { maximumFractionDigits: 1 })}</span>}
+              note={single ? 'impressões ÷ alcance do dia' : 'só existe para um dia de cada vez'} info={FREQUENCY_UNAVAILABLE} />
+            <KpiCard label="Hook rate" tone="mut" value={<span className={s.kpiNa}>indisponível</span>}
+              note={c.video ? `vídeo: ${formatNumber(c.video.plays)} inícios de reprodução, não visualizações de 3 s` : 'anúncio de imagem'} info={HOOK_RATE_UNAVAILABLE} />
+          </KpiGrid>
+
+          {c.video && (
+            <Block title="Quanto do vídeo as pessoas assistem" howTo="Parte dos inícios de reprodução que chegou a cada ponto do vídeo. O autoplay conta como início, então é retenção, não gancho.">
+              <div className={s.retention}>
+                {([['25% do vídeo', c.video.retention25], ['metade', c.video.retention50], ['75% do vídeo', c.video.retention75], ['até o fim', c.video.retention100]] as const).map(([label, v]) => (
+                  <div key={label} className={s.retRow}>
+                    <span>{label}</span>
+                    <span className={s.barTrack}><i className={`${s.barFill} ${s.barMeta}`} style={{ width: `${Math.min(100, v ?? 0)}%` }} /></span>
+                    <b>{formatPct(v)}</b>
+                  </div>
+                ))}
               </div>
-            </div>
+            </Block>
+          )}
 
-            {/* KPIs */}
-            <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 12, padding: '14px 16px' }}>
-              <p style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-ghost)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>Período: {dateFrom} → {dateTo}</p>
-              {[
-                { label: 'Gasto', value: `$${Number(s.spend).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, color: '#8B5CF6' },
-                { label: 'Receita FB', value: `$${Number(s.revenue).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, color: '#10B981' },
-                { label: 'ROAS', value: `${Number(s.roas).toFixed(2)}x`, color: Number(s.roas) >= 3 ? '#10B981' : Number(s.roas) >= 1.5 ? '#F59E0B' : '#F43F5E' },
-                { label: 'Compras', value: String(Number(s.purchases)), color: 'var(--text-secondary)' },
-                { label: 'CTR', value: `${Number(s.ctr).toFixed(2)}%`, color: 'var(--text-secondary)' },
-                { label: 'Frequência', value: Number(s.frequency).toFixed(2), color: Number(s.frequency) > 3.5 ? '#F59E0B' : 'var(--text-secondary)' },
-              ].map(m => (
-                <div key={m.label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
-                  <span style={{ fontSize: 12, color: 'var(--text-faint)' }}>{m.label}</span>
-                  <span style={{ fontSize: 13, fontWeight: 600, color: m.color }}>{m.value}</span>
-                </div>
-              ))}
-            </div>
+          {detail.configured && detail.contributionRate !== null && (
+            <Block title="Lucro estimado por dia" howTo="Barra acima da linha do zero = dia em que as vendas atribuídas, depois da margem da loja, pagaram o gasto do anúncio." info={detail.formula}>
+              <DailyProfitBars
+                days={detail.daily.map(d => ({ date: d.date, profit: ctx.part(d.estimatedProfit ?? 0), revenue: d.purchaseValue, metaSpend: d.spend, orders: d.purchases }))}
+                partialDate={ctx.partial ? ctx.today : null}
+                partialNote={ctx.partialLabel ?? undefined}
+                today={ctx.today}
+                height={200}
+                ariaLabel={`Lucro estimado por dia do anúncio ${c.name}`}
+              />
+            </Block>
+          )}
 
-            {/* Video funnel */}
-            {videoSteps.length > 0 && (
-              <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 12, padding: '14px 16px' }}>
-                <p style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-ghost)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 12 }}>Funil de Vídeo</p>
-                <p style={{ fontSize: 11, color: 'var(--text-faint)', marginBottom: 10 }}>
-                  {Number(s.video_plays ?? 0).toLocaleString()} plays
-                </p>
-                {videoSteps.map((step, i) => {
-                  const v = Number(step.value)
-                  const color = v >= 30 ? '#10B981' : v >= 15 ? '#F59E0B' : '#F43F5E'
-                  return (
-                    <div key={step.label} style={{ marginBottom: 8 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                        <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{step.label} <span style={{ color: 'var(--text-ghost)', fontSize: 10 }}>({step.desc})</span></span>
-                        <span style={{ fontSize: 12, fontWeight: 600, color }}>{v.toFixed(1)}%</span>
-                      </div>
-                      <div style={{ height: 4, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>
-                        <div style={{ width: `${Math.min(v, 100)}%`, height: '100%', background: color, borderRadius: 2 }} />
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* Right: daily charts */}
-          <CreativeDetailCharts daily={daily} />
-        </div>
-      </main>
-    </div>
+          <Block title="Dia a dia" howTo="Cada dia no fuso da loja. Dias sem gasto aparecem apagados." flush>
+            <DataTable caption={`Dia a dia do anúncio ${c.name}`} columns={columns} rows={rows} initialSort={{ key: 'date', dir: 'desc' }} dense />
+          </Block>
+        </>
+      )}
+    </AppShell>
   )
 }

@@ -1,0 +1,36 @@
+/* Países e clientes. Tokens only (app/globals.css). */
+
+.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s4); }
+.country { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.cc {
+  font: 600 10.5px/1 var(--mono); color: var(--tx-2); background: var(--hover); border: 1px solid var(--line-2);
+  border-radius: 4px; padding: 3px 5px; min-width: 26px; text-align: center; flex: none;
+}
+.cName { color: var(--tx); }
+.cSub { display: block; font-size: 11.5px; color: var(--tx-3); }
+.small { font-size: 12px; color: var(--tx-3); line-height: 1.45; }
+.asideHead { margin-bottom: 12px; }
+.asideTitle { font-weight: 600; font-size: 15px; }
+.asideSub { font-size: 12.5px; color: var(--tx-3); margin-top: 2px; line-height: 1.4; }
+.asideFoot { margin-top: 12px; }
+
+/* Funnel */
+.steps { display: flex; flex-direction: column; gap: 2px; }
+.step { display: grid; grid-template-columns: 170px minmax(0, 1fr) 110px 120px; gap: 12px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.step:first-child { border-top: 0; }
+.stepName { color: var(--tx); }
+.stepTrack { height: 10px; border-radius: 3px; background: var(--hover); overflow: hidden; }
+.stepTrack i { display: block; height: 100%; background: var(--c-meta); border-radius: 3px; min-width: 2px; }
+.stepVal { font: 500 13px var(--mono); text-align: right; color: var(--tx); white-space: nowrap; }
+.stepRate { font-size: 12px; color: var(--tx-3); text-align: right; white-space: nowrap; }
+.shopRow { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s6); margin-top: var(--s4); padding-top: var(--s3); border-top: 1px solid var(--line-2); font-size: 12.5px; color: var(--tx-2); }
+.shopRow b { font: 500 13px var(--mono); color: var(--tx); }
+.omitted { font-size: 12px; color: var(--tx-3); margin-top: var(--s3); }
+
+@media (max-width: 1100px) {
+  .grid2 { grid-template-columns: minmax(0, 1fr); }
+  .step { grid-template-columns: 140px minmax(0, 1fr) 90px; }
+  .step .stepRate { grid-column: 1 / -1; text-align: left; }
+}
+.gapTop { margin-top: 12px; }
+.kpiPad { padding: 0 20px 14px; }
