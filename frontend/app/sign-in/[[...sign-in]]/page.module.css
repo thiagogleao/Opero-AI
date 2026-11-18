@@ -1,0 +1,57 @@
+/* Partner sign-in. Tokens only (app/globals.css). */
+
+.page {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: var(--s8) var(--s5);
+  /* A faint steel-blue light from the top, so the page is not a flat void. */
+  background: radial-gradient(70% 45% at 50% 0%, var(--neu-bg), transparent 70%), var(--bg);
+}
+
+.column {
+  width: 100%;
+  max-width: 400px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--s6);
+}
+
+.intro { display: flex; flex-direction: column; gap: var(--s3); padding: 0 var(--s1); }
+
+.brand { display: flex; align-items: center; gap: 10px; color: var(--tx); }
+.mark { width: 30px; height: 30px; display: grid; place-items: center; flex: none; }
+.name { font: 600 19px/1 var(--sans); letter-spacing: -.01em; }
+.tag {
+  font: 500 10px/1 var(--mono);
+  color: var(--tx-3);
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+  padding: 2px 4px;
+}
+
+.lead {
+  margin-top: var(--s2);
+  font-family: var(--serif);
+  font-optical-sizing: auto;
+  font-weight: 500;
+  font-size: 26px;
+  line-height: 1.2;
+  letter-spacing: -.01em;
+  color: var(--tx);
+}
+
+.sub { font-size: 13.5px; line-height: 1.5; color: var(--tx-2); }
+
+.foot {
+  font: 400 11.5px/1.4 var(--sans);
+  color: var(--tx-4);
+  text-align: center;
+}
+
+@media (max-width: 480px) {
+  .page { padding: var(--s7) var(--s4); place-items: start center; }
+  .lead { font-size: 22px; }
+}

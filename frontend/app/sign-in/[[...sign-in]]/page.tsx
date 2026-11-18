@@ -1,38 +1,61 @@
+import type { Metadata } from 'next'
 import { SignIn } from '@clerk/nextjs'
+import s from './page.module.css'
+
+export const metadata: Metadata = { title: 'Entrar' }
 
 /**
- * Sign-in for partners. Opero is a private tool: accounts are created by the
- * owner (the public /sign-up page is gone), so the widget offers no sign-up —
- * withSignUp={false} turns off Clerk's combined sign-in-or-up flow and the
- * footer link to it is hidden. Turning sign-ups off in the Clerk dashboard is
- * what actually closes them.
+ * Sign-in for partners, on the dark design (tokens from app/globals.css; the
+ * Clerk card's colours and words come from ../clerk.ts through the root
+ * layout's ClerkProvider).
+ *
+ * Opero is a private tool: accounts are created by the owner and the public
+ * /sign-up page is gone. withSignUp={false} turns off Clerk's combined
+ * sign-in-or-up flow and the footer link to it is hidden; turning sign-ups off
+ * in the Clerk dashboard is what actually closes them. The line under the
+ * headline tells a partner why there is no "create account" link.
  */
 export default function SignInPage() {
   return (
-    <div style={{
-      minHeight: '100vh', background: 'var(--bg)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      flexDirection: 'column', gap: 32,
-    }}>
-      <div style={{ textAlign: 'center' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 14, marginBottom: 8 }}>
-          <svg width="40" height="40" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M12 33 C14 26 28 14 37 16 L37 34 L12 34 Z" fill="rgba(16,185,129,0.09)"/>
-            <circle cx="24" cy="24" r="19" stroke="#10b981" strokeWidth="2.5" fill="none"/>
-            <path d="M12 33 C14 26 28 14 37 16" stroke="#10b981" strokeWidth="2.2" strokeLinecap="round" fill="none"/>
-            <circle cx="37" cy="16" r="2.6" fill="#10b981"/>
-          </svg>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-            <span style={{ fontSize: 28, fontWeight: 700, letterSpacing: '-0.04em', color: 'var(--text-primary)' }}>opero</span>
-            <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.07em', color: '#10b981', background: 'rgba(16,185,129,0.13)', padding: '3px 7px', borderRadius: 4 }}>AI</span>
+    <main className={s.page}>
+      <div className={s.column}>
+        <header className={s.intro}>
+          <div className={s.brand}>
+            <span className={s.mark}><Logo /></span>
+            <span className={s.name}>opero</span>
+            <span className={s.tag}>AI</span>
           </div>
-        </div>
-        <p style={{ fontSize: 13, color: 'var(--text-faint)' }}>Lucro e anúncios das suas lojas — acesso para sócios</p>
+          <h1 className={s.lead}>O lucro real das suas lojas, depois de todos os custos.</h1>
+          <p className={s.sub}>
+            Acesso só para sócios. As contas são criadas pelo dono do Opero: não há cadastro aberto.
+          </p>
+        </header>
+
+        <SignIn
+          withSignUp={false}
+          appearance={{
+            elements: {
+              rootBox: { width: '100%' },
+              cardBox: { width: '100%', maxWidth: '100%' },
+              footerAction: { display: 'none' },
+            },
+          }}
+        />
+
+        <p className={s.foot}>Pedidos da Shopify e gasto do Meta · valores em US$</p>
       </div>
-      <SignIn
-        withSignUp={false}
-        appearance={{ elements: { footerAction: { display: 'none' } } }}
-      />
-    </div>
+    </main>
+  )
+}
+
+/** The mark from the app shell's sidebar (components/shell/AppShell `Logo`).
+ *  Drawn here rather than imported: AppShell's module also loads the
+ *  server-only freshness block, which reads the database. */
+function Logo() {
+  return (
+    <svg width="26" height="26" viewBox="0 0 20 20" aria-hidden="true">
+      <rect x="1" y="1" width="18" height="18" rx="5" fill="none" stroke="var(--tx)" strokeWidth="1.6" />
+      <path d="M5 13.5l3.2-3.6 2.6 2.2L15 6.5" fill="none" stroke="var(--pos)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   )
 }
