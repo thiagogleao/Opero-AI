@@ -11,6 +11,9 @@
  *   freshnessCell(f, now)   the "atualizado há 4 min" cell, with the same
  *                           thresholds as the top bar (lib/sync/plan)
  *   trailRange(range)       the days behind each row's sparkline
+ *   trailSinceStart(d, 1st) those days from the store's start (no empty bars
+ *                           from before it existed)
+ *   trailProfitCount        its "dias no lucro N de M", the running day out
  *   idleReasons(idle, rng)  why an idle store is out of the total (its day
  *                           has not begun, it had not sold yet, or quiet)
  *   storeDayOf(at, tz)      a database instant on the store's own calendar
@@ -40,31 +43,11 @@ export function rowResult(row: { configured: boolean; totals: PnL }): RowResult 
   return { kind: 'profit', value: t.operatingProfit }
 }
 
-export interface CashHit {
-  /** "2 chargebacks", "1 reembolso e 2 chargebacks"; null when no count came
-   *  with the money (then the cell says "reembolsos e chargebacks"). */
-  what: string | null
-  /** Negative: what left the cash (refunded margin + chargebacks + fees).
-   *  NOT halved: halve at render with ctx.part. */
-  amount: number
-}
-
-/**
- * Money that left a row with no sale: refunds and chargebacks of older orders
- * arrive whether or not the store sold in the window (CAMP HALLOW, 11–17 nov:
- * 0 orders, 0 spend, 2 chargebacks, −$342,63). The row read only "— sem
- * vendas" while the page's ledger and total counted the hit; the Resumo's
- * verdict says "Mas chegaram 2 chargebacks: −$343 no caixa" (lib/views/verdict,
- * same noSales rule), and the row now says the same thing.
- */
-export function noSalesCashHit(t: Pick<PnL, 'orders' | 'revenue' | 'adjustments' | 'refundCount' | 'chargebackCount'>): CashHit | null {
-  if (t.orders > 0 || t.revenue > 0 || !(t.adjustments >= 0.005)) return null
-  const what = [
-    t.refundCount > 0 ? plural(t.refundCount, 'reembolso', 'reembolsos') : null,
-    t.chargebackCount > 0 ? plural(t.chargebackCount, 'chargeback', 'chargebacks') : null,
-  ].filter((x): x is string => x !== null)
-  return { what: what.length ? what.join(' e ') : null, amount: -t.adjustments }
-}
+/** "2 chargebacks: −$343 no caixa" under a row with no sale. One rule for the
+ *  phone's store list, this table and the Resumo's verdict line; it lives in
+ *  lib/views/verdict because the phone cannot import this module (it pulls
+ *  lib/views/store, which loads the database, into the client bundle). */
+export { noSalesCashHit, type CashHit } from '@/lib/views/verdict'
 
 /**
  * Which stores the verdict's amount is made of, so the ledger subtitle and
@@ -343,4 +326,71 @@ export const TRAIL_MAX_DAYS = 92
 export function trailRange(range: DateRange): DateRange {
   const n = Math.min(TRAIL_MAX_DAYS, Math.max(TRAIL_MIN_DAYS, daysBetween(range.from, range.to)))
   return { from: shiftDate(range.to, -(n - 1)), to: range.to }
+}
+
+/** One day of a row's sparkline (./data TrailPoint). */
+export interface TrailDay { date: string; profit: number; revenue: number; adSpend: number; orders: number }
+
+/** No order, no sale and no ad spend: the Resumo chart's idle day (lib/views/store chartSeries). */
+const trailIdle = (d: TrailDay) => d.orders === 0 && d.revenue === 0 && d.adSpend === 0
+
+/**
+ * A row's sparkline days from the store's start, by the Resumo chart's rule
+ * (lib/views/store chartSeries + windowDaysSinceStart): the store starts on
+ * its first kept order or its first day with any activity, whichever is
+ * earlier, and the days before it are dropped — empty days from before the
+ * store existed read as days it sold nothing. Hibikura (first order and first
+ * ad on 7 nov) drew 19 empty bars from 19 out and its tooltip said "dias no
+ * lucro 8 de 30" while its Resumo said "9 de 12 dias". An idle day after the
+ * start stays: the store existed and sold nothing.
+ * `startedOn` is set only when days were dropped, so the tooltip can say so.
+ */
+export function trailSinceStart<T extends TrailDay>(days: readonly T[], firstOrderDate: string | null): { days: T[]; startedOn: string | null } {
+  const firstActive = days.find(d => !trailIdle(d))?.date ?? null
+  const start = [firstOrderDate, firstActive].filter((x): x is string => !!x).sort()[0] ?? null
+  if (!start) return { days: [...days], startedOn: null }
+  const kept = days.filter(d => d.date >= start)
+  return { days: kept, startedOn: kept.length < days.length ? start : null }
+}
+
+/** Why a row's sparkline draws no bars (null: it draws them). */
+export type TrailGap =
+  | { kind: 'no_data' }
+  /** Every day is before the store's first sale: it did not exist yet. */
+  | { kind: 'not_yet' }
+  | { kind: 'unconfigured' }
+  /** The store existed and nothing moved, for `days` days since its start. */
+  | { kind: 'idle'; days: number }
+
+/**
+ * The empty sparkline, said for what it is. A window that ENDS before the
+ * store's first sale read "sem movimento em 31 dias" (Hibikura, Mês passado:
+ * first sale on 7 nov) next to "ainda não vendia · 1ª venda em 7 nov" in the
+ * same row: trailSinceStart drops the days before the start, and here every
+ * day was before it. Checked before the missing costs, which are not the
+ * reason a store that did not exist has no series. A day with ad spend before
+ * the first sale is activity (Glooty: ads from 4 nov, first order 6 nov), so
+ * that window draws its bars. "Sem movimento" counts the days since the start.
+ */
+export function trailGap(
+  days: readonly TrailDay[] | undefined,
+  row: { configured: boolean; firstOrderDate: string | null },
+): TrailGap | null {
+  if (!days?.length) return { kind: 'no_data' }
+  const allIdle = days.every(trailIdle)
+  if (allIdle && row.firstOrderDate && row.firstOrderDate > days[days.length - 1].date) return { kind: 'not_yet' }
+  if (!row.configured) return { kind: 'unconfigured' }
+  if (allIdle) return { kind: 'idle', days: trailSinceStart(days, row.firstOrderDate).days.length }
+  return null
+}
+
+/**
+ * The "dias no lucro N de M" of a sparkline: the store's running day left
+ * out, as the Resumo chart's line leaves it out — a few hours of ad spend
+ * spread over a morning are not a day out of profit. `runningDay` is the
+ * row's own today when its window reaches it (row.partial), else null.
+ */
+export function trailProfitCount(days: readonly { date: string; profit: number }[], runningDay: string | null): { inProfit: number; of: number; leftOut: boolean } {
+  const closed = runningDay ? days.filter(d => d.date !== runningDay) : days
+  return { inProfit: closed.filter(d => d.profit > 0).length, of: closed.length, leftOut: closed.length < days.length }
 }

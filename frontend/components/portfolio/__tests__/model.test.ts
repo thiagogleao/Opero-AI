@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { sumPnL, type PnL, type PnLLines } from '@/lib/engine/pnl'
 import type { SharedAdAccount } from '@/lib/attributionModels'
-import { adChannels, freshnessCell, idleReasons, laneState, lastSaleDate, noSalesCashHit, notSellingYet, pairOrdersIn, pairsMixedIn, quietNote, resultSortValue, sumMembers, resumoLinkOverrides, rowResult, sharedAccountBadges, storeDayOf, trailRange, type QuietInput } from '../model'
+import { adChannels, freshnessCell, idleReasons, laneState, lastSaleDate, noSalesCashHit, notSellingYet, pairOrdersIn, pairsMixedIn, quietNote, resultSortValue, sumMembers, resumoLinkOverrides, rowResult, sharedAccountBadges, storeDayOf, trailGap, trailProfitCount, trailRange, trailSinceStart, type QuietInput, type TrailDay } from '../model'
 
 const pnl = (over: Partial<PnLLines> = {}): PnL => sumPnL([{ ...sumPnL([]), ...over }])
 const NOW = new Date('2026-11-18T01:30:00Z')
@@ -145,6 +145,97 @@ describe('trailRange', () => {
     expect(trailRange({ from: '2026-09-01', to: '2026-10-31' })).toEqual({ from: '2026-09-01', to: '2026-10-31' })
     // 1 Aug – 31 Oct is exactly 92 days: a longer window is cut there.
     expect(trailRange({ from: '2026-01-01', to: '2026-10-31' })).toEqual({ from: '2026-08-01', to: '2026-10-31' })
+  })
+})
+
+describe('trailSinceStart', () => {
+  const blank = (date: string): TrailDay => ({ date, profit: 0, revenue: 0, adSpend: 0, orders: 0 })
+  const dates = (from: string, n: number) => Array.from({ length: n }, (_, i) => {
+    const d = new Date(`${from}T12:00:00Z`)
+    d.setUTCDate(d.getUTCDate() + i)
+    return d.toISOString().slice(0, 10)
+  })
+  // Hibikura, 19 out – 17 nov (engine daily rows): nothing until 7 nov, when
+  // its first order and first ad came.
+  const HIBIKURA_PROFIT = [68.15, 17.22, -213.15, 87.01, -96.2, -10.09, 96.69, 187.16, 114.5, 44.29, 588.68]
+  const hibikura = (): TrailDay[] => dates('2026-10-19', 30).map((date, i) => i < 19 ? blank(date)
+    : { date, profit: HIBIKURA_PROFIT[i - 19], revenue: 100, adSpend: i === 19 ? 0 : 50, orders: 2 })
+
+  it('starts the sparkline at the store\'s first day, as the Resumo chart does (Hibikura: 8 de 11, not 8 de 30)', () => {
+    const r = trailSinceStart(hibikura(), '2026-11-07')
+    expect(r.startedOn).toBe('2026-11-07')
+    expect(r.days).toHaveLength(11)
+    expect(r.days[0].date).toBe('2026-11-07')
+    expect(r.days.filter(d => d.profit > 0)).toHaveLength(8)
+    expect(r.days.reduce((a, d) => a + d.profit, 0)).toBeCloseTo(884.26, 2)
+  })
+
+  it('starts on the first ad when the ads came before the first sale', () => {
+    const days = dates('2026-10-24', 30).map(blank)
+    days[11] = { ...days[11], adSpend: 74.48, profit: -74.48 } // 4 nov
+    days[13] = { ...days[13], revenue: 403.71, orders: 4, adSpend: 267.99, profit: 135.72 } // 6 nov
+    const r = trailSinceStart(days, '2026-11-06')
+    expect(r.startedOn).toBe('2026-11-04')
+    expect(r.days[0].date).toBe('2026-11-04')
+    expect(r.days).toHaveLength(19)
+  })
+
+  it('keeps idle days after the start and every day of an older store', () => {
+    const days = hibikura()
+    days[25] = blank(days[25].date) // a quiet day after the start still counts
+    expect(trailSinceStart(days, '2026-11-07').days).toHaveLength(11)
+    // MOKOO sold before the trail: nothing is dropped, nothing to say.
+    expect(trailSinceStart(hibikura(), '2026-04-11')).toEqual({ days: hibikura(), startedOn: null })
+  })
+
+  it('counts "dias no lucro" on closed days only, as the Resumo line does', () => {
+    const r = trailSinceStart(hibikura(), '2026-11-07')
+    // 17 nov still running (MOKOO, Este mês at 09h): its morning is not a day.
+    expect(trailProfitCount(r.days, '2026-11-17')).toEqual({ inProfit: 7, of: 10, leftOut: true })
+    expect(trailProfitCount(r.days, null)).toEqual({ inProfit: 8, of: 11, leftOut: false })
+    // A running day outside the bars (Hibikura's Tokyo day already on 18 nov).
+    expect(trailProfitCount(r.days, '2026-11-18')).toEqual({ inProfit: 8, of: 11, leftOut: false })
+  })
+
+  it('falls back on the first active day when the first sale is unknown', () => {
+    const r = trailSinceStart(hibikura(), null)
+    expect(r.startedOn).toBe('2026-11-07')
+    expect(r.days).toHaveLength(11)
+    expect(trailSinceStart([blank('2026-11-01')], null)).toEqual({ days: [blank('2026-11-01')], startedOn: null })
+  })
+})
+
+describe('trailGap', () => {
+  const blank = (date: string): TrailDay => ({ date, profit: 0, revenue: 0, adSpend: 0, orders: 0 })
+  const october = () => Array.from({ length: 31 }, (_, i) => blank(`2026-10-${String(i + 1).padStart(2, '0')}`))
+
+  it('says "ainda não vendia" for a window that ends before the first sale (Hibikura, Mês passado)', () => {
+    // It read "sem movimento em 31 dias" next to "ainda não vendia · 1ª venda em 7 nov".
+    expect(trailGap(october(), { configured: true, firstOrderDate: '2026-11-07' })).toEqual({ kind: 'not_yet' })
+    // Before the missing costs: a store that did not exist yet has no series for that reason (Glooty, 1ª venda 6 nov).
+    expect(trailGap(october(), { configured: false, firstOrderDate: '2026-11-06' })).toEqual({ kind: 'not_yet' })
+  })
+
+  it('draws the bars when ads ran before the first sale', () => {
+    const days = october()
+    days[30] = { ...days[30], adSpend: 74.48, profit: -74.48 }
+    expect(trailGap(days, { configured: true, firstOrderDate: '2026-11-06' })).toBeNull()
+    expect(trailGap(days, { configured: false, firstOrderDate: '2026-11-06' })).toEqual({ kind: 'unconfigured' })
+  })
+
+  it('keeps "sem movimento" for a store that existed, counting the days since it started', () => {
+    expect(trailGap(october(), { configured: true, firstOrderDate: '2026-04-11' })).toEqual({ kind: 'idle', days: 31 })
+    expect(trailGap(october(), { configured: true, firstOrderDate: null })).toEqual({ kind: 'idle', days: 31 })
+    // First kept sale on 20 out, nothing kept since (refunded): 12 days, not 31.
+    expect(trailGap(october(), { configured: true, firstOrderDate: '2026-10-20' })).toEqual({ kind: 'idle', days: 12 })
+  })
+
+  it('has nothing to say when there are no days or the bars have something to draw', () => {
+    expect(trailGap(undefined, { configured: true, firstOrderDate: null })).toEqual({ kind: 'no_data' })
+    expect(trailGap([], { configured: true, firstOrderDate: null })).toEqual({ kind: 'no_data' })
+    const days = october()
+    days[3] = { ...days[3], revenue: 80, orders: 1, profit: 12 }
+    expect(trailGap(days, { configured: true, firstOrderDate: '2026-04-11' })).toBeNull()
   })
 })
 

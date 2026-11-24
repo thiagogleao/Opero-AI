@@ -141,6 +141,13 @@ export interface PortfolioComparison extends DateRange {
   label: string
   /** True when at least one store's comparison was cut at its own current time. */
   sameTimeOfDay: boolean
+  /** The minute of `to` where the comparison was cut (sameTimeOfDay), when
+   *  every cut store was cut at the same minute; null when nothing was cut or
+   *  the stores' clocks differ (Tokyo and Brasília on the same date). The
+   *  labels need it: a window of several days ending today is compared with
+   *  the earlier days whole plus the last one cut at this minute, and "em
+   *  31 out – 9 nov" alone named a profit that range never had. */
+  cutoffMinutes: number | null
   /** Sum of the included stores' comparison totals. */
   totals: PnL
 }
@@ -605,6 +612,7 @@ export function assemblePortfolio(i: PortfolioInputs): PortfolioView {
   const totals = sumPnL(rows.map(r => r.totals))
   const included = rows.filter(r => r.comparison.included)
   const comparisonTotals = sumPnL(included.map(r => r.comparison.totals))
+  const cutMinutes = included.map(r => r.comparison.cutoffMinutes).filter((m): m is number => m !== null)
 
   // Daily: the same per-store days, summed by date. Every date is present, so
   // a day with spend and no sales still pulls the line down.
@@ -680,7 +688,8 @@ export function assemblePortfolio(i: PortfolioInputs): PortfolioView {
     unconfiguredStoreIds: rows.filter(r => !r.configured).map(r => r.id),
     comparison: {
       from: i.comparison.from, to: i.comparison.to, label: i.comparison.label,
-      sameTimeOfDay: included.some(r => r.comparison.cutoffMinutes !== null),
+      sameTimeOfDay: cutMinutes.length > 0,
+      cutoffMinutes: cutMinutes.length > 0 && cutMinutes.every(m => m === cutMinutes[0]) ? cutMinutes[0] : null,
       totals: comparisonTotals,
     },
     daily,

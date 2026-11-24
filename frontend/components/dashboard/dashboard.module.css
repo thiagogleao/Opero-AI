@@ -12,6 +12,11 @@
 .kpiNote b { font-family: var(--mono); font-weight: 500; color: var(--tx); }
 .kpiWords { font-size: 12px; color: var(--tx-2); line-height: 1.45; }
 .cfg { display: inline-flex; align-items: center; gap: 5px; color: var(--warn); font-size: 12px; }
+/* A KPI's delta pill wraps inside its card instead of running past it: the
+   shared pill is nowrap, and "▲ 20,0 p.p. vs 1–24 out até 00h33 (−12,6%)" is
+   wider than a 4-column card at 1440 (the page scrolled sideways). Two
+   classes, so it wins over the pill's own rule whatever the CSS order. */
+.kpis .kpiDelta { white-space: normal; flex-wrap: wrap; row-gap: 2px; max-width: 100%; }
 
 /* RoasVsEmpate: the ROAS words when there is no break-even line to draw */
 .roasGap { font-size: 12.5px; color: var(--tx-2); display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 6px; line-height: 1.4; }

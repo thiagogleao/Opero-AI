@@ -34,14 +34,19 @@ export function NetSalesBars({ days, share = 1, selected, selectedLabel, partial
   const shown = (d: NetDay) => d.value * share
   const shareLabel = `sua parte (${formatPct(share * 100, { digits: 0 })})`
   const W = 1000, H = 240
-  const m = { l: 56, r: 8, t: selected ? 30 : 14, b: 36 }
-  const iw = W - m.l - m.r, ih = H - m.t - m.b
-  const band = iw / Math.max(1, days.length)
-  const bw = Math.min(18, band * 0.62)
   const values = days.map(shown)
   const lo = Math.min(0, ...values), hi = Math.max(0, ...values)
   const pad = (hi - lo) * 0.1
   const ticks = niceTicks(lo < 0 ? lo - pad : 0, hi > 0 ? hi + pad : 0, 5)
+  // One format for the whole axis, as in DailyProfitBars: cents on every tick
+  // when the step is under a dollar ("−$2,00 | −$1,50", never "−$2 | −$1,50").
+  const tickText = (t: number) => formatMoneyAxis(t, ticks)
+  // The left margin fits the widest tick label (a fixed 56 left "−$10.000"
+  // hanging past the chart's left edge).
+  const m = { l: Math.max(56, Math.ceil(Math.max(...ticks.map(t => textWidth(tickText(t), 11))) + 14)), r: 8, t: selected ? 30 : 14, b: 36 }
+  const iw = W - m.l - m.r, ih = H - m.t - m.b
+  const band = iw / Math.max(1, days.length)
+  const bw = Math.min(18, band * 0.62)
   const y = linear([ticks[0], ticks[ticks.length - 1]], [m.t + ih, m.t])
   const y0 = y(0)
   const x = (i: number) => m.l + i * band
@@ -82,7 +87,7 @@ export function NetSalesBars({ days, share = 1, selected, selectedLabel, partial
         {ticks.map(t => (
           <g key={t}>
             <line x1={m.l} x2={W - m.r} y1={y(t)} y2={y(t)} className={t === 0 ? s.netZero : s.netGrid} />
-            <text x={m.l - 10} y={y(t) + 4} textAnchor="end">{t === 0 ? '$0' : formatMoneyAxis(t)}</text>
+            <text x={m.l - 10} y={y(t) + 4} textAnchor="end">{tickText(t)}</text>
           </g>
         ))}
         {days.map((d, i) => {

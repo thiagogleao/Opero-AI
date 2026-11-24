@@ -107,7 +107,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: Pro
         <VerdictCard
           verdict={v}
           // Only pairs that mixed THIS window mark a store's profit as inflated or deflated.
-          footer={<ProfitShare view={view} verdict={v} part={ctx.part} shared={mixed} />}
+          footer={<ProfitShare view={view} verdict={v} part={ctx.part} split={ctx.split} shared={mixed} />}
           aside={
             <BreakdownLedger pnl={v.totals} configured={v.basis !== 'revenue_minus_ads'} split={ctx.split}
               bar={sold} title="Para onde foi cada dólar" sub={ledgerSub} />

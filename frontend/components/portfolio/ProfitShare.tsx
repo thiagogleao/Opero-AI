@@ -13,8 +13,13 @@ import { formatMoney, formatPct } from '@/lib/format'
 import { HorizontalBars } from '@/components/charts'
 import type { SharedAdAccount } from '@/lib/attributionModels'
 
-export function ProfitShare({ view, verdict, part, shared = [] }: {
-  view: PortfolioView; verdict: Verdict; part: (v: number) => number; shared?: SharedAdAccount[]
+export function ProfitShare({ view, verdict, part, split = false, shared = [] }: {
+  view: PortfolioView; verdict: Verdict; part: (v: number) => number
+  /** Partner view: the bars are the viewer's share (`part`), and say so — a
+   *  bare "De onde vem o lucro" over halved amounts read as each store's
+   *  whole profit. Shares (%) are the same either way. */
+  split?: boolean
+  shared?: SharedAdAccount[]
 }) {
   if (verdict.basis !== 'profit') return null
   const excluded = new Set(verdict.excluded.map(e => e.id))
@@ -27,11 +32,13 @@ export function ProfitShare({ view, verdict, part, shared = [] }: {
   // four others read 41 + 22 + 21 + 17 = 101% of the total, and on a day
   // where one store carries the rest "181,9%". Then each bar shows its amount.
   const shares = total > 0 && rows.every(r => r.totals.operatingProfit >= 0)
+  // "sua parte (50%)", as the Resumo charts name it.
+  const shareWords = split ? `sua parte (${formatPct(part(1) * 100, { digits: 0 })})` : null
   return (
     <div>
-      <div className="lbl" style={{ marginBottom: 8 }}>De onde vem o lucro</div>
+      <div className="lbl" style={{ marginBottom: 8 }}>De onde vem o lucro{shareWords ? ` · ${shareWords}` : ''}</div>
       <HorizontalBars
-        ariaLabel="Lucro real de cada loja no período"
+        ariaLabel={shareWords ? `A ${shareWords} do lucro real de cada loja no período` : 'Lucro real de cada loja no período'}
         items={rows.map(r => {
           const p = r.totals.operatingProfit
           // A store selling on another's ads looks richer than it is, and the

@@ -221,6 +221,23 @@ describe('assemblePortfolio', () => {
     expect(view.comparison.sameTimeOfDay).toBe(true)
     expect(view.comparison.label).toBe('ontem até esta hora')
   })
+  it('says where the comparison was cut: one minute when every cut store shares it, null when the clocks differ', () => {
+    // MOKOO cut at 15h45; Hibikura's closed day compared whole (null): one clock.
+    expect(view.comparison.cutoffMinutes).toBe(945)
+    const twoClocks = new Map(compared)
+    twoClocks.set('hibikura', { ...compared.get('hibikura')!, cutoffMinutes: 3 * 60 + 45 })
+    const v = assemblePortfolio({
+      stores, period: 'today', range, comparison: cmp, anchorTimezone: 'America/Sao_Paulo', now: NOW,
+      current, compared: twoClocks, chargebackHealth: null, liveFeed: [], liveCovered: new Set(), syncRows: null,
+    })
+    expect(v.comparison).toMatchObject({ sameTimeOfDay: true, cutoffMinutes: null })
+    const whole = new Map([...compared].map(([id, c]) => [id, { ...c, cutoffMinutes: null }]))
+    const w = assemblePortfolio({
+      stores, period: 'today', range, comparison: cmp, anchorTimezone: 'America/Sao_Paulo', now: NOW,
+      current, compared: whole, chargebackHealth: null, liveFeed: [], liveCovered: new Set(), syncRows: null,
+    })
+    expect(w.comparison).toMatchObject({ sameTimeOfDay: false, cutoffMinutes: null })
+  })
   it('lists where refunds landed and which stores lack a live feed', () => {
     expect(view.adjustmentsByStore.map(a => a.storeId)).toEqual(['hibikura'])
     expect(view.freshness.storesWithoutLiveFeed.map(s => s.storeId)).toEqual(['glooty', 'hibikura'])

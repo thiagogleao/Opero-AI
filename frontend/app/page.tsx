@@ -33,6 +33,7 @@ import { RefundsBlock } from '@/components/dashboard/RefundsBlock'
 import { SharedAccountNote } from '@/components/dashboard/SharedAccountNote'
 import { QuietStoreNote } from '@/components/dashboard/QuietStoreNote'
 import { beforeStartText, isBeforeStart } from '@/components/campaigns/storeStart'
+import { formatDate } from '@/lib/format'
 import s from '@/components/dashboard/dashboard.module.css'
 
 // Absolute: the root layout's "%s · Opero" template only reaches child
@@ -45,7 +46,7 @@ export const generateMetadata = pageMetadata({ absolute: 'Resumo · Opero' }, { 
 /** The code pill, unless the store's name already carries it ("Dumpling
  *  Squishy · 8jcp3a" read "… 8jcp3a 8jcp3a"). */
 function headerCode(ctx: PageContext, store: StoreRef): string | null | undefined {
-  const code = ctx.storeOptions.find(o => o.id === store.id)?.code
+  const code = ctx.storeOption?.code
   return code && store.name.endsWith(code) ? null : undefined
 }
 
@@ -203,7 +204,10 @@ export default async function ResumoPage({ searchParams }: { searchParams: Promi
             {/* Keyed: a soft navigation to another store or window keeps this
                 class component mounted, and a failure would stick to the next one. */}
             <BlockBoundary key={`${store.id}:${ctx.range.from}:${ctx.range.to}:${ctx.split}`} title="Leitura da IA">
-              <InsightsCard storeId={store.id} from={ctx.range.from} to={ctx.range.to} split={ctx.split} />
+              {/* Before the first sale the AI has nothing to read: the card says
+                  so, as the verdict and the ledger do, with no paid "Gerar leitura". */}
+              <InsightsCard storeId={store.id} from={ctx.range.from} to={ctx.range.to} split={ctx.split}
+                notStarted={beforeStart && firstOrder ? { storeName: store.name, firstSale: formatDate(firstOrder, ctx.today) } : null} />
             </BlockBoundary>
           </Suspense>
         </div>

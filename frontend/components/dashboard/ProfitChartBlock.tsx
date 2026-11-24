@@ -6,9 +6,10 @@
  *
  * A store without cost settings gets NetSalesBars (revenue − ads, never called
  * profit) and no intraday curve. In the partner split (?parte=50) both charts
- * draw the viewer's share, like the verdict above them (both get the whole
- * day's numbers plus `share`, so their tooltips can show the whole day and a
- * margin that is never halved); a series with no sale,
+ * draw the viewer's share, like the verdict above them (the bars and the
+ * intraday curve all get the whole day's numbers plus `share`, so their
+ * tooltips show the whole day beside "sua parte" and a margin that is never
+ * halved); a series with no sale,
  * no spend and no cost on any day is said in words instead of drawn.
  */
 
@@ -174,9 +175,10 @@ export async function ProfitChartBlock({ ctx, summary }: { ctx: PageContext; sum
             <IntradayLegend reference={trail.reference ? refLabel : undefined} now={ctx.partial} />
           </div>
           <IntradayCurve
-            points={(summary.pnl.hourly ?? []).map(h => ({ ...h, cumProfit: ctx.part(h.cumProfit) }))}
+            points={summary.pnl.hourly ?? []}
+            share={ctx.splitFactor}
             nowMinutes={ctx.partial ? summary.pnl.minutesCovered : null}
-            reference={trail.reference ? { points: trail.reference.map(h => ({ hour: h.hour, cumProfit: ctx.part(h.cumProfit) })), label: refLabel } : null}
+            reference={trail.reference ? { points: trail.reference, label: refLabel } : null}
             tzNote={city ? ` · ${city}` : undefined}
             width={1000}
             height={230}

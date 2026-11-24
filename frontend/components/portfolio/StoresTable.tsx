@@ -15,7 +15,7 @@
 import type { PageContext } from '@/lib/views/page'
 import type { PortfolioStoreRow, PortfolioView } from '@/lib/views/portfolio'
 import { storeStatusChips, type Verdict } from '@/lib/views/verdict'
-import { formatDate, formatMoney, formatRangeLabel, plural } from '@/lib/format'
+import { formatDate, formatMoney, formatPct, formatRangeLabel, plural } from '@/lib/format'
 import {
   Avatar, Badge, Block, Chip, CodePill, Count, DataTable, Delta, EmptyState, Money, Pct, StatusDot,
   VerdictChips, type DataRow,
@@ -25,7 +25,7 @@ import { empateGap } from '@/lib/views/store'
 import { RoasVsEmpate } from '@/components/dashboard/RoasVsEmpate'
 import type { SharedAdAccount } from '@/lib/attributionModels'
 import { loadRowExtras, type RowExtras } from './data'
-import { adChannels, freshnessCell, idleReasons, lastSaleDate, noSalesCashHit, notSellingYet, pairOrdersIn, resultSortValue, resumoLinkOverrides, rowResult, sharedAccountBadges, sumMembers } from './model'
+import { adChannels, freshnessCell, idleReasons, lastSaleDate, noSalesCashHit, notSellingYet, pairOrdersIn, resultSortValue, resumoLinkOverrides, rowResult, sharedAccountBadges, sumMembers, trailGap, trailProfitCount, trailSinceStart, type TrailGap } from './model'
 import s from './portfolio.module.css'
 
 function StoreCell({ ctx, row, extras }: { ctx: PageContext; row: PortfolioStoreRow; extras: RowExtras }) {
@@ -133,16 +133,43 @@ function RevenueCell({ row }: { row: PortfolioStoreRow }) {
 /** The sparkline cell; `inline` is its copy under the result in a narrow
  *  table, which draws the bars only (the result cell already says why a row
  *  has none: sem vendas, custos não configurados). */
+function trailGapText(g: TrailGap): string {
+  switch (g.kind) {
+    case 'no_data': return '—'
+    case 'not_yet': return 'ainda não vendia'
+    case 'unconfigured': return 'sem série de lucro até configurar custos'
+    case 'idle': return `sem movimento em ${plural(g.days, 'dia', 'dias')}`
+  }
+}
+
+/** "sua parte (50%)", as the Resumo charts name the partner's share. */
+const shareLabel = (ctx: PageContext) => `sua parte (${formatPct(ctx.splitFactor * 100, { digits: 0 })})`
+
 function TrailCell({ ctx, row, extras, inline = false }: { ctx: PageContext; row: PortfolioStoreRow; extras: RowExtras; inline?: boolean }) {
-  const pts = extras.trail.get(row.id)
-  const none = !pts?.length ? '—'
-    : !row.configured ? 'sem série de lucro até configurar custos'
-    : pts.every(p => p.revenue === 0 && p.adSpend === 0) ? `sem movimento em ${pts.length} dias`
-    : null
-  if (none !== null || !pts) return inline ? null : <span className={s.sparkNone}>{none}</span>
+  const all = extras.trail.get(row.id)
+  const gap = trailGap(all, row)
+  if (gap || !all) return inline ? null : <span className={s.sparkNone}>{gap ? trailGapText(gap) : '—'}</span>
+  // From the store's start, as the Resumo chart counts (model trailSinceStart):
+  // Hibikura's bars began 19 days before its first sale and read "8 de 30".
+  const { days: pts, startedOn } = trailSinceStart(all, row.firstOrderDate)
+  const shown = startedOn ? { from: pts[0].date, to: pts[pts.length - 1].date } : extras.trailRange
+  const shownLabel = `${formatRangeLabel(shown, ctx.today)}${startedOn ? ' (desde que a loja começou)' : ''}`
+  // Drawn as the viewer's share, like the Resumo chart (DailyProfitBars); the
+  // tooltip names it and gives the store's whole sum next to it — a bare
+  // "soma $809" under ?parte=50 read as Hibikura's whole profit ($1.617).
   const values = pts.map(p => ctx.part(p.profit))
   const days = pts.filter(p => p.date >= ctx.range.from && p.date <= ctx.range.to).length
-  const sum = values.reduce((a, b) => a + b, 0)
+  const whole = pts.reduce((a, p) => a + p.profit, 0)
+  const sum = ctx.part(whole)
+  const tone = sum < 0 ? 'neg' : 'pos'
+  const count = trailProfitCount(pts, row.partial ? row.storeToday : null)
+  const notes = [
+    days < values.length ? 'A parte sombreada é o período escolhido.' : null,
+    count.leftOut ? 'Hoje, ainda em andamento, fica fora de “dias no lucro”.' : null,
+  ].filter((n): n is string => !!n)
+  const sumRows: [string, string, ('pos' | 'neg')?][] = ctx.split
+    ? [[shareLabel(ctx), formatMoney(sum), tone], ['soma da loja inteira', formatMoney(whole)]]
+    : [['soma', formatMoney(sum), tone]]
   return (
     <span className={inline ? `${s.spark} ${s.inlineTrail}` : s.spark}>
       <MiniBars
@@ -151,11 +178,11 @@ function TrailCell({ ctx, row, extras, inline = false }: { ctx: PageContext; row
         height={28}
         highlightLast={days < values.length ? days : undefined}
         tip={{
-          title: `Lucro por dia · ${formatRangeLabel(extras.trailRange, ctx.today)}`,
-          rows: [['soma', formatMoney(sum), sum < 0 ? 'neg' : 'pos'], ['dias no lucro', `${values.filter(v => v > 0).length} de ${values.length}`]],
-          note: days < values.length ? 'A parte sombreada é o período escolhido.' : undefined,
+          title: `Lucro por dia · ${shownLabel}`,
+          rows: [...sumRows, ['dias no lucro', `${count.inProfit} de ${count.of}`]],
+          note: notes.length ? notes.join(' ') : undefined,
         }}
-        ariaLabel={`Lucro por dia da ${row.name} em ${formatRangeLabel(extras.trailRange, ctx.today)}`}
+        ariaLabel={`${ctx.split ? `Sua parte (${formatPct(ctx.splitFactor * 100, { digits: 0 })}) do lucro` : 'Lucro'} por dia da ${row.name} em ${shownLabel}`}
       />
     </span>
   )
@@ -284,7 +311,7 @@ export async function StoresTable({ ctx, view, verdict, shared, sharedNow }: {
       howTo={`Cada loja em ${ctx.rangeLabel}, no calendário do próprio fuso, ordenadas por lucro. Clique numa loja para abrir o Resumo dela no mesmo período${shifted.length && ctx.period !== 'custom' ? ` (${shifted.join(', ')}: nas mesmas datas, ${formatRangeLabel(ctx.range, ctx.today)})` : ''}.`}
       info={<>Lucro real = receita − produto − frete − taxas − Anúncios Meta − Anúncios Shopify − custos fixos, pelo mesmo motor de todas as telas.
         Uma loja sem custos configurados mostra receita − anúncios e fica fora do total. O ROAS de cada loja é comparado com o empate dela
-        (receita ÷ contribuição). A coluna Atualizado mostra a fonte mais antiga da loja: pedidos ou Meta.</>}
+        (receita ÷ contribuição). Ao lado da cidade de cada loja, a leitura mais antiga das fontes dela: pedidos ou Meta.</>}
       flush
     >
       {/* A size container: below the table's natural width (~1100px) the
@@ -297,7 +324,7 @@ export async function StoresTable({ ctx, view, verdict, shared, sharedNow }: {
           columns={[
             { key: 'store', label: 'Loja', sortable: true, info: 'Ao lado da cidade: a última leitura bem-sucedida da fonte mais antiga da loja (pedidos ou Meta). Âmbar: atrasada; coral: a última tentativa falhou.' },
             { key: 'result', label: `Lucro${ctx.split ? ' (sua parte)' : ''}`, numeric: true, sortable: true, info: `Lucro real no período e a variação ${ctx.comparisonText}. Sem custos configurados: receita − anúncios, fora do total.` },
-            { key: 'trail', label: <span className={s.colTrail}>Lucro por dia</span>, info: `Lucro real de cada dia em ${formatRangeLabel(extras.trailRange, ctx.today)}, na escala de cada loja. A parte sombreada é o período escolhido.` },
+            { key: 'trail', label: <span className={s.colTrail}>Lucro por dia</span>, info: `Lucro real de cada dia em ${formatRangeLabel(extras.trailRange, ctx.today)} (uma loja mais nova, desde que começou: a primeira venda ou o primeiro anúncio), na escala de cada loja. A parte sombreada é o período escolhido.${ctx.split ? ` Na visão de sócio, cada barra é a ${shareLabel(ctx)} do lucro do dia; a dica traz também a soma da loja inteira.` : ''}` },
             { key: 'revenue', label: 'Receita', numeric: true, sortable: true },
             { key: 'orders', label: 'Pedidos', numeric: true, sortable: true },
             { key: 'margin', label: <span className={s.colMargin}>Margem</span>, numeric: true, sortable: true },

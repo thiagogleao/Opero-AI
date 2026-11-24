@@ -35,7 +35,8 @@ export const SHARED_LOOKBACK_DAYS = 90
  *  EPOCH → CAMP HALLOW 446. */
 export const SHARED_MIN_ORDERS = 20
 
-export interface TrailPoint { date: string; profit: number; revenue: number; adSpend: number }
+/** One sparkline day (model TrailDay: orders too, so a $0 order is not an idle day). */
+export interface TrailPoint { date: string; profit: number; revenue: number; adSpend: number; orders: number }
 
 export interface RowExtras {
   trailRange: DateRange
@@ -151,7 +152,7 @@ export async function loadRowExtras(
   const trail = new Map<string, TrailPoint[]>()
   for (const id of ids) {
     const p = pnl?.get(id)
-    if (p) trail.set(id, p.daily.map(d => ({ date: d.date, profit: d.operatingProfit, revenue: d.revenue, adSpend: d.adSpend })))
+    if (p) trail.set(id, p.daily.map(d => ({ date: d.date, profit: d.operatingProfit, revenue: d.revenue, adSpend: d.adSpend, orders: d.orders })))
   }
   return {
     trailRange: tr, trail,
