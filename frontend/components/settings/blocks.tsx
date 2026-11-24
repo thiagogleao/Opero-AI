@@ -17,7 +17,7 @@ import type { StoreShopifyHealth, SyncStatus } from '@/lib/integrations/types'
 import { Block, Callout, Chip, ErrorState, Icon } from '@/components/ui'
 import { AdAccounts, type AccountRow } from './AdAccounts'
 import { AnchorButton } from './AnchorButton'
-import { FACEBOOK_ERROR, SHOPIFY_ERROR } from './messages'
+import { facebookErrorText, shopifyErrorText } from './messages'
 import { SyncErrorsLine } from './SyncErrorsLine'
 import { StoresList } from './StoresList'
 import { storeDay } from './storeDay'
@@ -33,7 +33,7 @@ export function ReturnBanner({ params }: { params: Record<string, string | undef
     out.push(<Callout key="sc" tone="info" icon="check" title="Shopify reconectada">A Shopify confirmou o acesso e a chave nova foi gravada.</Callout>)
   }
   if (params.shopify_error) {
-    out.push(<Callout key="se" tone="neg" title="A Shopify não foi conectada">{SHOPIFY_ERROR[params.shopify_error] ?? `Erro: ${params.shopify_error}.`} Nada foi alterado.</Callout>)
+    out.push(<Callout key="se" tone="neg" title="A Shopify não foi conectada">{shopifyErrorText(params.shopify_error)} Nada foi alterado.</Callout>)
   }
   if (params.fb_connected === 'true' || params.fb_extra_connected === 'true') {
     out.push(
@@ -43,7 +43,7 @@ export function ReturnBanner({ params }: { params: Record<string, string | undef
     )
   }
   if (params.fb_error) {
-    out.push(<Callout key="fe" tone="neg" title="O Facebook não foi conectado">{FACEBOOK_ERROR[params.fb_error] ?? `Erro: ${params.fb_error}.`} Nada foi alterado.</Callout>)
+    out.push(<Callout key="fe" tone="neg" title="O Facebook não foi conectado">{facebookErrorText(params.fb_error)} Nada foi alterado.</Callout>)
   }
   return out.length ? <>{out}</> : null
 }
@@ -236,6 +236,7 @@ export async function FacebookBlock({ store, today, now, returnTo }: { store: St
         key={store.id}
         storeId={store.id}
         storeName={store.name}
+        timezone={store.timezone}
         returnTo={returnTo}
         archived={store.archived}
         today={today}

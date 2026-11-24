@@ -1,6 +1,7 @@
 import { query } from '../db'
 import { AccessError, listStores, requireStore, type StoreRef, type Viewer } from '../access'
 import { shiftDate, todayInTz } from '../engine/dates'
+import { formatDate } from '../format'
 import { storeCredentials, extraAccountCredentials } from './credentials'
 import { inspectToken, readAdAccount, type GraphAdAccount } from './facebook'
 import { HttpError } from './http'
@@ -162,7 +163,8 @@ export async function attachAdAccount(viewer: Viewer, store: StoreRef, input: At
     if (before?.neverExpires && after && !after.neverExpires) {
       throw new HttpError(409, 'replaces_permanent_token',
         'A chave atual desta conta é permanente; a nova vence' +
-        (after.expiresAt ? ` em ${after.expiresAt.slice(0, 10)}` : '') +
+        // The store's calendar day, not the UTC date of the instant.
+        (after.expiresAt ? ` em ${formatDate(todayInTz(store.timezone, new Date(after.expiresAt)), todayInTz(store.timezone))}` : '') +
         '. Confirme para trocar mesmo assim.',
         { expiresAt: after.expiresAt })
     }

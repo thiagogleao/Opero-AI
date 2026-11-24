@@ -9,7 +9,13 @@
  *  it starts the OAuth, else Ajustes. A hint only — the store comes from the server. */
 export const FB_RETURN_KEY = 'opero:fb-return'
 
-export const SHOPIFY_ERROR: Record<string, string> = {
+/** A code → text table without a prototype: `TABLE['constructor']` is
+ *  undefined, not Object's constructor. Lookups still go through codeText. */
+function codeTable(entries: Record<string, string>): Readonly<Record<string, string>> {
+  return Object.freeze(Object.assign(Object.create(null) as Record<string, string>, entries))
+}
+
+export const SHOPIFY_ERROR = codeTable({
   invalid_state: 'O pedido de conexão expirou ou veio de outra aba. Comece de novo.',
   invalid_shop: 'Domínio inválido: use o endereço <loja>.myshopify.com.',
   not_configured: 'O app Opero da Shopify não está configurado neste servidor.',
@@ -29,9 +35,9 @@ export const SHOPIFY_ERROR: Record<string, string> = {
   credentials_rejected: 'A Shopify recusou o Client ID e o Secret. Confira se são do app instalado nesta loja.',
   token_rejected: 'A Shopify recusou este token.',
   not_found: 'Loja não encontrada.',
-}
+})
 
-export const FACEBOOK_ERROR: Record<string, string> = {
+export const FACEBOOK_ERROR = codeTable({
   invalid_state: 'O pedido de conexão expirou ou veio de outra aba. Comece de novo.',
   access_denied: 'A conexão foi cancelada no Facebook.',
   not_configured: 'O app do Facebook não está configurado neste servidor.',
@@ -50,6 +56,33 @@ export const FACEBOOK_ERROR: Record<string, string> = {
   no_pending: 'Nenhum login do Facebook aguardando. Conecte de novo.',
   facebook_error: 'O Facebook não respondeu. Tente de novo.',
   not_found: 'Loja não encontrada.',
+})
+
+/**
+ * The text of a known code, or null. Codes arrive from the URL (?fb_error=,
+ * ?shopify_error=, ?error=) and from response bodies, so only the table's own
+ * keys count: `constructor` or `__proto__` used to index Object.prototype and
+ * crash Ajustes and onboarding.
+ */
+export function codeText(table: Readonly<Record<string, string>>, code: string | null | undefined): string | null {
+  return typeof code === 'string' && Object.hasOwn(table, code) ? table[code] : null
+}
+
+/** "Erro: <code>." for a code with no text. Only something shaped like a code
+ *  is echoed: the value comes from the URL, and a link could carry a sentence
+ *  that the page would then print as if it were the server's message. */
+export function unknownCodeText(code: string): string {
+  return /^[A-Za-z0-9_.-]{1,64}$/.test(code) ? `Erro: ${code}.` : 'Erro desconhecido.'
+}
+
+/** What a Shopify flow's error code means, in words. */
+export function shopifyErrorText(code: string): string {
+  return codeText(SHOPIFY_ERROR, code) ?? unknownCodeText(code)
+}
+
+/** What a Facebook flow's error code means, in words. */
+export function facebookErrorText(code: string): string {
+  return codeText(FACEBOOK_ERROR, code) ?? unknownCodeText(code)
 }
 
 export interface ApiResult<T> {
@@ -65,7 +98,7 @@ export interface ApiResult<T> {
 
 /** fetch + JSON, with failures turned into words. `ok` is true only for a 2xx
  *  answer with a JSON body: that is the only case a screen may call a success. */
-export async function callApi<T>(url: string, init: RequestInit = {}, codes: Record<string, string> = {}): Promise<ApiResult<T>> {
+export async function callApi<T>(url: string, init: RequestInit = {}, codes: Readonly<Record<string, string>> = {}): Promise<ApiResult<T>> {
   let res: Response
   try {
     res = await fetch(url, {
@@ -82,7 +115,7 @@ export async function callApi<T>(url: string, init: RequestInit = {}, codes: Rec
   const code = typeof body?.code === 'string' ? body.code : null
   const rawText = typeof body?.error === 'string' ? body.error.trim() : null
   const raw = rawText ? (/[.!?]$/.test(rawText) ? rawText : `${rawText}.`) : null
-  const error = (code && codes[code]) || raw
+  const error = codeText(codes, code) || raw
     || (res.status === 401 ? 'Sua sessão expirou. Entre de novo.' : `O servidor respondeu com erro (HTTP ${res.status}). Nada foi alterado.`)
   return { ok: false, status: res.status, data: null, error, code, extra: body ?? {} }
 }

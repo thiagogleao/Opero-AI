@@ -131,4 +131,9 @@ describe('storeNotes', () => {
     expect(storeNotes('unknown.myshopify.com')).toEqual([])
     expect(storeNotes(null)).toEqual([])
   })
+  it('a shop handle named like an Object.prototype member has no notes (and does not throw)', () => {
+    for (const h of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+      expect(storeNotes(`${h}.myshopify.com`)).toEqual([])
+    }
+  })
 })

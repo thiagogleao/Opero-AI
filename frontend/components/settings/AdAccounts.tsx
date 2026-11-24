@@ -23,6 +23,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { FACEBOOK_ERROR, FB_RETURN_KEY, accountStatusText, callApi } from './messages'
 import { SyncErrorsLine } from './SyncErrorsLine'
 import { startBackfill } from './backfill'
+import { storeDateLabel } from './storeDay'
 import s from './settings.module.css'
 
 export interface AccountRow extends StoreAdAccount {
@@ -31,9 +32,11 @@ export interface AccountRow extends StoreAdAccount {
 
 type Pending = { kind: 'pause' | 'remove'; row: AccountRow } | null
 
-export function AdAccounts({ storeId, storeName, returnTo, archived, today, accounts, healthError }: {
+export function AdAccounts({ storeId, storeName, timezone, returnTo, archived, today, accounts, healthError }: {
   storeId: string
   storeName: string
+  /** The store's timezone: a token's expiry instant is shown as the store's calendar day. */
+  timezone: string
   /** Ajustes with its URL state: where a Facebook login started here comes back. */
   returnTo: string
   archived: boolean
@@ -116,7 +119,7 @@ export function AdAccounts({ storeId, storeName, returnTo, archived, today, acco
       <div>
         <div className="lbl" style={{ marginBottom: 8 }}>Conta principal</div>
         {main ? (
-          <AccountItem row={main} label={label(main)} today={today}>
+          <AccountItem row={main} label={label(main)} today={today} tz={timezone}>
             <div className={s.actions}>
               {!archived && <Button size="sm" variant="ghost" onClick={() => setForm(form === 'main' ? null : 'main')}>Trocar por ID e token</Button>}
               {!archived && <AnchorButton href={oauth('main')} icon="refresh">Reconectar com o Facebook</AnchorButton>}
@@ -134,14 +137,14 @@ export function AdAccounts({ storeId, storeName, returnTo, archived, today, acco
             )}
           </div>
         )}
-        {form === 'main' && <LinkForm storeId={storeId} role="main" onDone={text => { setForm(null); setResult({ ok: true, text }); router.refresh() }} onCancel={() => setForm(null)} />}
+        {form === 'main' && <LinkForm storeId={storeId} tz={timezone} today={today} role="main" onDone={text => { setForm(null); setResult({ ok: true, text }); router.refresh() }} onCancel={() => setForm(null)} />}
       </div>
 
       <div>
         <div className="lbl" style={{ marginBottom: 8 }}>Contas extras · {extras.length}</div>
         {extras.length === 0 && <p className={s.sub}>Nenhuma conta extra. Use uma quando a loja anuncia também por outra conta de anúncio.</p>}
         {extras.map(row => (
-          <AccountItem key={row.adAccountId} row={row} label={label(row)} today={today}>
+          <AccountItem key={row.adAccountId} row={row} label={label(row)} today={today} tz={timezone}>
             {archived ? null : renaming?.id === row.id ? (
               <div className={s.inline}>
                 <input
@@ -169,14 +172,14 @@ export function AdAccounts({ storeId, storeName, returnTo, archived, today, acco
             <Button size="sm" variant="ghost" onClick={() => setForm(form === 'extra' ? null : 'extra')}>Adicionar por ID e token</Button>
           </div>
         )}
-        {form === 'extra' && <LinkForm storeId={storeId} role="extra" onDone={text => { setForm(null); setResult({ ok: true, text }); router.refresh() }} onCancel={() => setForm(null)} />}
+        {form === 'extra' && <LinkForm storeId={storeId} tz={timezone} today={today} role="extra" onDone={text => { setForm(null); setResult({ ok: true, text }); router.refresh() }} onCancel={() => setForm(null)} />}
       </div>
 
       {historical.length > 0 && (
         <div>
           <div className="lbl" style={{ marginBottom: 8 }}>Contas históricas · {historical.length}</div>
           <p className={s.sub} style={{ marginBottom: 8 }}>Não estão mais ligadas nem são coletadas, mas o gasto que tiveram continua no lucro desta loja.</p>
-          {historical.map(row => <AccountItem key={row.adAccountId} row={row} label={label(row)} today={today} />)}
+          {historical.map(row => <AccountItem key={row.adAccountId} row={row} label={label(row)} today={today} tz={timezone} />)}
         </div>
       )}
 
@@ -209,10 +212,12 @@ export function AdAccounts({ storeId, storeName, returnTo, archived, today, acco
   )
 }
 
-function AccountItem({ row, label, today, children }: { row: AccountRow; label: string; today: string; children?: React.ReactNode }) {
+function AccountItem({ row, label, today, tz, children }: { row: AccountRow; label: string; today: string; tz: string; children?: React.ReactNode }) {
   const h = row.health
   const status = h ? accountStatusText(h.accountStatus) : null
   const t = h?.tokenInfo
+  // The store's calendar day of the expiry instant, not its UTC date.
+  const expires = t?.expiresAt ? storeDateLabel(t.expiresAt, tz, today) : null
   return (
     <div className={s.acct}>
       <div className={s.acctMain}>
@@ -241,7 +246,7 @@ function AccountItem({ row, label, today, children }: { row: AccountRow; label: 
               <span className={t.valid ? undefined : 'neg'}>
                 {!t.valid ? 'Token inválido ou expirado: reconecte.'
                   : t.neverExpires ? `Token que não expira${t.type === 'SYSTEM_USER' ? ' (usuário do sistema)' : ''}.`
-                  : t.expiresAt ? <>Token expira em <b>{formatDate(t.expiresAt.slice(0, 10), today)}</b>. Nada o renova sozinho: reconecte antes ou use um token de usuário do sistema.</>
+                  : expires ? <>Token expira em <b>{expires}</b>. Nada o renova sozinho: reconecte antes ou use um token de usuário do sistema.</>
                   : 'Validade do token desconhecida.'}
               </span>
             )}
@@ -260,8 +265,8 @@ function AccountItem({ row, label, today, children }: { row: AccountRow; label: 
 }
 
 /** Link an account by typing its id and a token (a system-user token never expires). */
-function LinkForm({ storeId, role, onDone, onCancel }: {
-  storeId: string; role: 'main' | 'extra'; onDone: (text: string) => void; onCancel: () => void
+function LinkForm({ storeId, tz, today, role, onDone, onCancel }: {
+  storeId: string; tz: string; today: string; role: 'main' | 'extra'; onDone: (text: string) => void; onCancel: () => void
 }) {
   const [account, setAccount] = useState('')
   const [token, setToken] = useState('')
@@ -269,6 +274,8 @@ function LinkForm({ storeId, role, onDone, onCancel }: {
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [replace, setReplace] = useState<string | null>(null)
+  // The new token's expiry on the store's calendar (the server sends an instant).
+  const replaceExpires = replace ? storeDateLabel(replace, tz, today) : null
 
   async function submit(confirmReplacePermanent = false) {
     setPending(true)
@@ -317,7 +324,7 @@ function LinkForm({ storeId, role, onDone, onCancel }: {
       {error && <div className={s.err} role="alert">{error}</div>}
       {replace !== null && (
         <Callout tone="warn" title="Isto troca um token que não expira por um que expira">
-          O token atual da loja não expira; o novo {replace ? `expira em ${replace.slice(8, 10)}/${replace.slice(5, 7)}/${replace.slice(0, 4)}` : 'expira'} e nada o
+          O token atual da loja não expira; o novo {replaceExpires ? `expira em ${replaceExpires}` : 'expira'} e nada o
           renova sozinho. Quando vencer, a coleta do Meta para.
           <div className={s.inline} style={{ marginTop: 8 }}>
             <Button size="sm" variant="danger" pending={pending} onClick={() => submit(true)}>Trocar mesmo assim</Button>

@@ -19,7 +19,7 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
 import { REFERENCE_TZ } from '@/lib/engine/dates'
 import { Button, ButtonLink, Callout, Chip } from '@/components/ui'
 import { AnchorButton } from './AnchorButton'
-import { FACEBOOK_ERROR, FB_RETURN_KEY, SHOPIFY_ERROR, callApi, nothingChanged } from './messages'
+import { FACEBOOK_ERROR, FB_RETURN_KEY, SHOPIFY_ERROR, callApi, facebookErrorText, nothingChanged, shopifyErrorText } from './messages'
 import { explainShopifyKey } from './ShopifyKeyForm'
 import { clampStart, dateBounds, withState } from './wizardState'
 import s from './settings.module.css'
@@ -125,7 +125,7 @@ function ShopifyStep({ error, startDate, onStartDate, bounds, returnTo, isOwner,
   const [secret, setSecret] = useState('')
   const [token, setToken] = useState('')
   const [pending, setPending] = useState(false)
-  const [fail, setFail] = useState<string | null>(error ? SHOPIFY_ERROR[error] ?? `Erro: ${error}` : null)
+  const [fail, setFail] = useState<string | null>(error ? shopifyErrorText(error) : null)
 
   const domain = shop.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '')
   const hint = method === 'token' ? explainShopifyKey(token, 'token') : method === 'dev' ? explainShopifyKey(secret, 'secret') : null
@@ -230,7 +230,7 @@ function FacebookStep({ store, wasThere, error, returnTo, onBeforeOAuth, onDone 
   const [account, setAccount] = useState('')
   const [token, setToken] = useState('')
   const [pending, setPending] = useState(false)
-  const [fail, setFail] = useState<string | null>(error ? FACEBOOK_ERROR[error] ?? `Erro: ${error}` : null)
+  const [fail, setFail] = useState<string | null>(error ? facebookErrorText(error) : null)
 
   async function link() {
     setPending(true)

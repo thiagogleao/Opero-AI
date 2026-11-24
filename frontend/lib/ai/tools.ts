@@ -381,9 +381,11 @@ const HANDLERS: Record<string, (input: Input, env: ToolEnv) => Promise<unknown>>
   },
 }
 
-/** Model tool names sometimes differ only in letter case; accept those. */
+/** Model tool names sometimes differ only in letter case; accept those. The
+ *  name is model output: an own-key check, or "constructor" resolved to
+ *  Object (runTool "succeeded" by echoing the input) and "__proto__" threw. */
 export function resolveToolName(name: string): string | null {
-  if (HANDLERS[name]) return name
+  if (Object.hasOwn(HANDLERS, name)) return name
   const lower = name.toLowerCase()
   return TOOL_NAMES.find(n => n.toLowerCase() === lower) ?? null
 }

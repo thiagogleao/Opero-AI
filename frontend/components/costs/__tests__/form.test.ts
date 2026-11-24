@@ -188,3 +188,24 @@ describe('price cells: an empty one asks for the price, a bad one is invalid', (
     expect(messages(r)['cogs.price_tiers[0].order_prices.1']).toBe('Informe o preço do pedido com 1 unidade(s).')
   })
 })
+
+describe('typed keys reach the server, "__proto__" included', () => {
+  // A plain object swallows `o['__proto__'] = x`: the row vanished from the
+  // payload and nothing told the person. Sent as an own key, the validator
+  // refuses it by name — through JSON, as the browser sends it.
+  const viaJson = (f: ReturnType<typeof toForm>) => JSON.parse(JSON.stringify(toPayload(f).config)) as unknown
+
+  it('a supplier step typed "__proto__" is refused, not dropped', () => {
+    const f = toForm(sample())
+    f.cogs.price_tiers[0].steps.push({ _id: 'p', units: '__proto__', price: '5' })
+    const r = parseProfitConfig(viaJson(f), sample())
+    expect(r.issues.map(i => i.message)).toContain('Quantidade inválida: "__proto__". Use números inteiros a partir de 1.')
+  })
+
+  it('a country typed "__proto__" is refused, not dropped', () => {
+    const f = toForm(sample())
+    f.cogs.country_prices[0].prices.push({ _id: 'p', country: '__proto__', price: '5' })
+    const r = parseProfitConfig(viaJson(f), sample())
+    expect(r.issues.map(i => i.path)).toContain('cogs.country_prices[0].prices.__proto__')
+  })
+})

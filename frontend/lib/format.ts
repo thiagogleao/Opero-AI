@@ -266,7 +266,7 @@ const CITY: Record<string, string> = {
 /** City name for a timezone ("Tóquio"). Same table as lib/views/portfolio
  *  cityOfTz, duplicated because that module loads the database. */
 export function tzCity(tz: string): string {
-  return CITY[tz] ?? (tz.split('/').pop() ?? tz).replace(/_/g, ' ')
+  return Object.hasOwn(CITY, tz) ? CITY[tz] : (tz.split('/').pop() ?? tz).replace(/_/g, ' ')
 }
 
 /** Timezones that keep Brazil's calendar day (no "dia de X" label needed). */

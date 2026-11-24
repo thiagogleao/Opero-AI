@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { SHOPIFY_ERROR, accountStatusText, callApi, shortError } from '../messages'
+import {
+  FACEBOOK_ERROR, SHOPIFY_ERROR, accountStatusText, callApi, codeText, facebookErrorText, shopifyErrorText, shortError,
+} from '../messages'
 import { explainShopifyKey } from '../ShopifyKeyForm'
 
 const respond = (status: number, body: unknown, json = true) =>
@@ -78,5 +80,56 @@ describe('shortError — a collector error fit to quote', () => {
     expect(out.endsWith('…')).toBe(true)
     expect(out).not.toContain('second line')
     expect(out.startsWith('Response(code=402')).toBe(true)
+  })
+})
+
+// Codes come from the URL (?fb_error=, ?shopify_error=, ?error=): a prototype
+// key used to index Object.prototype and crash Ajustes and onboarding.
+const PROTO_KEYS = ['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'valueOf', 'isPrototypeOf', '__defineGetter__', 'propertyIsEnumerable', 'toLocaleString']
+
+describe('error codes from the URL — own keys only', () => {
+  it('known codes keep their text', () => {
+    expect(shopifyErrorText('invalid_hmac')).toBe(SHOPIFY_ERROR.invalid_hmac)
+    expect(facebookErrorText('access_denied')).toBe(FACEBOOK_ERROR.access_denied)
+  })
+
+  it('a prototype key is an unknown code, not a crash', () => {
+    for (const k of PROTO_KEYS) {
+      expect(typeof shopifyErrorText(k)).toBe('string')
+      expect(typeof facebookErrorText(k)).toBe('string')
+      expect(codeText(SHOPIFY_ERROR, k)).toBeNull()
+      expect(codeText(FACEBOOK_ERROR, k)).toBeNull()
+    }
+    expect(facebookErrorText('__proto__')).toBe('Erro: __proto__.')
+    expect(shopifyErrorText('constructor')).toBe('Erro: constructor.')
+  })
+
+  it('the tables have no prototype, so even a direct index misses', () => {
+    expect((SHOPIFY_ERROR as Record<string, unknown>).constructor).toBeUndefined()
+    expect((FACEBOOK_ERROR as Record<string, unknown>).toString).toBeUndefined()
+    expect(Object.isFrozen(SHOPIFY_ERROR)).toBe(true)
+  })
+
+  it('an unknown code keeps the "Erro: <code>." fallback; a sentence in the URL is not echoed', () => {
+    expect(shopifyErrorText('scope_changed')).toBe('Erro: scope_changed.')
+    expect(facebookErrorText('Sua conta foi suspensa, ligue para 0800')).toBe('Erro desconhecido.')
+    expect(facebookErrorText('')).toBe('Erro desconhecido.')
+    expect(shopifyErrorText('x'.repeat(65))).toBe('Erro desconhecido.')
+  })
+
+  it('codeText ignores null, undefined and works on a plain table', () => {
+    expect(codeText(SHOPIFY_ERROR, null)).toBeNull()
+    expect(codeText(SHOPIFY_ERROR, undefined)).toBeNull()
+    expect(codeText({ a: 'A' }, 'a')).toBe('A')
+    expect(codeText({ a: 'A' }, 'constructor')).toBeNull()
+  })
+
+  it('callApi with a prototype-key code in the body falls back to the server text, not a function', async () => {
+    vi.stubGlobal('fetch', respond(400, { error: 'Pedido inválido', code: 'constructor' }))
+    const r = await callApi('/api/x', {}, FACEBOOK_ERROR)
+    expect(r.error).toBe('Pedido inválido.')
+    vi.stubGlobal('fetch', respond(400, { error: 'Pedido inválido', code: 'constructor' }))
+    const plain = await callApi('/api/x')
+    expect(plain.error).toBe('Pedido inválido.')
   })
 })

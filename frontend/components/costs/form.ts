@@ -180,6 +180,13 @@ export interface Payload {
   index: PayloadIndex
 }
 
+/** An object for keys the person typed (units, country codes): no prototype,
+ *  so every key — "__proto__" included — is an own key that JSON.stringify
+ *  sends and the server's validator can refuse by name. */
+function typedKeys<V>(): Record<string, V> {
+  return Object.create(null) as Record<string, V>
+}
+
 /**
  * The body for POST/PUT /api/profit: every section, every list in form order
  * (blank rows included — the server drops them silently, and filtering here
@@ -203,7 +210,9 @@ export function toPayload(f: CostForm, catalogueNames: Record<string, string> = 
   }))
 
   const tiers = c.price_tiers.map(t => {
-    const order_prices: Record<string, number | string | null> = {}
+    // Typed keys go in a prototype-less object: "__proto__" typed in a cell
+    // would otherwise vanish from the payload instead of being refused.
+    const order_prices = typedKeys<number | string | null>()
     for (const s of t.steps) {
       if (!s.units.trim() && !s.price.trim()) continue
       order_prices[s.units.trim()] = cell(s.price)
@@ -220,7 +229,7 @@ export function toPayload(f: CostForm, catalogueNames: Record<string, string> = 
   })
 
   const countryPrices = c.country_prices.map(cp => {
-    const prices: Record<string, number | string | null> = {}
+    const prices = typedKeys<number | string | null>()
     for (const p of cp.prices) {
       if (!p.country.trim() && !p.price.trim()) continue
       prices[p.country.trim()] = cell(p.price)

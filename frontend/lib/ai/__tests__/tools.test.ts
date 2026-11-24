@@ -35,6 +35,16 @@ describe('Copilot tools', () => {
     expect(JSON.parse(unknown.content).error).toContain('get_profit')
     expect((await runTool('get_profit', 'not an object', env)).isError).toBe(true)
   })
+  it('refuses Object.prototype member names (model output), in the run and in the chip', async () => {
+    const env = { ctx: CTX, split: false, lastUserText: '', signal: new AbortController().signal, now: NOW }
+    for (const name of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf']) {
+      expect(resolveToolName(name)).toBeNull()
+      const out = await runTool(name, { a: 1 }, env)
+      expect(out.isError).toBe(true)
+      expect(JSON.parse(out.content).error).toContain('não existe')
+      expect(toolLabel(name, {}, CTX, NOW)).toBe(name)
+    }
+  })
   it('labels the chip with the resolved store-calendar window', () => {
     expect(toolLabel('get_profit', { period: 'yesterday' }, CTX, NOW)).toBe('Lucro · 16 nov')
     expect(toolLabel('get_order', { order_number: 1234 }, CTX, NOW)).toBe('Pedido #1234')

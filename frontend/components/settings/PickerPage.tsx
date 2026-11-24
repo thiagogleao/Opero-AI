@@ -22,7 +22,7 @@ import { Block, ButtonLink, EmptyState, ErrorState } from '@/components/ui'
 import { AnchorButton } from './AnchorButton'
 import { ArchivedNote } from './ArchivedNote'
 import { FacebookPicker } from './FacebookPicker'
-import { FACEBOOK_ERROR } from './messages'
+import { FACEBOOK_ERROR, codeText } from './messages'
 
 const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v)
 
@@ -40,7 +40,7 @@ export async function PickerPage({ searchParams, role }: { searchParams: Promise
     try {
       picker = await pickerFor(ctx.viewer, store, (await cookies()).get(FB_PENDING_COOKIE)?.value)
     } catch (err) {
-      if (err instanceof HttpError) failure = { code: err.code, text: FACEBOOK_ERROR[err.code] ?? err.message }
+      if (err instanceof HttpError) failure = { code: err.code, text: codeText(FACEBOOK_ERROR, err.code) ?? err.message }
       else {
         console.error('[facebook picker]', err instanceof Error ? err.message : err)
         failure = { code: 'internal', text: 'O Facebook não respondeu com as contas. Nada foi alterado.' }
@@ -68,6 +68,8 @@ export async function PickerPage({ searchParams, role }: { searchParams: Promise
             picker={picker}
             role={role}
             manual={one(sp.manual) === 'true'}
+            timezone={store.timezone}
+            today={ctx.today}
             settingsHref={ctx.hrefWith('/settings?fb_connected=true', { loja: store.id })}
           />
         </Block>

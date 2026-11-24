@@ -17,6 +17,7 @@ import { Badge, Button, Callout, Chip } from '@/components/ui'
 import type { FacebookPicker as Picker, PickerAdAccount } from '@/lib/integrations/types'
 import { startBackfill } from './backfill'
 import { FACEBOOK_ERROR, FB_RETURN_KEY, accountStatusText, callApi, nothingChanged } from './messages'
+import { storeDateLabel } from './storeDay'
 import s from './settings.module.css'
 
 /** Onboarding's hint ("/onboarding?periodo=30d") → back to its import step,
@@ -43,9 +44,12 @@ function returnPath(storeId: string, fallback: string): string {
   return fallback
 }
 
-export function FacebookPicker({ picker, role, manual, settingsHref }: {
+export function FacebookPicker({ picker, role, manual, settingsHref, timezone, today }: {
   picker: Picker
   role: 'main' | 'extra'
+  /** The store's timezone and today: a token's expiry instant is shown as the store's calendar day. */
+  timezone: string
+  today: string
   /** The login could not list any account: type the id. */
   manual: boolean
   /** Ajustes of this store, with ?fb_connected=true. */
@@ -57,6 +61,9 @@ export function FacebookPicker({ picker, role, manual, settingsHref }: {
   const [replace, setReplace] = useState<{ id: string; expiresAt: string | null } | null>(null)
   const [typed, setTyped] = useState('')
   const [nickname, setNickname] = useState('')
+  // Expiry instants on the store's calendar, not their UTC date.
+  const loginExpires = picker.tokenInfo?.expiresAt ? storeDateLabel(picker.tokenInfo.expiresAt, timezone, today) : null
+  const replaceExpires = replace?.expiresAt ? storeDateLabel(replace.expiresAt, timezone, today) : null
 
   async function link(id: string, confirmReplacePermanent = false) {
     setPending(id)
@@ -94,7 +101,7 @@ export function FacebookPicker({ picker, role, manual, settingsHref }: {
         <p className={s.sub}>
           Acesso deste login: {!t.valid ? <span className="neg">inválido</span>
             : t.neverExpires ? 'não expira'
-            : t.expiresAt ? <>expira em <b>{t.expiresAt.slice(8, 10)}/{t.expiresAt.slice(5, 7)}/{t.expiresAt.slice(0, 4)}</b> e nada o renova sozinho</>
+            : loginExpires ? <>expira em <b>{loginExpires}</b> e nada o renova sozinho</>
             : 'validade desconhecida'}.
           {t.replacesPermanent && <span className="warn"> Ele substituiria o token atual da loja, que não expira.</span>}
         </p>
@@ -102,7 +109,7 @@ export function FacebookPicker({ picker, role, manual, settingsHref }: {
       {error && <Callout tone="neg" title="A conta não foi ligada">{nothingChanged(error)}</Callout>}
       {replace && (
         <Callout tone="warn" title="Isto troca um token que não expira por um que expira">
-          O acesso atual de {picker.storeName} não expira. O deste login {replace.expiresAt ? `expira em ${replace.expiresAt.slice(8, 10)}/${replace.expiresAt.slice(5, 7)}/${replace.expiresAt.slice(0, 4)}` : 'expira'} e nada
+          O acesso atual de {picker.storeName} não expira. O deste login {replaceExpires ? `expira em ${replaceExpires}` : 'expira'} e nada
           o renova sozinho: quando vencer, a coleta do Meta para.
           <div className={s.inline} style={{ marginTop: 8 }}>
             <Button size="sm" variant="danger" pending={pending === replace.id} onClick={() => link(replace.id, true)}>Trocar mesmo assim</Button>

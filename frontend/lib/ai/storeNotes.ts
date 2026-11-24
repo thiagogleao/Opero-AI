@@ -37,5 +37,6 @@ const NOTES: Readonly<Record<string, readonly string[]>> = {
 export function storeNotes(domain: string | null | undefined): string[] {
   if (!domain) return []
   const key = domain.replace(/^https?:\/\//, '').split('.')[0]
-  return [...(NOTES[key] ?? [])]
+  // Own keys only: a shop handle such as "constructor" threw "not iterable".
+  return Object.hasOwn(NOTES, key) ? [...NOTES[key]] : []
 }
