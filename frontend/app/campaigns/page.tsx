@@ -1,6 +1,5 @@
 import { Suspense } from 'react'
-import type { Metadata } from 'next'
-import { getPageContext, type PageContext, type SearchParams } from '@/lib/views/page'
+import { getPageContext, pageMetadata, type PageContext, type SearchParams } from '@/lib/views/page'
 import { buildPortfolio } from '@/lib/views/portfolio'
 import { todayInTz } from '@/lib/engine/dates'
 import { resumoLinkOverrides } from '@/components/portfolio/model'
@@ -37,7 +36,7 @@ import s from '@/components/campaigns/campaigns.module.css'
  * ?campanha=<campaignId> (creatives of one campaign), ?mostrar=todos.
  */
 
-export const metadata: Metadata = { title: 'Campanhas' }
+export const generateMetadata = pageMetadata('Campanhas')
 
 const TABLE_LIMIT = 80
 const first = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v) ?? null

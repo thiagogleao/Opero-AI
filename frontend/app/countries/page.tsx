@@ -1,6 +1,5 @@
 import { Suspense } from 'react'
-import type { Metadata } from 'next'
-import { getPageContext, type PageContext, type SearchParams } from '@/lib/views/page'
+import { getPageContext, pageMetadata, type PageContext, type SearchParams } from '@/lib/views/page'
 import { computePnL, type CountryPnL, type PnL } from '@/lib/engine/pnl'
 import type { StoreRef } from '@/lib/access'
 import { getCountryReport, rollUpCountries, TERRITORIES_NOTE, type CountryReport, type CountryRow } from '@/lib/data/countries'
@@ -28,7 +27,7 @@ import s from '@/components/countries/countries.module.css'
  * cost settings per country and lists customers per store.
  */
 
-export const metadata: Metadata = { title: 'Países e clientes' }
+export const generateMetadata = pageMetadata('Países e clientes')
 
 const ROWS = 15
 const CAVEAT_LINE =

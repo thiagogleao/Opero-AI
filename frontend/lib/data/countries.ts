@@ -78,6 +78,16 @@ export interface CountrySharedLeftOut {
   salesStoreIds: string[]
 }
 
+/** One country of Meta's split of the left-out shared-account campaigns. */
+export interface CountrySharedMeta {
+  /** ISO code, "??" when Meta gave none (as the rows). */
+  country: string
+  spend: number
+  /** Phantom ad-days removed. */
+  purchaseValue: number
+  purchases: number
+}
+
 export interface CountryReport {
   storeId: string
   range: DateRange
@@ -98,6 +108,12 @@ export interface CountryReport {
    *  of every country's Meta columns (and of the coverage); null when none.
    *  Always set by getCountryReport (optional for reports built by hand). */
   sharedLeftOut?: CountrySharedLeftOut | null
+  /** Meta's country split of those left-out campaigns, per country (what
+   *  was taken out of each row's Meta columns). A sum over stores that also
+   *  holds every store in `sharedLeftOut.salesStoreIds` adds it back, as the
+   *  desktop "Todas" does: those campaigns' sales are then orders of the sum.
+   *  Empty when nothing was left out; optional for reports built by hand. */
+  sharedMeta?: CountrySharedMeta[]
   meta: {
     label: string
     caveat: string
@@ -331,6 +347,7 @@ export async function getCountryReport(
     totals: pnl.totals,
     sharedAdAccounts: shared,
     sharedLeftOut,
+    sharedMeta: sharedByCountry.map(r => ({ country: r.country, spend: r.spend, purchaseValue: r.pv, purchases: r.pc })),
     meta: {
       label: META_COUNTRY_LABEL,
       caveat: META_COUNTRY_CAVEAT,

@@ -157,7 +157,13 @@ export function sourceLabel(src: string | null | undefined): string {
   if (s === 'direct') return 'Direto'
   if (s === 'email') return 'E-mail'
   const app = /^android-app:\/\/([^/?#]+)/i.exec(s)
-  if (app) return APP_NAMES[app[1].toLowerCase()] ?? `App ${app[1]}`
+  if (app) {
+    // The package comes from the visitor's Referer: an own-key lookup, or
+    // "android-app://__proto__/" returned Object.prototype (rendered as a
+    // React child, it crashed the journey reader).
+    const key = app[1].toLowerCase()
+    return Object.hasOwn(APP_NAMES, key) ? APP_NAMES[key] : `App ${app[1]}`
+  }
   if (/^https?:\/\//i.test(s)) {
     try {
       return new URL(s).hostname.replace(/^www\./, '') || s

@@ -1,6 +1,5 @@
-import type { Metadata } from 'next'
 import type { ReactNode } from 'react'
-import { getPageContext, type PageContext, type SearchParams } from '@/lib/views/page'
+import { getPageContext, pageMetadata, type PageContext, type SearchParams } from '@/lib/views/page'
 import { computePnL, type PnL } from '@/lib/engine/pnl'
 import { getProductReport, type ProductReport } from '@/lib/data/products'
 import { sumTotals } from '@/lib/views/verdict'
@@ -23,7 +22,7 @@ import s from '@/components/products/products.module.css'
  * the optional "Meta ligado" column is journey attribution, labelled as such.
  */
 
-export const metadata: Metadata = { title: 'Produtos' }
+export const generateMetadata = pageMetadata('Produtos')
 
 const COLUMNS_NOTE =
   'Pedidos = pedidos que tinham o produto (um pedido com dois produtos conta nos dois). Custos = produto, embalagem e taxa do fornecedor, frete, taxas da Shopify e do pagamento e extras por pedido, na parte do produto. Contribuição = receita − custos: o que o produto deixa para pagar anúncios e custos fixos. Margem = contribuição ÷ receita.'

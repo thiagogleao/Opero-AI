@@ -1,13 +1,12 @@
-import type { Metadata } from 'next'
 import { notFound } from 'next/navigation'
-import { getPageContext, type SearchParams } from '@/lib/views/page'
+import { ALL_STORES, getPageContext, pageMetadata, type SearchParams } from '@/lib/views/page'
 import { computeStorePnL } from '@/lib/engine/pnl'
-import { listStores } from '@/lib/access'
-import { getCreativeDetail, type CreativeDetail, type CreativeRow } from '@/lib/data/creatives'
+import { getViewer, listStores, resolveStore } from '@/lib/access'
+import { adBelongsToStore, getCreativeDetail, type CreativeDetail, type CreativeRow } from '@/lib/data/creatives'
 import { FREQUENCY_UNAVAILABLE, HOOK_RATE_UNAVAILABLE } from '@/lib/creativeSignal'
 import { formatDate, formatMoney, formatNumber, formatPct, formatRoas, formatWeekdayDate, plural } from '@/lib/format'
 import { EARLY_DAY_MINUTES } from '@/lib/views/verdict'
-import { AppShell, PageHeader } from '@/components/shell'
+import { AppShell, PageHeader, periodName } from '@/components/shell'
 import {
   Block, ButtonLink, Card, Count, DataTable, EmptyState, ErrorState, KpiCard, KpiGrid, Money, Pct,
   VerdictCard, type DataColumn, type DataRow,
@@ -26,7 +25,41 @@ import s from '@/components/campaigns/campaigns.module.css'
  * store with no spend in the period says so; another store's ad is a 404.
  */
 
-export const metadata: Metadata = { title: 'Criativo' }
+/** The ad id from the route; null when it is not a valid %-escape, which the
+ *  page answers with a 404 instead of a crash. */
+function adIdOf(raw: string | string[] | undefined): string | null {
+  const v = Array.isArray(raw) ? raw[0] : raw
+  if (!v) return null
+  try {
+    return decodeURIComponent(v) || null
+  } catch {
+    return null
+  }
+}
+
+const firstParam = (v: string | string[] | undefined): string | null => {
+  const t = (Array.isArray(v) ? v[0] : v)?.trim()
+  return t ? t : null
+}
+
+/**
+ * The tab title, and "Página não encontrada" whenever the page itself 404s:
+ * the same store getPageContext shows (an unknown ?loja is handled by
+ * pageMetadata), and an ad that store never had, whatever the window. A
+ * cheap EXISTS: pricing the detail here would double the page's work.
+ */
+export const generateMetadata = pageMetadata('Criativo', {
+  scope: 'store',
+  exists: async (params, sp) => {
+    const adId = adIdOf(params.id)
+    if (!adId) return false
+    const viewer = await getViewer()
+    if (!viewer) return true // the page redirects to /sign-in
+    const loja = firstParam(sp.loja)
+    const { store } = await resolveStore(viewer, loja && loja !== ALL_STORES ? loja : null)
+    return store ? adBelongsToStore(store.id, adId) : false
+  },
+})
 
 /** Meta's effective_status values, in words. An ad whose own status is ACTIVE
  *  but that does not run has its ad set or campaign paused. */
@@ -56,8 +89,8 @@ export default async function CreativePage({ params, searchParams }: {
   const [{ id }, sp] = await Promise.all([params, searchParams])
   const ctx = await getPageContext(sp, { scope: 'store' })
   const store = ctx.store
-  if (!store) notFound()
-  const adId = decodeURIComponent(id)
+  const adId = adIdOf(id)
+  if (!store || !adId) notFound()
   const backHref = ctx.hrefWith('/campaigns?aba=criativos')
 
   let detail: CreativeDetail | null
@@ -141,7 +174,7 @@ export default async function CreativePage({ params, searchParams }: {
       <PageHeader
         ctx={ctx}
         title={c.name}
-        sub={<>{ctx.period === 'custom' ? <b className="num">{ctx.rangeLabel}</b> : <><b>{ctx.periodLabel}</b> · <span className="num">{ctx.rangeLabel}</span></>} · criativo da {store.name}</>}
+        sub={<><b>{periodName(ctx)}</b> · <span className="num">{ctx.rangeLabel}</span> · criativo da {store.name}</>}
         actions={<ButtonLink href={backHref} size="sm" icon="camp">Todos os criativos</ButtonLink>}
       />
       <VerdictCard verdict={verdict} aside={aside} />
@@ -188,8 +221,15 @@ export default async function CreativePage({ params, searchParams }: {
 
           {detail.configured && detail.contributionRate !== null && (
             <Block title={ctx.split ? 'Lucro estimado por dia (sua parte)' : 'Lucro estimado por dia'} howTo="Barra acima da linha do zero = dia em que as vendas atribuídas, depois da margem da loja, pagaram o gasto do anúncio." info={detail.formula}>
+              {/* The whole day's estimate plus the split: the bars show the
+                  viewer's part, the tooltip's margin stays the whole day's
+                  (the split halves money, never ratios). The tooltip names
+                  what is plotted: an estimate over Meta-attributed sales, and
+                  Meta's credited purchases, which are not the store's orders. */}
               <DailyProfitBars
-                days={detail.daily.map(d => ({ date: d.date, profit: ctx.part(d.estimatedProfit ?? 0), revenue: d.purchaseValue, metaSpend: d.spend, orders: d.purchases }))}
+                days={detail.daily.map(d => ({ date: d.date, profit: d.estimatedProfit ?? 0, revenue: d.purchaseValue, metaSpend: d.spend, orders: d.purchases }))}
+                labels={{ profit: 'lucro estimado', wholeProfit: 'lucro estimado do dia', revenue: 'vendas atribuídas', orders: 'compras (Meta)' }}
+                share={ctx.splitFactor}
                 partialDate={ctx.partial ? ctx.today : null}
                 partialNote={ctx.partialLabel ?? undefined}
                 today={ctx.today}

@@ -63,6 +63,16 @@ describe('sourceLabel', () => {
     expect(sourceLabel('android-app://com.example.reader/')).toBe('App com.example.reader')
     expect(sourceLabel('Google')).toBe('Google')
   })
+  it('never returns an Object.prototype member for a visitor-controlled app package', () => {
+    // The Referer is the visitor's: __proto__ returned Object.prototype, an
+    // object rendered as a React child, which crashed the journey reader.
+    for (const pkg of ['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'valueOf']) {
+      const label = sourceLabel(`android-app://${pkg}/`)
+      expect(typeof label).toBe('string')
+      expect(label).toBe(`App ${pkg}`)
+    }
+    expect(sourceLabel('android-app://Constructor/')).toBe('App Constructor')
+  })
 })
 
 describe('liveThumbnail', () => {

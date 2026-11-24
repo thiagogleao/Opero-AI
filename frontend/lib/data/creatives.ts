@@ -312,10 +312,26 @@ export interface CreativeDetail {
 }
 
 /**
+ * Whether this store has ever had metrics for this ad, whatever the window:
+ * the one rule for "this ad is this store's". getCreativeDetail returns null
+ * without it, and the creative page's tab title (generateMetadata) asks it
+ * alone, so a 404 reads "Página não encontrada" without pricing anything.
+ */
+export async function adBelongsToStore(storeId: string, adId: string): Promise<boolean> {
+  if (!storeId || !adId) return false
+  const rows = await query<{ ok: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM fb_ad_daily_metrics WHERE tenant_id = $1 AND ad_id = $2) AS ok`,
+    [storeId, adId],
+  )
+  return rows[0]?.ok === true
+}
+
+/**
  * One ad of this store. Null when the store has never had metrics for this ad
- * (another store's ad reads as not found). An ad of this store with no spend
- * in the window returns hasSpend false and an all-empty series, so the page
- * can say "sem gasto neste período" instead of "não encontrado".
+ * (another store's ad reads as not found; adBelongsToStore). An ad of this
+ * store with no spend in the window returns hasSpend false and an all-empty
+ * series, so the page can say "sem gasto neste período" instead of "não
+ * encontrado".
  */
 export async function getCreativeDetail(
   store: StoreTz, adId: string, range: DateRange, opts: CreativesOptions = {},
@@ -323,12 +339,9 @@ export async function getCreativeDetail(
   const [facts, margin, owned] = await Promise.all([
     loadAdDayFacts(store.id, range, { adId }),
     opts.margin ? Promise.resolve(opts.margin) : loadStoreMargin(store.id, range, opts.now),
-    query<{ ok: boolean }>(
-      `SELECT EXISTS (SELECT 1 FROM fb_ad_daily_metrics WHERE tenant_id = $1 AND ad_id = $2) AS ok`,
-      [store.id, adId],
-    ),
+    adBelongsToStore(store.id, adId),
   ])
-  if (!owned[0]?.ok) return null
+  if (!owned) return null
   const info = await loadAdInfo([adId], opts.now)
   const campaignId = info.get(adId)?.campaignId ?? null
   const journeys = campaignId ? await loadCampaignJourneyStores([campaignId]) : new Map()
