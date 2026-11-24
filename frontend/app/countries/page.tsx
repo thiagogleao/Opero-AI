@@ -11,6 +11,8 @@ import { AppShell, PageHeader, PeriodNote } from '@/components/shell'
 import { Block, Callout, EmptyState, ErrorState, SkeletonBlock, VerdictCard } from '@/components/ui'
 import { HorizontalBars } from '@/components/charts'
 import { CountryTable, MetaCountries, coverageText } from '@/components/countries/CountryTables'
+import { metaElsewhereText } from '@/components/countries/metaEmpty'
+import { getSharedAdAccountsForStore } from '@/lib/attribution'
 import { CustomersByStore, CustomersSplit, FunnelBlock, LtvBlock, type StoreCustomers } from '@/components/countries/CustomerBlocks'
 import { buildCountriesVerdict } from '@/components/countries/countriesVerdict'
 import { countryCounts, foldCountryRows } from '@/components/countries/fold'
@@ -37,7 +39,7 @@ export default async function CountriesPage({ searchParams }: { searchParams: Pr
   const ctx = await getPageContext(searchParams)
   if (ctx.scope === 'all') return <AllStores ctx={ctx} />
   const store = ctx.store
-  const header = <PageHeader ctx={ctx} title={`Países e clientes · ${store?.name ?? ''}`} />
+  const header = <PageHeader ctx={ctx} title={`Países e clientes · ${store?.name ?? ''}`} halved={false} />
   if (!store) {
     return <AppShell ctx={ctx}>{header}<EmptyState icon="store" title="Nenhuma loja para mostrar" /></AppShell>
   }
@@ -60,7 +62,7 @@ export default async function CountriesPage({ searchParams }: { searchParams: Pr
   const [report, split, firstSale] = loaded as [CountryReport, CustomerSplit, Awaited<ReturnType<typeof loadFirstSale>>]
   const all = report.rows
   const rows = foldCountryRows(all, ROWS, report.totals.revenue)
-  const opt = ctx.storeOptions.find(o => o.id === store.id)
+  const opt = ctx.storeOption
   const verdict = buildCountriesVerdict({
     subjectOf: `da ${store.name}`, subjectIn: `na ${store.name}`, rows, counts: countryCounts(all), totals: report.totals,
     configured: report.configured, customers: split, rangeLabel: ctx.rangeLabel, periodPhrase: ctx.periodPhrase,
@@ -70,6 +72,11 @@ export default async function CountriesPage({ searchParams }: { searchParams: Pr
   const coverage = coverageText(report.meta)
   const nameOf = (id: string) => ctx.stores.find(x => x.id === id)?.name ?? null
   const metaShared = report.sharedLeftOut ? sharedLeftOutText(report.sharedLeftOut, nameOf, 'das colunas do Meta e da captura') : null
+  const sharedSpend = report.sharedLeftOut?.spend ?? 0
+  // Only a store with no Meta spend of its own asks where its ads are paid
+  // (CAMP HALLOW's run in EPOCH's account): the table then says so instead
+  // of blaming a missing Meta report.
+  const elsewhere = report.meta.totalSpend > 0 || sharedSpend > 0 ? null : await adsPaidElsewhere(store, ctx)
 
   return (
     <AppShell ctx={ctx}>
@@ -99,7 +106,7 @@ export default async function CountriesPage({ searchParams }: { searchParams: Pr
           {coverage && <span>{coverage}</span>}
         </> : undefined}
       >
-        <MetaCountries rows={rows} purchasesKnown rangeLabel={ctx.rangeLabel} />
+        <MetaCountries rows={rows} purchasesKnown rangeLabel={ctx.rangeLabel} metaSpend={report.meta.totalSpend} sharedSpend={sharedSpend} elsewhere={elsewhere} />
       </Block>
       <CustomersSplit split={split} today={ctx.today} rangeLabel={ctx.rangeLabel} />
       <div className={s.grid2}>
@@ -141,6 +148,19 @@ function CountryAside({ rows, totals, configured, rangeLabel }: { rows: CountryR
   )
 }
 
+/** Where the window's orders of this store came from ads paid in another
+ *  store's account, named only among the stores the viewer may see; null
+ *  when none (or when the lookup fails: the table then keeps the plain
+ *  "sem gasto" line). */
+async function adsPaidElsewhere(store: StoreRef, ctx: PageContext): Promise<string | null> {
+  const visible = new Map(ctx.stores.map(x => [x.id, x.name]))
+  const pairs = await getSharedAdAccountsForStore(store.id, ctx.range, visible)
+    .catch(err => { console.error('[countries] shared accounts', err); return [] })
+  return metaElsewhereText(pairs
+    .filter(p => p.salesStoreId === store.id && p.adStoreId !== store.id && visible.has(p.adStoreId))
+    .map(p => ({ name: p.adStoreName, orders: p.orders })))
+}
+
 async function StoreLtv({ store, today }: { store: StoreRef; today: string }) {
   const ltv = await getCustomerLtv(store).catch(err => { console.error('[countries] ltv', err); return null })
   if (!ltv) return <Block title="Valor do cliente (LTV)"><ErrorState compact /></Block>
@@ -172,7 +192,7 @@ function sumCountries(lists: CountryPnL[][]): (CountryPnL & { purchases: number 
 }
 
 async function AllStores({ ctx }: { ctx: PageContext }) {
-  const header = <PageHeader ctx={ctx} title="Países e clientes · todas as lojas" />
+  const header = <PageHeader ctx={ctx} title="Países e clientes · todas as lojas" halved={false} />
   const pnls = await computePnL(ctx.storeIds, ctx.range, { countries: true }, ctx.now)
     .catch(err => { console.error('[countries] all stores', err); return null })
   if (!pnls) {
@@ -222,7 +242,7 @@ async function AllStores({ ctx }: { ctx: PageContext }) {
         <CountryTable rows={rows} totals={totals} configured={configured} rangeLabel={ctx.rangeLabel} storesLabel={excludedNames.length ? 'das lojas com custos' : 'das lojas'} />
       </Block>
       <Block title="Gasto no Meta por país" eyebrow="Atribuído pelo Meta" howTo={`${CAVEAT_LINE}${metaLeftOut.length ? ` Sem ${metaLeftOut.join(', ')} (custos não configurados).` : ''}`} flush>
-        <MetaCountries rows={rows} purchasesKnown={false} rangeLabel={ctx.rangeLabel} />
+        <MetaCountries rows={rows} purchasesKnown={false} rangeLabel={ctx.rangeLabel} metaSpend={totals.metaSpend} />
       </Block>
       <Suspense fallback={<SkeletonBlock lines={5} height={160} />}>
         <AllCustomers stores={ctx.selected} rangeLabel={ctx.rangeLabel} ctx={ctx} />

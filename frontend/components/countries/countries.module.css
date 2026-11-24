@@ -16,7 +16,10 @@
 
 /* Funnel */
 .steps { display: flex; flex-direction: column; gap: 2px; }
-.step { display: grid; grid-template-columns: 170px minmax(0, 1fr) 110px 120px; gap: 12px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); font-size: 13px; }
+/* The rate column fits "40,6% da etapa anterior" (~132px): at 120px it ran
+   into the card's padding. Fixed, not auto: every row's bar track must have
+   the same width for the bars to compare. */
+.step { display: grid; grid-template-columns: 170px minmax(0, 1fr) 110px 150px; gap: 12px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); font-size: 13px; }
 .step:first-child { border-top: 0; }
 .stepName { color: var(--tx); }
 .stepTrack { height: 10px; border-radius: 3px; background: var(--hover); overflow: hidden; }
@@ -40,12 +43,24 @@
    1000px "% das vendas" folds under Receita. A marker class in the header and
    every cell picks the column (DataTable takes no class per column). */
 .tableBox { container-type: inline-size; min-width: 0; }
-.tableBox th, .wrapHeads th { white-space: normal; }
+.tableBox th { white-space: normal; }
 .colShare { display: contents; }
 .inline { display: none; }
 @container (max-width: 999px) {
   .tableBox th:has(.colShare), .tableBox td:has(.colShare) { display: none; }
   .inline { display: block; margin-top: 2px; font: 400 11.5px/1.3 var(--sans); color: var(--tx-3); white-space: nowrap; letter-spacing: 0; }
 }
-.wrapHeads { min-width: 0; }
-.wrapHeads .cName { white-space: nowrap; }
+/* Clientes por loja ("Todas"): ~934px with every column, 906px of box at 1024.
+   Headers wrap and store names stay on one line; below 1000px of box "Sem
+   cadastro" folds under Pedidos (a store's guests, when it has any, or one
+   line under the table when no store had any). */
+.custBox { container-type: inline-size; min-width: 0; }
+.custBox th { white-space: normal; }
+.custBox .cName { white-space: nowrap; }
+.colGuest { display: contents; }
+.inlineGuest, .guestNote { display: none; }
+@container (max-width: 999px) {
+  .custBox th:has(.colGuest), .custBox td:has(.colGuest) { display: none; }
+  .inlineGuest { display: block; margin-top: 2px; font: 400 11.5px/1.3 var(--sans); color: var(--tx-3); white-space: nowrap; letter-spacing: 0; }
+  .guestNote { display: block; padding: 8px 18px 12px; font-size: 12px; color: var(--tx-3); border-top: 1px solid var(--line); }
+}

@@ -76,6 +76,22 @@ describe('buildCountriesVerdict', () => {
     expect(v.chips[0].label).toBe('US: 85% das vendas')
   })
 
+  it('says "todos" only of several countries (Hibikura sells to Japan alone)', () => {
+    const jp = [row('JP', 6, 600, 400)].map(r => ({ ...r, revenueShare: 100 }))
+    const v = buildCountriesVerdict({ ...base, rows: jp, counts: { withOrders: 1, small: 1 }, customers: null, totals: { revenue: 600, orders: 6, contribution: 400 } as PnL })
+    expect(v.chips.map(c => c.label)).toContain('Menos de 30 pedidos')
+    expect(v.chips.map(c => c.label).join(' ')).not.toMatch(/Todos/)
+    expect(v.details[0].text).toBe('Vendeu para 1 país, com menos de 30 pedidos — amostra pequena para decidir por país.')
+    // Several small countries keep "todos".
+    const two = [row('US', 5, 500, 300), row('CA', 2, 200, 120)].map(r => ({ ...r, revenueShare: r.revenue / 7 }))
+    const w = buildCountriesVerdict({ ...base, rows: two, counts: { withOrders: 2, small: 2 }, customers: null, totals: { revenue: 700, orders: 7, contribution: 420 } as PnL })
+    expect(w.chips.map(c => c.label)).toContain('Todos com menos de 30 pedidos')
+    expect(w.details[0].text).toBe('Vendeu para 2 países; todos com menos de 30 pedidos — amostra pequena para decidir por país.')
+    // One big country: no sample warning at all.
+    const big = buildCountriesVerdict({ ...base, rows: [row('JP', 40, 4000, 2600)].map(r => ({ ...r, revenueShare: 100 })), counts: { withOrders: 1, small: 0 }, customers: null, totals: { revenue: 4000, orders: 40, contribution: 2600 } as PnL })
+    expect(big.details[0].text).toBe('Vendeu para 1 país.')
+  })
+
   it('says there were no orders instead of a fake $0', () => {
     const v = buildCountriesVerdict({ ...base, rows: [], counts: { withOrders: 0, small: 0 }, customers: null, totals: { revenue: 0, orders: 0, contribution: 0 } as PnL })
     expect(v.amount).toBeNull()

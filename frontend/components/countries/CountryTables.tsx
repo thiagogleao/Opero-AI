@@ -13,6 +13,7 @@ import type { CountryRow } from '@/lib/data/countries'
 import type { PnL } from '@/lib/engine/pnl'
 import { Badge, Count, DataTable, EmptyState, Money, Pct, type DataColumn, type DataRow } from '@/components/ui'
 import { formatMoney, formatPct, plural } from '@/lib/format'
+import { metaCountriesEmpty } from './metaEmpty'
 import s from './countries.module.css'
 
 function CountryCell({ row }: { row: CountryRow }) {
@@ -96,9 +97,12 @@ export function CountryTable({ rows, totals, configured, rangeLabel, storesLabel
   )
 }
 
-export function MetaCountries({ rows, purchasesKnown, rangeLabel }: {
+export function MetaCountries({ rows, purchasesKnown, rangeLabel, metaSpend, sharedSpend = 0, elsewhere = null }: {
   rows: CountryRow[]; purchasesKnown: boolean; rangeLabel: string
+  /** See ./metaEmpty metaCountriesEmpty. */
+  metaSpend: number; sharedSpend?: number; elsewhere?: string | null
 }) {
+  const empty = metaCountriesEmpty({ metaSpend, sharedSpend, elsewhere })
   const withMeta = rows.filter(r => r.meta.spend > 0 || r.meta.purchases > 0)
   const columns: DataColumn[] = [
     { key: 'country', label: 'País' },
@@ -134,7 +138,7 @@ export function MetaCountries({ rows, purchasesKnown, rangeLabel }: {
       rows={data}
       initialSort={{ key: 'spend', dir: 'desc' }}
       dense
-      empty={<EmptyState compact title="Sem divisão por país do Meta neste período">O Meta não entregou o detalhamento por país para estas datas.</EmptyState>}
+      empty={<EmptyState compact title={empty.title}>{empty.body}</EmptyState>}
     />
   )
 }

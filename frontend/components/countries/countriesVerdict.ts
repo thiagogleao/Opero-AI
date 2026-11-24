@@ -109,10 +109,16 @@ export function buildCountriesVerdict(input: {
     ? { code: 'margem_fina', label: `${top.name}: ${pct0(top.revenueShare)} das vendas`, tone: 'info', icon: 'diamond' }
     : { code: 'margem_fina', label: `Vendas espalhadas: maior país com ${pct0(top.revenueShare)}`, tone: 'info', icon: 'diamond' }
   chips.splice(chips.filter(c => c.code === 'sem_custos').length, 0, concentration)
-  if (small === countryCount) chips.push({ code: 'poucos_pedidos', label: `Todos com menos de ${SMALL_SAMPLE} pedidos`, tone: 'warn', icon: 'alert' })
+  // "Todos" only of several countries: Hibikura sells to Japan alone, and
+  // "Vendeu para 1 país; todos com menos de 30 pedidos" read as a crowd.
+  const one = countryCount === 1
+  if (small === countryCount) {
+    chips.push({ code: 'poucos_pedidos', label: one ? `Menos de ${SMALL_SAMPLE} pedidos` : `Todos com menos de ${SMALL_SAMPLE} pedidos`, tone: 'warn', icon: 'alert' })
+  }
 
+  const sample = ` com menos de ${SMALL_SAMPLE} pedidos — amostra pequena para decidir por país.`
   details.push(line(`Vendeu para ${plural(countryCount, 'país', 'países')}`,
-    small ? `; ${small === countryCount ? 'todos' : `${small} deles`} com menos de ${SMALL_SAMPLE} pedidos — amostra pequena para decidir por país.` : '.'))
+    !small ? '.' : one ? `,${sample}` : `; ${small === countryCount ? 'todos' : `${small} deles`}${sample}`))
   if (input.customers && input.customers.orders > 0) {
     const mix = customerMixShares(input.customers)
     details.push(line({ text: mix.returning, strong: true }, ' dos pedidos foram recompra, ',

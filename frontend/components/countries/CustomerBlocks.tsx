@@ -118,11 +118,17 @@ export function CustomersByStore({ stores, rangeLabel }: { stores: StoreCustomer
     { key: 'orders', label: 'Pedidos', numeric: true, sortable: true },
     { key: 'new', label: 'Novos', numeric: true, sortable: true },
     { key: 'returning', label: 'Recompra', numeric: true, sortable: true },
-    { key: 'guest', label: 'Sem cadastro', numeric: true, sortable: true },
+    // Folds under Pedidos below ~1000px of table box (countries.module.css,
+    // container query): at 1024 the 8 columns needed ~934px of a 906px box
+    // and "Voltaram (histórico)" sat cut behind a scrollbar.
+    { key: 'guest', label: <span className={s.colGuest}>Sem cadastro</span>, numeric: true, sortable: true },
     { key: 'repeat', label: '% recompra', numeric: true, sortable: true, info: 'Pedidos de recompra ÷ pedidos com cliente identificado, no período.' },
     { key: 'ltv', label: 'LTV médio (histórico)', numeric: true, sortable: true, info: 'Tudo o que cada cliente comprou desde o primeiro pedido guardado, contado dos pedidos.' },
     { key: 'back', label: 'Voltaram (histórico)', numeric: true, sortable: true },
   ]
+  // With the column folded, a store's guests show under its orders; when no
+  // store had any, one line says so instead of seven empty notes.
+  const noGuests = stores.every(st => !st.split || st.split.guestOrders === 0)
   const rows: DataRow[] = stores.map(st => {
     const sp = st.split, l = st.ltv
     return {
@@ -130,10 +136,10 @@ export function CustomersByStore({ stores, rangeLabel }: { stores: StoreCustomer
       tone: sp && sp.orders > 0 ? undefined : 'mut',
       cells: {
         store: <span className={s.cName}>{st.name}</span>,
-        orders: <Count value={sp?.orders ?? null} />,
+        orders: <><Count value={sp?.orders ?? null} />{sp && sp.guestOrders > 0 && <span className={s.inlineGuest}>{formatCount(sp.guestOrders)} sem cadastro</span>}</>,
         new: <Count value={sp?.newOrders ?? null} />,
         returning: <Count value={sp?.returningOrders ?? null} />,
-        guest: <Count value={sp?.guestOrders ?? null} />,
+        guest: <span className={s.colGuest}><Count value={sp?.guestOrders ?? null} /></span>,
         repeat: <Pct value={sp?.repeatOrderPct ?? null} />,
         ltv: <Money value={l?.avgLtv ?? null} />,
         back: <Pct value={l?.repeatCustomerPct ?? null} />,
@@ -151,10 +157,11 @@ export function CustomersByStore({ stores, rangeLabel }: { stores: StoreCustomer
       info={'"Novo" = primeiro pedido do cliente nos pedidos que o Opero guardou de cada loja (as lojas começaram a ser coletadas em datas diferentes).'}
       flush
     >
-      {/* Long headers ("LTV médio (histórico)") wrap instead of pushing the
-          last column behind a scrollbar at 1024px. */}
-      <div className={s.wrapHeads}>
+      {/* Long headers ("LTV médio (histórico)") wrap; in a narrow box "Sem
+          cadastro" folds under Pedidos, so every column shows at 1024px. */}
+      <div className={s.custBox}>
         <DataTable caption="Clientes por loja" columns={columns} rows={rows} initialSort={{ key: 'orders', dir: 'desc' }} dense />
+        {noGuests && <p className={s.guestNote}>Nenhum pedido sem cadastro em {rangeLabel}.</p>}
       </div>
     </Block>
   )
