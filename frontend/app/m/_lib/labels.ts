@@ -6,6 +6,31 @@
 import type { LiveOrderItem } from '@/lib/views/portfolio'
 import { shiftDate, todayInTz } from '@/lib/engine/dates'
 import { formatDate, formatTimeInTz } from '@/lib/format'
+import type { CampaignAction } from '@/lib/campaignSignal'
+import { BELOW_BREAK_EVEN_LABEL, type Signal } from '@/lib/creativeSignal'
+import type { AlertDelivery } from '@/lib/alerts'
+// The desktop's chips (Campanhas, Criativos; a pure module): one campaign or
+// ad reads the same word with the same icon and tone on both screens.
+import { ACTION_CHIP, SIGNAL_CHIP, type ChipSpec } from '@/components/campaigns/text'
+
+/** A campaign's action chip, the desktop's (ACTION_CHIP). */
+export function campaignChip(action: CampaignAction, label: string | null): ChipSpec {
+  return { ...ACTION_CHIP[action], label: label ?? ACTION_CHIP[action].label }
+}
+
+/**
+ * One ad's chip from the server's word (lib/creativeSignal signalLabel): an
+ * 'ok' ad at or above its break-even reads "Manter" with a check; below it
+ * (too little spend to cut, or above the cut line) "Abaixo do empate" with a
+ * neutral ring — a check there would read as approval beside a red estimated
+ * loss. components/campaigns/text adSignalChip draws the desktop chip the
+ * same way, from the same signalLabel.
+ */
+export function creativeChip(signal: Signal, label: string | null): ChipSpec {
+  const word = label ?? SIGNAL_CHIP[signal].label
+  if (word === BELOW_BREAK_EVEN_LABEL) return { label: word, tone: 'neu', icon: 'ring' }
+  return { ...SIGNAL_CHIP[signal], label: word }
+}
 
 export interface FeedLine {
   /** First product with ITS OWN quantity: "2× HIBACHI ZERO 専用リモコン". May be cut. */
@@ -58,7 +83,40 @@ const ALERT_KIND_LABEL: Record<string, string> = {
  */
 export function alertRowTitle(kind: string, title: string | null): string {
   const t = title?.trim()
-  return t ? ptNumbers(t) : ALERT_KIND_LABEL[kind] || 'Alerta'
+  return t ? ptNumbers(t) : (Object.hasOwn(ALERT_KIND_LABEL, kind) ? ALERT_KIND_LABEL[kind] : 'Alerta')
+}
+
+const devicesWord = (n: number) => `${n} ${n === 1 ? 'aparelho' : 'aparelhos'}`
+
+/**
+ * What one fired alert reached, for its row in the alerts sheet: a row is a
+ * once-a-day claim, not a receipt (production kept 10 claims with no device
+ * subscribed, and the sheet called them "Enviados"). Rows written before the
+ * count was stored say so instead of guessing.
+ */
+export function alertDeliveryText(d: AlertDelivery): string {
+  switch (d.state) {
+    case 'delivered': return `entregue a ${devicesWord(d.devices)}`
+    case 'not_delivered':
+      if (!d.keys) return 'não entregue: sem chave de push neste servidor'
+      if (d.subscribed === 0) return 'não entregue: nenhum aparelho inscrito'
+      return `não entregue: ${d.subscribed === 1 ? 'o aparelho inscrito recusou' : `os ${devicesWord(d.subscribed)} inscritos recusaram`}`
+    case 'sending': return 'enviando…'
+    case 'interrupted': return 'envio interrompido, entrega desconhecida'
+    case 'unknown': return 'envio antigo, entrega desconhecida'
+  }
+}
+
+/**
+ * Why nothing can arrive right now, for the top of the alerts sheet and the
+ * test button; null when pushes can be delivered. A server without VAPID keys
+ * reads 0 devices whatever is subscribed: "nenhum aparelho inscrito" sent the
+ * owner to subscribe a phone that could not have received anything.
+ */
+export function pushBlockedText(info: { pushKeys?: boolean; devices: number }): string | null {
+  if (info.pushKeys === false) return 'Sem chave de push neste servidor (VAPID): os alertas são avaliados, mas nenhum pode ser enviado.'
+  if (info.devices === 0) return 'Nenhum aparelho inscrito: os alertas são avaliados, mas não chegam a lugar nenhum.'
+  return null
 }
 
 /**

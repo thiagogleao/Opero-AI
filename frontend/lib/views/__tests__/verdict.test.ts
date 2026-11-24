@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { sumPnL, type PnL, type PnLLines } from '../../engine/pnl'
 import {
-  buildVerdict, comparisonPhrase, comparisonText, isIdle, judgedStores, perDollarLine, periodPhrase, roasSummary, storeStatus, sumTotals,
+  buildVerdict, comparisonPhrase, comparisonText, isIdle, judgedStores, perDollarLine, periodPhrase, roasSummary, storeStatus, storeStatusChips, sumTotals,
   type VerdictInput, type VerdictStore,
 } from '../verdict'
 import { formatRoas } from '../../format'
@@ -700,5 +700,61 @@ describe('perDollarLine', () => {
       period: 'lastmonth', range: { from: '2026-10-01', to: '2026-10-31' }, today: '2026-11-18', anchorTimezone: 'America/Sao_Paulo', comparison: null,
     })
     expect(v.details[0].text).toBe('Sobrou menos de 1 centavo de cada dólar vendido.')
+  })
+})
+
+// ─── No cost settings, ads above sales (regression) ───────────────────────────
+// Glooty has no cost settings: its row read only "custos não configurados"
+// while its ads cost more than it sold, and the phone's Atenção skipped it on
+// a running day. Revenue below ad spend is a loss whatever the products cost
+// (adsAboveSales): the row says "no prejuízo", the settings come second.
+describe('a store without cost settings whose ads passed its sales', () => {
+  const GLOOTY_DAY = pnl({ revenue: 39.9, orders: 1, units: 1, metaSpend: 112.4 })
+  const row = (totals: PnL, over: Partial<VerdictStore> = {}) => store({
+    id: 'g', name: 'Glooty', timezone: 'America/Belem', configured: false, totals,
+    partial: true, minutesCovered: 855, dayState: 'running', ...over,
+  })
+  const day = (s: VerdictStore): VerdictInput => ({
+    stores: [s], period: 'today', range: { from: '2026-11-18', to: '2026-11-18' }, today: '2026-11-18',
+    anchorTimezone: 'America/Belem', comparison: null,
+  })
+
+  it('a running day past 04h reads "no prejuízo", even with 1 order, and keeps the settings chip second', () => {
+    const r = row(GLOOTY_DAY)
+    expect(storeStatus(r).code).toBe('prejuizo')
+    expect(storeStatusChips(r).map(c => c.label)).toEqual(['no prejuízo', 'custos não configurados'])
+    // The verdict on the same store says the same.
+    const v = buildVerdict(day(r))
+    expect(v.early).toBe(false)
+    expect(v.chips.map(c => c.code)).toEqual(['prejuizo', 'sem_custos', 'parcial'])
+  })
+
+  it('a closed window too (7 dias)', () => {
+    const r = row(pnl({ revenue: 156.30, orders: 2, metaSpend: 374.42 }), { partial: false, minutesCovered: 1440, dayState: 'complete' })
+    expect(storeStatus(r, { singleDay: false }).code).toBe('prejuizo')
+    expect(storeStatusChips(r, { singleDay: false }).map(c => c.code)).toEqual(['prejuizo', 'sem_custos'])
+  })
+
+  it('before 04h it stays "custos não configurados", as the verdict stays "cedo demais"', () => {
+    const r = row(GLOOTY_DAY, { minutesCovered: 200 })
+    expect(storeStatus(r).code).toBe('sem_custos')
+    expect(storeStatusChips(r)).toHaveLength(1)
+    expect(buildVerdict(day(r)).chips[0].code).toBe('cedo')
+  })
+
+  it('sales above the ads: only "custos não configurados" (nothing to judge without costs)', () => {
+    const r = row(pnl({ revenue: 900, orders: 12, metaSpend: 300 }))
+    expect(storeStatus(r).code).toBe('sem_custos')
+    expect(storeStatusChips(r).map(c => c.label)).toEqual(['custos não configurados'])
+  })
+
+  it('no order at all with spend: "no prejuízo" first, the settings second', () => {
+    expect(storeStatusChips(row(pnl({ metaSpend: 64.18 }))).map(c => c.code)).toEqual(['prejuizo', 'sem_custos'])
+    expect(storeStatusChips(row(pnl({}))).map(c => c.code)).toEqual(['sem_vendas', 'sem_custos'])
+  })
+
+  it('a store with cost settings gets one chip', () => {
+    const r = store({ id: 'm', name: 'MOKOO', totals: MOKOO_7D })
+    expect(storeStatusChips(r, { singleDay: false }).map(c => c.code)).toEqual(['margem_fina'])
   })
 })

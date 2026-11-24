@@ -16,21 +16,15 @@ import {
 import { HorizontalBars, MiniBars } from '@/components/charts'
 import { formatCount, formatMoney, formatPct, formatRangeLabel, formatRelativeTime, formatRoas, plural } from '@/lib/format'
 import type { CampaignAction } from '@/lib/campaignSignal'
-import type { Signal } from '@/lib/creativeSignal'
+import { sharedLeftOutText } from '@/components/countries/sharedText'
 import type {
   CampaignsDetail, CountriesDetail, CreativesDetail, CustomersDetail, DetailSection, MobileDetailResponse, ProductsDetail,
 } from '@/lib/views/mobileDetail'
 import { TABS, type Selection } from '../_lib/selection'
 import { useDetail } from '../_lib/useMobileData'
+import { campaignChip, creativeChip } from '../_lib/labels'
 import { StoreName } from './Home'
 import s from '../m.module.css'
-
-const ACTION_CHIP: Record<CampaignAction, { tone: 'pos' | 'neg' | 'neu' | 'info'; icon: 'up' | 'down' | 'ring' | 'clock' }> = {
-  escalar: { tone: 'pos', icon: 'up' }, cortar: { tone: 'neg', icon: 'down' }, manter: { tone: 'neu', icon: 'ring' }, observar: { tone: 'info', icon: 'clock' },
-}
-const SIGNAL_CHIP: Record<Signal, { tone: 'pos' | 'neg' | 'neu' | 'warn'; icon: 'up' | 'down' | 'ring' | 'swap' }> = {
-  scale: { tone: 'pos', icon: 'up' }, kill: { tone: 'neg', icon: 'down' }, refresh: { tone: 'warn', icon: 'swap' }, ok: { tone: 'neu', icon: 'ring' },
-}
 
 export function DetailTabs({ sel, aba, onTab, forceSignal, pollSignal, homeRange, now, scopeName }: {
   sel: Selection
@@ -193,6 +187,10 @@ function Thumb({ src, noReferrer }: { src: string | null; noReferrer?: boolean }
   return <img src={src} alt="" className={s.thumb} loading="lazy" referrerPolicy={noReferrer ? 'no-referrer' : undefined} onError={() => setFailed(src)} />
 }
 
+function ChipOf({ spec }: { spec: ReturnType<typeof creativeChip> }) {
+  return <Chip tone={spec.tone} icon={spec.icon} size="sm">{spec.label}</Chip>
+}
+
 function useMore(total: number, first = 10) {
   const [all, setAll] = useState(false)
   return { limit: all ? total : first, all, toggle: () => setAll(v => !v), needed: total > first }
@@ -249,7 +247,7 @@ function Campaigns({ d }: { d: CampaignsDetail }) {
                 </span>
                 <span className={s.rowVal}>
                   {c.action
-                    ? <Chip tone={ACTION_CHIP[c.action].tone} icon={ACTION_CHIP[c.action].icon} size="sm">{c.actionLabel}</Chip>
+                    ? <ChipOf spec={campaignChip(c.action, c.actionLabel)} />
                     : <Chip tone="mut" size="sm">sem ação</Chip>}
                   {c.estimatedProfit !== null
                     ? <><b><Money value={c.estimatedProfit} sign /></b><small>lucro estimado</small></>
@@ -322,7 +320,7 @@ function Creatives({ d }: { d: CreativesDetail }) {
                 </span>
                 <span className={s.rowVal}>
                   {c.signal
-                    ? <Chip tone={SIGNAL_CHIP[c.signal].tone} icon={SIGNAL_CHIP[c.signal].icon} size="sm">{c.signalLabel}</Chip>
+                    ? <ChipOf spec={creativeChip(c.signal, c.signalLabel)} />
                     : <Chip tone="mut" size="sm">sem veredito</Chip>}
                   {c.estimatedProfit !== null && <><b><Money value={c.estimatedProfit} sign /></b><small>lucro estimado</small></>}
                 </span>
@@ -396,7 +394,18 @@ function Countries({ d }: { d: CountriesDetail }) {
       info={<>{d.notes.map((n, i) => <p key={i} style={{ marginTop: i ? 6 : 0 }}>{n}</p>)}</>}
       flush={d.countries.length > 0}
       // The Meta caveat is about comparing columns: noise under "Nenhum pedido".
-      footer={d.countries.length === 0 ? undefined : `${d.meta.caveat}${d.meta.coveragePct !== null && d.meta.coveragePct < 95 ? ` A divisão do Meta cobre ${formatPct(d.meta.coveragePct, { digits: 0 })} do gasto.` : ''}`}
+      footer={d.countries.length === 0 ? undefined : <>
+        <span>{d.meta.caveat}{d.meta.coveragePct !== null && d.meta.coveragePct < 95 ? ` A divisão do Meta cobre ${formatPct(d.meta.coveragePct, { digits: 0 })} do gasto.` : ''}</span>
+        {/* CAMP HALLOW's campaigns on EPOCH's account are out of EPOCH's Meta
+            columns (lib/data/countries): said with the amounts, as the
+            desktop says it, so a lower "dos pedidos reais" is not a mystery. */}
+        {(d.sharedLeftOut ?? []).map(lo => (
+          <span key={lo.storeId}>
+            {d.stores.length > 1 && <b>{lo.store}: </b>}
+            {sharedLeftOutText(lo, id => lo.salesStores.find(x => x.id === id)?.name ?? null, 'das colunas do Meta e da captura')}
+          </span>
+        ))}
+      </>}
     >
       {d.countries.length === 0 ? (
         <EmptyState compact icon="globe" title="Nenhum pedido no período" />

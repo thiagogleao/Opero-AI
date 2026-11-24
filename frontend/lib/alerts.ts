@@ -1,5 +1,5 @@
 import { query } from './db'
-import { pushDeviceCount, sendPushToAll, type PushKind } from './push'
+import { pushDeviceCount, pushKeysConfigured, sendPushToAll, type PushKind, type PushResult } from './push'
 import { listStores, type StoreRef } from './access'
 import { computePnL, type PnL } from './engine/pnl'
 import { REFERENCE_TZ, minutesIntoDay, safeTz, shiftDate, todayInTz } from './engine/dates'
@@ -180,20 +180,40 @@ async function activeStores(): Promise<StoreRef[]> {
 /**
  * Claim an alert for a day. False when it was already claimed — the unique
  * index does the work, so two overlapping scheduler passes cannot both win.
+ *
+ * The claim is written with `delivered: null` (being sent); deliver() then
+ * records what the push reached (recordDelivery). A claim whose push reached
+ * nobody (`delivered: 0`) can be taken again, so the alert still fires once a
+ * device is registered, and meanwhile the alerts sheet says it was not
+ * delivered instead of listing it as sent. Rows written before the count was
+ * stored have no `delivered` key and stay claimed (deliveryOf: unknown).
  */
-async function claim(kind: string, key: string, day: string, payload: unknown): Promise<boolean> {
+async function claim(kind: string, key: string, day: string, payload: Record<string, unknown>): Promise<boolean> {
   const rows = await query<{ id: string }>(
     `INSERT INTO alert_events (kind, tenant_id, day, payload)
      VALUES ($1, $2, $3::date, $4::jsonb)
-     ON CONFLICT (kind, tenant_id, day) DO NOTHING
+     ON CONFLICT (kind, tenant_id, day) DO UPDATE
+        SET payload = EXCLUDED.payload, sent_at = now()
+      WHERE alert_events.payload->>'delivered' = '0'
      RETURNING id`,
-    [kind, key, day, JSON.stringify(payload ?? {})],
+    [kind, key, day, JSON.stringify({ ...payload, delivered: null })],
   )
   return rows.length > 0
 }
 
-/** Undo a claim whose push reached nobody, so it can still fire once a device
- *  is registered instead of being silently spent for the day. */
+/** Store on the claim what its push reached (devices that accepted it, how
+ *  many were on file, whether this server had a push key), for the sheet. */
+async function recordDelivery(kind: string, key: string, day: string, res: PushResult, extra: Record<string, unknown> = {}): Promise<void> {
+  const fields = { ...extra, delivered: res.sent, devices: res.devices, keys: pushKeysConfigured() }
+  await query(
+    `UPDATE alert_events SET payload = COALESCE(payload, '{}'::jsonb) || $4::jsonb
+      WHERE kind = $1 AND tenant_id = $2 AND day = $3::date`,
+    [kind, key, day, JSON.stringify(fields)],
+  )
+}
+
+/** Undo a claim when nothing went out at all (the send or the summary threw,
+ *  or there was nothing to send), so an error does not spend the day. */
 async function release(kind: string, key: string, day: string): Promise<void> {
   await query(`DELETE FROM alert_events WHERE kind = $1 AND tenant_id = $2 AND day = $3::date`, [kind, key, day])
 }
@@ -349,16 +369,26 @@ export async function loadAlertInputs(stores: StoreRef[], now: Date = new Date()
 
 interface RunOpts { force?: boolean; dryRun?: boolean }
 
-/** Send one push under a once-per-day claim; release the claim when nobody
- *  received it. Returns devices reached (0 also when the claim was lost). */
+/** Send one push under a once-per-day claim and record on the claim what it
+ *  reached (one that reached nobody can be taken again: see claim()).
+ *  Returns devices reached (0 also when the claim was lost). */
 async function deliver(
   claimKind: string, claimKey: string, day: string,
   push: { title: string; body: string; url: string; tag: string; kind: PushKind; data: Record<string, unknown> },
   opts: RunOpts,
 ): Promise<number> {
   if (!opts.force && !(await claim(claimKind, claimKey, day, { title: push.title }))) return 0
-  const res = await sendPushToAll(push)
-  if (res.sent === 0 && !opts.force) await release(claimKind, claimKey, day)
+  let res: PushResult
+  try {
+    res = await sendPushToAll(push)
+  } catch (err) {
+    if (!opts.force) await release(claimKind, claimKey, day).catch(() => {})
+    throw err
+  }
+  if (!opts.force) {
+    await recordDelivery(claimKind, claimKey, day, res)
+      .catch(err => console.error('[alerts] could not record the delivery of', claimKind, claimKey, err))
+  }
   return res.sent
 }
 
@@ -561,6 +591,8 @@ export async function sendDailySummary(opts: RunOpts = {}): Promise<SummaryResul
     if (!opts.force && !(await claim('daily_summary', '*', day, { hour: cfg.dailySummary.hour }))) return none
   }
 
+  let summary: DailySummary
+  let res: PushResult
   try {
     const stores = await activeStores()
     if (!stores.length) {
@@ -569,25 +601,76 @@ export async function sendDailySummary(opts: RunOpts = {}): Promise<SummaryResul
     }
     const view = await buildPortfolio(stores, 'today', null, null, new Date(),
       { liveFeed: false, chargebackHealth: false, freshness: false })
-    const summary = summaryText(view.totals, view.comparison.totals, view.stores, view.comparison.sameTimeOfDay)
+    summary = summaryText(view.totals, view.comparison.totals, view.stores, view.comparison.sameTimeOfDay)
     if (opts.dryRun) return { sent: false, delivered: 0, summary }
 
-    const res = await sendPushToAll({
+    res = await sendPushToAll({
       title: summary.title, body: summary.body, url: '/m', kind: 'summary',
       tag: `daily-summary-${day}`,
       data: { kind: 'daily_summary', profit: summary.profit },
     })
-    if (res.sent === 0 && !opts.force) await release('daily_summary', '*', day)
-    console.log(`[alerts] daily summary for ${day}: profit ${summary.profit.toFixed(2)}, ${res.sent} device(s)`)
-    return { sent: res.sent > 0, delivered: res.sent, summary }
   } catch (err) {
     // A claim whose summary never went out must not block the day.
     if (!opts.dryRun && !opts.force) await release('daily_summary', '*', day).catch(() => {})
     throw err
   }
+  // Its title too: the sheet shows the summary's own line, not only its kind.
+  // One that reached nobody stays re-claimable (claim()).
+  if (!opts.force) {
+    await recordDelivery('daily_summary', '*', day, res, { title: summary.title })
+      .catch(err => console.error('[alerts] could not record the daily summary delivery', err))
+  }
+  console.log(`[alerts] daily summary for ${day}: profit ${summary.profit.toFixed(2)}, ${res.sent} device(s)`)
+  return { sent: res.sent > 0, delivered: res.sent, summary }
 }
 
 // ─── API shapes (GET/POST /api/mobile/alerts) ─────────────────────────────────
+
+/**
+ * What a recorded alert reached, read from its alert_events payload
+ * (deliveryOf). A row is a once-a-day claim, not a receipt: production kept
+ * claims while no device was subscribed (10 rows, 0 subscriptions) and the
+ * sheet listed them as "Enviados".
+ */
+export type AlertDelivery =
+  /** Accepted by `devices` devices. */
+  | { state: 'delivered'; devices: number }
+  /** Reached nobody: `subscribed` devices were on file (all refused, or none);
+   *  `keys` false when this server had no VAPID key to send with. */
+  | { state: 'not_delivered'; subscribed: number; keys: boolean }
+  /** Claimed a moment ago, the push still going out. */
+  | { state: 'sending' }
+  /** Claimed, but the send never reported back (the process stopped). */
+  | { state: 'interrupted' }
+  /** Written before the count was stored: what it reached is not known. */
+  | { state: 'unknown' }
+
+/** A claim still "being sent" after this long never reported back. */
+const SENDING_GRACE_MS = 10 * 60_000
+
+/** "2026-11-18 16:29:21.37+00" (Postgres text) → a Date; null when unparseable. */
+function pgTime(v: string | Date | null): Date | null {
+  if (v === null) return null
+  const d = v instanceof Date ? v : new Date(v.trim().replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'))
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
+/** The delivery of one alert_events row, from its payload. Pure. */
+export function deliveryOf(payload: unknown, sentAt: string | Date | null = null, now: Date = new Date()): AlertDelivery {
+  if (!isObj(payload) || !('delivered' in payload)) return { state: 'unknown' }
+  const d = payload.delivered
+  if (d === null) {
+    const at = pgTime(sentAt)
+    return at && now.getTime() - at.getTime() > SENDING_GRACE_MS ? { state: 'interrupted' } : { state: 'sending' }
+  }
+  if (!finite(d) || d < 0) return { state: 'unknown' }
+  if (d > 0) return { state: 'delivered', devices: d }
+  return {
+    state: 'not_delivered',
+    subscribed: finite(payload.devices) && payload.devices >= 0 ? payload.devices : 0,
+    keys: payload.keys !== false,
+  }
+}
 
 export interface AlertEventRow {
   kind: string
@@ -596,21 +679,59 @@ export interface AlertEventRow {
   store: string | null
   /** The store-day the alert was claimed for. */
   day: string
+  /** When it was claimed (when taken again, the last attempt). */
   sentAt: string
   title: string | null
+  /** What it reached. */
+  delivery: AlertDelivery
+}
+
+/**
+ * The alerts fired in the last 24 hours, newest first, each with what it
+ * reached. `nameOf` names the stores (archived ones included). Empty when
+ * the table does not exist yet.
+ */
+export async function loadRecentAlerts(nameOf: ReadonlyMap<string, string>, now: Date = new Date()): Promise<AlertEventRow[]> {
+  let rows: { kind: string; tenant_id: string; day: string; sent_at: string; payload: unknown }[]
+  try {
+    rows = await query(
+      `SELECT kind, tenant_id, day::text AS day, sent_at::text AS sent_at, payload
+         FROM alert_events
+        WHERE sent_at > now() - interval '24 hours'
+        ORDER BY sent_at DESC
+        LIMIT 30`)
+  } catch {
+    return [] // table not migrated yet
+  }
+  return rows.map(r => {
+    // Scale alerts are keyed "<store>:<campaign>", the summary "*".
+    const storeId = r.tenant_id === '*' ? null : r.tenant_id.split(':')[0]
+    const p = isObj(r.payload) ? r.payload : {}
+    return {
+      kind: r.kind, storeId, store: storeId ? nameOf.get(storeId) ?? null : null,
+      day: r.day, sentAt: r.sent_at, title: typeof p.title === 'string' ? p.title : null,
+      delivery: deliveryOf(r.payload, r.sent_at, now),
+    }
+  })
 }
 
 export interface AlertsGetResponse {
   config: AlertConfig
-  /** What was delivered in the last 24 hours, newest first. */
+  /** The alerts fired in the last 24 hours (once-a-day claims), newest
+   *  first, each with what it reached. */
   recent: AlertEventRow[]
   /** Devices a push would reach right now; 0 means alerts cannot arrive. */
   devices: number
+  /** False when this server has no VAPID key: nothing can be sent at all,
+   *  and `devices` reads 0 whatever is subscribed. */
+  pushKeys: boolean
 }
 
 export interface AlertsTestResponse {
   tested: true
   devices: number
+  /** As in AlertsGetResponse. */
+  pushKeys: boolean
   alerts: FiredAlert[]
   summary: SummaryResult
 }

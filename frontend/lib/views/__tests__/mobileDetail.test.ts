@@ -182,6 +182,23 @@ describe('mergeCreatives', () => {
     expect(m.creatives[2].breakEvenRoas).toBeNull()
     expect(m.totals).toMatchObject({ spend: 1300, estimatedProfit: -30, verdicts: { kill: 1, ok: 1, none: 1, scale: 0, refresh: 0 } })
   })
+
+  // The phone said "Sem ação" (SIGNAL_LABEL.ok) where the desktop chip said
+  // "Abaixo do empate" or "Manter" for the same ad: the verdict's own word wins.
+  it("uses the verdict's own word for an 'ok' ad, as the desktop chip", () => {
+    const below = creativeVerdict({ spend: 30, roas: 0, purchases: 0, breakEven: 1.5, costsConfigured: true, running: true, frequency: null, sharedNote: null })
+    const above = creativeVerdict({ spend: 30, roas: 1.8, purchases: 1, breakEven: 1.5, costsConfigured: true, running: true, frequency: null, sharedNote: null })
+    expect(below.signal).toBe('ok')
+    const m = mergeCreatives([{ store: MOKOO, value: creativesReport(MOKOO, [
+      { ...creative('below', 30, 'ok', -30), verdict: below },
+      { ...creative('above', 20, 'ok', 5), verdict: above },
+      // A row built without a label (older shape) still gets the signal's word.
+      creative('bare', 10, 'ok', 1),
+    ], 1.5) }])
+    expect(Object.fromEntries(m.creatives.map(c => [c.adId, c.signalLabel]))).toEqual({
+      below: 'Abaixo do empate', above: 'Manter', bare: 'Sem ação',
+    })
+  })
 })
 
 const product = (p: Partial<ProductRow> & { title: string; revenue: number; contribution: number }): ProductRow => ({
@@ -255,6 +272,76 @@ describe('mergeCountries', () => {
     expect(m.totals.contribution).toBeNull()
     expect(m.unconfiguredStores).toEqual(['GLOOTY'])
     expect(m.notes.at(-1)).toBe('GLOOTY sem custos configurados: nos países onde ela vendeu, a contribuição não aparece.')
+  })
+  // CAMP HALLOW's campaigns on EPOCH's account are out of EPOCH's Meta
+  // columns (lib/data/countries): the phone names them, with the store their
+  // sales landed in, as the desktop does.
+  it("carries each store's shared campaigns left out of the Meta columns, with the sales store named", () => {
+    const EPOCH = ref('epoch', 'America/Sao_Paulo')
+    const lo = { campaigns: 5, spend: 22058.17, purchases: 439, purchaseValue: 39637.9, salesStoreIds: ['camp', 'gone'] }
+    const m = mergeCountries([
+      { store: EPOCH, value: { ...countryReport(EPOCH, [country('US', 10, 1000, 400)]), sharedLeftOut: lo } },
+      { store: MOKOO, value: { ...countryReport(MOKOO, [country('US', 5, 500, 200)]), sharedLeftOut: null } },
+    ], 12, id => (id === 'camp' ? 'CAMP HALLOW' : null))
+    expect(m.sharedLeftOut).toEqual([{ ...lo, storeId: 'epoch', store: 'EPOCH', salesStores: [{ id: 'camp', name: 'CAMP HALLOW' }, { id: 'gone', name: null }] }])
+    // Nothing left out: an empty list (the phone shows no line).
+    expect(mergeCountries([{ store: MOKOO, value: countryReport(MOKOO, [country('US', 5, 500, 200)]) }]).sharedLeftOut).toEqual([])
+  })
+  // The desktop "Todas" keeps those campaigns in Meta's columns (raw engine
+  // countries); the phone's Todas left them out, so the two disagreed on
+  // Meta purchases and capture whenever they spent.
+  describe('shared campaigns in a sum that holds their sales store', () => {
+    const EPOCH = ref('epoch', 'America/Sao_Paulo')
+    const CAMP = ref('camp', 'America/Sao_Paulo')
+    const lo = { campaigns: 2, spend: 300, purchases: 12, purchaseValue: 900, salesStoreIds: ['camp'] }
+    // EPOCH's rows already have the shared part taken out (getCountryReport
+    // withoutShared); CA had only shared spend, so it was dropped from them.
+    const epoch: CountryReport = {
+      ...countryReport(EPOCH, [country('US', 10, 1000, 400, { spend: 200, purchases: 8, purchaseValue: 700 })]),
+      meta: { label: 'l', caveat: 'c', coveredSpend: 200, totalSpend: 250, coveragePct: 80, missingDays: [] },
+      sharedLeftOut: lo,
+      sharedMeta: [
+        { country: 'US', spend: 250, purchases: 11, purchaseValue: 850 },
+        { country: 'CA', spend: 40, purchases: 1, purchaseValue: 50 },
+      ],
+    }
+    const camp: CountryReport = {
+      ...countryReport(CAMP, [country('US', 12, 600, 240)]),
+      meta: { label: 'l', caveat: 'c', coveredSpend: 0, totalSpend: 0, coveragePct: null, missingDays: [] },
+      sharedLeftOut: null, sharedMeta: [],
+    }
+
+    it('adds them back to the Meta columns, the capture and the coverage, and does not name them', () => {
+      const m = mergeCountries([{ store: EPOCH, value: epoch }, { store: CAMP, value: camp }], 12, () => 'CAMP HALLOW')
+      const us = m.countries.find(c => c.country === 'US')!
+      expect(us).toMatchObject({ orders: 22, revenue: 1600 })
+      expect(us.meta).toMatchObject({ spend: 450, purchases: 19, purchaseValue: 1550 })
+      expect(us.meta.capturePct).toBeCloseTo((19 / 22) * 100)
+      // A country with only shared spend comes back as its own row.
+      expect(m.countries.find(c => c.country === 'CA')).toMatchObject({ orders: 0, revenue: 0, meta: { spend: 40, purchases: 1, purchaseValue: 50 } })
+      expect(m.meta).toMatchObject({ coveredSpend: 490, totalSpend: 550 })
+      expect(m.meta.coveragePct).toBeCloseTo((490 / 550) * 100)
+      expect(m.sharedLeftOut).toEqual([])
+      // Shopify's side is untouched.
+      expect(m.totals).toEqual({ orders: 22, revenue: 1600, contribution: 640 })
+    })
+
+    it('keeps them out, and named, when their sales store is not in the sum', () => {
+      const m = mergeCountries([{ store: EPOCH, value: epoch }, { store: MOKOO, value: countryReport(MOKOO, [country('US', 5, 500, 200)]) }])
+      expect(m.countries.find(c => c.country === 'US')!.meta).toMatchObject({ spend: 200, purchases: 8, purchaseValue: 700 })
+      expect(m.countries.find(c => c.country === 'CA')).toBeUndefined()
+      expect(m.meta).toMatchObject({ coveredSpend: 280, totalSpend: 350 })
+      expect(m.sharedLeftOut.map(x => x.storeId)).toEqual(['epoch'])
+    })
+
+    it('keeps them out when only some of their sales stores are in the sum, or the split per country is missing', () => {
+      const two = { ...epoch, sharedLeftOut: { ...lo, salesStoreIds: ['camp', 'other'] } }
+      expect(mergeCountries([{ store: EPOCH, value: two }, { store: CAMP, value: camp }]).sharedLeftOut.map(x => x.storeId)).toEqual(['epoch'])
+      const noSplit: CountryReport = { ...epoch, sharedMeta: undefined }
+      const m = mergeCountries([{ store: EPOCH, value: noSplit }, { store: CAMP, value: camp }])
+      expect(m.sharedLeftOut.map(x => x.storeId)).toEqual(['epoch'])
+      expect(m.meta.totalSpend).toBe(250)
+    })
   })
   it("drops one store's 'contribuição é a própria receita' note: wrong once merged, and noise when that store sold nothing", () => {
     const glooty = { ...countryReport(GLOOTY, [], false), notes: ['Custos não configurados: a contribuição de cada país é a própria receita.'] }

@@ -60,6 +60,13 @@ export interface PushResult {
 
 const NOTHING: PushResult = { sent: 0, failed: 0, pruned: 0, rejected: 0, devices: 0 }
 
+/** Whether this server can send pushes at all (its VAPID keys are set): with
+ *  them missing, pushDeviceCount reads 0 whatever is subscribed, and the
+ *  screens must say "sem chave de push", not "nenhum aparelho inscrito". */
+export function pushKeysConfigured(): boolean {
+  return configure()
+}
+
 /** Devices a push would reach right now (0 when VAPID is not configured). */
 export async function pushDeviceCount(): Promise<number> {
   if (!configure()) return 0

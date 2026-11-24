@@ -8,7 +8,12 @@ import {
   afterFailedStatus, refreshOutcome, refreshProgress, skippedText, STATUS_GIVE_UP_MS, STATUS_MAX_FAILURES,
 } from '../refreshProgress'
 import { fitCustomRange, MAX_WINDOW_DAYS, rangeCutNote, resolvePortfolioWindow } from '@/lib/views/portfolioLimits'
-import { alertRowTitle, dueByLabel, feedLine, ptNumbers } from '../labels'
+import {
+  alertDeliveryText, alertRowTitle, campaignChip, creativeChip, dueByLabel, feedLine, ptNumbers, pushBlockedText,
+} from '../labels'
+import { adSignalChip, ACTION_CHIP } from '@/components/campaigns/text'
+import { signalLabel } from '@/lib/creativeSignal'
+import { deliveryOf } from '@/lib/alerts'
 import { bytesToBase64Url, sameServerKey, urlBase64ToUint8Array } from '../pushKeys'
 import { NO_SHARED_ADS, noSpendLine, pairNotes, pairOrdersKnown, type SharedAds } from '../sharedAds'
 
@@ -398,5 +403,53 @@ describe('shared ad accounts on the phone (CAMP HALLOW on EPOCH)', () => {
     expect(pairOrdersKnown(0)).toBe(0)
     expect(pairOrdersKnown(3)).toBeNull()
     expect(pairOrdersKnown(null)).toBeNull()
+  })
+})
+
+// ─── Campaign and ad chips: the desktop's, word for word ──────────────────────
+describe('phone chips match the desktop chips', () => {
+  it("an 'ok' ad below its break-even is \"Abaixo do empate\" with a ring; above, \"Manter\" with a check", () => {
+    expect(creativeChip('ok', 'Abaixo do empate')).toEqual({ label: 'Abaixo do empate', tone: 'neu', icon: 'ring' })
+    expect(creativeChip('ok', 'Manter')).toMatchObject({ label: 'Manter', icon: 'check' })
+    // Same spec as the desktop's adSignalChip for the same ROAS and break-even.
+    for (const [roas, be] of [[0, 1.5], [1.2, 1.5], [1.8, 1.5], [3, 1.5]] as const) {
+      expect(creativeChip('ok', signalLabel('ok', roas, be))).toEqual(adSignalChip('ok', roas, be))
+    }
+    for (const sig of ['kill', 'scale', 'refresh'] as const) {
+      expect(creativeChip(sig, signalLabel(sig, 1, 1.5))).toEqual(adSignalChip(sig, 1, 1.5))
+    }
+  })
+  it('a campaign action reads as on the desktop', () => {
+    expect(campaignChip('manter', 'Manter')).toEqual(ACTION_CHIP.manter)
+    expect(campaignChip('cortar', null)).toEqual(ACTION_CHIP.cortar)
+  })
+})
+
+// ─── Alerts sheet: what each fired alert reached ──────────────────────────────
+describe('alert delivery', () => {
+  const now = new Date('2026-11-18T18:00:00Z')
+  it('reads the stored count; old rows say the delivery is unknown', () => {
+    expect(alertDeliveryText(deliveryOf({ title: 't', delivered: 2, devices: 2, keys: true }))).toBe('entregue a 2 aparelhos')
+    expect(alertDeliveryText(deliveryOf({ title: 't', delivered: 1, devices: 3 }))).toBe('entregue a 1 aparelho')
+    expect(alertDeliveryText(deliveryOf({ title: 't', delivered: 0, devices: 0, keys: true }))).toBe('não entregue: nenhum aparelho inscrito')
+    expect(alertDeliveryText(deliveryOf({ title: 't', delivered: 0, devices: 2, keys: true }))).toBe('não entregue: os 2 aparelhos inscritos recusaram')
+    expect(alertDeliveryText(deliveryOf({ title: 't', delivered: 0, devices: 1 }))).toBe('não entregue: o aparelho inscrito recusou')
+    expect(alertDeliveryText(deliveryOf({ title: 't', delivered: 0, devices: 0, keys: false }))).toBe('não entregue: sem chave de push neste servidor')
+    // Production's rows: { title } or { margin } or { hour }, no count.
+    expect(alertDeliveryText(deliveryOf({ title: '⚠️ Margem 4% — MOKOO' }))).toBe('envio antigo, entrega desconhecida')
+    expect(alertDeliveryText(deliveryOf({ margin: 12 }))).toBe('envio antigo, entrega desconhecida')
+    expect(alertDeliveryText(deliveryOf(null))).toBe('envio antigo, entrega desconhecida')
+  })
+  it('a claim still being sent, and one that never reported back', () => {
+    expect(deliveryOf({ title: 't', delivered: null }, '2026-11-18 17:58:00+00', now)).toEqual({ state: 'sending' })
+    expect(deliveryOf({ title: 't', delivered: null }, '2026-11-18 17:00:00.123+00', now)).toEqual({ state: 'interrupted' })
+    expect(alertDeliveryText({ state: 'interrupted' })).toBe('envio interrompido, entrega desconhecida')
+  })
+  it('a server without push keys says so, not "nenhum aparelho inscrito"', () => {
+    expect(pushBlockedText({ pushKeys: false, devices: 0 })).toMatch(/^Sem chave de push neste servidor/)
+    expect(pushBlockedText({ pushKeys: true, devices: 0 })).toMatch(/^Nenhum aparelho inscrito/)
+    expect(pushBlockedText({ pushKeys: true, devices: 2 })).toBeNull()
+    // An answer from an older server (no pushKeys field) keeps the old reading.
+    expect(pushBlockedText({ devices: 0 })).toMatch(/^Nenhum aparelho inscrito/)
   })
 })

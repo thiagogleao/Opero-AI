@@ -1,16 +1,16 @@
 import { mobileAuthOk, unauthorized } from '@/lib/mobileAuth'
 import {
-  AlertConfigError, getAlertConfig, saveAlertConfig, runAlertChecks, sendDailySummary,
-  type AlertEventRow, type AlertsGetResponse, type AlertsTestResponse,
+  AlertConfigError, getAlertConfig, loadRecentAlerts, saveAlertConfig, runAlertChecks, sendDailySummary,
+  type AlertsGetResponse, type AlertsTestResponse,
 } from '@/lib/alerts'
-import { pushDeviceCount } from '@/lib/push'
+import { pushDeviceCount, pushKeysConfigured } from '@/lib/push'
 import { listStores } from '@/lib/access'
-import { query } from '@/lib/db'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-/** Current thresholds, what fired lately, and how many devices would hear it. */
+/** Current thresholds, what fired lately (and what each reached), how many
+ *  devices would hear it, and whether this server can send pushes at all. */
 export async function GET(req: Request) {
   if (!(await mobileAuthOk(req))) return unauthorized()
 
@@ -19,26 +19,11 @@ export async function GET(req: Request) {
     pushDeviceCount().catch(() => 0),
     listStores({ kind: 'owner' }, { includeArchived: true }),
   ])
-  const nameOf = new Map(stores.map(s => [s.id, s.name]))
-  let recent: AlertEventRow[] = []
-  try {
-    const rows = await query<{ kind: string; tenant_id: string; day: string; sent_at: string; title: string | null }>(
-      `SELECT kind, tenant_id, day::text AS day, sent_at::text AS sent_at, payload->>'title' AS title
-         FROM alert_events
-        WHERE sent_at > now() - interval '24 hours'
-        ORDER BY sent_at DESC
-        LIMIT 30`)
-    recent = rows.map(r => {
-      // Scale alerts are keyed "<store>:<campaign>", the summary "*".
-      const storeId = r.tenant_id === '*' ? null : r.tenant_id.split(':')[0]
-      return {
-        kind: r.kind, storeId, store: storeId ? nameOf.get(storeId) ?? null : null,
-        day: r.day, sentAt: r.sent_at, title: r.title,
-      }
-    })
-  } catch { /* table not migrated yet */ }
+  // Each row says what it reached ("entregue a 2 aparelhos", "não entregue"):
+  // a row is a once-a-day claim, not a delivery receipt.
+  const recent = await loadRecentAlerts(new Map(stores.map(s => [s.id, s.name])))
 
-  const body: AlertsGetResponse = { config, recent, devices }
+  const body: AlertsGetResponse = { config, recent, devices, pushKeys: pushKeysConfigured() }
   return Response.json(body, { headers: { 'Cache-Control': 'no-store' } })
 }
 
@@ -59,7 +44,7 @@ export async function POST(req: Request) {
     const devices = await pushDeviceCount()
     const alerts = await runAlertChecks({ force: true })
     const summary = await sendDailySummary({ force: true })
-    const res: AlertsTestResponse = { tested: true, devices, alerts, summary }
+    const res: AlertsTestResponse = { tested: true, devices, pushKeys: pushKeysConfigured(), alerts, summary }
     return Response.json(res)
   }
 

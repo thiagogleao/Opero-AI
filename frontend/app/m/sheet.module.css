@@ -69,6 +69,10 @@
 .recent li { padding: 9px 14px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--tx-2); line-height: 1.4; }
 .recent li:first-child { border-top: 0; }
 .recent small { display: block; color: var(--tx-3); font-size: 11.5px; }
+/* What the alert reached: the words carry it ("entregue a 2 aparelhos",
+   "não entregue: …"); green only repeats a delivery. */
+.recent small.deliveredOk { color: var(--pos); }
+.recent small.deliveredNo { color: var(--tx-3); font-style: italic; }
 
 @keyframes fade { from { opacity: 0; } }
 @keyframes rise { from { transform: translateY(24px); opacity: .6; } }

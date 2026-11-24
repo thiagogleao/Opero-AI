@@ -22,6 +22,7 @@
  *   buildVerdict(input)                    any number of stores, any period
  *   verdictInputFromPortfolio(view, opts)  adapter from buildPortfolio()
  *   storeStatus(store, opts)               one chip for a store row in a list
+ *   storeStatusChips(store, opts)          that chip, plus "custos não configurados" when it is not the chip
  *   roasSummary(roas, breakEven, facts)    "ROAS 1,95× · empate 1,58× → no lucro"
  *   storeRoas(totals, configured)          the same on the store's ad channel
  *   judgedStores(stores) / isIdle(totals)  which stores a sum is made of
@@ -758,6 +759,14 @@ export function buildVerdict(input: VerdictInput): Verdict {
  * with buildVerdict: a running day is "começando" before 04h, or with fewer
  * than MIN_ORDERS orders while its ads have not yet passed its sales.
  *
+ * A store without cost settings whose ads already cost more than it sold is
+ * "no prejuízo" (adsAboveSales: a loss whatever the products cost, as the
+ * verdict says), not just "custos não configurados": such a row (Glooty,
+ * no costs) read only the settings chip while the verdict above it said "no
+ * prejuízo". Before 04h of a running day it keeps the settings chip, as the
+ * verdict keeps "cedo demais". The missing settings are then the second chip
+ * (storeStatusChips; the desktop table adds the same one).
+ *
  * `singleDay` (default true): the window is one day. Pass
  * `{ singleDay: range.from === range.to }` for longer windows, where a young
  * clock on the last day does not make the store "começando".
@@ -773,14 +782,29 @@ export function storeStatus(
     if (t.adSpend > 0 && !(runningDay && s.minutesCovered < EARLY_DAY_MINUTES)) return low(chip('prejuizo'))
     return low(chip('sem_vendas', 'Sem vendas'))
   }
-  if (!s.configured) return low(chip('sem_custos'))
-  if (runningDay && s.minutesCovered < EARLY_DAY_MINUTES) return chip('comecando')
+  const young = runningDay && s.minutesCovered < EARLY_DAY_MINUTES
+  if (!s.configured) return low(chip(adsAboveSales(t) && !young ? 'prejuizo' : 'sem_custos'))
+  if (young) return chip('comecando')
   // Past 04h a handful of orders is still "começando" — unless the ads already
   // cost more than the sales, as the zero-order rule above (adsAboveSales).
   if (runningDay && t.orders < MIN_ORDERS && !adsAboveSales(t)) return chip('comecando')
   if (t.operatingProfit < 0) return low(chip('prejuizo'))
   if (t.margin !== null && t.margin < THIN_MARGIN_PCT) return low(chip('margem_fina'))
   return low(chip('lucro'))
+}
+
+/**
+ * storeStatus, then "custos não configurados" for a store without cost
+ * settings whose chip says something else ("no prejuízo", "sem vendas"):
+ * the missing settings are never dropped, only demoted to the second chip.
+ */
+export function storeStatusChips(
+  s: Pick<VerdictStore, 'configured' | 'totals' | 'partial' | 'minutesCovered'>,
+  opts: { singleDay?: boolean } = {},
+): VerdictChip[] {
+  const main = storeStatus(s, opts)
+  if (s.configured || main.code === 'sem_custos') return [main]
+  return [main, { ...chip('sem_custos'), label: 'custos não configurados' }]
 }
 
 // ─── Adapter ─────────────────────────────────────────────────────────────────

@@ -18,7 +18,7 @@ import {
   formatTimeInTz, formatWeekdayDate, partialLabel, plural, tzCity,
 } from '@/lib/format'
 import { minutesIntoDay, todayInTz } from '@/lib/engine/dates'
-import { judgedStores, periodPhrase, storeRoas, storeStatus, type RoasSummary, type Verdict } from '@/lib/views/verdict'
+import { judgedStores, periodPhrase, storeRoas, storeStatus, storeStatusChips, type RoasSummary, type Verdict } from '@/lib/views/verdict'
 import type { MobileResponse } from '@/lib/views/mobile'
 import type { IntradayAside, LiveOrderItem, PortfolioStoreRow } from '@/lib/views/portfolio'
 import { LIVE_FEED_SIZE } from '@/lib/views/portfolioLimits'
@@ -366,29 +366,39 @@ export function Attention({ data }: { data: Data }) {
   const singleDay = data.range.from === data.range.to
   const items: { key: string; tone: 'neg' | 'warn'; title: string; body: string }[] = []
   for (const r of data.stores) {
+    // One rule with the store list and the desktop table (verdict
+    // storeStatus): a store without costs whose ads passed its sales is "no
+    // prejuízo" there too — on a running day as well, past 04h. This block
+    // used to skip that case on a running day ("!(singleDay && r.partial)").
     const chip = storeStatus(r, { singleDay })
     if (isAllAnswer(data) && chip.code === 'prejuizo' && r.totals.adSpend > 0) {
       const t = r.totals
-      const sr = storeRoas(t, r.configured)
-      const roas = sr ? ` ${sr.text.replace(/^ROAS/, sr.label ?? 'ROAS')}.` : ''
-      items.push({
-        key: `loss-${r.id}`, tone: 'neg',
-        // "está no prejuízo ontem" read wrong: a closed window already happened.
-        title: `${r.name} ${r.partial ? 'está' : 'ficou'} no prejuízo ${phrase}`,
-        body: t.orders === 0
-          ? `Gastou ${formatMoney(t.adSpend)} em anúncios e não vendeu nada.${r.partial ? ' Dia ainda aberto.' : ''}`
-          : `Gastou ${formatMoney(t.adSpend)} em anúncios e vendeu ${formatMoney(t.revenue)}.${roas}${r.partial ? ' Dia ainda aberto.' : ''}`,
-      })
-    } else if (isAllAnswer(data) && chip.code === 'sem_custos' && r.totals.adSpend > r.totals.revenue && !(singleDay && r.partial)) {
-      // Without costs the chip says only "custos não configurados", yet ads
-      // above sales is a certain loss (the real profit is lower still): Glooty
-      // lost $1.572 in 3–12 nov and this block named only Hibikura's $147.
-      const t = r.totals
-      items.push({
-        key: `loss-${r.id}`, tone: 'neg',
-        title: `${r.name} gastou mais em anúncios do que vendeu ${phrase}`,
-        body: `Vendas ${formatMoney(t.revenue)} − anúncios ${formatMoney(t.adSpend)} = ${formatMoney(t.revenue - t.adSpend)}, antes do custo dos produtos: o prejuízo real é maior. Configure os custos dela para ver o lucro.`,
-      })
+      const open = r.partial ? ' Dia ainda aberto.' : ''
+      if (t.orders === 0) {
+        items.push({
+          key: `loss-${r.id}`, tone: 'neg',
+          // "está no prejuízo ontem" read wrong: a closed window already happened.
+          title: `${r.name} ${r.partial ? 'está' : 'ficou'} no prejuízo ${phrase}`,
+          body: `Gastou ${formatMoney(t.adSpend)} em anúncios e não vendeu nada.${open}`,
+        })
+      } else if (!r.configured) {
+        // Without costs only revenue − ads is known, and it is already below
+        // zero: the real profit is lower still (Glooty lost $1.572 in 3–12
+        // nov while this block named only Hibikura's $147).
+        items.push({
+          key: `loss-${r.id}`, tone: 'neg',
+          title: `${r.name} ${r.partial ? 'está gastando mais em anúncios do que vende' : 'gastou mais em anúncios do que vendeu'} ${phrase}`,
+          body: `Vendas ${formatMoney(t.revenue)} − anúncios ${formatMoney(t.adSpend)} = ${formatMoney(t.revenue - t.adSpend)}${r.partial ? ' até agora' : ''}, antes do custo dos produtos: o prejuízo real é maior. Configure os custos dela para ver o lucro.${open}`,
+        })
+      } else {
+        const sr = storeRoas(t, r.configured)
+        const roas = sr ? ` ${sr.text.replace(/^ROAS/, sr.label ?? 'ROAS')}.` : ''
+        items.push({
+          key: `loss-${r.id}`, tone: 'neg',
+          title: `${r.name} ${r.partial ? 'está' : 'ficou'} no prejuízo ${phrase}`,
+          body: `Gastou ${formatMoney(t.adSpend)} em anúncios e vendeu ${formatMoney(t.revenue)}.${roas}${open}`,
+        })
+      }
     }
     for (const b of r.badges) {
       if (b.code === 'sync_atrasado' || b.code === 'sync_falhando') {
@@ -423,7 +433,9 @@ export function StoreList({ data, shared, onPick }: { data: Data; shared: Shared
       <ul className={s.list}>
         {rows.map(r => {
           const t = r.totals
-          const chip = storeStatus(r, { singleDay })
+          // "no prejuízo" + "custos não configurados" for a store without costs
+          // whose ads passed its sales, as the desktop table shows it.
+          const chips = storeStatusChips(r, { singleDay })
           const on = active(r)
           const dayLabel = dayOfLabel(r.timezone)
           const sr = t.orders > 0 ? storeRoas(t, r.configured) : null
@@ -464,7 +476,7 @@ export function StoreList({ data, shared, onPick }: { data: Data; shared: Shared
                     ? <b><Money value={t.operatingProfit} sign tone={r.configured ? 'auto' : 'mut'} /></b>
                     : <b className={s.mutedVal}>—</b>}
                   {on && !r.configured && <small>vendas − anúncios</small>}
-                  <VerdictChips chips={[chip]} size="sm" />
+                  <VerdictChips chips={chips} size="sm" />
                 </span>
               </button>
             </li>
@@ -565,7 +577,7 @@ export function ChargebackBlock({ data, deviceTz, now }: { data: Data; deviceTz:
             const dueAt = d.dueBy ? dueByLabel(d.dueBy, deviceTz, at) : null
             return (
               <span key={`${d.storeId}|${d.externalId}`} style={{ display: 'block' }}>
-                {d.currency === 'USD' ? formatMoney(d.amount) : `${d.currency} ${Math.round(d.amount)}`} · {REASON[d.reason] ?? d.reason}
+                {d.currency === 'USD' ? formatMoney(d.amount) : `${d.currency} ${Math.round(d.amount)}`} · {Object.hasOwn(REASON, d.reason) ? REASON[d.reason] : d.reason}
                 {several ? ` · ${d.store}` : ''}{dueAt ? ` · ${dueAt}` : ''}
               </span>
             )

@@ -355,7 +355,7 @@ const CITY: Record<string, string> = {
 }
 
 export function cityOfTz(tz: string): string {
-  return CITY[tz] ?? (tz.split('/').pop() ?? tz).replace(/_/g, ' ')
+  return Object.hasOwn(CITY, tz) ? CITY[tz] : (tz.split('/').pop() ?? tz).replace(/_/g, ' ')
 }
 
 const ddmm = (d: string) => `${d.slice(8, 10)}/${d.slice(5, 7)}`

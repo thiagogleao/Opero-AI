@@ -28,7 +28,7 @@ import { getCreativesReport, type CreativesReport } from '../data/creatives'
 import { getProductReport, type ProductReport } from '../data/products'
 import {
   getCountryReport, rollUpCountries, META_COUNTRY_CAVEAT, META_COUNTRY_LABEL, SMALL_SAMPLE, TERRITORIES_NOTE,
-  type CountryReport,
+  type CountryReport, type CountrySharedLeftOut,
 } from '../data/countries'
 import { getCustomerLtv, getCustomerSplit, LTV_SEGMENTS, type CustomerLtv, type CustomerSplit, type LtvSegment } from '../data/customers'
 import {
@@ -313,6 +313,21 @@ export interface CountriesDetail extends DetailBase {
   notes: string[]
   smallSample: number
   unconfiguredStores: string[]
+  /** Per store, the shared-account campaigns taken out of its Meta columns
+   *  and capture (lib/data/countries sharedLeftOut: CAMP HALLOW's campaigns
+   *  on EPOCH's account), with the stores their sales landed in, by name.
+   *  A store whose sales stores are all in this sum is not listed: its
+   *  campaigns are back in the Meta columns (mergeCountries).
+   *  Empty when nothing was left out. Worded on the phone with
+   *  components/countries/sharedText sharedLeftOutText, as on the desktop. */
+  sharedLeftOut: MobileSharedLeftOut[]
+}
+
+export interface MobileSharedLeftOut extends CountrySharedLeftOut {
+  storeId: string
+  store: string
+  /** The stores of salesStoreIds, named (null when the viewer cannot see one). */
+  salesStores: { id: string; name: string | null }[]
 }
 
 // Customers
@@ -455,7 +470,12 @@ export function mergeCreatives(loaded: Loaded<CreativesReport>[], limit = DETAIL
         spend: c.spend, purchaseValue: c.purchaseValue, purchases: c.purchases, roas: c.roas, cpa: c.cpa, ctr: c.ctr,
         estimatedProfit: c.estimatedProfit,
         breakEvenRoas: c.shared ? null : r.breakEvenRoas,
-        signal: c.verdict.signal, signalLabel: c.verdict.signal ? SIGNAL_LABEL[c.verdict.signal] : null,
+        // The verdict's own word ("Manter" / "Abaixo do empate", from the ROAS
+        // against the break-even), as the desktop chip: the static
+        // SIGNAL_LABEL.ok reads "Sem ação" for both, and the phone said that
+        // where the desktop said "Abaixo do empate" for the same ad.
+        signal: c.verdict.signal,
+        signalLabel: c.verdict.label ?? (c.verdict.signal ? SIGNAL_LABEL[c.verdict.signal] : null),
         reason: c.verdict.reason,
         video: c.video ? {
           playRate: c.video.playRate, retention25: c.video.retention25, retention50: c.video.retention50,
@@ -535,7 +555,9 @@ export function mergeProducts(loaded: Loaded<ProductReport>[], limit = DETAIL_LI
 export const unconfiguredCountriesNote = (stores: string[]) =>
   `${stores.join(', ')} sem custos configurados: nos países onde ${stores.length > 1 ? 'essas lojas venderam' : 'ela vendeu'}, a contribuição não aparece.`
 
-export function mergeCountries(loaded: Loaded<CountryReport>[], limit = DETAIL_LIMIT.paises): Omit<CountriesDetail, keyof DetailBase | 'section'> {
+export function mergeCountries(
+  loaded: Loaded<CountryReport>[], limit = DETAIL_LIMIT.paises, nameOf: (storeId: string) => string | null = () => null,
+): Omit<CountriesDetail, keyof DetailBase | 'section'> {
   type Acc = { country: string; orders: number; revenue: number; variableCosts: number; contribution: number; metaSpend: number; metaPurchaseValue: number; purchases: number }
   const by = new Map<string, Acc>()
   const unconfiguredCountries = new Set<string>()
@@ -543,13 +565,53 @@ export function mergeCountries(loaded: Loaded<CountryReport>[], limit = DETAIL_L
   let covered = 0, total = 0, missing = 0
   const unconfigured: string[] = []
   const notes = new Set<string>()
+  const sharedLeftOut: MobileSharedLeftOut[] = []
+  const accOf = (code: string): Acc => {
+    let cur = by.get(code)
+    if (!cur) {
+      cur = { country: code, orders: 0, revenue: 0, variableCosts: 0, contribution: 0, metaSpend: 0, metaPurchaseValue: 0, purchases: 0 }
+      by.set(code, cur)
+    }
+    return cur
+  }
+  // Stores whose orders are in this sum (a store that failed to load is not).
+  const inSum = new Set(loaded.map(l => l.store.id))
   for (const { store, value: r } of loaded) {
+    // A store's shared-account campaigns (CAMP HALLOW's on EPOCH's account)
+    // go back into the Meta columns when every store their sales landed in
+    // is part of this sum: those purchases are then orders of the sum, as
+    // in the desktop "Todas" (raw computePnL countries) and the summed
+    // funnel (lib/data/funnel sumFunnels). Otherwise they stay out, named.
+    const lo = r.sharedLeftOut
+    const back = lo && r.sharedMeta && lo.salesStoreIds.length > 0 && lo.salesStoreIds.every(id => inSum.has(id))
+      ? { spend: lo.spend, countries: r.sharedMeta }
+      : null
+    if (lo && !back) {
+      sharedLeftOut.push({
+        ...lo, storeId: store.id, store: store.name,
+        salesStores: lo.salesStoreIds.map(id => ({ id, name: nameOf(id) })),
+      })
+    }
     revenue += r.totals.revenue
     orders += r.totals.orders
     contribution += r.totals.contribution
     covered += r.meta.coveredSpend
     total += r.meta.totalSpend
     missing += r.meta.missingDays.length
+    if (back) {
+      // totalSpend comes from the daily ad rows and coveredSpend from Meta's
+      // country split, as getCountryReport took them out. Keyed by country
+      // code: a country with only shared spend was dropped from the store's
+      // rows (hasCountryActivity) and comes back as its own row.
+      total += back.spend
+      for (const m of back.countries) {
+        const cur = accOf(m.country)
+        cur.metaSpend += m.spend
+        cur.metaPurchaseValue += m.purchaseValue
+        cur.purchases += m.purchases
+        covered += m.spend
+      }
+    }
     if (!r.configured && r.totals.revenue > 0) unconfigured.push(store.name)
     // One store's "custos não configurados: a contribuição é a própria
     // receita" is wrong here: this view blanks those countries' contribution
@@ -557,7 +619,7 @@ export function mergeCountries(loaded: Loaded<CountryReport>[], limit = DETAIL_L
     // nothing. Replaced by unconfiguredCountriesNote().
     for (const n of r.notes) if (!n.startsWith('Custos não configurados')) notes.add(n)
     for (const c of r.rows) {
-      const cur = by.get(c.country) ?? { country: c.country, orders: 0, revenue: 0, variableCosts: 0, contribution: 0, metaSpend: 0, metaPurchaseValue: 0, purchases: 0 }
+      const cur = accOf(c.country)
       cur.orders += c.orders
       cur.revenue += c.revenue
       cur.variableCosts += c.variableCosts
@@ -566,7 +628,6 @@ export function mergeCountries(loaded: Loaded<CountryReport>[], limit = DETAIL_L
       cur.metaPurchaseValue += c.meta.purchaseValue
       cur.purchases += c.meta.purchases
       if (!r.configured && c.revenue > 0) unconfiguredCountries.add(c.country)
-      by.set(c.country, cur)
     }
   }
   // rollUpCountries sums the tail into "outros" and recomputes every ratio
@@ -598,6 +659,7 @@ export function mergeCountries(loaded: Loaded<CountryReport>[], limit = DETAIL_L
     ],
     smallSample: SMALL_SAMPLE,
     unconfiguredStores: unconfigured,
+    sharedLeftOut,
   }
 }
 
@@ -749,7 +811,7 @@ export async function buildMobileDetail(
       const r = await perStore(stores, s => getCountryReport(s, range, { limit: 250 }))
       guard(r.ok.length)
       const cfg = new Map(r.ok.map(l => [l.store.id, l.value.configured]))
-      return { section: 'paises', ...base(s => cfg.get(s.id) ?? null, r.ok.map(l => l.store), r.failed), ...mergeCountries(r.ok) }
+      return { section: 'paises', ...base(s => cfg.get(s.id) ?? null, r.ok.map(l => l.store), r.failed), ...mergeCountries(r.ok, DETAIL_LIMIT.paises, id => ctx.storeNames?.get(id) ?? null) }
     }
     case 'clientes': {
       const [splits, ltvs] = await Promise.all([

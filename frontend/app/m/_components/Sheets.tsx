@@ -13,7 +13,7 @@ import type { AlertConfig, AlertsGetResponse, AlertsTestResponse } from '@/lib/a
 import type { MobileStoreOption } from '@/lib/views/mobile'
 import { MAX_WINDOW_DAYS, MIN_WINDOW_DATE, MIN_WINDOW_LABEL } from '@/lib/views/portfolioLimits'
 import { customRange, PERIOD_MAIN, PERIOD_MORE, periodLabel, type Selection } from '../_lib/selection'
-import { alertRowTitle } from '../_lib/labels'
+import { alertDeliveryText, alertRowTitle, pushBlockedText } from '../_lib/labels'
 import type { usePush } from '../_lib/usePush'
 import { Sheet, SoundIcon, Switch } from './Sheet'
 import s from '../sheet.module.css'
@@ -135,7 +135,7 @@ export function SettingsSheet({ push, soundOn, onSound, archived, onOpenStore, o
           <div className={s.status}><Icon name="bell" size={16} /> <span style={{ flex: 1 }}>Neste aparelho</span><PushStatusChip status={push.status} /></div>
           <p className={s.statusText}>
             {PUSH_TEXT[push.status]}
-            {push.devices !== null && push.status !== 'verificando' && ` ${push.devices === 0 ? 'Nenhum aparelho inscrito no servidor: nada chega a lugar nenhum.' : `${push.devices} ${push.devices === 1 ? 'aparelho inscrito' : 'aparelhos inscritos'} no total.`}`}
+            {push.devices !== null && push.status !== 'verificando' && push.status !== 'sem_chave' && ` ${push.devices === 0 ? 'Nenhum aparelho inscrito no servidor: nada chega a lugar nenhum.' : `${push.devices} ${push.devices === 1 ? 'aparelho inscrito' : 'aparelhos inscritos'} no total.`}`}
           </p>
           {push.note && <p className={`${s.msg} ${s.msgOk}`} role="status">{push.note}</p>}
           {push.error && <p className={`${s.msg} ${s.msgErr}`} role="alert">{push.error}</p>}
@@ -321,7 +321,8 @@ export function AlertsSheet({ onClose }: { onClose: () => void }) {
       })
       if (!res.ok) throw new Error(`O servidor respondeu ${res.status}`)
       const r = await res.json() as AlertsTestResponse
-      if (r.devices === 0) setTestMsg({ ok: false, text: 'Nenhum aparelho inscrito: o teste não chegou a lugar nenhum. Ative as notificações primeiro.' })
+      if (r.pushKeys === false) setTestMsg({ ok: false, text: 'Sem chave de push neste servidor (VAPID): o teste não pode ser enviado a nenhum aparelho.' })
+      else if (r.devices === 0) setTestMsg({ ok: false, text: 'Nenhum aparelho inscrito: o teste não chegou a lugar nenhum. Ative as notificações primeiro.' })
       else {
         const fired = r.alerts.length
         setTestMsg({
@@ -370,8 +371,8 @@ export function AlertsSheet({ onClose }: { onClose: () => void }) {
         </div>
       ) : (
         <>
-          {data.devices === 0 && (
-            <p className={`${s.msg} ${s.msgErr}`} style={{ padding: '0 0 8px' }}>Nenhum aparelho inscrito: os alertas são avaliados, mas não chegam a lugar nenhum.</p>
+          {pushBlockedText(data) && (
+            <p className={`${s.msg} ${s.msgErr}`} style={{ padding: '0 0 8px' }}>{pushBlockedText(data)}</p>
           )}
           <div className={s.box}>
             {RULES.map(r => numField(r.num, r.title, r.help, {
@@ -398,9 +399,9 @@ export function AlertsSheet({ onClose }: { onClose: () => void }) {
           </div>
           <div className={s.group}>
             {/* A row is an alert the server fired (its once-a-day claim), not a
-                delivery receipt: with no device subscribed nobody got it, and
-                "Enviados" under "Nenhum aparelho inscrito" contradicted itself. */}
-            <div className={s.groupTitle}>Disparados nas últimas 24 h{data.devices === 0 && data.recent.length > 0 ? ' (nenhum entregue)' : ''}</div>
+                delivery receipt: each says what it reached, from the count
+                stored when it was sent (lib/alerts deliveryOf). */}
+            <div className={s.groupTitle}>Disparados nas últimas 24 h</div>
             {data.recent.length === 0 ? (
               <EmptyState compact title="Nenhum alerta disparado" />
             ) : (
@@ -409,6 +410,10 @@ export function AlertsSheet({ onClose }: { onClose: () => void }) {
                   <li key={`${r.kind}-${r.storeId}-${r.sentAt}-${i}`}>
                     {alertRowTitle(r.kind, r.title)}
                     <small>{[r.store ?? (r.storeId ? null : 'Todas as lojas'), `${formatDate(r.day)} · ${formatTimeInTz(r.sentAt, 'America/Sao_Paulo')}`].filter(Boolean).join(' · ')}</small>
+                    {/* An answer from a server older than the delivery field has none. */}
+                    <small className={r.delivery?.state === 'delivered' ? s.deliveredOk : s.deliveredNo}>
+                      {alertDeliveryText(r.delivery ?? { state: 'unknown' })}
+                    </small>
                   </li>
                 ))}
               </ul>
