@@ -704,7 +704,7 @@ function addHealthSheet(wb: ExcelJS.Workbook, data: ExportData, loja: (id: strin
     if (!h?.hasData) continue
     rows.push({
       loja: loja(st.id), disputas: h.count, pedidos: h.orders, taxa: h.rate, limite: 1.5,
-      abertas: h.open, perdidas: h.lost, ganhas: h.won, situacao: h.rate >= 1.5 ? 'ACIMA DO LIMITE' : 'ok',
+      abertas: h.open, perdidas: h.lost, ganhas: h.won, evitadas: h.prevented ?? 0, situacao: h.rate >= 1.5 ? 'ACIMA DO LIMITE' : 'ok',
     })
   }
   table(wb, 'Saúde chargeback 90d', [
@@ -716,6 +716,7 @@ function addHealthSheet(wb: ExcelJS.Workbook, data: ExportData, loja: (id: strin
     { header: 'Em aberto', key: 'abertas', width: 11, fmt: 'int' },
     { header: 'Perdidas', key: 'perdidas', width: 10, fmt: 'int' },
     { header: 'Ganhas', key: 'ganhas', width: 9, fmt: 'int' },
+    { header: 'Evitadas', key: 'evitadas', width: 10, fmt: 'int' },
     { header: 'Situação', key: 'situacao', width: 18 },
   ], rows)
 }

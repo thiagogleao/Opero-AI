@@ -147,6 +147,25 @@ function nextPage(res: Response): string | null {
   return next ? next.split(';')[0].trim().replace(/[<>]/g, '') : null
 }
 
+/** syncAdjustments' note when the token cannot read Shopify Payments
+ *  disputes (HTTP 403). autoSync writes it on the pass's sync_runs row
+ *  (source 'adjustments'), where disputesReadable finds it. */
+export const DISPUTES_FORBIDDEN = 'sem permissão de Shopify Payments neste token'
+
+/**
+ * Whether a store's disputes can be read, from its latest finished
+ * adjustments pass: false when that pass hit the 403 (DISPUTES_FORBIDDEN in
+ * its message), true when it finished without it, null when no pass was
+ * recorded (the scheduler before v2 wrote none) or it failed for another
+ * reason. Glooty and Hibikura have no chargeback row ever, and the missing
+ * permission was only known from a live token check in Ajustes.
+ */
+export function disputesReadable(run: { status: string | null; error_message: string | null } | null | undefined): boolean | null {
+  if (!run) return null
+  if (run.error_message?.includes(DISPUTES_FORBIDDEN)) return false
+  return run.status === 'success' ? true : null
+}
+
 export interface SyncAdjustments {
   tenantId: string
   refunds: number
@@ -262,7 +281,7 @@ export async function syncAdjustments(
       if (res.status === 403) {
         // The token predates the payments scope; until it is reissued this
         // store simply has no dispute data (blindToChargebacks says so).
-        out.skipped = 'sem permissão de Shopify Payments neste token'
+        out.skipped = DISPUTES_FORBIDDEN
         break
       }
       if (!res.ok) throw new Error(`disputas: Shopify HTTP ${res.status}`)
@@ -473,8 +492,61 @@ export async function getAdjustmentImpact(
 /** A dispute waiting for the store's evidence. */
 export interface AwaitingDispute { externalId: string; amount: number; currency: string; reason: string; dueBy: string | null }
 
+/**
+ * Chargebacks by status, in the groups the screens name. Every status lands in
+ * exactly one group, so the groups add up to the count: "7 em aberto · 5
+ * perdidas · 11 ganhas" next to "31 de 700 pedidos" (CAMP HALLOW, 90 days)
+ * left out the 8 disputes Shopify marks "prevented", which were in the count,
+ * the rate and the amount all the same.
+ */
+export interface DisputeStatusCounts {
+  /** needs_response or under_review: still being decided. */
+  open: number
+  lost: number
+  won: number
+  /** Shopify's "prevented": closed before a decision (with its fee in the
+   *  data, $15 each). Counted like any dispute (the prudent side): whether the
+   *  processor's ratio counts it is not something the data says. */
+  prevented: number
+  /** Any other status (accepted, charge_refunded, empty or new). */
+  other: number
+}
+
+export const NO_DISPUTES: DisputeStatusCounts = { open: 0, lost: 0, won: 0, prevented: 0, other: 0 }
+
+/** Status rows (status, count) → the groups (pure). */
+export function groupDisputeStatuses(rows: readonly { status: string | null; n: number | string }[]): DisputeStatusCounts {
+  const out = { ...NO_DISPUTES }
+  for (const r of rows) {
+    const n = Number(r.n) || 0
+    if (r.status === 'needs_response' || r.status === 'under_review') out.open += n
+    else if (r.status === 'lost') out.lost += n
+    else if (r.status === 'won') out.won += n
+    else if (r.status === 'prevented') out.prevented += n
+    else out.other += n
+  }
+  return out
+}
+
+/**
+ * The chargebacks that ARRIVED in a window — event_date inside it, the
+ * engine's rule for the period's chargeback cost (lib/engine/pnl) — by their
+ * status today. The Resumo called every one of them "disputa aberta": EPOCH's
+ * October read "37 disputas abertas" over 14 lost, 7 prevented and 16 open.
+ */
+export async function getWindowDisputeStatuses(tenantId: string, from: string, to: string): Promise<DisputeStatusCounts> {
+  const rows = await query<{ status: string | null; n: string }>(
+    `SELECT status, count(*)::text AS n
+       FROM order_adjustments
+      WHERE tenant_id = $1 AND kind = 'chargeback' AND event_date BETWEEN $2::date AND $3::date
+      GROUP BY status`,
+    [tenantId, from, to],
+  )
+  return groupDisputeStatuses(rows)
+}
+
 export interface ChargebackHealth {
-  /** Disputes opened in the last 90 days. */
+  /** Disputes opened in the last 90 days, whatever their status. */
   count: number
   orders: number
   /** Count-based rate, which is the one payment processors act on. */
@@ -484,6 +556,11 @@ export interface ChargebackHealth {
   open: number
   lost: number
   won: number
+  /** The rest of `count` (DisputeStatusCounts): open + lost + won + prevented
+   *  + other = count. Optional for hand-built fixtures; getChargebackHealth
+   *  always sets them. */
+  prevented?: number
+  other?: number
   /**
    * EVERY dispute still waiting for the store's evidence ("needs_response")
    * whose deadline has not passed (or is unknown), soonest deadline first.
@@ -496,6 +573,10 @@ export interface ChargebackHealth {
    *  fixtures; getChargebackHealth always sets it. */
   overdue?: number
   hasData: boolean
+  /** The store's disputes can be read (disputesReadable): false when its
+   *  token has no Shopify Payments permission, so a zero proves nothing;
+   *  null when unknown. Absent on sums and hand-built fixtures. */
+  readable?: boolean | null
 }
 
 /** A "needs_response" chargeback row as the health query reads it. */
@@ -542,8 +623,10 @@ export function combineChargebackHealth(each: readonly ChargebackHealth[]): Char
     open: a.open + h.open,
     lost: a.lost + h.lost,
     won: a.won + h.won,
+    prevented: a.prevented + (h.prevented ?? 0),
+    other: a.other + (h.other ?? 0),
     overdue: a.overdue + (h.overdue ?? 0),
-  }), { count: 0, orders: 0, amount: 0, fees: 0, open: 0, lost: 0, won: 0, overdue: 0 })
+  }), { count: 0, orders: 0, amount: 0, fees: 0, open: 0, lost: 0, won: 0, prevented: 0, other: 0, overdue: 0 })
 
   return {
     ...sum,
@@ -563,7 +646,7 @@ export async function getCombinedChargebackHealth(tenantIds: string[]): Promise<
 export async function getChargebackHealth(tenantId: string): Promise<ChargebackHealth> {
   const empty: ChargebackHealth = {
     count: 0, orders: 0, rate: 0, amount: 0, fees: 0,
-    open: 0, lost: 0, won: 0, dueSoon: [], overdue: 0, hasData: false,
+    open: 0, lost: 0, won: 0, prevented: 0, other: 0, dueSoon: [], overdue: 0, hasData: false,
   }
   try {
     const [row] = await query<Record<string, string>>(
@@ -572,7 +655,8 @@ export async function getChargebackHealth(tenantId: string): Promise<ChargebackH
               COALESCE(SUM(fee), 0)::text    AS fees,
               count(*) FILTER (WHERE status IN ('needs_response','under_review'))::text AS open,
               count(*) FILTER (WHERE status = 'lost')::text AS lost,
-              count(*) FILTER (WHERE status = 'won')::text  AS won
+              count(*) FILTER (WHERE status = 'won')::text  AS won,
+              count(*) FILTER (WHERE status = 'prevented')::text AS prevented
        FROM order_adjustments
        WHERE tenant_id = $1 AND kind = 'chargeback'
          AND event_date > CURRENT_DATE - 90`,
@@ -598,20 +682,34 @@ export async function getChargebackHealth(tenantId: string): Promise<ChargebackH
       [tenantId]
     )
     const { dueSoon, overdue } = splitNeedsResponse(waiting)
+    // The latest finished refunds/disputes pass says whether the token can
+    // read disputes at all. Context only: a failed read is "unknown".
+    const [run] = await query<{ status: string | null; error_message: string | null }>(
+      `SELECT status, error_message FROM sync_runs
+        WHERE tenant_id = $1 AND source = 'adjustments' AND status <> 'running'
+        ORDER BY started_at DESC LIMIT 1`,
+      [tenantId]
+    ).catch(() => [])
 
     const count = Number(row?.n ?? 0)
     const orders = Number(ord?.n ?? 0)
+    const open = Number(row?.open ?? 0)
+    const lost = Number(row?.lost ?? 0)
+    const won = Number(row?.won ?? 0)
+    const prevented = Number(row?.prevented ?? 0)
     return {
       count, orders,
       rate: orders > 0 ? (count / orders) * 100 : 0,
       amount: Number(row?.amount ?? 0),
       fees: Number(row?.fees ?? 0),
-      open: Number(row?.open ?? 0),
-      lost: Number(row?.lost ?? 0),
-      won: Number(row?.won ?? 0),
+      open, lost, won, prevented,
+      // Whatever status is left (accepted, charge_refunded, empty), so the
+      // parts always add up to the count.
+      other: Math.max(0, count - open - lost - won - prevented),
       dueSoon,
       overdue,
       hasData: count > 0,
+      readable: disputesReadable(run),
     }
   } catch {
     return empty
