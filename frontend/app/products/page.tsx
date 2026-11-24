@@ -3,7 +3,7 @@ import { getPageContext, pageMetadata, type PageContext, type SearchParams } fro
 import { computePnL, type PnL } from '@/lib/engine/pnl'
 import { getProductReport, type ProductReport } from '@/lib/data/products'
 import { sumTotals } from '@/lib/views/verdict'
-import { formatMoney, formatPct, plural } from '@/lib/format'
+import { formatMoney, formatPct, formatShare, plural } from '@/lib/format'
 import { AppShell, PageHeader, PeriodNote } from '@/components/shell'
 import { Block, Callout, Count, EmptyState, ErrorState, Icon, Money, Pct, VerdictCard, type DataColumn } from '@/components/ui'
 import { HorizontalBars } from '@/components/charts'
@@ -11,7 +11,10 @@ import { ProductTable, type SearchableRow } from '@/components/products/ProductT
 import { buildProductsVerdict, type ProductLike } from '@/components/products/productsVerdict'
 import { metaSpendSplitText } from '@/components/products/metaSpendSplit'
 import { restLine, topBars, unpricedLine } from '@/components/products/topBars'
-import { loadFirstSale } from '@/components/campaigns/firstSale'
+import { loadFirstSale, loadFirstSales } from '@/components/campaigns/firstSale'
+import { firstSaleOfAll } from '@/components/campaigns/storeStart'
+import { WhyEmpty, emptyWhy } from '@/components/campaigns/emptyWhy'
+import { loadArchivedStore } from '@/components/dashboard/archivedStore'
 import s from '@/components/products/products.module.css'
 
 /**
@@ -51,9 +54,11 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
     return <AppShell ctx={ctx}>{header}<EmptyState icon="store" title="Nenhuma loja para mostrar" /></AppShell>
   }
 
-  const [loaded, firstSale] = await Promise.all([
+  const [loaded, firstSale, archived, firstSales] = await Promise.all([
     load(ctx).catch(err => { console.error('[products]', err); return null }),
     loadFirstSale(ctx),
+    loadArchivedStore(ctx),
+    loadFirstSales(ctx),
   ])
   if (!loaded) {
     return (
@@ -63,16 +68,22 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
       </AppShell>
     )
   }
-  const { rows, totals, configured, attribution, contributionTotal, costsTotal, excludedStores, pricedTotals } = loaded
+  const { rows, totals, configured, attribution, contributionTotal, costsTotal, excludedStores, pricedTotals, stores } = loaded
   const all = ctx.scope === 'all'
   const opt = ctx.storeOption
+  // "Todas" before every store's first sale: the Overview's reading.
+  const firstOfAll = all ? firstSaleOfAll(stores.map(p => ({ totals: p.totals, firstOrderDate: firstSales.get(p.id) ?? null })), ctx.range) : null
   const verdict = buildProductsVerdict({
     subject: all ? 'suas lojas' : `a ${ctx.store?.name}`,
     subjectOf: all ? 'das suas lojas' : `da ${ctx.store?.name}`,
     subjectIn: all ? 'nas suas lojas' : `na ${ctx.store?.name}`,
     products: rows, totals, configured, contributionTotal, excludedStores, rangeLabel: ctx.rangeLabel, periodPhrase: ctx.periodPhrase,
-    partialLabel: ctx.partialLabel, dayLabel: opt?.dayLabel ?? null, split: ctx.split, firstSale,
+    partialLabel: ctx.partialLabel, dayLabel: opt?.dayLabel ?? null, split: ctx.split, firstSale, archived,
+    firstSaleAll: firstOfAll ? { firstOrderDate: firstOfAll, range: ctx.range, today: ctx.today, storeCount: stores.length } : null,
   })
+  // Before the first sale or after the archive day the table says the
+  // verdict's reason, and no "$0 em 0 pedidos" footer.
+  const why = emptyWhy(verdict, ctx.rangeLabel)
 
   const money = (p: Row) => (configured ? p.contribution ?? 0 : p.revenue)
   // The bars, the rest line's count and its amount all come from one list:
@@ -98,7 +109,7 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
             sub: p.store ?? `${plural(p.units, 'unidade', 'unidades')} · ${plural(p.orders, 'pedido', 'pedidos')}`,
             value: v,
             tone: v < 0 ? 'neg' : configured ? 'pos' : 'neu',
-            note: formatPct(pct(v, base), { digits: 0 }),
+            note: formatShare(pct(v, base)),
           }
         })}
       />
@@ -197,7 +208,7 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
         howTo={`Ordene por qualquer coluna e busque pelo nome. Receita = total do pedido dividido entre os itens pelo valor de cada um, em ${ctx.rangeLabel}.`}
         info={<>{REVENUE_NOTE} {COLUMNS_NOTE}</>}
         flush
-        footer={<>
+        footer={why ? undefined : <>
           <span>Os produtos somam as vendas {all ? 'das lojas' : 'da loja'}: <b className="num">{formatMoney(totals.revenue)}</b> em <b className="num">{plural(totals.orders, 'pedido', 'pedidos')}</b>.{leftOut}</span>
           {attribution && (
             // Linked here + credited in another store + linked to nothing = the
@@ -218,7 +229,7 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
             initialSort={{ key: configured ? 'contribution' : 'revenue', dir: 'desc' }}
             maxHeight={760}
             dense
-            empty={<EmptyState compact title="Nenhum produto vendido no período" />}
+            empty={why ? <WhyEmpty why={why} /> : <EmptyState compact title="Nenhum produto vendido no período" />}
           />
         </div>
       </Block>
@@ -239,6 +250,8 @@ interface Loaded {
    *  summed, for the totals row. Null otherwise (the row is `totals`). */
   pricedTotals: PnL | null
   attribution: ProductReport['attribution'] | null
+  /** "Todas": each store's totals (for the window before every first sale). */
+  stores: { id: string; totals: PnL }[]
 }
 
 async function load(ctx: PageContext): Promise<Loaded> {
@@ -258,6 +271,7 @@ async function load(ctx: PageContext): Promise<Loaded> {
       excludedStores: [],
       pricedTotals: null,
       attribution: r.attribution,
+      stores: [],
     }
   }
   // Todas: one engine pass for every store, each priced with its own costs.
@@ -280,6 +294,7 @@ async function load(ctx: PageContext): Promise<Loaded> {
   const excludedStores = list.filter(p => !p.configured && p.totals.revenue > 0).map(p => name.get(p.store.id) ?? p.store.name)
   return {
     rows, totals, configured, attribution: null,
+    stores: list.map(p => ({ id: p.store.id, totals: p.totals })),
     contributionTotal: withCosts.reduce((s, p) => s + p.totals.contribution, 0),
     costsTotal: withCosts.reduce((s, p) => s + p.totals.variableCosts, 0),
     excludedStores,

@@ -8,7 +8,9 @@
 import type { PnL } from '@/lib/engine/pnl'
 import type { Verdict, VerdictChip, VerdictLine } from '@/lib/views/verdict'
 import { formatMoney, formatPct, plural } from '@/lib/format'
-import { beforeStartVerdict, isBeforeStart, type BeforeStartInput } from '@/components/campaigns/storeStart'
+import { beforeStartAllVerdict, beforeStartVerdict, isBeforeStart, type AllBeforeStartInput, type BeforeStartInput } from '@/components/campaigns/storeStart'
+import type { ArchivedStoreInput } from '@/components/dashboard/archivedStore'
+import { archivedEmptyVerdict } from '@/components/dashboard/emptyWindow'
 
 export interface ProductLike {
   key: string
@@ -62,6 +64,14 @@ export function buildProductsVerdict(input: {
   /** One store with a known first sale: a window that ends before it reads
    *  "Vende desde 7 nov", like the Resumo (components/campaigns/storeStart). */
   firstSale?: BeforeStartInput | null
+  /** One archived store (components/dashboard/archivedStore): a window after
+   *  its archive day reads "sem dados", word for word the Resumo's verdict,
+   *  not "Nenhuma venda". */
+  archived?: ArchivedStoreInput | null
+  /** "Todas" when no store had made its first sale by the end of the window
+   *  (components/campaigns/storeStart firstSaleOfAll): the Overview's
+   *  "Nenhuma das lojas vendia ainda", not "Nenhuma venda nas suas lojas". */
+  firstSaleAll?: AllBeforeStartInput | null
 }): Verdict {
   const { products, totals, configured, periodPhrase, subject, subjectOf, subjectIn } = input
   const chips: VerdictChip[] = []
@@ -76,10 +86,20 @@ export function buildProductsVerdict(input: {
   if (input.dayLabel) chips.push({ code: 'dia_fuso', label: input.dayLabel, tone: 'info', icon: 'clock' })
 
   if (!products.length || totals.revenue <= 0) {
+    if (input.firstSaleAll && !(totals.orders > 0)) {
+      return beforeStartAllVerdict({ ...input.firstSaleAll, periodPhrase, rangeLabel: input.rangeLabel, totals, split: input.split })
+    }
     const fs = input.firstSale
     if (fs && isBeforeStart(fs.firstOrderDate, fs.range, { orders: totals.orders, revenue: totals.revenue, spend: totals.adSpend })) {
       return beforeStartVerdict({ ...fs, rangeLabel: input.rangeLabel, dayLabel: input.dayLabel, totals, configured, split: input.split })
     }
+    // An archived store's empty window, by the Resumo's rule: after the
+    // archive day it is "sem dados"; one that runs past it (Este mês, 1–24 nov,
+    // archived on 10 nov) "não teve vendas em 1–10 nov" with the archive note,
+    // not "Nenhuma venda neste mês" for days never read.
+    const ar = input.archived
+    const archivedV = ar ? archivedEmptyVerdict({ ...ar, rangeLabel: input.rangeLabel, dayLabel: input.dayLabel, totals, configured, split: input.split }, { orders: totals.orders, revenue: totals.revenue, spend: totals.adSpend }) : null
+    if (archivedV) return archivedV
     chips.unshift({ code: 'sem_vendas', label: input.partialLabel ? 'Sem vendas ainda' : 'Sem vendas no período', tone: 'neu', icon: 'ring' })
     return {
       ...base, tone: 'neu', chips, headline: `Nenhuma venda ${subjectIn} ${periodPhrase}.`,
@@ -126,9 +146,13 @@ export function buildProductsVerdict(input: {
         { text: named(worst), strong: true }, `, ${formatPct((worst.contribution / worst.revenue) * 100)} de contribuição.`))
     }
     const giftCost = -gifts.reduce((s, p) => s + p.contribution, 0)
+    // The gifts handed out are units, not product lines: MOKOO's 7 dias read
+    // "6 brindes custaram $111" for six Free Gift rows holding 17 units.
+    const giftUnits = Math.round(gifts.reduce((s, p) => s + p.units, 0))
+    const given = giftUnits > 0 ? giftUnits : gifts.length
     const giftText = gifts.length
-      // The participle agrees with the count: "1 brinde (dado de graça) custou".
-      ? `${plural(gifts.length, 'brinde', 'brindes')} (${gifts.length === 1 ? 'dado' : 'dados'} de graça) ${gifts.length === 1 ? 'custou' : 'custaram'} ${formatMoney(giftCost)}`
+      // The participle agrees with the count: "1 brinde dado de graça custou".
+      ? `${plural(given, 'brinde', 'brindes')} ${given === 1 ? 'dado' : 'dados'} de graça${gifts.length > 1 ? ` (${gifts.length} produtos de brinde)` : ''} ${given === 1 ? 'custou' : 'custaram'} ${formatMoney(giftCost)}`
       : ''
     details.push(losers.length
       ? line({ text: plural(losers.length, 'produto vendido saiu', 'produtos vendidos saíram'), strong: true, tone: 'neg' },

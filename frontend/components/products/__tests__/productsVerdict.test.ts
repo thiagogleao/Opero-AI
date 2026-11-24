@@ -24,9 +24,14 @@ describe('buildProductsVerdict', () => {
   it('keeps free gifts out of the "no prejuízo" chip and says what they cost', () => {
     const v = buildProductsVerdict({ ...base, products, totals })
     expect(v.chips.some(c => c.code === 'prejuizo')).toBe(false)
-    expect(v.details.map(d => d.text).join(' ')).toContain('1 brinde (dado de graça) custou $40,00')
-    const two = buildProductsVerdict({ ...base, products: [...products, P('Brinde Capy', 2, 0, -12.5)], totals })
-    expect(two.details.map(d => d.text).join(' ')).toContain('2 brindes (dados de graça) custaram $52,50')
+    // Units given away, not product lines (Free Gift: 6 units in 6 orders).
+    expect(v.details.map(d => d.text).join(' ')).toContain('6 brindes dados de graça custaram $40,00')
+    const one = buildProductsVerdict({ ...base, products: [...products.slice(0, 3), P('Free Gift', 1, 0, -6.5)], totals })
+    expect(one.details.map(d => d.text).join(' ')).toContain('1 brinde dado de graça custou $6,50')
+    // MOKOO 7 dias: six Free Gift rows with 1+1+2+3+3+7 = 17 units.
+    const six = [1, 1, 2, 3, 3, 7].map((u, i) => P(`Free Gift ${i}`, u, 0, -18.5, u))
+    const many = buildProductsVerdict({ ...base, products: [...products.slice(0, 3), ...six], totals })
+    expect(many.details.map(d => d.text).join(' ')).toContain('17 brindes dados de graça (6 produtos de brinde) custaram $111')
   })
 
   it('calls out products sold below cost, gifts apart', () => {
@@ -34,7 +39,7 @@ describe('buildProductsVerdict', () => {
     expect(v.chips[0].label).toBe('1 no prejuízo antes dos anúncios')
     const text = v.details.map(d => d.text).join(' ')
     expect(text).toContain('1 produto vendido saiu no prejuízo antes dos anúncios: Gift Box.')
-    expect(text).toContain('À parte, 1 brinde')
+    expect(text).toContain('À parte, 6 brindes dados de graça custaram $40,00.')
   })
 
   it('shows sales, not contribution, without cost settings', () => {
