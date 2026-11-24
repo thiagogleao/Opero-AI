@@ -27,17 +27,19 @@
  */
 
 import type { PnL } from '@/lib/engine/pnl'
-import type { Period } from '@/lib/engine/dates'
+import { shiftDate, type DateRange, type Period } from '@/lib/engine/dates'
 import type { CampaignAction } from '@/lib/campaignSignal'
-import type { CampaignReport } from '@/lib/data/campaigns'
+import type { CampaignReport, MetaSpendSpan } from '@/lib/data/campaigns'
 import {
   EARLY_DAY_MINUTES, SPLIT_SHARE, storeRoas as channelStoreRoas,
   type Verdict, type VerdictChip, type VerdictLine,
 } from '@/lib/views/verdict'
-import { formatMoney, formatPct, formatRoas, plural } from '@/lib/format'
+import { formatMoney, formatPct, formatRangeLabel, formatRoas, plural } from '@/lib/format'
 import { breakEvenReason } from '@/components/ui/roasReason'
 import { actionCountsText } from './text'
-import { beforeStartVerdict, isBeforeStart, type BeforeStartInput } from './storeStart'
+import { beforeStartVerdict, dateBeside, isBeforeStart, type BeforeStartInput } from './storeStart'
+import type { ArchivedStoreInput } from '@/components/dashboard/archivedStore'
+import { frozenVerdict, isFrozenWindow } from '@/components/dashboard/emptyWindow'
 
 type Part = { text: string; strong?: boolean; tone?: 'pos' | 'neg' | 'warn' }
 const line = (...parts: (string | Part)[]): VerdictLine => {
@@ -83,7 +85,51 @@ export interface AdsVerdictInput {
   /** The store's first sale: a window that ends before it, with nothing in
    *  it, reads "Vende desde 7 nov" like the Resumo (./storeStart). */
   firstSale?: BeforeStartInput | null
+  /** One archived store (components/dashboard/archivedStore): a window after
+   *  its archive day, with nothing in it, reads "sem dados" word for word as
+   *  the Resumo, not "não gastou no Meta". */
+  archived?: ArchivedStoreInput | null
+  /** When the store spent on Meta, read only for a window without spend
+   *  (noSpendHistory). Absent: the window's own facts only, never "ainda". */
+  metaHistory?: MetaHistory | null
 }
+
+export interface MetaHistory extends MetaSpendSpan {
+  /** The page's window and today, on the store's clock. */
+  range: DateRange
+  today: string
+  /** Stores the viewer may see whose ad accounts carried ads that sold here,
+   *  for a store with no Meta spend of its own on record (CAMP HALLOW → EPOCH). */
+  adsRunIn?: readonly string[]
+}
+
+/**
+ * What a window without Meta spend says about the store's ads. "Ainda não
+ * gastou" only when the store spent the day before the window (its ads are
+ * running and the day is not over): said of Glooty, whose ads stopped on
+ * 15 nov, and of CAMP HALLOW, which has no ad account of its own, it promised
+ * spend that was never coming. Otherwise a line with the fact: ads stopped
+ * (the Resumo's "Anúncios parados" wording), ads that started later, or ads
+ * that run in another store's account. Pure.
+ */
+export function noSpendHistory(h: MetaHistory | null | undefined, partial: boolean, storeName: string): { yet: boolean; line: string | null } {
+  if (!h) return { yet: false, line: null }
+  if (partial && h.lastSpendDay !== null && h.lastSpendDay === shiftDate(h.range.from, -1)) return { yet: true, line: null }
+  const date = (iso: string) => dateBeside(iso, [h.range.from, h.range.to], h.today)
+  if (h.lastSpendDay) {
+    // The window reaches yesterday or today: the ads are stopped now.
+    return h.range.to >= shiftDate(h.today, -1)
+      ? { yet: false, line: `Anúncios parados: o último gasto no Meta foi em ${date(h.lastSpendDay)}.` }
+      : { yet: false, line: `O último gasto no Meta antes destas datas foi em ${date(h.lastSpendDay)}.` }
+  }
+  if (h.firstSpendDay) return { yet: false, line: `A ${storeName} começou a anunciar no Meta em ${date(h.firstSpendDay)}.` }
+  const where = h.adsRunIn ?? []
+  return where.length
+    ? { yet: false, line: `A ${storeName} não tem gasto no Meta registrado nela: os anúncios dela rodam na conta da ${joinNames([...where])}, e o gasto deles fica na contabilidade de lá.` }
+    : { yet: false, line: `A ${storeName} não tem nenhum gasto no Meta registrado.` }
+}
+
+const joinNames = (xs: string[]) => (xs.length <= 1 ? xs.join('') : `${xs.slice(0, -1).join(', ')} e ${xs[xs.length - 1]}`)
 
 export interface ReconciliationBridge {
   /** Σ estimated profit of the priced campaigns. */
@@ -216,19 +262,58 @@ export function uncreditedSources(shopSpend: number): string {
 
 /** The sentence under the "ROAS atribuído" gauge, on the same campaigns as
  *  the gauge (shared-account ones left out) and the same list of
- *  uncredited sources as the verdict. */
-export function attributedRoasNote(input: { sharedSpend: number; shopSpend: number }): string {
+ *  uncredited sources as the verdict. "Fica abaixo do ROAS do quadro ao
+ *  lado" only when Meta credits no more than the store sold: MOKOO's March
+ *  (no order yet) read it under "ROAS atribuído 1,33×" beside 0,00×. With
+ *  `credited` and `storeRevenue` left out, the general sentence. */
+export function attributedRoasNote(input: { sharedSpend: number; shopSpend: number; credited?: number; storeRevenue?: number }): string {
   const what = input.sharedSpend > 0
     ? `Vendas que o Meta credita às campanhas desta loja ÷ o gasto delas (os ${formatMoney(input.sharedSpend)} das campanhas de conta compartilhada ficam fora).`
     : 'Vendas que o Meta credita às campanhas ÷ gasto no Meta.'
+  const credited = input.credited ?? 0
+  const revenue = input.storeRevenue ?? null
+  if (revenue !== null && credited >= CENT && revenue < CENT) {
+    return `${what} A loja não teve nenhum pedido no período: o que o Meta credita não são vendas desta loja — a atribuição do Meta não fecha com os pedidos.`
+  }
+  if (revenue !== null && credited > revenue + CENT) {
+    return `${what} Fica acima do ROAS do quadro ao lado (todas as vendas da loja) porque o Meta credita mais do que a loja vendeu: as estimativas por campanha saem otimistas.`
+  }
   const sources = input.shopSpend > 0 ? 'Anúncios Shopify, orgânico, e-mail, recompra' : 'orgânico, e-mail, recompra'
   return `${what} Fica abaixo do ROAS do quadro ao lado (todas as vendas da loja) quando há venda que o Meta não credita (${sources}) — julgue as campanhas por ele e a loja pelo lucro real.`
+}
+
+const CENT = 0.005
+
+/**
+ * What Meta credits to a store's campaigns in a window where the store had no
+ * order at all (MOKOO's March, a month before its first sale: $1.506 credited,
+ * "ROAS atribuído 1,33×"). Those purchases cannot be this store's sales.
+ * Shared with the Resumo's campaigns block. Null when Meta credits nothing or
+ * the store sold.
+ */
+export function creditedWithoutSalesText(credited: number, storeRevenue: number, partial = false): string | null {
+  if (!(credited >= CENT) || storeRevenue >= CENT) return null
+  return `O Meta credita ${formatMoney(credited)} em vendas às campanhas, mas a loja ${partial ? 'não tem nenhum pedido até agora' : 'não teve nenhum pedido no período'}: essas compras não são vendas desta loja — a atribuição do Meta não fecha com os pedidos.`
 }
 
 /** "47%", or "menos de 1%" for a share that has money but rounds to 0. */
 const shareText = (part: number, whole: number) => {
   const p = whole > 0 ? (part / whole) * 100 : 0
   return part > 0 && Math.round(p) === 0 ? 'menos de 1%' : formatPct(p, { digits: 0 })
+}
+
+/**
+ * An archived store's window that runs past the archive day (starts on or
+ * before it, ends after it): the archive day and the span that was read, as
+ * printed. Null otherwise — a window wholly after it is frozen, not a tail.
+ */
+export function frozenTailOf(ar: ArchivedStoreInput | null | undefined): { day: string; readSpan: string } | null {
+  const on = ar?.archivedOn
+  if (!ar || !on || !(ar.range.from <= on && on < ar.range.to)) return null
+  return {
+    day: dateBeside(on, [ar.range.from, ar.range.to], ar.today),
+    readSpan: formatRangeLabel({ from: ar.range.from, to: on }, ar.today),
+  }
 }
 
 export function buildAdsVerdict(input: AdsVerdictInput): { verdict: Verdict; reconciliation: Reconciliation } {
@@ -250,6 +335,12 @@ export function buildAdsVerdict(input: AdsVerdictInput): { verdict: Verdict; rec
   const base = {
     when, totals: pnl, comparisonTotals: null, excluded: [], partial: w.partial, split, storeCount: 1,
   }
+  // An archived store's window that runs past its archive day: the later days
+  // were never read (the Resumo's `frozenTail` note, word for word). Squishy
+  // World's 5–15 nov read "não gastou no Meta em 5–15 nov" with no word of
+  // the archive on 10 nov.
+  const tail = frozenTailOf(input.archived)
+  if (tail) notes.push(line(`A ${storeName} foi arquivada em `, strong(tail.day), ' e não sincroniza mais: não há dados dos dias seguintes.'))
 
   // ── No Meta spend: nothing to judge, never a fake $0.
   if (!(spend > 0)) {
@@ -260,14 +351,26 @@ export function buildAdsVerdict(input: AdsVerdictInput): { verdict: Verdict; rec
         reconciliation: rec,
       }
     }
-    chips.push(chip('sem_vendas', w.partial ? 'Sem gasto no Meta ainda' : 'Sem gasto no Meta', 'neu', 'ring'))
+    const ar = input.archived
+    if (ar && isFrozenWindow({ archived: true, archivedOn: ar.archivedOn }, ar.range, ar.today, { orders: pnl.orders, revenue: pnl.revenue, spend: pnl.adSpend })) {
+      return {
+        verdict: frozenVerdict({ ...ar, rangeLabel: w.rangeLabel, dayLabel: w.dayLabel, totals: pnl, configured: report.configured, split }),
+        reconciliation: rec,
+      }
+    }
+    const elsewhere = input.billedElsewhere
+    const history = noSpendHistory(input.metaHistory, w.partial, storeName)
+    // Only the days read are described: "em 5–10 nov", not the unread tail.
+    const phrase = tail ? `em ${tail.readSpan}` : w.periodPhrase
+    chips.push(chip('sem_vendas', history.yet ? 'Sem gasto no Meta ainda' : 'Sem gasto no Meta', 'neu', 'ring'))
     if (w.dayLabel) chips.push(chip('dia_fuso', w.dayLabel, 'info', 'clock'))
     details.push(line(
       pnl.revenue > 0
-        ? `A loja vendeu ${money(pnl.revenue)} ${w.periodPhrase} sem nenhum gasto no Meta registrado nela.`
-        : `Nenhuma venda e nenhum gasto no Meta ${w.periodPhrase}.`,
+        ? `A loja vendeu ${money(pnl.revenue)} ${phrase} sem nenhum gasto no Meta registrado nela.`
+        : `Nenhuma venda e nenhum gasto no Meta ${phrase}.`,
     ))
-    const elsewhere = input.billedElsewhere
+    // The campaigns paid elsewhere (below) already say where the ads run.
+    if (history.line && !(elsewhere && elsewhere.campaigns > 0 && !input.metaHistory?.firstSpendDay)) details.push(line(history.line))
     if (elsewhere && elsewhere.campaigns > 0) {
       const one = elsewhere.campaigns === 1
       // The whole campaigns' spend, not only the ads credited with an order
@@ -279,7 +382,7 @@ export function buildAdsVerdict(input: AdsVerdictInput): { verdict: Verdict; rec
     return {
       verdict: {
         ...base, tone: 'neu', chips,
-        headline: `A ${storeName} não gastou no Meta ${w.periodPhrase}.`,
+        headline: `A ${storeName} ${history.yet ? 'ainda não gastou' : 'não gastou'} no Meta ${phrase}.`,
         amount: null, amountTone: 'neu', amountCaption: 'sem campanhas com gasto no período',
         details, notes, basis: 'none', roas: null, early: false, fewOrders: false,
       },
@@ -302,10 +405,18 @@ export function buildAdsVerdict(input: AdsVerdictInput): { verdict: Verdict; rec
     ? line(
       'Gasto no Meta: ', strong(money(own.spend)), ` em ${plural(own.campaigns, 'campanha', 'campanhas')} desta loja (mais ${money(shared.spend)} em ${shared.campaigns} de conta compartilhada). O Meta credita ${own.campaigns === 1 ? 'à' : 'às'} da loja `,
       strong(money(own.value)), ' em vendas — ROAS atribuído ', strong(roasLine(own.roas)), ...empate)
-    : line(
-      // The pronoun agrees with the count: "em 1 campanha. O Meta credita a ela".
-      'Gasto no Meta: ', strong(money(spend)), ` em ${plural(campaignsCount, 'campanha', 'campanhas')}. O Meta credita ${campaignsCount === 1 ? 'a ela' : 'a elas'} `,
-      strong(money(own.value)), ' em vendas — ROAS atribuído ', strong(roasLine(own.roas)), ...empate))
+    : campaignsCount === 0
+      // Every dollar in ads the sync has not tied to a campaign yet (Glooty,
+      // 12 nov): "$138 em 0 campanhas. O Meta credita a elas" named nothing.
+      ? line(
+        'Gasto no Meta: ', strong(money(spend)), ', todo em anúncios que a sincronização ainda não ligou a uma campanha. O Meta credita a eles ',
+        strong(money(own.value)), ' em vendas — ROAS atribuído ', strong(roasLine(own.roas)), ...empate)
+      : line(
+        // The pronoun agrees with the count: "em 1 campanha. O Meta credita a ela".
+        'Gasto no Meta: ', strong(money(spend)), ` em ${plural(campaignsCount, 'campanha', 'campanhas')}. O Meta credita ${campaignsCount === 1 ? 'a ela' : 'a elas'} `,
+        strong(money(own.value)), ' em vendas — ROAS atribuído ', strong(roasLine(own.roas)), ...empate))
+  const creditedNoSale = creditedWithoutSalesText(own.value, pnl.revenue, w.partial)
+  if (creditedNoSale) details.push(line(creditedNoSale))
   if (pnl.revenue > 0) {
     const share = (Math.abs(rec.uncredited) / pnl.revenue) * 100
     details.push(rec.uncredited >= 0
@@ -352,13 +463,13 @@ export function buildAdsVerdict(input: AdsVerdictInput): { verdict: Verdict; rec
         tone: rec.revenueMinusAds < 0 ? 'neg' : 'warn',
         chips,
         headline: noSales
-          ? `A ${storeName} gastou ${money(spend)} no Meta ${w.periodPhrase} e não vendeu nada.`
+          ? `A ${storeName} gastou ${money(spend)} no Meta ${w.periodPhrase} e ${w.partial ? 'ainda não vendeu' : 'não vendeu'} nada.`
           : rec.revenueMinusAds < 0
           ? `A ${storeName} vendeu menos do que gastou em anúncios ${w.periodPhrase} — e ainda falta o custo dos produtos.`
           : `Sem custos configurados não dá para dizer se os anúncios da ${storeName} se pagam.`,
         amount: rec.revenueMinusAds * k,
         amountTone: rec.revenueMinusAds < 0 ? 'neg' : 'neu',
-        amountCaption: `${split ? 'sua parte de ' : ''}vendas da loja − anúncios, sem o custo dos produtos`,
+        amountCaption: `vendas da loja − anúncios, sem o custo dos produtos${split ? ' (sua parte, 50%)' : ''}`,
         details, notes, basis: 'revenue_minus_ads', roas: storeRoas, early, fewOrders: fewPurchases,
       },
       reconciliation: rec,
@@ -382,7 +493,7 @@ export function buildAdsVerdict(input: AdsVerdictInput): { verdict: Verdict; rec
     if (w.dayLabel) chips.push(chip('dia_fuso', w.dayLabel, 'info', 'clock'))
     const lossPerSale = !noSales && estimated !== null
     const headline = noSales
-      ? `A ${storeName} gastou ${money(spend)} no Meta ${w.periodPhrase} e não vendeu nada.`
+      ? `A ${storeName} gastou ${money(spend)} no Meta ${w.periodPhrase} e ${w.partial ? 'ainda não vendeu' : 'não vendeu'} nada.`
       : estimated === null
         ? `As campanhas da ${storeName} ${w.periodPhrase} rodaram em conta compartilhada: não dá para estimar o lucro delas.`
         : `Cada venda da ${storeName} já perde dinheiro antes do anúncio ${w.periodPhrase}: nenhum ROAS empata.`
@@ -392,7 +503,9 @@ export function buildAdsVerdict(input: AdsVerdictInput): { verdict: Verdict; rec
         amount: (lossPerSale ? estimated : -spend) * k, amountTone: early ? 'neu' : 'neg',
         amountCaption: lossPerSale
           ? `${split ? 'sua parte (50%) do ' : 'de '}lucro estimado das campanhas: cada venda já sai no prejuízo`
-          : `${split ? 'sua parte do ' : ''}gasto no Meta sem margem para cobri-lo`,
+          // The amount is the halved loss; the spend itself stays whole (the
+          // split chip says so, and the next line prints it whole).
+          : `de prejuízo${split ? ' (sua parte, 50%)' : ''}: gasto no Meta sem margem para cobri-lo`,
         details, notes, basis: 'profit', roas: storeRoas, early, fewOrders: fewPurchases,
       },
       reconciliation: rec,
@@ -414,13 +527,19 @@ export function buildAdsVerdict(input: AdsVerdictInput): { verdict: Verdict; rec
   if (early) {
     headline = `Cedo demais para julgar os anúncios da ${storeName} hoje: o Meta ainda está atribuindo as vendas.`
   } else {
-    headline = `As campanhas da ${storeName} deram ${inProfit ? 'lucro' : 'prejuízo'} ${w.periodPhrase}, pela atribuição do Meta`
+    // A window still running is told in the present, "até agora": "deram
+    // lucro hoje" at 06h12 read as a closed day (Resumo says "está no lucro").
+    const result = inProfit ? 'lucro' : 'prejuízo'
+    headline = w.partial
+      ? `As campanhas da ${storeName} estão dando ${result} ${w.periodPhrase}, até agora, pela atribuição do Meta`
+      : `As campanhas da ${storeName} deram ${result} ${w.periodPhrase}, pela atribuição do Meta`
     // The judgement leaves the shared-account campaigns out (no margin of
     // this store applies to them): say how much of the spend that is — 47%
     // of EPOCH's October.
     if (shared.spend > 0) headline += `, sem contar ${shareText(shared.spend, spend)} do gasto (campanhas de conta compartilhada)`
-    if (!inProfit && storeCovers) headline += ' — mas a loja inteira cobriu o gasto com anúncios.'
-    else if (inProfit && storeRoas?.state === 'neg') headline += ' — mas a loja inteira não cobriu o gasto com anúncios.'
+    const covered = w.partial ? 'está cobrindo' : 'cobriu'
+    if (!inProfit && storeCovers) headline += ` — mas a loja inteira ${covered} o gasto com anúncios.`
+    else if (inProfit && storeRoas?.state === 'neg') headline += ` — mas a loja inteira não ${covered} o gasto com anúncios.`
     else headline += '.'
   }
 

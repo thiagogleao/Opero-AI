@@ -20,6 +20,7 @@ import { MiniBars } from '@/components/charts'
 import { formatDate, formatMoney, formatPct, formatRoas, plural } from '@/lib/format'
 import { SPLIT_SHARE } from '@/lib/views/verdict'
 import { ACTION_CHIP, ptText } from './text'
+import { WhyEmpty, type EmptyWindowText } from './emptyWhy'
 import s from './campaigns.module.css'
 
 const ORDER: CampaignAction[] = ['escalar', 'cortar', 'manter', 'observar']
@@ -68,7 +69,17 @@ function DecisionRow({ row, breakEven, k }: { row: CampaignRow; breakEven: numbe
   )
 }
 
-export function ScaleRoom({ report, windowLabel, costsHref, split = false }: { report: CampaignReport; windowLabel: string; costsHref: string; split?: boolean }) {
+export function ScaleRoom({ report, windowLabel, costsHref, split = false, tableHasRows = true, why = null }: {
+  report: CampaignReport; windowLabel: string; costsHref: string; split?: boolean
+  /** Why the decision window (the last closed days, not the page's window)
+   *  has nothing in it, when that is not "no campaign spent": an archived
+   *  store reads nothing after its archive day (./emptyWhy windowWhy). */
+  why?: EmptyWindowText | null
+  /** Whether the table under this block (the page's own window) lists
+   *  anything: "estão na tabela abaixo" pointed at "Nenhuma campanha com
+   *  gasto no período" (Glooty, 7 dias). */
+  tableHasRows?: boolean
+}) {
   const k = split ? SPLIT_SHARE : 1
   const rows = report.campaigns.filter(c => c.decision.spend > 0 || c.decision.basis !== 'sem_gasto')
   const acting = rows.filter(c => c.decision.action !== null)
@@ -95,9 +106,12 @@ export function ScaleRoom({ report, windowLabel, costsHref, split = false }: { r
       info={<>{ptText(report.formula)} A margem mínima para escalar ({t.minMargin}%) é a mesma das notificações de escala, definida em Ajustes.</>}
       footer={rules}
     >
-      {!report.configured ? (
+      {why && rows.length === 0 ? (
+        <WhyEmpty why={why} compact={false} />
+      ) : !report.configured ? (
         <EmptyState icon="sliders" title="Custos não configurados" action={<ButtonLink href={costsHref} size="sm" icon="sliders">Configurar custos</ButtonLink>}>
-          Sem o custo dos produtos não há margem, e sem margem não há veredito de escala. O gasto e as vendas de cada campanha estão na tabela abaixo.
+          Sem o custo dos produtos não há margem, e sem margem não há veredito de escala.{' '}
+          {tableHasRows ? 'O gasto e as vendas de cada campanha estão na tabela abaixo.' : 'Nenhuma campanha teve gasto no período escolhido.'}
         </EmptyState>
       ) : rows.length === 0 ? (
         <EmptyState title="Nenhuma campanha com gasto">Nenhuma campanha gastou nos últimos {t.windowDays} dias fechados.</EmptyState>

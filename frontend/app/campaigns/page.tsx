@@ -1,30 +1,33 @@
 import { Suspense } from 'react'
 import { getPageContext, pageMetadata, type PageContext, type SearchParams } from '@/lib/views/page'
 import { buildPortfolio } from '@/lib/views/portfolio'
-import { todayInTz } from '@/lib/engine/dates'
+import { shiftDate, todayInTz } from '@/lib/engine/dates'
 import { resumoLinkOverrides } from '@/components/portfolio/model'
 import { computeStorePnL, type StorePnL } from '@/lib/engine/pnl'
-import { formatRangeLabel, formatMoney, plural } from '@/lib/format'
+import { formatRangeLabel, formatMoney } from '@/lib/format'
 import { listStores, type StoreRef } from '@/lib/access'
 import { getAlertConfig } from '@/lib/alerts'
-import { getSharedAdAccounts } from '@/lib/attribution'
-import { decisionWindows, getCampaignReport, getOwnAttribution, getStoreCampaignName, type CampaignReport } from '@/lib/data/campaigns'
+import { getSharedAdAccounts, getSharedAdAccountsForStore } from '@/lib/attribution'
+import { decisionWindows, getCampaignReport, getMetaSpendSpan, getOwnAttribution, getStoreCampaignName, type CampaignReport } from '@/lib/data/campaigns'
 import { getCreativesReport } from '@/lib/data/creatives'
 import type { ScaleThresholds } from '@/lib/campaignSignal'
 import { AppShell, PageHeader, PeriodNote } from '@/components/shell'
 import { Block, Callout, EmptyState, ErrorState, RoasGauge, SkeletonBlock, Tabs, VerdictCard } from '@/components/ui'
-import { attributedRoasNote, buildAdsVerdict } from '@/components/campaigns/adsVerdict'
+import { attributedRoasNote, buildAdsVerdict, type MetaHistory } from '@/components/campaigns/adsVerdict'
 import { ReconciliationLedger } from '@/components/campaigns/ReconciliationLedger'
 import { ScaleRoom } from '@/components/campaigns/ScaleRoom'
 import { CampaignTable } from '@/components/campaigns/CampaignTable'
 import { CreativesView } from '@/components/campaigns/CreativesView'
 import { campaignFilterText, type CreativesFilter } from '@/components/campaigns/campaignFilter'
+import { sharedCampaignsNote } from '@/components/campaigns/text'
 import { noSpendWhen } from '@/components/campaigns/creativeVerdict'
 import { BilledElsewhere } from '@/components/campaigns/BilledElsewhere'
 import { PortfolioAdsTable, SharedAccountsCallout, buildPortfolioAdsVerdict } from '@/components/campaigns/PortfolioAds'
 import { storeMarginFromPnL } from '@/components/campaigns/margin'
 import { loadFirstSale } from '@/components/campaigns/firstSale'
+import { loadArchivedStore, type ArchivedStoreInput } from '@/components/dashboard/archivedStore'
 import type { BeforeStartInput } from '@/components/campaigns/storeStart'
+import { emptyWhy, windowWhy, type EmptyWindowText } from '@/components/campaigns/emptyWhy'
 import s from '@/components/campaigns/campaigns.module.css'
 
 /**
@@ -83,6 +86,7 @@ async function StoreCampaigns({ ctx, store, tab, campaignId, showAll }: {
 
   let pnl: StorePnL | null, report: CampaignReport, decisionReport: CampaignReport, storeNames: Map<string, string>
   let firstSale: BeforeStartInput | null
+  let archived: ArchivedStoreInput | null
   try {
     const [all, th] = await Promise.all([listStores(ctx.viewer, { includeArchived: true }), thresholds()])
     storeNames = new Map(all.map(x => [x.id, x.name]))
@@ -90,13 +94,14 @@ async function StoreCampaigns({ ctx, store, tab, campaignId, showAll }: {
     // The decision block always judges the last 7 closed days; when the page
     // shows another window, that window gets its own report so a campaign that
     // did not spend today still appears there.
-    const [p, r, d, f] = await Promise.all([
+    const [p, r, d, f, a] = await Promise.all([
       computeStorePnL(store.id, ctx.range, {}, ctx.now),
       getCampaignReport(store, ctx.range, opts),
       sameWindow ? Promise.resolve(null) : getCampaignReport(store, decision.window, opts),
       loadFirstSale(ctx),
+      loadArchivedStore(ctx),
     ])
-    pnl = p; report = r; decisionReport = d ?? r; firstSale = f
+    pnl = p; report = r; decisionReport = d ?? r; firstSale = f; archived = a
   } catch (err) {
     console.error('[campaigns] report', err)
     return (
@@ -124,6 +129,8 @@ async function StoreCampaigns({ ctx, store, tab, campaignId, showAll }: {
     campaigns: report.billedElsewhere.length,
     stores: [...new Set(report.billedElsewhere.map(b => b.billedStoreName))],
   } : null
+  // Only a window without Meta spend asks when the store last spent.
+  const metaHistory = report.totals.spend > 0 ? null : await loadMetaHistory(ctx, store)
   const { verdict, reconciliation } = buildAdsVerdict({
     storeName: store.name,
     report,
@@ -136,8 +143,19 @@ async function StoreCampaigns({ ctx, store, tab, campaignId, showAll }: {
     billedElsewhere,
     split: ctx.split,
     firstSale,
+    archived,
+    metaHistory,
+  })
+  // Before the first sale or after the archive day, the blocks say the
+  // verdict's reason. "Onde há folga" judges its own window (the last closed
+  // days), so it gets that window's reason.
+  const why = emptyWhy(verdict, ctx.rangeLabel)
+  const decisionWhy = windowWhy({
+    range: decision.window, rangeLabel: decisionLabel, today: ctx.today, spend: decisionReport.totals.spend,
+    firstOrderDate: firstSale?.firstOrderDate ?? null, archived,
   })
   const shared = report.campaigns.filter(c => c.shared)
+  const sharedNote = sharedCampaignsNote(shared, ctx.rangeLabel)
   const ownSpend = report.campaigns.filter(c => !c.shared).reduce((t, c) => t + c.spend, 0)
   const ownValue = report.campaigns.filter(c => !c.shared).reduce((t, c) => t + c.purchaseValue, 0)
   const margin = storeMarginFromPnL(ctx.range, pnl)
@@ -146,27 +164,23 @@ async function StoreCampaigns({ ctx, store, tab, campaignId, showAll }: {
     <AppShell ctx={ctx}>
       {header}
       <PeriodNote ctx={ctx} />
-      {shared.length > 0 && (
-        <Callout tone="warn" title="Conta de anúncio compartilhada com outra loja.">
-          {' '}{plural(shared.length, 'campanha desta lista rodou', 'campanhas desta lista rodaram')} numa conta que também veiculou anúncios de outra loja
-          ({shared.map(c => c.name).join(', ')}). O gasto delas, {formatMoney(shared.reduce((t, c) => t + c.spend, 0))}, está nesta loja,
-          mas as vendas podem ter caído na outra: ficam sem margem e sem veredito. Some as duas lojas para julgar o resultado.
-        </Callout>
+      {sharedNote && (
+        <Callout tone={sharedNote.tone} title={sharedNote.title}>{' '}{sharedNote.text}</Callout>
       )}
       <VerdictCard
         verdict={verdict}
         headingLevel="h2"
-        aside={<ReconciliationLedger rec={reconciliation} rangeLabel={ctx.rangeLabel} split={ctx.split} elsewhere={billedElsewhere} />}
+        aside={<ReconciliationLedger rec={reconciliation} rangeLabel={ctx.rangeLabel} split={ctx.split} elsewhere={billedElsewhere} why={why} />}
         footer={report.totals.spend > 0 ? (
           <div>
             <RoasGauge roas={ownSpend > 0 ? ownValue / ownSpend : null} breakEven={report.breakEvenRoas} configured={report.configured}
               revenue={pnl.totals.revenue} contribution={pnl.totals.contribution} label="ROAS atribuído" />
-            <p className={s.small}>{attributedRoasNote({ sharedSpend: shared.reduce((t, c) => t + c.spend, 0), shopSpend: pnl.totals.shopSpend })}</p>
+            <p className={s.small}>{attributedRoasNote({ sharedSpend: shared.reduce((t, c) => t + c.spend, 0), shopSpend: pnl.totals.shopSpend, credited: ownValue, storeRevenue: pnl.totals.revenue })}</p>
           </div>
         ) : undefined}
       />
       <BilledElsewhere rows={report.billedElsewhere} storeName={store.name} rangeLabel={ctx.rangeLabel} hrefFor={id => otherStoreHref(ctx, id)} />
-      <ScaleRoom report={decisionReport} windowLabel={decisionLabel} costsHref={ctx.hrefWith('/profit')} split={ctx.split} />
+      <ScaleRoom report={decisionReport} windowLabel={decisionLabel} costsHref={ctx.hrefWith('/profit')} split={ctx.split} tableHasRows={report.campaigns.length > 0} why={decisionWhy} />
       <Tabs
         ariaLabel="Campanhas ou criativos"
         active={tab}
@@ -176,15 +190,16 @@ async function StoreCampaigns({ ctx, store, tab, campaignId, showAll }: {
         ]}
       />
       <Suspense key={`${tab}:${campaignId ?? ''}:${showAll}`} fallback={<SkeletonBlock lines={6} height={260} />}>
-        <TabContent ctx={ctx} store={store} tab={tab} report={report} campaignId={campaignId} showAll={showAll} storeNames={storeNames} margin={margin} />
+        <TabContent ctx={ctx} store={store} tab={tab} report={report} campaignId={campaignId} showAll={showAll} storeNames={storeNames} margin={margin} why={why} />
       </Suspense>
     </AppShell>
   )
 }
 
-async function TabContent({ ctx, store, tab, report, campaignId, showAll, storeNames, margin }: {
+async function TabContent({ ctx, store, tab, report, campaignId, showAll, storeNames, margin, why }: {
   ctx: PageContext; store: StoreRef; tab: 'campanhas' | 'criativos'; report: CampaignReport
   campaignId: string | null; showAll: boolean; storeNames: Map<string, string>; margin: ReturnType<typeof storeMarginFromPnL>
+  why: EmptyWindowText | null
 }) {
   // A campaign filter only applies to the creatives tab. It stays on even when
   // the campaign has no row in this window (a period change keeps ?campanha=)
@@ -219,6 +234,7 @@ async function TabContent({ ctx, store, tab, report, campaignId, showAll, storeN
         showAllHref={ctx.hrefWith(`/campaigns?aba=criativos${filterId ? `&campanha=${encodeURIComponent(filterId)}` : ''}&mostrar=todos`)}
         split={ctx.split}
         storeRevenue={margin.revenue}
+        why={why}
       />
     )
   }
@@ -232,7 +248,7 @@ async function TabContent({ ctx, store, tab, report, campaignId, showAll, storeN
         ? <span>A lista soma <b className="num">{formatMoney(report.reconciliation.listedSpend)}</b>, o mesmo gasto no Meta que a contabilidade da loja carrega.</span>
         : <span className="warn">A lista soma {formatMoney(report.reconciliation.listedSpend)} e a contabilidade {formatMoney(report.reconciliation.engineMetaSpend)}.</span>}
     >
-      <CampaignTable report={report} creatives={creatives.creatives} hrefWith={p => ctx.hrefWith(p)} rangeLabel={ctx.rangeLabel} split={ctx.split} />
+      <CampaignTable report={report} creatives={creatives.creatives} hrefWith={p => ctx.hrefWith(p)} rangeLabel={ctx.rangeLabel} split={ctx.split} why={why} />
     </Block>
   )
 }
@@ -248,6 +264,36 @@ async function campaignFilter(ctx: PageContext, store: StoreRef, id: string, row
   }
 }
 
+/** How far back "the ads that sell here run in another store's account" is
+ *  looked for: the pairing is a property of the stores, not of the window
+ *  (CAMP HALLOW's last sale on EPOCH's ads was 30 out). */
+const ADS_ELSEWHERE_LOOKBACK_DAYS = 90
+
+/**
+ * When the store spent on Meta, for a window without spend (adsVerdict
+ * noSpendHistory) and, for a store with none ever, whose account carries the
+ * ads that sell there (only stores the viewer may see). Null when the read
+ * fails: the verdict then says only what the window holds.
+ */
+async function loadMetaHistory(ctx: PageContext, store: StoreRef): Promise<MetaHistory | null> {
+  try {
+    const span = await getMetaSpendSpan(store.id, ctx.range.to)
+    let adsRunIn: string[] = []
+    if (!span.firstSpendDay) {
+      const visible = new Map(ctx.stores.map(x => [x.id, x.name]))
+      const lookback = { from: shiftDate(ctx.today, -(ADS_ELSEWHERE_LOOKBACK_DAYS - 1)), to: ctx.today }
+      const pairs = await getSharedAdAccountsForStore(store.id, lookback, visible)
+      adsRunIn = [...new Set(pairs
+        .filter(p => p.salesStoreId === store.id && p.adStoreId !== store.id && visible.has(p.adStoreId))
+        .map(p => p.adStoreName))]
+    }
+    return { ...span, range: ctx.range, today: ctx.today, adsRunIn }
+  } catch (err) {
+    console.error('[campaigns] meta history', err)
+    return null
+  }
+}
+
 /**
  * A link to another store's Campanhas on the dates this page shows. The same
  * `periodo` resolves on that store's own clock, which can be a day ahead
@@ -256,14 +302,14 @@ async function campaignFilter(ctx: PageContext, store: StoreRef, id: string, row
 function otherStoreHref(ctx: PageContext, storeId: string): string {
   const other = ctx.stores.find(x => x.id === storeId)
   const storeToday = other ? todayInTz(other.timezone, ctx.now) : ctx.today
-  return ctx.hrefWith('/campaigns', resumoLinkOverrides({ id: storeId, storeToday }, ctx))
+  return ctx.hrefWith('/campaigns', resumoLinkOverrides({ id: storeId, storeToday, timezone: other?.timezone }, ctx))
 }
 
 async function AllStores({ ctx }: { ctx: PageContext }) {
   const header = <PageHeader ctx={ctx} title="Campanhas · todas as lojas" halved={false} />
   const names = new Map(ctx.selected.map(x => [x.id, x.name]))
   const loaded = await Promise.all([
-    buildPortfolio(ctx.selected, ctx.period, ctx.params.de, ctx.params.ate, ctx.now, { liveFeed: false, chargebackHealth: false, freshness: false }),
+    buildPortfolio(ctx.selected, ctx.period, ctx.params.de, ctx.params.ate, ctx.now, { liveFeed: false, chargebackHealth: false, freshness: false, compareAs: ctx.comparePeriod }),
     getSharedAdAccounts(ctx.storeIds, ctx.range, names).catch(err => { console.error('[campaigns] shared accounts', err); return [] }),
     // Own vs shared-account campaigns per store, so ROAS atribuído follows
     // the store pages' rule; on failure those columns say "—" instead of
@@ -281,6 +327,7 @@ async function AllStores({ ctx }: { ctx: PageContext }) {
   const [view, pairs, attribution] = loaded
   const verdict = buildPortfolioAdsVerdict({
     stores: view.stores, attribution, pairs, rangeLabel: ctx.rangeLabel, periodPhrase: ctx.periodPhrase, partialLabel: ctx.partialLabel, split: ctx.split,
+    range: ctx.range,
   })
   return (
     <AppShell ctx={ctx}>

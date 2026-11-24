@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { PnL } from '@/lib/engine/pnl'
 import type { CampaignRow } from '@/lib/data/campaigns'
-import { attributedRoasNote, buildAdsVerdict, buildReconciliation, noEmpateWhy, ownAttributedRoas, sharedCampaigns, uncreditedSources, type AdsWindow, type ReportForVerdict } from '../adsVerdict'
-import { actionCountsText, adSignalChip, phantomBadge, phantomNote, ptText, trendSpec } from '../text'
+import { attributedRoasNote, buildAdsVerdict, buildReconciliation, creditedWithoutSalesText, noEmpateWhy, noSpendHistory, ownAttributedRoas, sharedCampaigns, uncreditedSources, type AdsWindow, type ReportForVerdict } from '../adsVerdict'
+import { actionCountsText, adSignalChip, phantomBadge, phantomNote, ptText, sharedCampaignsNote, trendSpec } from '../text'
 import { creativeVerdict, signalLabel, SIGNAL_LABEL } from '@/lib/creativeSignal'
 
 const WINDOW: AdsWindow = {
@@ -202,10 +202,11 @@ describe('buildAdsVerdict', () => {
     const r = report(rows, { contributionRate: null, breakEvenRoas: null, storeRevenue: 0 })
     r.totals = { ...r.totals, estimatedProfit: -32.55 }
     const v = buildAdsVerdict({ storeName: 'MOKOO', report: r, pnl: noSales, window: w, decision: null }).verdict
-    expect(v.headline).toBe('A MOKOO gastou $32,55 no Meta hoje e não vendeu nada.')
+    // The day is still running: "ainda não vendeu", as the Resumo says.
+    expect(v.headline).toBe('A MOKOO gastou $32,55 no Meta hoje e ainda não vendeu nada.')
     expect(v.chips[0].label).toBe('Gasto sem vendas')
     expect(v.amount).toBeCloseTo(-32.55, 6)
-    expect(v.amountCaption).toBe('gasto no Meta sem margem para cobri-lo')
+    expect(v.amountCaption).toBe('de prejuízo: gasto no Meta sem margem para cobri-lo')
     expect(v.amountCaption).not.toContain('cada venda')
 
     // One campaign credited (unpriced without a rate), one not: the estimate
@@ -214,7 +215,9 @@ describe('buildAdsVerdict', () => {
     mixed.totals = { ...mixed.totals, estimatedProfit: -12.55 }
     const m = buildAdsVerdict({ storeName: 'MOKOO', report: mixed, pnl: noSales, window: w, decision: null, split: true }).verdict
     expect(m.amount).toBeCloseTo(-32.55 / 2, 6)
-    expect(m.amountCaption).toBe('sua parte do gasto no Meta sem margem para cobri-lo')
+    // Dumpling 22 out, parte=50: "−$37,53 sua parte do gasto no Meta" beside a chip that says spend stays whole.
+    expect(m.amountCaption).toBe('de prejuízo (sua parte, 50%): gasto no Meta sem margem para cobri-lo')
+    expect(m.amountCaption).not.toContain('parte do gasto')
   })
 
   it('keeps "cada venda já sai no prejuízo" for sales that do not cover their own costs', () => {
@@ -386,5 +389,129 @@ describe('ad signal words', () => {
     expect(creativeVerdict({ spend: 0, roas: null, purchases: 0, breakEven: 1.34, frequency: null, running: true }).label).toBeUndefined()
     expect(Object.values(SIGNAL_LABEL)).not.toContain('OK')
     expect(signalLabel('ok', 0, 1.34)).toBe(adSignalChip('ok', 0, 1.34).label)
+  })
+})
+
+describe('buildAdsVerdict — round-5 wording', () => {
+  const today: AdsWindow = { ...WINDOW, period: 'today', rangeLabel: '24 nov', periodPhrase: 'hoje', partial: true, partialLabel: 'parcial · até 06h12', minutesIntoDay: 372 }
+
+  it('tells a running day in the present tense', () => {
+    // EPOCH, Hoje at 06h12: "deram lucro hoje" read as a closed day.
+    const rows = [row({ spend: 1000, purchaseValue: 3000 })]
+    const v = buildAdsVerdict({ storeName: 'EPOCH ®️', report: report(rows), pnl: store(), window: today, decision: null }).verdict
+    expect(v.headline).toBe('As campanhas da EPOCH ®️ estão dando lucro hoje, até agora, pela atribuição do Meta.')
+    const loss = buildAdsVerdict({ storeName: 'MOKOO', report: report([row({ spend: 3000, purchaseValue: 4000 })]), pnl: store(), window: today, decision: null }).verdict
+    expect(loss.headline).toBe('As campanhas da MOKOO estão dando prejuízo hoje, até agora, pela atribuição do Meta — mas a loja inteira está cobrindo o gasto com anúncios.')
+    // A closed window keeps the past tense.
+    expect(buildAdsVerdict({ storeName: 'EPOCH ®️', report: report(rows), pnl: store(), window: WINDOW, decision: null }).verdict.headline)
+      .toBe('As campanhas da EPOCH ®️ deram lucro nos últimos 7 dias, pela atribuição do Meta.')
+    // No spend yet today, for a store that spent yesterday.
+    const spentYesterday = { firstSpendDay: '2026-05-21', lastSpendDay: '2026-11-23', range: { from: '2026-11-24', to: '2026-11-24' }, today: '2026-11-24' }
+    const yet = buildAdsVerdict({ storeName: 'X', report: report([]), pnl: pnl({}), window: today, decision: null, metaHistory: spentYesterday }).verdict
+    expect(yet.headline).toBe('A X ainda não gastou no Meta hoje.')
+    expect(yet.chips[0].label).toBe('Sem gasto no Meta ainda')
+    // Without the history, never "ainda": the spend may not be coming.
+    expect(buildAdsVerdict({ storeName: 'X', report: report([]), pnl: pnl({}), window: today, decision: null }).verdict.headline)
+      .toBe('A X não gastou no Meta hoje.')
+  })
+
+  // REGRESSION: "A Glooty ainda não gastou no Meta hoje" — its ads stopped on
+  // 15 nov — and the same for CAMP HALLOW, whose ads run in EPOCH's account.
+  it('says "ainda" only for a store that was spending, and why the others are not', () => {
+    const range = { from: '2026-11-24', to: '2026-11-24' }
+    const glooty = buildAdsVerdict({
+      storeName: 'Glooty', report: report([], { configured: false }), pnl: pnl({}), window: today, decision: null,
+      metaHistory: { firstSpendDay: '2026-11-04', lastSpendDay: '2026-11-15', range, today: '2026-11-24' },
+    }).verdict
+    expect(glooty.headline).toBe('A Glooty não gastou no Meta hoje.')
+    expect(glooty.chips[0].label).toBe('Sem gasto no Meta')
+    expect(glooty.details.map(d => d.text)).toEqual(['Nenhuma venda e nenhum gasto no Meta hoje.', 'Anúncios parados: o último gasto no Meta foi em 15 nov.'])
+    const camp = buildAdsVerdict({
+      storeName: 'CAMP HALLOW', report: report([]), pnl: pnl({}), window: today, decision: null,
+      metaHistory: { firstSpendDay: null, lastSpendDay: null, range, today: '2026-11-24', adsRunIn: ['EPOCH ®️'] },
+    }).verdict
+    expect(camp.headline).toBe('A CAMP HALLOW não gastou no Meta hoje.')
+    expect(camp.details[1].text).toBe('A CAMP HALLOW não tem gasto no Meta registrado nela: os anúncios dela rodam na conta da EPOCH ®️, e o gasto deles fica na contabilidade de lá.')
+    // With campaigns paid elsewhere in the window, that line says it instead.
+    const billed = buildAdsVerdict({
+      storeName: 'CAMP HALLOW', report: report([]), pnl: pnl({ revenue: 500, orders: 5 }), window: WINDOW, decision: null,
+      billedElsewhere: { spend: 900, campaigns: 2, stores: ['EPOCH ®️'] },
+      metaHistory: { firstSpendDay: null, lastSpendDay: null, range: { from: '2026-10-10', to: '2026-10-16' }, today: '2026-11-24', adsRunIn: ['EPOCH ®️'] },
+    }).verdict
+    expect(billed.details.map(d => d.text).filter(t => t.includes('rodam na conta'))).toHaveLength(0)
+    expect(billed.details.map(d => d.text).join(' ')).toContain('2 campanhas pagas na conta da EPOCH ®️')
+  })
+
+  it('noSpendHistory tells "ainda", stopped ads, ads that started later and ads never in these books apart', () => {
+    const day = { from: '2026-11-24', to: '2026-11-24' }
+    expect(noSpendHistory({ firstSpendDay: '2026-05-21', lastSpendDay: '2026-11-23', range: day, today: '2026-11-24' }, true, 'EPOCH')).toEqual({ yet: true, line: null })
+    // A closed day is never "ainda".
+    expect(noSpendHistory({ firstSpendDay: '2026-05-21', lastSpendDay: '2026-11-22', range: { from: '2026-11-23', to: '2026-11-23' }, today: '2026-11-24' }, false, 'EPOCH').yet).toBe(false)
+    // 7 dias ending yesterday: still the present, so "parados".
+    expect(noSpendHistory({ firstSpendDay: '2026-11-04', lastSpendDay: '2026-11-15', range: { from: '2026-11-17', to: '2026-11-23' }, today: '2026-11-24' }, false, 'Glooty').line)
+      .toBe('Anúncios parados: o último gasto no Meta foi em 15 nov.')
+    // A window in the past says only when the last spend before it was.
+    expect(noSpendHistory({ firstSpendDay: '2026-08-09', lastSpendDay: '2026-10-01', range: { from: '2026-10-10', to: '2026-10-16' }, today: '2026-11-24' }, false, 'Dumpling').line)
+      .toBe('O último gasto no Meta antes destas datas foi em 1 out.')
+    // Before the store's first spend.
+    expect(noSpendHistory({ firstSpendDay: '2026-11-08', lastSpendDay: null, range: { from: '2026-11-07', to: '2026-11-07' }, today: '2026-11-24' }, false, 'Hibikura').line)
+      .toBe('A Hibikura começou a anunciar no Meta em 8 nov.')
+    expect(noSpendHistory({ firstSpendDay: null, lastSpendDay: null, range: day, today: '2026-11-24' }, true, 'X').line)
+      .toBe('A X não tem nenhum gasto no Meta registrado.')
+    expect(noSpendHistory(null, true, 'X')).toEqual({ yet: false, line: null })
+  })
+
+  it('names unsynced ads instead of "0 campanhas"', () => {
+    // Glooty, 12 nov: $138, all in ads the sync had not tied to a campaign.
+    const bucket = row({ campaignId: null, name: 'Anúncios ainda não sincronizados', unsynced: true, spend: 138.4 })
+    const r = report([bucket], { configured: false, contributionRate: null, breakEvenRoas: null, storeRevenue: 0 })
+    r.totals = { ...r.totals, campaigns: 0 }
+    const v = buildAdsVerdict({ storeName: 'Glooty', report: r, pnl: pnl({ metaSpend: 138.4, adSpend: 138.4 }), window: WINDOW, decision: null }).verdict
+    expect(v.details[0].text).toBe('Gasto no Meta: $138, todo em anúncios que a sincronização ainda não ligou a uma campanha. O Meta credita a eles $0 em vendas — ROAS atribuído 0,00× (sem vendas no período, não há empate).')
+    expect(v.details[0].text).not.toContain('0 campanhas')
+  })
+
+  it('says Meta credits sales the store never had', () => {
+    // MOKOO, 1–31 mar (first order 11 abr): $1.506 credited by Meta, store revenue $0.
+    const rows = [row({ spend: 1132.4, purchaseValue: 1506.2, purchases: 23 })]
+    const r = report(rows, { contributionRate: null, breakEvenRoas: null, storeRevenue: 0 })
+    r.totals = { ...r.totals, estimatedProfit: -1132.4 }
+    const p = pnl({ metaSpend: 1132.4, adSpend: 1132.4, operatingProfit: -1132.4 })
+    const v = buildAdsVerdict({ storeName: 'MOKOO', report: r, pnl: p, window: { ...WINDOW, periodPhrase: 'em 1–31 mar' }, decision: null }).verdict
+    expect(v.headline).toBe('A MOKOO gastou $1.132 no Meta em 1–31 mar e não vendeu nada.')
+    expect(v.details.map(d => d.text)).toContain('O Meta credita $1.506 em vendas às campanhas, mas a loja não teve nenhum pedido no período: essas compras não são vendas desta loja — a atribuição do Meta não fecha com os pedidos.')
+    expect(creditedWithoutSalesText(0, 0)).toBeNull()
+    expect(creditedWithoutSalesText(286, 120)).toBeNull()
+    expect(creditedWithoutSalesText(286, 0, true)).toContain('não tem nenhum pedido até agora')
+    // The gauge's help: never "fica abaixo" when it is above.
+    expect(attributedRoasNote({ sharedSpend: 0, shopSpend: 0, credited: 1506.2, storeRevenue: 0 }))
+      .toBe('Vendas que o Meta credita às campanhas ÷ gasto no Meta. A loja não teve nenhum pedido no período: o que o Meta credita não são vendas desta loja — a atribuição do Meta não fecha com os pedidos.')
+    expect(attributedRoasNote({ sharedSpend: 0, shopSpend: 0, credited: 1259, storeRevenue: 1245 })).toContain('Fica acima do ROAS do quadro ao lado')
+    expect(attributedRoasNote({ sharedSpend: 0, shopSpend: 0, credited: 400, storeRevenue: 1245 })).toContain('Fica abaixo do ROAS do quadro ao lado')
+  })
+
+  it('keeps the split on the result, never on the sales or the spend', () => {
+    const rows = [row({ spend: 800, purchaseValue: 150 })]
+    const p = pnl({ revenue: 156, orders: 2, metaSpend: 800, adSpend: 800 })
+    const v = buildAdsVerdict({ storeName: 'Glooty', report: report(rows, { configured: false, contributionRate: null, breakEvenRoas: null }), pnl: p, window: WINDOW, decision: null, split: true }).verdict
+    expect(v.amountCaption).toBe('vendas da loja − anúncios, sem o custo dos produtos (sua parte, 50%)')
+  })
+})
+
+describe('sharedCampaignsNote', () => {
+  it('agrees with the count and drops the money sentence with no spend', () => {
+    // EPOCH 30 dias: one shared campaign, $0 in the window, 2 late purchases.
+    const one = sharedCampaignsNote([{ name: 'CBO - FREDDIE KReUGER - USA', spend: 0, purchases: 2 }], '25 out – 23 nov')!
+    expect(one.tone).toBe('neu')
+    expect(one.text).toBe('1 campanha desta lista rodou numa conta que também veiculou anúncios de outra loja (CBO - FREDDIE KReUGER - USA). Ela não gastou nada em 25 out – 23 nov: as 2 compras atribuídas a ela vêm de anúncios anteriores e podem ter caído na outra loja.')
+    expect(one.text).not.toContain('$0')
+    const paid = sharedCampaignsNote([{ name: 'A', spend: 1200, purchases: 10 }], '10–16 nov')!
+    expect(paid.tone).toBe('warn')
+    expect(paid.text).toContain('O gasto dela, $1.200, está nesta loja, mas as vendas podem ter caído na outra: fica sem margem e sem veredito.')
+    const two = sharedCampaignsNote([{ name: 'A', spend: 1200, purchases: 10 }, { name: 'B', spend: 300, purchases: 1 }], '10–16 nov')!
+    expect(two.text).toContain('2 campanhas desta lista rodaram')
+    expect(two.text).toContain('O gasto delas, $1.500, está nesta loja, mas as vendas podem ter caído na outra: ficam sem margem e sem veredito.')
+    expect(sharedCampaignsNote([], '10–16 nov')).toBeNull()
+    expect(sharedCampaignsNote([{ name: 'A', spend: 0, purchases: 1 }], 'hoje')!.text).toContain('a compra atribuída a ela vem de anúncios anteriores e pode ter caído')
   })
 })

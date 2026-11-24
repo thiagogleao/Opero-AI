@@ -138,6 +138,8 @@ export interface CampaignRow extends MetaTotals {
    *  no estimated profit, no action. Its spend still counts in the totals —
    *  it is in this store's books. */
   shared: SharedAccountFlag | null
+  /** Ads and ad sets with spend or a sale in the window (listedCounts): what
+   *  the row opens to. */
   ads: number
   adsets: number
   /** Window: Meta purchase value × contribution rate − spend; null without
@@ -267,6 +269,36 @@ export function metaTotals(a: Pick<Acc, 'spend' | 'purchaseValue' | 'purchases' 
 const UNSYNCED_KEY = 'unsynced:'
 export const groupKey = (f: AdDayFact) => f.campaignId ?? `${UNSYNCED_KEY}${f.accountId ?? ''}`
 
+/** One ad's window sums, for counting what a row opens to. */
+export interface ListedAd { adsetId: string | null; spend: number; purchases: number; purchaseValue: number }
+
+/** Add a fact to its ad's window sums (keyed by ad id). */
+export function addListed(ads: Map<string, ListedAd>, f: Pick<AdDayFact, 'adId' | 'adsetId' | 'spend' | 'purchases' | 'purchaseValue'>): void {
+  const a = ads.get(f.adId) ?? { adsetId: null, spend: 0, purchases: 0, purchaseValue: 0 }
+  a.adsetId ??= f.adsetId
+  a.spend += f.spend; a.purchases += f.purchases; a.purchaseValue += f.purchaseValue
+  ads.set(f.adId, a)
+}
+
+/**
+ * The ads and ad sets a row counts: those with spend OR a sale in the window,
+ * the rule the creatives report lists ads by (lib/data/creatives
+ * buildCreativeRows), so a row's "N conjuntos · M anúncios" is what it opens
+ * to. Counting spend only, a paused campaign with $0 and 2 late purchases
+ * (MOKOO, "CBO - CHRISTMAS CAPY — global") read "0 conjuntos · 0 anúncios"
+ * over an expansion of 2 ad sets with 1 ad each.
+ */
+export function listedCounts(ads: ReadonlyMap<string, ListedAd>): { ads: number; adsets: number } {
+  let n = 0
+  const sets = new Set<string>()
+  for (const a of ads.values()) {
+    if (!(a.spend > 0 || a.purchases > 0 || a.purchaseValue > 0)) continue
+    n++
+    if (a.adsetId) sets.add(a.adsetId)
+  }
+  return { ads: n, adsets: sets.size }
+}
+
 export interface BuildCampaignInput {
   storeId: string
   range: DateRange
@@ -296,7 +328,9 @@ export function buildCampaignRows(input: BuildCampaignInput): CampaignRow[] {
   interface Group {
     key: string; campaignId: string | null; accountId: string | null
     win: Acc; byDate: Map<string, Acc>; decisionDays: Map<string, DecisionDay>
-    ads: Set<string>; adsets: Set<string>; adSpend: Map<string, number>
+    adSpend: Map<string, number>
+    /** Each ad's window sums and ad set, for the row's counts (listedAds). */
+    adWin: Map<string, ListedAd>
   }
   const groups = new Map<string, Group>()
   const group = (f: AdDayFact): Group => {
@@ -305,7 +339,7 @@ export function buildCampaignRows(input: BuildCampaignInput): CampaignRow[] {
     if (!g) {
       g = {
         key, campaignId: f.campaignId, accountId: f.accountId, win: emptyAcc(), byDate: new Map(),
-        decisionDays: new Map(), ads: new Set(), adsets: new Set(), adSpend: new Map(),
+        decisionDays: new Map(), adSpend: new Map(), adWin: new Map(),
       }
       groups.set(key, g)
     }
@@ -322,7 +356,7 @@ export function buildCampaignRows(input: BuildCampaignInput): CampaignRow[] {
       const d = g.byDate.get(f.date) ?? emptyAcc()
       add(d, f)
       g.byDate.set(f.date, d)
-      if (f.spend > 0) { g.ads.add(f.adId); if (f.adsetId) g.adsets.add(f.adsetId) }
+      addListed(g.adWin, f)
       g.adSpend.set(f.adId, (g.adSpend.get(f.adId) ?? 0) + f.spend)
     }
     if (inDecision) {
@@ -336,6 +370,7 @@ export function buildCampaignRows(input: BuildCampaignInput): CampaignRow[] {
   for (const g of groups.values()) {
     if (!(g.win.spend > 0 || g.win.purchases > 0 || g.win.purchaseValue > 0)) continue
     const unsynced = g.campaignId === null
+    const listed = listedCounts(g.adWin)
     const info = g.campaignId ? input.campaigns.get(g.campaignId) : undefined
     const accountId = info?.accountId ?? g.accountId
     const shared = sharedAccountFlag(
@@ -379,8 +414,8 @@ export function buildCampaignRows(input: BuildCampaignInput): CampaignRow[] {
             .map(([adId, spend]) => ({ adId, name: input.adNames?.get(adId) ?? orphanAdName(adId), spend: round2(spend) }))
         : [],
       shared,
-      ads: g.ads.size,
-      adsets: g.adsets.size,
+      ads: listed.ads,
+      adsets: listed.adsets,
       estimatedProfit: est(g.win.purchaseValue, g.win.spend),
       margin: rate !== null ? marginPct(g.win.purchaseValue, g.win.spend, rate) : null,
       journeyOrders: g.campaignId ? input.firstTouch.get(g.campaignId) ?? 0 : 0,
@@ -510,6 +545,32 @@ export async function getStoreCampaignName(storeId: string, campaignId: string):
   )
   if (rows[0]?.ok !== true) return null
   return (await loadCampaignInfo([campaignId])).get(campaignId)?.name ?? `Campanha ${campaignId}`
+}
+
+/** When a store has had Meta spend (Meta's day = the store's calendar). */
+export interface MetaSpendSpan {
+  /** The first day with spend on record, any date; null when none ever. */
+  firstSpendDay: string | null
+  /** The last day with spend on or before the date asked for; null when none. */
+  lastSpendDay: string | null
+}
+
+/**
+ * When the store spent on Meta, from the table the engine charges
+ * (fb_ad_daily_metrics). What tells a day with no spend YET (spent the day
+ * before) from ads that stopped (Glooty: last spend 15 nov), ads that started
+ * later (Hibikura: 8 nov) and a store whose own books never had any (CAMP
+ * HALLOW: its ads ran in EPOCH's account).
+ */
+export async function getMetaSpendSpan(storeId: string, onOrBefore: string): Promise<MetaSpendSpan> {
+  const rows = await query<{ first: string | null; last: string | null }>(
+    `SELECT MIN(date)::text AS first,
+            (MAX(date) FILTER (WHERE date <= $2::date))::text AS last
+       FROM fb_ad_daily_metrics
+      WHERE tenant_id = $1 AND spend > 0`,
+    [storeId, onOrBefore],
+  )
+  return { firstSpendDay: rows[0]?.first ?? null, lastSpendDay: rows[0]?.last ?? null }
 }
 
 // ─── Own vs shared-account campaigns, for several stores ──────────────────────
@@ -712,12 +773,13 @@ export async function getAdsetReport(
   const rate = margin.configured && !shared ? margin.contributionRate : null
   const adInfo = await loadAdInfo([...new Set(facts.map(f => f.adId))])
 
-  const groups = new Map<string, { acc: Acc; ads: Set<string> }>()
+  const groups = new Map<string, { acc: Acc; ads: Map<string, ListedAd> }>()
   for (const f of facts) {
     const key = f.adsetId ?? ''
-    const g = groups.get(key) ?? { acc: emptyAcc(), ads: new Set<string>() }
+    const g = groups.get(key) ?? { acc: emptyAcc(), ads: new Map<string, ListedAd>() }
     add(g.acc, f)
-    if (f.spend > 0) g.ads.add(f.adId)
+    // The campaign rows' rule: an ad with spend or a sale counts.
+    addListed(g.ads, f)
     groups.set(key, g)
   }
   const adsetName = new Map<string, { name: string | null; status: string | null }>()
@@ -728,7 +790,7 @@ export async function getAdsetReport(
     adsetId: key || null,
     name: key ? adsetName.get(key)?.name ?? `Conjunto ${key}` : 'Conjunto não sincronizado',
     status: key ? adsetName.get(key)?.status ?? null : null,
-    ads: g.ads.size,
+    ads: listedCounts(g.ads).ads,
     estimatedProfit: estimateRow(g.acc.purchaseValue, g.acc.spend, margin, !!shared),
     margin: rate !== null ? marginPct(g.acc.purchaseValue, g.acc.spend, rate) : null,
   })).sort((a, b) => b.spend - a.spend)

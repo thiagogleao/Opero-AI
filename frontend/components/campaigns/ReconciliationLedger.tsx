@@ -14,12 +14,17 @@
 import { Badge, EmptyState, Icon } from '@/components/ui'
 import { formatMoney, formatPct, plural } from '@/lib/format'
 import type { Reconciliation } from './adsVerdict'
+import { WhyEmpty, type EmptyWindowText } from './emptyWhy'
 import s from './campaigns.module.css'
 
 const signed = (v: number) => formatMoney(v, { sign: true })
 
-export function ReconciliationLedger({ rec, rangeLabel, split, elsewhere }: {
+export function ReconciliationLedger({ rec, rangeLabel, split, elsewhere, why = null }: {
   rec: Reconciliation; rangeLabel: string; split?: boolean; elsewhere?: { spend: number; stores: string[] } | null
+  /** The verdict's reason the window is empty (./emptyWhy): before the first
+   *  sale or after the archive day there was nothing to compare, not a window
+   *  read and found empty. */
+  why?: EmptyWindowText | null
 }) {
   const top = Math.max(rec.storeRevenue, rec.credited + rec.creditedShared, 1e-9)
   const pctOfStore = (v: number) => (rec.storeRevenue > 0 ? formatPct((v / rec.storeRevenue) * 100, { digits: 0 }) : '—')
@@ -36,7 +41,7 @@ export function ReconciliationLedger({ rec, rangeLabel, split, elsewhere }: {
     return (
       <div>
         {head}
-        <EmptyState compact title="Sem vendas e sem gasto no Meta">Não há nada para comparar neste período.</EmptyState>
+        {why ? <WhyEmpty why={why} /> : <EmptyState compact title="Sem vendas e sem gasto no Meta">Não há nada para comparar neste período.</EmptyState>}
       </div>
     )
   }

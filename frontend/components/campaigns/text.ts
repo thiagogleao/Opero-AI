@@ -130,3 +130,36 @@ export function phantomBadge(value: number): string {
 export function phantomNote(value: number): string {
   return `O Meta reportou ${formatMoney(value)} em compras impossíveis (acima de $20.000 num dia de um anúncio). Foram descartadas: não entram nas vendas atribuídas, no ROAS nem no lucro estimado.`
 }
+
+const CENT = 0.005
+
+/**
+ * The callout over Campanhas when campaigns of the list ran on an ad account
+ * that also carried another store's ads. Agrees with the count ("O gasto
+ * dela … fica", "delas … ficam"): one campaign read "O gasto delas … ficam
+ * sem margem". With no spend in the window, there is no money to warn about:
+ * it only says where the late-credited purchases may belong (EPOCH 30 dias:
+ * "O gasto delas, $0, está nesta loja" for a campaign with "$0 · 2 compras").
+ * Null without such campaigns.
+ */
+export function sharedCampaignsNote(
+  shared: readonly { name: string; spend: number; purchases: number }[], rangeLabel: string,
+): { tone: 'warn' | 'neu'; title: string; text: string } | null {
+  if (!shared.length) return null
+  const one = shared.length === 1
+  const spend = shared.reduce((t, c) => t + c.spend, 0)
+  const names = shared.map(c => c.name).join(', ')
+  const ran = `${one ? '1 campanha desta lista rodou' : `${shared.length} campanhas desta lista rodaram`} numa conta que também veiculou anúncios de outra loja (${names}).`
+  if (spend < CENT) {
+    const purchases = shared.reduce((t, c) => t + c.purchases, 0)
+    const credited = purchases > 0
+      ? ` ${one ? 'Ela não gastou' : 'Elas não gastaram'} nada em ${rangeLabel}: ${purchases === 1 ? 'a compra atribuída' : `as ${Math.round(purchases)} compras atribuídas`} ${one ? 'a ela' : 'a elas'} ${purchases === 1 ? 'vem' : 'vêm'} de anúncios anteriores e ${purchases === 1 ? 'pode ter caído' : 'podem ter caído'} na outra loja.`
+      : ` ${one ? 'Ela não gastou' : 'Elas não gastaram'} nada em ${rangeLabel}.`
+    return { tone: 'neu', title: 'Conta de anúncio compartilhada com outra loja.', text: `${ran}${credited}` }
+  }
+  return {
+    tone: 'warn',
+    title: 'Conta de anúncio compartilhada com outra loja.',
+    text: `${ran} O gasto ${one ? 'dela' : 'delas'}, ${formatMoney(spend)}, está nesta loja, mas as vendas podem ter caído na outra: ${one ? 'fica' : 'ficam'} sem margem e sem veredito. Some as duas lojas para julgar o resultado.`,
+  }
+}

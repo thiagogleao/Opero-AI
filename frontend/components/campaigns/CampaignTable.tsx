@@ -23,6 +23,7 @@ import { Badge, Chip, Count, EmptyState, Money } from '@/components/ui'
 import { formatMoney, formatRoas, plural } from '@/lib/format'
 import { SPLIT_SHARE } from '@/lib/views/verdict'
 import { RoasCell } from './RoasCell'
+import { WhyEmpty, type EmptyWindowText } from './emptyWhy'
 import { ownAttributedRoas, sharedCampaigns } from './adsVerdict'
 import { ExpandableTable, type ExpandableColumn, type ExpandableRow } from './ExpandableTable'
 import { ACTION_CHIP, adVerdictChip, phantomBadge, phantomNote, ptText, trendSpec } from './text'
@@ -187,8 +188,10 @@ function CampaignDetail({ row, ads, hrefWith, adsPerAdset, k, days }: {
   )
 }
 
-export function CampaignTable({ report, creatives, hrefWith, rangeLabel, split = false, adsPerAdset = 6 }: {
+export function CampaignTable({ report, creatives, hrefWith, rangeLabel, split = false, adsPerAdset = 6, why = null }: {
   report: CampaignReport; creatives: CreativeRow[]; hrefWith: (path: string) => string; rangeLabel: string; split?: boolean; adsPerAdset?: number
+  /** The verdict's reason the window is empty (./emptyWhy), for the empty table. */
+  why?: EmptyWindowText | null
 }) {
   const be = report.breakEvenRoas
   const k = split ? SPLIT_SHARE : 1
@@ -288,9 +291,11 @@ export function CampaignTable({ report, creatives, hrefWith, rangeLabel, split =
       caption={`Campanhas da loja em ${rangeLabel}`}
       columns={columns}
       rows={rows}
-      empty={<EmptyState title="Nenhuma campanha com gasto no período">O Meta não registrou gasto nem venda atribuída nestas datas.</EmptyState>}
+      empty={why ? <WhyEmpty why={why} compact={false} /> : <EmptyState title="Nenhuma campanha com gasto no período">O Meta não registrou gasto nem venda atribuída nestas datas.</EmptyState>}
       footer={{
-        name: <span>Total · {plural(t.campaigns, 'campanha', 'campanhas')}</span>,
+        // Only the unsynced bucket (Glooty, 12 nov): "Total · 0 campanhas"
+        // over $138 of spend named nothing.
+        name: <span>Total · {t.campaigns === 0 && rows.length > 0 ? 'anúncios ainda não sincronizados' : plural(t.campaigns, 'campanha', 'campanhas')}</span>,
         spend: <Money value={t.spend} />,
         purchases: <Count value={t.purchases} />,
         pv: <Money value={t.purchaseValue} />,

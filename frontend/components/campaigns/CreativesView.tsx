@@ -27,9 +27,12 @@ import { AD_VERDICT_RULE, adVerdictChip, ptText } from './text'
 import { AdThumb } from './AdThumb'
 import { RoasCell } from './RoasCell'
 import type { CreativesFilter } from './campaignFilter'
+import { WhyEmpty, type EmptyWindowText } from './emptyWhy'
 import s from './campaigns.module.css'
 
 const CARD_LIMIT = 12
+const FREQ_INFO = 'Impressões ÷ alcance do dia.'
+const formatFreq = (v: number) => v.toLocaleString('pt-BR', { maximumFractionDigits: 1 })
 
 function Thumb({ ad, className, large }: { ad: CreativeRow; className: string; large?: boolean }) {
   // Cards want the full creative; table rows the small thumbnail.
@@ -65,7 +68,7 @@ function AdCard({ ad, href, k }: { ad: CreativeRow; href: string; k: number }) {
   )
 }
 
-export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, showAllHref, split = false, storeRevenue }: {
+export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, showAllHref, split = false, storeRevenue, why = null }: {
   report: CreativesReport
   hrefWith: (path: string) => string
   rangeLabel: string
@@ -76,7 +79,13 @@ export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, sho
   /** The store's revenue in the window (engine): tells the ROAS gauges'
    *  "sem empate → loja sem vendas" apart from an unknown break-even. */
   storeRevenue?: number | null
+  /** The verdict's reason the window is empty (./emptyWhy): before the first
+   *  sale or after the archive day, not "Nenhum anúncio teve gasto". */
+  why?: EmptyWindowText | null
 }) {
+  // A filtered list keeps its own words: the campaign may have no ads here
+  // for its own reasons, and the callout above says which campaign.
+  const whyEmpty = !report.creatives.length && !filter ? why : null
   const be = report.configured ? report.breakEvenRoas : null
   // Verdicts are judged on the campaigns' last closed days (lib/data/creatives),
   // whatever window the figures show: the tab says which.
@@ -107,11 +116,13 @@ export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, sho
     // CTR and Hook fold away below ~1100px of table box (campaigns.module.css):
     // at 1024 Hook and the verdict column sat behind an unseen scrollbar. CTR
     // then shows under Compras; hook rate is unavailable for every ad anyway,
-    // and the block's footer says so.
+    // and the block's footer says so. A single day adds Frequência (~136px):
+    // the fold then starts at ~1240px, and below ~1040px Frequência folds
+    // under Gasto too — at 1440 and 1024 the verdict column was cut.
     { key: 'ctr', label: <span className={s.colCtr}>CTR</span>, numeric: true, sortable: true },
     { key: 'roas', label: be !== null ? `ROAS × empate ${formatRoas(be)}` : 'ROAS', sortable: true, info: 'Vendas atribuídas pelo Meta ÷ gasto, contra o empate da loja (receita ÷ contribuição). Compras = compras que o Meta atribui ao anúncio; CTR = cliques no link ÷ impressões.' },
     { key: 'est', label: split ? 'Lucro est. (sua parte)' : 'Lucro est.', numeric: true, sortable: true, info: split ? `${ptText(report.formula)} Na visão de sócio, cada valor é a sua parte (50%).` : ptText(report.formula) },
-    ...(singleDay ? [{ key: 'freq', label: 'Frequência', numeric: true, sortable: true, info: 'Impressões ÷ alcance do dia.' } as DataColumn] : []),
+    ...(singleDay ? [{ key: 'freq', label: <span className={s.colFreq}>Frequência</span>, numeric: true, sortable: true, info: FREQ_INFO } as DataColumn] : []),
     { key: 'hook', label: <span className={s.colHook}>Hook</span>, info: HOOK_RATE_UNAVAILABLE },
     { key: 'verdict', label: `Veredito · ${verdictDays} dias`, sortable: true, info: `${AD_VERDICT_RULE} ${windowNote}` },
   ]
@@ -133,13 +144,13 @@ export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, sho
           </span>
         </span>
       ),
-      spend: <Money value={a.spend} />,
+      spend: <><Money value={a.spend} />{singleDay && a.frequency !== null && <span className={`${s.cellSub} ${s.inlineFreq}`} title={`Frequência: ${FREQ_INFO.toLowerCase()}`}>freq. {formatFreq(a.frequency)}</span>}</>,
       purchases: <><Count value={a.purchases} />{a.ctr !== null && <span className={`${s.cellSub} ${s.inlineCtr}`}>CTR {formatPct(a.ctr, { digits: 2 })}</span>}</>,
       ctr: <span className={s.colCtr}><Pct value={a.ctr} digits={2} /></span>,
       roas: a.shared ? <span className={s.why}>{formatRoas(a.roas)} · sem empate</span> : <RoasCell roas={a.roas} breakEven={be} paused={!a.running}
         configured={report.configured} revenue={storeRevenue} contribution={report.contributionRate} />,
       est: a.estimatedProfit === null ? <span className={s.muted}>—</span> : <Money value={est(a)} />,
-      freq: <span>{a.frequency === null ? '—' : a.frequency.toLocaleString('pt-BR', { maximumFractionDigits: 1 })}</span>,
+      freq: <span className={s.colFreq}>{a.frequency === null ? '—' : formatFreq(a.frequency)}</span>,
       hook: (
         <span className={s.colHook}>
           {a.video
@@ -174,9 +185,14 @@ export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, sho
           : `Desligar ou escalar, pelo ROAS dos últimos ${verdictDays} dias fechados (${verdictLabel}) contra o empate da loja nesses dias${verdictBe !== null ? ` (${formatRoas(verdictBe)})` : ''}, como o veredito das campanhas. Gasto, ROAS e lucro de cada cartão são de ${rangeLabel}.${split ? ' "Sua parte" é a sua metade do lucro estimado do anúncio.' : ''}`}
         info="O mesmo veredito aparece no celular. Um dia ainda aberto não decide: o Meta atribui as vendas com atraso. Anúncios pausados não recebem recomendação."
       >
-        {!report.configured ? (
+        {whyEmpty ? (
+          <WhyEmpty why={whyEmpty} />
+        ) : !report.configured ? (
           <EmptyState icon="sliders" title="Custos não configurados">
-            Sem o custo dos produtos não há empate, e sem empate não há veredito por anúncio. Gasto e ROAS estão na tabela abaixo.
+            {/* "Gasto e ROAS estão na tabela abaixo" pointed at an empty table
+                (Glooty, 7 dias, no spend). */}
+            Sem o custo dos produtos não há empate, e sem empate não há veredito por anúncio.{' '}
+            {ads.length ? 'Gasto e ROAS estão na tabela abaixo.' : filter ? 'Nenhum anúncio desta campanha teve gasto no período.' : 'Nenhum anúncio teve gasto no período.'}
           </EmptyState>
         ) : decide.length === 0 ? (
           <EmptyState compact title="Nenhum anúncio para desligar ou escalar">
@@ -194,7 +210,9 @@ export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, sho
         howTo="Ordene por qualquer coluna; clique num anúncio para ver o dia a dia dele no mesmo período."
         info={<>A lista soma o gasto que a contabilidade da loja carrega: {formatMoney(t.spend)} em {plural(t.ads, 'anúncio', 'anúncios')}. <span>{HOOK_RATE_UNAVAILABLE}</span>{report.notes.frequency ? <> {report.notes.frequency}</> : null}</>}
         flush
-        footer={
+        // An empty table gets no totals line of zeros and no hook-rate legend:
+        // there is no column to explain.
+        footer={!ads.length && !(report.reconciliation && Math.abs(report.reconciliation.gap) >= 0.01) ? undefined : (
           <>
             <span><b>{plural(t.ads, 'anúncio', 'anúncios')}</b> com gasto ou venda · gasto <b className="num">{formatMoney(t.spend)}</b> · vendas atribuídas <b className="num">{formatMoney(t.purchaseValue)}</b>{sharedValue > 0 ? <>, das quais <b className="num">{formatMoney(sharedValue)}</b> em anúncios de conta compartilhada</> : null}</span>
             {report.reconciliation && Math.abs(report.reconciliation.gap) >= 0.01 && (
@@ -205,11 +223,11 @@ export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, sho
                 Mostrando os {shown.length} de maior gasto ({formatPct(t.spend > 0 ? (shownSpend / t.spend) * 100 : null, { digits: 0 })} do gasto). <Link href={showAllHref}>Mostrar todos os {ads.length}</Link>
               </span>
             )}
-            <span>Hook rate <InfoTip label="Por que o hook rate está indisponível">{HOOK_RATE_UNAVAILABLE}</InfoTip> indisponível</span>
+            {ads.length > 0 && <span>Hook rate <InfoTip label="Por que o hook rate está indisponível">{HOOK_RATE_UNAVAILABLE}</InfoTip> indisponível</span>}
           </>
-        }
+        )}
       >
-        <div className={s.adsBox}>
+        <div className={singleDay ? `${s.adsBox} ${s.adsBoxDay}` : s.adsBox}>
           <DataTable
             caption={`Anúncios em ${rangeLabel}`}
             columns={columns}
@@ -217,7 +235,7 @@ export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, sho
             initialSort={report.configured ? { key: 'est', dir: 'desc' } : { key: 'spend', dir: 'desc' }}
             maxHeight={720}
             dense
-            empty={<EmptyState compact title="Nenhum anúncio com gasto no período" action={filter ? <ButtonLink href={filter.clearHref} size="sm">Ver todas as campanhas</ButtonLink> : undefined} />}
+            empty={whyEmpty ? <WhyEmpty why={whyEmpty} /> : <EmptyState compact title="Nenhum anúncio com gasto no período" action={filter ? <ButtonLink href={filter.clearHref} size="sm">Ver todas as campanhas</ButtonLink> : undefined} />}
           />
         </div>
       </Block>

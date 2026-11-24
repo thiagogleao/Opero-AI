@@ -16,7 +16,7 @@
 
 import type { DateRange, Period } from '@/lib/engine/dates'
 import type { PnL } from '@/lib/engine/pnl'
-import type { Verdict, VerdictChip, VerdictLine } from '@/lib/views/verdict'
+import { notSellingYet, type Verdict, type VerdictChip, type VerdictLine } from '@/lib/views/verdict'
 import { formatDate, formatRangeLabel, monthLong } from '@/lib/format'
 
 const CENT = 0.005
@@ -40,9 +40,14 @@ export interface BeforeStartInput {
   range: DateRange
   /** Today on the store's clock (for the year in dates). */
   today: string
+  /** Other dates printed beside the window (the Resumo's comparison): a year
+   *  in them puts the year on the first sale too (dateBeside). */
+  alsoShown?: readonly (string | null | undefined)[]
 }
 
 export interface BeforeStartText {
+  /** The first sale as printed beside the window ("7 nov", "11 abr 2026"). */
+  first: string
   /** "Vende desde 7 nov". */
   chip: string
   /** "A Hibikura começou a vender em 7 nov — não há dados de 28 out – 3 nov." */
@@ -53,14 +58,27 @@ export interface BeforeStartText {
   detail: VerdictLine
 }
 
+/**
+ * A date printed beside a window, with its year whenever the window or
+ * anything shown with it (`shown`: its ends, a comparison's) is in another
+ * year than today's — the rule of lib/views/verdict dayText. "começou a
+ * vender em 11 abr" beside "15 dez 2025 – 15 jan 2026" read as 11 abr 2025.
+ * Otherwise formatDate's own rule (a year only when not this year).
+ */
+export function dateBeside(iso: string, shown: readonly (string | null | undefined)[], today: string): string {
+  const thisYear = today.slice(0, 4)
+  return shown.some(d => !!d && d.slice(0, 4) !== thisYear) ? `${formatDate(iso)} ${iso.slice(0, 4)}` : formatDate(iso, today)
+}
+
 /** The Resumo's sentences for a window before the first sale. */
 export function beforeStartText(i: BeforeStartInput): BeforeStartText {
-  const first = formatDate(i.firstOrderDate, i.today)
+  const first = dateBeside(i.firstOrderDate, [i.range.from, i.range.to, ...(i.alsoShown ?? [])], i.today)
   const span = i.period === 'lastmonth' ? monthLong(i.range.from)
     : i.range.from === i.range.to ? formatDate(i.range.from, i.today)
       : formatRangeLabel(i.range, i.today)
   const parts = [{ text: 'Escolha um período a partir de ' }, { text: first, strong: true }, { text: ' para ver o resultado.' }]
   return {
+    first,
     chip: `Vende desde ${first}`,
     headline: `A ${i.storeName} começou a vender em ${first} — não há dados de ${span}.`,
     caption: 'a loja ainda não vendia nesse período',
@@ -96,5 +114,59 @@ export function beforeStartVerdict(i: BeforeStartInput & {
     details: [text.detail], notes: [], basis: 'none',
     totals: i.totals, comparisonTotals: null, excluded: [], roas: null,
     early: false, fewOrders: false, partial: false, split: !!i.split, storeCount: 1,
+    // The blocks under the card read the same reason from here
+    // (./emptyWhy), as the Resumo's do from its verdict.
+    beforeStart: { date: i.firstOrderDate, text: text.first },
+  }
+}
+
+// ─── Several stores ("Todas"), none of which had started ─────────────────────
+
+/**
+ * The earliest first sale when EVERY store's window is before its own first
+ * sale with nothing in it (lib/views/verdict notSellingYet, the Resumo's
+ * `firstOfAll` rule); null otherwise, or when a store's first sale is unknown.
+ * Todas · Produtos and Países read 1–31 jan 2025 as "Nenhuma venda nas suas
+ * lojas" while the Overview said no store had started yet.
+ */
+export function firstSaleOfAll(
+  stores: readonly { totals: Pick<PnL, 'orders' | 'revenue' | 'adSpend' | 'adjustments' | 'fixedCosts'>; firstOrderDate?: string | null }[],
+  range: DateRange,
+): string | null {
+  if (!stores.length || !stores.every(s => notSellingYet(s, range))) return null
+  return stores.map(s => s.firstOrderDate!).reduce((a, b) => (b < a ? b : a))
+}
+
+/** What a page passes its verdict builder for "Todas" when no store had started. */
+export interface AllBeforeStartInput {
+  /** The earliest first sale (firstSaleOfAll). */
+  firstOrderDate: string
+  range: DateRange
+  /** Today on the page's clock (for the year in dates). */
+  today: string
+  storeCount: number
+}
+
+/** The Overview's verdict for a window before every store's first sale, word
+ *  for word (lib/views/verdict buildVerdict, `firstOfAll`). */
+export function beforeStartAllVerdict(i: AllBeforeStartInput & {
+  /** "em 1–31 jan 2025", "no mês passado". */
+  periodPhrase: string
+  rangeLabel: string
+  totals: PnL
+  split?: boolean
+}): Verdict {
+  const first = dateBeside(i.firstOrderDate, [i.range.from, i.range.to], i.today)
+  const parts = [{ text: 'Escolha um período a partir de ' }, { text: first, strong: true }, { text: ' para ver o resultado.' }]
+  return {
+    tone: 'neu',
+    chips: [{ code: 'comecando', label: `1ª venda em ${first}`, tone: 'info', icon: 'clock' }],
+    when: i.rangeLabel,
+    headline: `Nenhuma das lojas vendia ainda ${i.periodPhrase}: a primeira venda foi em ${first}.`,
+    amount: null, amountTone: 'neu', amountCaption: 'nenhuma das lojas vendia ainda nesse período',
+    details: [{ parts, text: parts.map(p => p.text).join('') }], notes: [], basis: 'none',
+    totals: i.totals, comparisonTotals: null, excluded: [], roas: null,
+    early: false, fewOrders: false, partial: false, split: !!i.split, storeCount: i.storeCount,
+    beforeStart: { date: i.firstOrderDate, text: first },
   }
 }

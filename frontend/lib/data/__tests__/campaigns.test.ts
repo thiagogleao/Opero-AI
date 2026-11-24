@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildCampaignRows, campaignTotals, decisionWindows, estimateRow, metaTotals, splitOwnShared, type BuildCampaignInput } from '../campaigns'
+import { addListed, buildCampaignRows, campaignTotals, decisionWindows, estimateRow, listedCounts, metaTotals, splitOwnShared, type BuildCampaignInput } from '../campaigns'
 import { adRunning, buildCreativeRows } from '../creatives'
 import {
   mergeRanges, reconcile, sharedAccountFlag, ORPHAN_CAMPAIGN_NAME,
@@ -162,6 +162,38 @@ describe('buildCampaignRows', () => {
     expect(byId('freddie').shared).not.toBeNull()
     expect(byId('freddie').estimatedProfit).toBeNull()
     expect(campaignTotals(rows, true).estimatedProfit).toBe(-58.78)
+  })
+
+  // MOKOO 7 dias: "CBO - CHRISTMAS CAPY — global · pausada · 0 conjuntos · 0
+  // anúncios · $0 · 2 compras", opening to "C4 TOF · 1 anúncio" and "C2 PRÉ-BLACK
+  // FRIDAY · 1 anúncio": the row counted only ads with spend.
+  it('counts the ad sets and ads it opens to: spend or a sale in the window', () => {
+    const facts = [
+      fact({ campaignId: 'xmas', adId: 'a1', adsetId: 'c4', purchases: 1, purchaseValue: 50 }),
+      fact({ campaignId: 'xmas', adId: 'a2', adsetId: 'c2', purchases: 1, purchaseValue: 59 }),
+      // An ad with nothing in the window, and a sale outside it, do not count.
+      fact({ campaignId: 'xmas', adId: 'a3', adsetId: 'c9' }),
+      fact({ campaignId: 'xmas', adId: 'a4', adsetId: 'c8', date: '2026-11-02', purchases: 1, purchaseValue: 30 }),
+      // A spending campaign keeps counting its spenders (and their ad sets once).
+      fact({ campaignId: 'live', adId: 'b1', adsetId: 's1', spend: 10 }),
+      fact({ campaignId: 'live', adId: 'b2', adsetId: 's1', spend: 5, date: '2026-11-15' }),
+    ]
+    const rows = build({ facts, campaigns: new Map([['xmas', camp('xmas', NEW_ACCOUNT, 'PAUSED')], ['live', camp('live', NEW_ACCOUNT)]]) })
+    const xmas = rows.find(r => r.campaignId === 'xmas')!
+    expect(xmas.spend).toBe(0)
+    expect({ adsets: xmas.adsets, ads: xmas.ads }).toEqual({ adsets: 2, ads: 2 })
+    const live = rows.find(r => r.campaignId === 'live')!
+    expect({ adsets: live.adsets, ads: live.ads }).toEqual({ adsets: 1, ads: 2 })
+  })
+})
+
+describe('listedCounts', () => {
+  it('counts an ad once over its days, with its ad set', () => {
+    const ads = new Map()
+    addListed(ads, { adId: 'a', adsetId: null, spend: 0, purchases: 0, purchaseValue: 0 })
+    addListed(ads, { adId: 'a', adsetId: 's', spend: 0.01, purchases: 0, purchaseValue: 0 })
+    addListed(ads, { adId: 'b', adsetId: 's', spend: 0, purchases: 0, purchaseValue: 0 })
+    expect(listedCounts(ads)).toEqual({ ads: 1, adsets: 1 })
   })
 })
 

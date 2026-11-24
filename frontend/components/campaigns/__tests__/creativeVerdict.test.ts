@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { CreativeDay, CreativeDetail, CreativeRow } from '@/lib/data/creatives'
 import type { PnL } from '@/lib/engine/pnl'
+import { formatMoney } from '@/lib/format'
 import { buildCreativeVerdict, noSpendWhen } from '../creativeVerdict'
 
 const day = (date: string, spend: number, estimatedProfit: number | null): CreativeDay => ({
@@ -39,9 +40,10 @@ describe('buildCreativeVerdict', () => {
     expect(whole.amount).toBeCloseTo(-24.08, 6)
     expect(half.amount).toBeCloseTo(-12.04, 6)
     const days = (v: typeof whole) => v.details.find(d => d.text.startsWith('Melhor dia'))!.text
-    expect(days(whole)).toBe('Melhor dia 12 nov ($30,50), pior dia 15 nov (−$54,58) — só dias com $10 ou mais de gasto.')
+    // Negative amounts as lib/format writes them (sign glued to the "$").
+    expect(days(whole)).toBe(`Melhor dia 12 nov ($30,50), pior dia 15 nov (${formatMoney(-54.58)}) — só dias com $10 ou mais de gasto.`)
     // The same days, halved, and said so: the day table below shows the same half.
-    expect(days(half)).toBe('Melhor dia 12 nov ($15,25), pior dia 15 nov (−$27,29) — só dias com $10 ou mais de gasto, sua parte do lucro estimado.')
+    expect(days(half)).toBe(`Melhor dia 12 nov ($15,25), pior dia 15 nov (${formatMoney(-27.29)}) — só dias com $10 ou mais de gasto, sua parte do lucro estimado.`)
   })
 
   it('says a shared-account note once, with one period', () => {
@@ -84,7 +86,15 @@ describe('a verdict judged on other days than the page', () => {
     expect(v.when).toBe('24 nov')
     expect(v.tone).toBe('pos')
     expect(v.amountTone).toBe('pos')
-    expect(v.headline).toBe('Este anúncio deu lucro hoje, pela atribuição do Meta: ROAS 5,75× contra empate 1,34×. O veredito vem dos 7 dias fechados (17–23 nov): neles, ficou abaixo de 80% do empate.')
+    // The day is still running: present tense (the chip says "parcial").
+    expect(v.headline).toBe('Este anúncio está dando lucro hoje, até agora, pela atribuição do Meta: ROAS 5,75× contra empate 1,34×. O veredito vem dos 7 dias fechados (17–23 nov): neles, ficou abaixo de 80% do empate.')
+  })
+
+  it('tells a running day in the present and a closed one in the past (Hibikura 52645047117020)', () => {
+    const loss = buildCreativeVerdict(today({ roas: 1.32, estimatedProfit: -12.4, verdict: { signal: null, reason: 'Pouco gasto' } }))
+    expect(loss.headline).toBe('Este anúncio está dando prejuízo hoje, até agora, pela atribuição do Meta: ROAS 1,32× contra empate 1,34×.')
+    const closed = buildCreativeVerdict({ ...today({ roas: 1.32, estimatedProfit: -12.4, verdict: { signal: null, reason: 'Pouco gasto' } }), partialLabel: null, periodPhrase: 'ontem' })
+    expect(closed.headline).toBe('Este anúncio deu prejuízo ontem, pela atribuição do Meta: ROAS 1,32× contra empate 1,34×.')
   })
 
   it('says a "below break-even" verdict is about other days than a profitable custom range (MOKOO 120249710934810625)', () => {
@@ -155,6 +165,18 @@ describe('an ad without spend in the window', () => {
     expect(v.details[0].text).toBe('Último dia com gasto: 23 nov.')
     const never = buildCreativeVerdict({ ...input(false), detail: { ...d, lastSpendDayEver: null }, periodPhrase: 'hoje', today: '2026-11-24' })
     expect(never.details[0].text).toBe('Nenhum gasto registrado para este anúncio.')
+    expect(never.amountCaption).toBe('nenhum gasto registrado para este anúncio')
+  })
+
+  it('points to the window that holds the last spend, after the page window too', () => {
+    // Hibikura, 25 out – 5 nov: last spend 24 nov, and the caption said "escolha um período maior".
+    const d = { ...detail({ spend: 0, lastSpendDay: null, estimatedProfit: null }), hasSpend: false, lastSpendDayEver: '2026-11-24', range: { from: '2026-10-25', to: '2026-11-05' } }
+    const v = buildCreativeVerdict({ ...input(false), detail: d, periodPhrase: 'em 25 out – 5 nov', today: '2026-11-24' })
+    expect(v.amountCaption).toBe('escolha um período que inclua 24 nov para ver o histórico dele')
+    expect(v.amountCaption).not.toContain('maior')
+    // A window printed with years puts the year on the day too.
+    const old = buildCreativeVerdict({ ...input(false), detail: { ...d, range: { from: '2025-12-01', to: '2025-12-31' } }, periodPhrase: 'em dez 2025', today: '2026-11-24' })
+    expect(old.details[0].text).toBe('Último dia com gasto: 24 nov 2026.')
   })
 })
 

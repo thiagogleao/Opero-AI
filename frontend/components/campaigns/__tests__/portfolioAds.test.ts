@@ -166,3 +166,58 @@ describe('the headline names the stores that were judged', () => {
     expect(allJudgedSentence(two, 2, 2, false, 'ontem')).toBe('Nenhuma das 2 lojas com custos cobriu o gasto com anúncios ontem.')
   })
 })
+
+// Todas · Hoje at 09h41: "cobriram o gasto com anúncios hoje" beside the chip
+// "parcial · até 09h41" — the store page already says "está cobrindo … até agora".
+describe('a running window is told in the present', () => {
+  const TODAY = { rangeLabel: '24 nov', periodPhrase: 'hoje', partialLabel: 'parcial · até 09h41' }
+
+  it('all judged stores covering', () => {
+    const stores = [st('EPOCH ®️', 900, 300, 0, 1.29), st('MOKOO', 800, 300, 0, 1.51), st('Hibikura', 600, 200, 0, 1.34), st('Dumpling', 300, 100, 0, 1.46), st('Glooty', 0, 0, 0, null, false), st('CAMP HALLOW', 0, 0, 0, 1.4)]
+    const v = buildPortfolioAdsVerdict({ stores, attribution: null, pairs: [], ...TODAY })
+    expect(v.headline).toBe('As 4 lojas com custos que anunciam no Meta estão cobrindo o gasto com anúncios hoje, até agora.')
+    expect(v.chips[0].label).toBe('4 estão cobrindo os anúncios')
+    expect(v.chips.map(c => c.label)).toContain('parcial · até 09h41')
+  })
+
+  it('one store, none covering, and a mixed day', () => {
+    expect(allJudgedSentence([{ name: 'Hibikura' }], 1, 6, true, 'hoje', true)).toBe('A única loja com gasto no Meta, Hibikura, está cobrindo o gasto com anúncios hoje, até agora.')
+    expect(allJudgedSentence([{ name: 'Hibikura' }], 2, 6, false, 'hoje', true)).toBe('A única loja com custos que anuncia no Meta, Hibikura, não está cobrindo o gasto com anúncios hoje, até agora.')
+    expect(allJudgedSentence([{ name: 'A' }, { name: 'B' }], 2, 2, false, 'hoje', true)).toBe('Nenhuma das 2 lojas com custos está cobrindo o gasto com anúncios hoje, até agora.')
+    const mixed = buildPortfolioAdsVerdict({ stores: [st('EPOCH ®️', 900, 300, 0, 1.29), st('MOKOO', 300, 300, 0, 1.51)], attribution: null, pairs: [], ...TODAY })
+    expect(mixed.headline).toBe('1 de 2 lojas está cobrindo o gasto com anúncios hoje, até agora — MOKOO está abaixo do empate.')
+    expect(mixed.chips[0].label).toBe('1 está cobrindo os anúncios')
+    // A closed window keeps the past tense.
+    const closed = buildPortfolioAdsVerdict({ stores: [st('EPOCH ®️', 900, 300, 0, 1.29), st('MOKOO', 300, 300, 0, 1.51)], attribution: null, pairs: [], ...WIN })
+    expect(closed.headline).toBe('1 de 2 lojas cobriram o gasto com anúncios nos últimos 7 dias — MOKOO ficou abaixo do empate.')
+  })
+})
+
+// Campanhas · Todas, 15 dez 2025 – 15 jan 2026: "As lojas venderam $0" while
+// not one store had made its first sale yet.
+describe('no Meta spend and no sale (regression: "As lojas venderam $0")', () => {
+  const range = { from: '2025-12-15', to: '2026-01-15' }
+  const WINTER = { rangeLabel: '15 dez 2025 – 15 jan 2026', periodPhrase: 'em 15 dez 2025 – 15 jan 2026', partialLabel: null }
+  const started = (s: PortfolioAdsStore, firstOrderDate: string | null): PortfolioAdsStore => ({ ...s, firstOrderDate })
+
+  it('every store started after the window: says none was selling yet', () => {
+    const stores = [started(st('MOKOO', 0, 0, 0, 1.51), '2026-04-11'), started(st('Glooty', 0, 0, 0, null, false), '2026-11-06')]
+    const v = buildPortfolioAdsVerdict({ stores, attribution: null, pairs: [], ...WINTER, range })
+    expect(v.headline).toBe('Nenhuma loja gastou no Meta em 15 dez 2025 – 15 jan 2026.')
+    expect(v.details.map(d => d.text)).toEqual(['Nenhuma das lojas vendia ainda em 15 dez 2025 – 15 jan 2026.'])
+  })
+
+  it('one store already existed (or its start is unknown): no sale and no Meta spend, never "$0"', () => {
+    const stores = [started(st('MOKOO', 0, 0, 0, 1.51), '2025-06-01'), started(st('Glooty', 0, 0, 0, null, false), '2026-11-06')]
+    const v = buildPortfolioAdsVerdict({ stores, attribution: null, pairs: [], ...WINTER, range })
+    expect(v.details.map(d => d.text)).toEqual(['Nenhuma venda e nenhum gasto no Meta em 15 dez 2025 – 15 jan 2026.'])
+    // Without the window the start cannot be judged: the same plain line.
+    const noRange = buildPortfolioAdsVerdict({ stores: stores.map(s => started(s, '2026-11-06')), attribution: null, pairs: [], ...WINTER })
+    expect(noRange.details[0].text).toBe('Nenhuma venda e nenhum gasto no Meta em 15 dez 2025 – 15 jan 2026.')
+  })
+
+  it('sales without Meta spend keep their amount', () => {
+    const v = buildPortfolioAdsVerdict({ stores: [st('Dumpling Squishy · hzsjyp', 2099, 0, 0, 1.67)], attribution: null, pairs: [], ...WIN, range: { from: '2026-11-11', to: '2026-11-17' } })
+    expect(v.details[0].text).toBe('As lojas venderam $2.099 nos últimos 7 dias sem gasto no Meta.')
+  })
+})

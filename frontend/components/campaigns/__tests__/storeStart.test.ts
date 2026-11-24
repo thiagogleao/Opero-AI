@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { PnL } from '@/lib/engine/pnl'
 import type { AttributionTotals } from '@/lib/attributionModels'
-import { beforeStartText, isBeforeStart, type BeforeStartInput } from '../storeStart'
+import { beforeStartText, dateBeside, isBeforeStart, type BeforeStartInput } from '../storeStart'
 import { buildAdsVerdict, type ReportForVerdict } from '../adsVerdict'
 import { buildProductsVerdict } from '@/components/products/productsVerdict'
 import { buildCountriesVerdict } from '@/components/countries/countriesVerdict'
@@ -40,6 +40,26 @@ describe('beforeStartText', () => {
   it('names the month for "Mês passado"', () => {
     expect(beforeStartText({ ...HIB, period: 'lastmonth', range: { from: '2026-10-01', to: '2026-10-31' } }).headline)
       .toBe('A Hibikura começou a vender em 7 nov — não há dados de outubro.')
+  })
+  it('puts the year on the first sale when the window is printed with years', () => {
+    // MOKOO, 15 dez 2025 – 15 jan 2026: "começou a vender em 11 abr" read as 11 abr 2025.
+    const mokoo: BeforeStartInput = { storeName: 'MOKOO', firstOrderDate: '2026-04-11', period: 'custom', range: { from: '2025-12-15', to: '2026-01-15' }, today: '2026-11-24' }
+    const t = beforeStartText(mokoo)
+    expect(t.chip).toBe('Vende desde 11 abr 2026')
+    expect(t.headline).toBe('A MOKOO começou a vender em 11 abr 2026 — não há dados de 15 dez 2025 – 15 jan 2026.')
+    expect(t.detail.text).toBe('Escolha um período a partir de 11 abr 2026 para ver o resultado.')
+    // A window of this year stays short; a comparison in another year counts (the Resumo).
+    expect(beforeStartText({ ...mokoo, range: { from: '2026-01-01', to: '2026-01-31' } }).chip).toBe('Vende desde 11 abr')
+    expect(beforeStartText({ ...mokoo, range: { from: '2026-01-01', to: '2026-01-10' }, alsoShown: ['2025-12-22', '2025-12-31'] }).chip).toBe('Vende desde 11 abr 2026')
+  })
+})
+
+describe('dateBeside', () => {
+  it('follows the Resumo verdict rule (lib/views/verdict dayText)', () => {
+    expect(dateBeside('2026-02-18', ['2025-11-23', '2026-11-23'], '2026-11-24')).toBe('18 fev 2026')
+    expect(dateBeside('2026-02-18', ['2026-01-01', '2026-11-23', null, undefined], '2026-11-24')).toBe('18 fev')
+    // A date of another year carries it anyway.
+    expect(dateBeside('2025-02-18', ['2026-01-01'], '2026-11-24')).toBe('18 fev 2025')
   })
 })
 

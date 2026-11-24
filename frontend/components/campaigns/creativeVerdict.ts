@@ -12,6 +12,7 @@ import { BELOW_BREAK_EVEN_LABEL, KEEP_LABEL, type CreativeVerdict } from '@/lib/
 import { eachDay, type DateRange } from '@/lib/engine/dates'
 import { formatDate, formatMoney, formatRangeLabel, formatRoas, plural } from '@/lib/format'
 import { adVerdictChip, ptText } from './text'
+import { dateBeside } from './storeStart'
 
 const line = (...parts: (string | { text: string; strong?: boolean; tone?: 'pos' | 'neg' | 'warn' })[]): VerdictLine => {
   const ps = parts.map(p => (typeof p === 'string' ? { text: p } : p))
@@ -81,12 +82,17 @@ export function buildCreativeVerdict(input: {
     // The ad's last spend on record, any window: the window's own is always
     // empty here, which left "Último dia com gasto" unreachable.
     const last = d.lastSpendDayEver ?? c.lastSpendDay
+    const lastText = last ? dateBeside(last, [d.range.from, d.range.to], input.today) : null
     chips.push({ code: 'sem_vendas', label: 'Sem gasto neste período', tone: 'neu', icon: 'ring' })
     return {
       ...base, tone: 'neu', chips,
       headline: `Este anúncio não gastou ${periodPhrase}.`,
-      amount: null, amountTone: 'neu', amountCaption: 'escolha um período maior para ver o histórico dele',
-      details: [line(last ? `Último dia com gasto: ${formatDate(last, input.today)}.` : 'Nenhum gasto registrado para este anúncio.')],
+      // Point at the day that has data: "escolha um período maior" sat over
+      // "Último dia com gasto: 24 nov", after a window ending on 5 nov — no
+      // longer window ending there would show anything.
+      amount: null, amountTone: 'neu',
+      amountCaption: lastText ? `escolha um período que inclua ${lastText} para ver o histórico dele` : 'nenhum gasto registrado para este anúncio',
+      details: [line(lastText ? `Último dia com gasto: ${lastText}.` : 'Nenhum gasto registrado para este anúncio.')],
       notes, basis: 'none',
     }
   }
@@ -132,7 +138,12 @@ export function buildCreativeVerdict(input: {
     const closed = days === 1 ? `do último dia fechado (${verdictDates})` : `dos ${days} dias fechados (${verdictDates})`
     headline = `Os números de hoje ainda são cedo: o Meta está atribuindo as vendas do dia. O veredito ${closed} continua valendo: ${spec!.label}.`
   } else if (est !== null) {
-    headline = `Este anúncio deu ${est >= 0 ? 'lucro' : 'prejuízo'} ${periodPhrase}, pela atribuição do Meta: ROAS ${formatRoas(c.roas)}${be !== null ? ` contra empate ${formatRoas(be)}` : ''}.`
+    // A window still running is told in the present, "até agora", as the
+    // Campanhas verdict does (adsVerdict): "deu lucro hoje" beside the chip
+    // "parcial · até 22h09" read as a closed day.
+    const result = est >= 0 ? 'lucro' : 'prejuízo'
+    const did = input.partialLabel ? `está dando ${result} ${periodPhrase}, até agora` : `deu ${result} ${periodPhrase}`
+    headline = `Este anúncio ${did}, pela atribuição do Meta: ROAS ${formatRoas(c.roas)}${be !== null ? ` contra empate ${formatRoas(be)}` : ''}.`
     // A verdict from other days that points the other way is said here, in
     // the sentence it contradicts, not only in the fine print below.
     const against = ownWindow ? verdictAgainstWindow(c.verdict, est) : null

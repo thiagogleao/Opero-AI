@@ -19,10 +19,11 @@
  */
 
 import type { PnL } from '@/lib/engine/pnl'
+import type { DateRange } from '@/lib/engine/dates'
 import type { OwnAttribution } from '@/lib/data/campaigns'
 import type { SharedAdAccount } from '@/lib/attributionModels'
 import { adChannelOf, channelSpend, type AdChannel } from '@/lib/views/adChannel'
-import { storeRoas, sumTotals, type RoasSummary, type Verdict, type VerdictChip, type VerdictLine } from '@/lib/views/verdict'
+import { notSellingYet, storeRoas, sumTotals, type RoasSummary, type Verdict, type VerdictChip, type VerdictLine } from '@/lib/views/verdict'
 import { formatMoney, formatRoas, plural } from '@/lib/format'
 
 type Part = string | { text: string; strong?: boolean; tone?: 'pos' | 'neg' | 'warn' }
@@ -40,6 +41,9 @@ export interface PortfolioAdsStore {
   name: string
   configured: boolean
   totals: PnL
+  /** The store's first sale on its own calendar (the portfolio rows carry
+   *  it); null or absent when unknown. */
+  firstOrderDate?: string | null
 }
 
 export interface StoreAdsRow {
@@ -116,19 +120,44 @@ export function metaBasis(stores: readonly PortfolioAdsStore[], pairs: readonly 
  */
 export function allJudgedSentence(
   judged: readonly Pick<PortfolioAdsStore, 'name'>[], spenders: number, configured: number, covered: boolean, periodPhrase: string,
+  /** The window is still running: the store page's rule (adsVerdict), in
+   *  the present with "até agora" — "cobriram … hoje" sat next to the chip
+   *  "parcial · até 09h41" as if the day were closed. */
+  partial = false,
 ): string {
   const n = judged.length
+  const when = partial ? `${periodPhrase}, até agora` : periodPhrase
   if (n === 1) {
     // "A única loja com gasto no Meta" only when no store without costs spent too.
-    const who = spenders === 1 ? 'A única loja com gasto no Meta' : 'A única loja com custos que anunciou no Meta'
-    return covered
-      ? `${who}, ${judged[0].name}, cobriu o gasto com anúncios ${periodPhrase}.`
-      : `${who}, ${judged[0].name}, não cobriu o gasto com anúncios ${periodPhrase}.`
+    const who = spenders === 1 ? 'A única loja com gasto no Meta' : `A única loja com custos que ${partial ? 'anuncia' : 'anunciou'} no Meta`
+    const verb = partial ? (covered ? 'está cobrindo' : 'não está cobrindo') : covered ? 'cobriu' : 'não cobriu'
+    return `${who}, ${judged[0].name}, ${verb} o gasto com anúncios ${when}.`
   }
   // "Todas as N lojas com custos" only when every store with costs spent on Meta.
-  const group = n === configured ? `${n} lojas com custos` : `${n} lojas com custos que anunciaram no Meta`
-  if (covered) return `${n === configured ? 'Todas as' : 'As'} ${group} cobriram o gasto com anúncios ${periodPhrase}.`
-  return `Nenhuma das ${group} cobriu o gasto com anúncios ${periodPhrase}.`
+  const group = n === configured ? `${n} lojas com custos` : `${n} lojas com custos que ${partial ? 'anunciam' : 'anunciaram'} no Meta`
+  if (covered) return `${n === configured ? 'Todas as' : 'As'} ${group} ${partial ? 'estão cobrindo' : 'cobriram'} o gasto com anúncios ${when}.`
+  return `Nenhuma das ${group} ${partial ? 'está cobrindo' : 'cobriu'} o gasto com anúncios ${when}.`
+}
+
+/** The chip over the stores that cover their ads: "4 cobriram os anúncios",
+ *  or on a running window "4 estão cobrindo os anúncios". */
+export function coveringChipLabel(n: number, partial: boolean): string {
+  if (partial) return `${n} ${n === 1 ? 'está cobrindo' : 'estão cobrindo'} os anúncios`
+  return `${n} ${n === 1 ? 'cobriu' : 'cobriram'} os anúncios`
+}
+
+/**
+ * The detail under "Nenhuma loja gastou no Meta". Without a sale it never
+ * says "As lojas venderam $0": for 15 dez 2025 – 15 jan 2026 no store had
+ * started yet (the verdict's "ainda não vendia", lib/views/verdict
+ * notSellingYet), and otherwise nothing was sold.
+ */
+export function noSaleNoMetaText(
+  stores: readonly PortfolioAdsStore[], totals: Pick<PnL, 'orders' | 'revenue'>, periodPhrase: string, range?: DateRange,
+): string {
+  if (totals.orders > 0 || totals.revenue > 0) return `As lojas venderam ${formatMoney(totals.revenue)} ${periodPhrase} sem gasto no Meta.`
+  if (range && stores.length > 0 && stores.every(s => notSellingYet(s, range))) return `Nenhuma das lojas vendia ainda ${periodPhrase}.`
+  return `Nenhuma venda e nenhum gasto no Meta ${periodPhrase}.`
 }
 
 export function buildPortfolioAdsVerdict(input: {
@@ -142,6 +171,9 @@ export function buildPortfolioAdsVerdict(input: {
   periodPhrase: string
   partialLabel: string | null
   split?: boolean
+  /** The window, to tell a window before every store's first sale (absent:
+   *  never said). */
+  range?: DateRange
 }): Verdict {
   const { stores, periodPhrase } = input
   const totals = sumTotals(stores.map(r => r.totals))
@@ -168,20 +200,23 @@ export function buildPortfolioAdsVerdict(input: {
     return {
       ...base, tone: 'neu', chips, headline: `Nenhuma loja gastou no Meta ${periodPhrase}.`,
       amount: null, amountTone: 'neu', amountCaption: 'sem gasto com anúncios no período',
-      details: [line(`As lojas venderam ${formatMoney(totals.revenue)} ${periodPhrase} sem gasto no Meta.`)], notes: [], basis: 'none',
+      details: [line(noSaleNoMetaText(stores, totals, periodPhrase, input.range))], notes: [], basis: 'none',
     }
   }
 
-  if (covering.length) chips.push({ code: 'lucro', label: `${covering.length} ${covering.length === 1 ? 'cobriu' : 'cobriram'} os anúncios`, tone: 'pos', icon: 'up' })
+  const partial = !!input.partialLabel
+  if (covering.length) chips.push({ code: 'lucro', label: coveringChipLabel(covering.length, partial), tone: 'pos', icon: 'up' })
   if (below.length) chips.push({ code: 'prejuizo', label: `${below.length} abaixo do empate`, tone: 'neg', icon: 'down' })
   if (unconfigured.length) chips.push({ code: 'sem_custos', label: unconfigured.length === 1 ? '1 loja sem custos' : `${unconfigured.length} lojas sem custos`, tone: 'cfg', icon: 'sliders' })
   if (input.partialLabel) chips.push({ code: 'parcial', label: input.partialLabel, tone: 'info', icon: 'clock' })
 
   const headline = judged.length === 0
-    ? `Suas lojas gastaram ${formatMoney(totals.metaSpend)} no Meta ${periodPhrase}, mas nenhuma delas tem custos para dizer se compensou.`
+    ? `Suas lojas ${partial ? 'estão gastando' : 'gastaram'} ${formatMoney(totals.metaSpend)} no Meta ${partial ? `${periodPhrase}, até agora` : periodPhrase}, mas nenhuma delas tem custos para dizer se ${partial ? 'compensa' : 'compensou'}.`
     : below.length === 0 || covering.length === 0
-      ? allJudgedSentence(judged, spenders.length, stores.filter(r => r.configured).length, below.length === 0, periodPhrase)
-      : `${covering.length} de ${judged.length} lojas cobriram o gasto com anúncios ${periodPhrase} — ${joinNames(below.map(r => r.name))} ${below.length === 1 ? 'ficou' : 'ficaram'} abaixo do empate.`
+      ? allJudgedSentence(judged, spenders.length, stores.filter(r => r.configured).length, below.length === 0, periodPhrase, partial)
+      : partial
+        ? `${covering.length} de ${judged.length} lojas ${covering.length === 1 ? 'está cobrindo' : 'estão cobrindo'} o gasto com anúncios ${periodPhrase}, até agora — ${joinNames(below.map(r => r.name))} ${below.length === 1 ? 'está' : 'estão'} abaixo do empate.`
+        : `${covering.length} de ${judged.length} lojas cobriram o gasto com anúncios ${periodPhrase} — ${joinNames(below.map(r => r.name))} ${below.length === 1 ? 'ficou' : 'ficaram'} abaixo do empate.`
 
   // 1. What Meta credits, on the store pages' rule (own campaigns only).
   if (input.attribution) {

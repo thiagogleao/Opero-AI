@@ -222,6 +222,21 @@
    Compras and Hook (unavailable for every ad) hides. */
 .colCtr, .colHook { display: contents; }
 .inlineCtr { display: none; }
+/* A single day adds Frequência (~136px, adsBoxDay): at 1440 the table needed
+   1174px of a 1134px box and nothing folded, so the fold starts earlier;
+   below ~1040px (1024: 898px against 975px) Frequência folds under Gasto. */
+.colFreq { display: contents; }
+.inlineFreq { display: none; }
+@container (max-width: 1239px) {
+  .adsBoxDay th:has(.colCtr), .adsBoxDay td:has(.colCtr),
+  .adsBoxDay th:has(.colHook), .adsBoxDay td:has(.colHook) { display: none; }
+  .adsBoxDay .inlineCtr { display: block; }
+  .adsBoxDay .adName, .adsBoxDay .adSub { max-width: 190px; }
+}
+@container (max-width: 1039px) {
+  .adsBox th:has(.colFreq), .adsBox td:has(.colFreq) { display: none; }
+  .inlineFreq { display: block; }
+}
 @container (max-width: 1099px) {
   .adsBox th:has(.colCredit), .adsBox td:has(.colCredit),
   .adsBox th:has(.colShop), .adsBox td:has(.colShop),
