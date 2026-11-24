@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { sumPnL, type PnL, type PnLLines } from '../../engine/pnl'
 import {
-  buildVerdict, comparisonPhrase, comparisonText, isIdle, judgedStores, perDollarLine, periodPhrase, roasSummary, storeStatus, storeStatusChips, sumTotals,
-  type VerdictInput, type VerdictStore,
+  buildVerdict, comparisonCut, comparisonPhrase, comparisonText, dayLeftMinutes, dayLeftVerb, isIdle, judgedStores, noSalesCashHit, perDollarLine, periodPhrase, roasSummary, storeStatus, storeStatusChips, sumTotals,
+  type ComparisonWindow, type VerdictInput, type VerdictStore,
 } from '../verdict'
 import { formatRoas } from '../../format'
 
@@ -286,7 +286,13 @@ describe('phrases', () => {
     expect(comparisonPhrase('mesmos dias do mês passado')).toBe('nos mesmos dias do mês passado')
     expect(comparisonPhrase('mês anterior')).toBe('no mês anterior')
     expect(comparisonText({ from: '2026-10-01', to: '2026-10-17', label: 'mesmos dias do mês passado', sameTimeOfDay: true }, '2026-11-17'))
+      .toBe('vs mesmos dias do mês passado (1–17 out, até esta hora de 17 out)')
+    expect(comparisonText({ from: '2026-10-01', to: '2026-10-17', label: 'mesmos dias do mês passado', sameTimeOfDay: true, cutoffMinutes: 988 }, '2026-11-17'))
+      .toBe('vs mesmos dias do mês passado (1–17 out, até 16h28 de 17 out)')
+    expect(comparisonText({ from: '2026-10-01', to: '2026-10-17', label: 'mesmos dias do mês passado', sameTimeOfDay: false }, '2026-11-17'))
       .toBe('vs mesmos dias do mês passado (1–17 out)')
+    expect(comparisonPhrase('10 dias anteriores', true)).toBe('nos 10 dias anteriores até esta hora')
+    expect(comparisonPhrase('ontem até esta hora', true)).toBe('ontem até esta hora')
   })
 
   it('ROAS summary', () => {
@@ -357,7 +363,7 @@ describe('a running window longer than a day', () => {
     const v = buildVerdict(mtd(MOKOO_7D, 120))
     expect(v.early).toBe(false)
     expect(v.chips.map(c => c.code)).toEqual(['lucro', 'margem_fina', 'parcial'])
-    expect(v.headline).toBe('A MOKOO está no lucro neste mês — mas menos do que nos mesmos dias do mês passado.')
+    expect(v.headline).toBe('A MOKOO está no lucro neste mês — mas menos do que nos mesmos dias do mês passado até esta hora.')
     expect(v.amountCaption).toBe('de lucro real até agora, depois de todos os custos')
     expect(v.notes).toEqual([]) // no "faltam … para o dia fechar" on a month
   })
@@ -756,5 +762,237 @@ describe('a store without cost settings whose ads passed its sales', () => {
   it('a store with cost settings gets one chip', () => {
     const r = store({ id: 'm', name: 'MOKOO', totals: MOKOO_7D })
     expect(storeStatusChips(r, { singleDay: false }).map(c => c.code)).toEqual(['margem_fina'])
+  })
+})
+
+// Hibikura, custom 10–19 nov at 04h16 in Tokyo: the comparison was 31 out – 9
+// nov with 9 nov cut at 04h16 (+$35,65), while the whole range lost $127,78.
+// Every label named the whole range ("O lucro era $35,65 em 31 out – 9 nov").
+describe('a comparison cut at this hour says where it stops', () => {
+  const CUT: ComparisonWindow = { from: '2026-10-31', to: '2026-11-09', label: '10 dias anteriores', sameTimeOfDay: true, cutoffMinutes: 256 }
+  const hib = (cmp: ComparisonWindow | null): VerdictInput => ({
+    stores: [store({
+      id: 'h', name: 'Hibikura', timezone: 'Asia/Tokyo', partial: true, minutesCovered: 256, dayState: 'running',
+      totals: pnl({ revenue: 2000, orders: 30, cogs: 600, metaSpend: 1000 }),
+      comparison: { included: true, totals: pnl({ revenue: 335, orders: 5, cogs: 100, metaSpend: 199.35 }) },
+    })],
+    period: 'custom', range: { from: '2026-11-10', to: '2026-11-19' }, today: '2026-11-19',
+    anchorTimezone: 'Asia/Tokyo', comparison: cmp,
+  })
+
+  it('in the chip line, the headline and the sentence', () => {
+    const v = buildVerdict(hib(CUT))
+    expect(v.when).toBe('10–19 nov · vs 10 dias anteriores (31 out – 9 nov, até 04h16 de 9 nov)')
+    expect(v.headline).toBe('A Hibikura está no lucro em 10–19 nov — e mais do que nos 10 dias anteriores até esta hora.')
+    const was = v.details.find(d => d.text.startsWith('O lucro era'))!
+    expect(was.text).toMatch(/^O lucro era \$35,65 em 31 out – 9 nov \(até 04h16 de 9 nov\): /)
+    expect(comparisonCut(CUT, '2026-11-19')).toBe('até 04h16 de 9 nov')
+  })
+
+  it('without a common minute (Tokyo and Brasília both cut) it says "esta hora"', () => {
+    expect(comparisonCut({ ...CUT, cutoffMinutes: null }, '2026-11-19')).toBe('até esta hora de 9 nov')
+    expect(buildVerdict(hib({ ...CUT, cutoffMinutes: null })).when)
+      .toBe('10–19 nov · vs 10 dias anteriores (31 out – 9 nov, até esta hora de 9 nov)')
+  })
+
+  it('whole days compared stay named by their dates alone', () => {
+    const whole: ComparisonWindow = { ...CUT, sameTimeOfDay: false, cutoffMinutes: null }
+    const v = buildVerdict(hib(whole))
+    expect(v.when).toBe('10–19 nov · vs 10 dias anteriores (31 out – 9 nov)')
+    expect(v.headline).toBe('A Hibikura está no lucro em 10–19 nov — e mais do que nos 10 dias anteriores.')
+    expect(comparisonCut(whole, '2026-11-19')).toBeNull()
+    expect(comparisonCut({ from: '2026-11-18', to: '2026-11-18', label: 'ontem até esta hora', sameTimeOfDay: true, cutoffMinutes: 600 }, '2026-11-19')).toBeNull()
+  })
+})
+
+// MOKOO · Hoje at 16h19 read "Faltaram 33 centavos…" beside "Faltam 7h41
+// para o dia fechar".
+describe('the per-dollar line of a window still running is in the present', () => {
+  it('perDollarLine(…, running)', () => {
+    expect(perDollarLine(-33, false, true).text).toBe('Faltam 33 centavos em cada dólar vendido para empatar, até agora.')
+    expect(perDollarLine(-1, false, true).text).toBe('Falta 1 centavo em cada dólar vendido para empatar, até agora.')
+    expect(perDollarLine(-0.4, false, true).text).toBe('Falta menos de 1 centavo em cada dólar vendido para empatar, até agora.')
+    expect(perDollarLine(-140, false, true).text).toBe('Falta $1,40 em cada dólar vendido para empatar, até agora.')
+    expect(perDollarLine(-225, false, true).text).toBe('Faltam $2,25 em cada dólar vendido para empatar, até agora.')
+    expect(perDollarLine(12, true, true).text).toBe('Sobram 12 centavos de cada dólar vendido, até agora.')
+    expect(perDollarLine(1, true, true).text).toBe('Sobra 1 centavo de cada dólar vendido, até agora.')
+  })
+  it('in the verdict of a running day, and not in a closed one', () => {
+    const day = (partial: boolean): VerdictInput => ({
+      stores: [store({ id: 'm', name: 'MOKOO', partial, minutesCovered: partial ? 979 : 1440, dayState: partial ? 'running' : 'complete',
+        totals: pnl({ revenue: 1000, orders: 10, cogs: 900, metaSpend: 430 }) })],
+      period: partial ? 'today' : 'yesterday', range: { from: '2026-11-17', to: '2026-11-17' }, today: partial ? '2026-11-17' : '2026-11-18',
+      anchorTimezone: 'America/Sao_Paulo', comparison: null,
+    })
+    expect(buildVerdict(day(true)).details.map(d => d.text)).toContain('Faltam 33 centavos em cada dólar vendido para empatar, até agora.')
+    expect(buildVerdict(day(false)).details.map(d => d.text)).toContain('Faltaram 33 centavos em cada dólar vendido para empatar.')
+  })
+})
+
+// ─── The day's countdown ──────────────────────────────────────────────────────
+// Todas · Hoje read 'Faltam 1 min para o dia fechar.' at 23h59 and 'Faltam
+// 24h00 para o dia fechar.' at 00h00.
+describe('day countdown', () => {
+  it('is floored, never a whole day, and agrees with its count', () => {
+    expect(dayLeftMinutes(0)).toBe(1439)
+    expect(dayLeftMinutes(0.5)).toBe(1439)
+    expect(dayLeftMinutes(1439)).toBe(1)
+    expect(dayLeftMinutes(1440)).toBe(0)
+    expect(dayLeftVerb(1)).toBe('Falta')
+    expect(dayLeftVerb(2)).toBe('Faltam')
+    expect(dayLeftVerb(80)).toBe('Falta')
+    expect(dayLeftVerb(125)).toBe('Faltam')
+    expect(dayLeftVerb(1439)).toBe('Faltam')
+  })
+  const at = (anchorMinutes: number) => {
+    const running = { partial: true, minutesCovered: Math.max(1, anchorMinutes), dayState: 'running' as const }
+    return buildVerdict({
+      stores: [
+        store({ id: 'a', name: 'A', ...running, totals: pnl({ revenue: 500, orders: 6, cogs: 100, metaSpend: 100 }) }),
+        store({ id: 'b', name: 'B', ...running, totals: pnl({ revenue: 400, orders: 5, cogs: 100, metaSpend: 100 }) }),
+      ],
+      period: 'today', range: { from: '2026-11-24', to: '2026-11-24' }, today: '2026-11-24',
+      anchorTimezone: 'America/Sao_Paulo', anchorMinutes, comparison: null, subject: 'Suas lojas',
+    }).notes.map(n => n.text)
+  }
+  it('reads Falta 1 min at 23h59 and 23h59 at midnight on Todas · Hoje', () => {
+    expect(at(1439)).toContain('Falta 1 min para o dia fechar.')
+    expect(at(0)).toContain('Faltam 23h59 para o dia fechar.')
+    expect(at(0).join(' ')).not.toMatch(/24h00/)
+    expect(at(13 * 60 + 38)).toContain('Faltam 10h22 para o dia fechar.')
+  })
+})
+
+// ─── Round 3 regressions ─────────────────────────────────────────────────────
+
+// Overview · Mês passado: Glooty (no costs, first sale 6 nov) read "1 loja sem
+// custos" and "fica fora da soma: sem custos configurados" for October, while
+// Hibikura in the same situation read "ainda não vendia".
+describe('a store without costs that had not started yet is not "sem custos"', () => {
+  const OCT = { from: '2026-10-01', to: '2026-10-31' }
+  const SEP = { from: '2026-09-01', to: '2026-09-30', label: 'mês anterior', sameTimeOfDay: false }
+  const mokoo = store({ id: 'm', name: 'MOKOO', totals: pnl({ revenue: 30000, orders: 400, cogs: 9000, metaSpend: 15000 }) })
+  const glooty = (over: Partial<VerdictStore> = {}) => store({ id: 'g', name: 'Glooty', configured: false, totals: pnl({}), firstOrderDate: '2026-11-06', ...over })
+  const hib = store({ id: 'h', name: 'Hibikura', timezone: 'Asia/Tokyo', totals: pnl({}), firstOrderDate: '2026-11-07' })
+  const october = (stores: VerdictStore[]) => buildVerdict({
+    period: 'lastmonth', range: OCT, today: '2026-11-24', anchorTimezone: 'America/Sao_Paulo', comparison: SEP, subject: 'Suas lojas', stores,
+  })
+
+  it('joins the "ainda não vendiam" note, with no chip and no "fica fora da soma" line', () => {
+    const v = october([mokoo, glooty(), hib])
+    expect(v.chips.map(c => c.label)).toEqual(['No lucro'])
+    expect(v.details.map(d => d.text).join(' ')).not.toMatch(/sem custos/)
+    expect(v.notes.map(n => n.text)).toEqual(['Glooty e Hibikura ainda não vendiam no mês passado: ficam fora da contagem de lojas.'])
+    expect(v.excluded).toEqual([])
+    expect(v.when).toBe('1 loja na soma · 1–31 out · vs mês anterior (1–30 set)')
+  })
+
+  it('once it sells (or spends) in the window, it is "sem custos" again', () => {
+    const selling = october([mokoo, glooty({ totals: pnl({ revenue: 500, orders: 6, metaSpend: 900 }), firstOrderDate: '2026-10-20' })])
+    expect(selling.chips.map(c => c.label)).toContain('1 loja sem custos')
+    expect(selling.excluded.map(e => e.name)).toEqual(['Glooty'])
+    // Ads before the first sale: something happened, so it is out for its settings.
+    const adsOnly = october([mokoo, glooty({ totals: pnl({ metaSpend: 120 }) })])
+    expect(adsOnly.excluded.map(e => e.name)).toEqual(['Glooty'])
+    expect(adsOnly.notes).toEqual([])
+  })
+})
+
+// CAMP HALLOW · 30 dias: 9 orders, $581,87 of profit, 12 chargebacks
+// (−$1.345,89), cash result −$764,02 — the card read a clean "lucrou · $582".
+describe('refunds and chargebacks with sales (regression: "No lucro" over a negative cash result)', () => {
+  const thirty = { from: '2026-10-25', to: '2026-11-23' }
+  const camp = (totals: PnL, split = false) => buildVerdict({
+    period: '30d', range: thirty, today: '2026-11-24', anchorTimezone: 'America/Sao_Paulo', split,
+    comparison: { from: '2026-09-25', to: '2026-10-24', label: '30 dias anteriores', sameTimeOfDay: false },
+    stores: [store({ id: 'c', name: 'CAMP HALLOW', totals })],
+  })
+  const CAMP_30D = pnl({ revenue: 684.87, orders: 9, units: 9, cogs: 103, chargebacks: 1165.89, chargebackFees: 180, chargebackCount: 12 })
+
+  it('says what arrived and where the cash ended, as the first line', () => {
+    const v = camp(CAMP_30D)
+    expect(v.totals.cashResult).toBeCloseTo(-764.02, 2)
+    expect(v.chips.map(c => c.code)).toEqual(['lucro'])
+    expect(v.details[0].text).toBe('Mas chegaram 12 chargebacks: −$1.346 no caixa — o resultado de caixa ficou em −$764.')
+    expect(v.details[0].parts.filter(p => p.tone === 'neg').map(p => p.text)).toEqual(['−$1.346 no caixa', '−$764'])
+  })
+
+  it('halves both amounts in the partner view', () => {
+    expect(camp(CAMP_30D, true).details[0].text).toBe('Mas chegaram 12 chargebacks: −$673 no caixa — o resultado de caixa ficou em −$382.')
+  })
+
+  it('a loss made worse reads "E chegaram…"; a small refund beside a real result says nothing', () => {
+    const loss = camp(pnl({ revenue: 1000, orders: 10, cogs: 600, metaSpend: 700, refunds: 120, refundCount: 2 }))
+    expect(loss.details[0].text).toBe('E chegaram 2 reembolsos: −$120 no caixa — o resultado de caixa ficou em −$420.')
+    const small = camp(pnl({ revenue: 10000, orders: 100, cogs: 4000, metaSpend: 3000, refunds: 150, refundCount: 3 }))
+    expect(small.details.map(d => d.text).join(' ')).not.toMatch(/no caixa/)
+  })
+
+  it('a big share of a positive cash result is said too', () => {
+    const v = camp(pnl({ revenue: 10000, orders: 100, cogs: 4000, metaSpend: 3000, chargebacks: 1500, chargebackCount: 10 }))
+    expect(v.details[0].text).toBe('Mas chegaram 10 chargebacks: −$1.500 no caixa — o resultado de caixa ficou em $1.500.')
+  })
+})
+
+// Squishy World (archived, not synced) on "Hoje" read "ainda não vendeu hoje ·
+// parcial · Faltam 19h42 para o dia fechar".
+describe('an archived store has no running day', () => {
+  const day = { from: '2026-11-24', to: '2026-11-24' }
+  const squishy = (totals: PnL) => buildVerdict({
+    period: 'today', range: day, today: '2026-11-24', anchorTimezone: 'America/Sao_Paulo',
+    comparison: { from: '2026-11-23', to: '2026-11-23', label: 'ontem até esta hora', sameTimeOfDay: true },
+    stores: [store({ id: 's', name: 'Squishy World', archived: true, partial: true, minutesCovered: 258, dayState: 'running', totals })],
+  })
+
+  it('no "ainda", no countdown, no "parcial": it says the store is not synced', () => {
+    const v = squishy(pnl({}))
+    expect(v.headline).toBe('A Squishy World está arquivada e não sincroniza mais: não há vendas hoje para mostrar.')
+    expect(v.chips.map(c => c.label)).toEqual(['Sem sincronização'])
+    expect(v.partial).toBe(false)
+    expect(v.notes).toEqual([])
+    expect(v.amount).toBeNull()
+    expect(v.amountCaption).toBe('loja arquivada: nenhum pedido novo chega')
+    expect(v.details.map(d => d.text)).toEqual(['Para ver o histórico, escolha um período de quando a loja ainda sincronizava.'])
+  })
+
+  it('the same store not archived still reads as a running day', () => {
+    const v = buildVerdict({
+      period: 'today', range: day, today: '2026-11-24', anchorTimezone: 'America/Sao_Paulo', comparison: null,
+      stores: [store({ id: 's', name: 'Squishy World', partial: true, minutesCovered: 258, dayState: 'running', totals: pnl({}) })],
+    })
+    expect(v.headline).toBe('A Squishy World ainda não vendeu hoje.')
+    expect(v.notes.map(n => n.text)).toEqual(['Faltam 19h42 para o dia fechar.'])
+  })
+})
+
+// MOKOO, 24 nov 2025 – 24 nov 2026: "a loja começou a vender em 11 abr" beside
+// a comparison printed with years read as 11 abr 2025.
+describe('the first sale is dated with its year when the window or the comparison has years', () => {
+  const mokoo = (range: { from: string; to: string }, comparison: ComparisonWindow) => buildVerdict({
+    period: 'custom', range, today: '2026-11-24', anchorTimezone: 'America/Belem', comparison,
+    stores: [store({
+      id: 'm', name: 'MOKOO', timezone: 'America/Belem', firstOrderDate: '2026-04-11',
+      totals: pnl({ revenue: 300000, orders: 4400, cogs: 150000, metaSpend: 120000 }), comparison: { included: true, totals: pnl({}) },
+    })],
+  })
+
+  it('a year-long range across two years', () => {
+    const v = mokoo({ from: '2025-11-24', to: '2026-11-24' }, { from: '2024-11-23', to: '2025-11-23', label: '366 dias anteriores', sameTimeOfDay: false })
+    expect(v.details.map(d => d.text)).toContain('Sem vendas para comparar em 23 nov 2024 – 23 nov 2025: a loja começou a vender em 11 abr 2026.')
+    expect(v.notes.map(n => n.text)).toContain('A MOKOO só começou a vender em 11 abr 2026: o período tem dias antes disso.')
+  })
+
+  it('this year only: no year, as before', () => {
+    const v = mokoo({ from: '2026-04-01', to: '2026-04-30' }, { from: '2026-03-02', to: '2026-03-31', label: '30 dias anteriores', sameTimeOfDay: false })
+    expect(v.notes.map(n => n.text)).toContain('A MOKOO só começou a vender em 11 abr: o período tem dias antes disso.')
+  })
+})
+
+describe('noSalesCashHit (shared with the store rows)', () => {
+  it('counts what arrived with no sale; nothing with a sale or no money', () => {
+    expect(noSalesCashHit(pnl({ chargebacks: 156.28, chargebackFees: 30, chargebackCount: 2 }))).toEqual({ what: '2 chargebacks', amount: -186.28 })
+    expect(noSalesCashHit(pnl({ refunds: 20, refundCount: 1, chargebacks: 40, chargebackCount: 1 }))?.what).toBe('1 reembolso e 1 chargeback')
+    expect(noSalesCashHit(pnl({ revenue: 50, orders: 1, chargebacks: 40, chargebackCount: 1 }))).toBeNull()
+    expect(noSalesCashHit(pnl({}))).toBeNull()
   })
 })

@@ -1,6 +1,8 @@
+import { readdirSync, readFileSync } from 'node:fs'
+import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
-  beginNavigation, detailRoute, endNavigation, IN_FLIGHT_TTL_MS, inFlightParam, layerHref, mergeQuery, NAV_LAYER,
+  beginNavigation, detailRoute, endNavigation, IN_FLIGHT_TTL_MS, inFlightParam, isStoreOnlyPath, layerHref, mergeQuery, NAV_LAYER,
   navigationInFlight, onTopOfInFlight, pickIsNoop, storeSwitchHref,
 } from '../url'
 
@@ -50,6 +52,20 @@ describe('store switch from a page of one store’s object', () => {
   it('reloads any other page with its own keys', () => {
     expect(storeSwitchHref('/campaigns', `?loja=${EPOCH}`, `?loja=${MOKOO}&aba=criativos`)).toBe(`/campaigns?loja=${EPOCH}&aba=criativos`)
     expect(storeSwitchHref('/settings', `?loja=${GLOOTY}`, `?loja=${MOKOO}&fb_connected=true`)).toBe(`/settings?loja=${GLOOTY}`)
+    // A campaign filter names one store's campaign: EPOCH has no such campaign, and picking the
+    // MOKOO again must not bring the old filter back.
+    expect(storeSwitchHref('/campaigns', `?loja=${EPOCH}&periodo=30d`, `?loja=${MOKOO}&periodo=30d&aba=criativos&campanha=120249693763810625&mostrar=todos`)).toBe(`/campaigns?loja=${EPOCH}&periodo=30d&aba=criativos`)
+  })
+
+  it('keeps the campaign filter on a period change (same store, same campaign)', () => {
+    expect(mergeQuery(`?loja=${MOKOO}&periodo=30d`, `?loja=${MOKOO}&aba=criativos&campanha=120249693763810625&mostrar=todos`))
+      .toBe(`?loja=${MOKOO}&periodo=30d&aba=criativos&campanha=120249693763810625&mostrar=todos`)
+  })
+
+  it('drops the campaign filter when a store is picked while a period change on it still loads', () => {
+    const opening = `/campaigns?loja=${MOKOO}&periodo=30d&aba=criativos&campanha=120249693763810625`
+    const storeFromScreen = storeSwitchHref('/campaigns', `?loja=${EPOCH}`, `?loja=${MOKOO}&aba=criativos&campanha=120249693763810625`)
+    expect(layerHref(opening, storeFromScreen, NAV_LAYER.store)).toBe(`/campaigns?loja=${EPOCH}&periodo=30d&aba=criativos`)
   })
 })
 
@@ -148,8 +164,81 @@ describe('pickIsNoop (regression: on a one-store page opened from Todas, the sto
   })
 
   it('a navigation still loading decides what is current, as before', () => {
-    expect(pickIsNoop(GLOOTY, MOKOO, 'todas', GLOOTY)).toBe(true)
-    expect(pickIsNoop(MOKOO, MOKOO, 'todas', GLOOTY)).toBe(false)
+    expect(pickIsNoop(GLOOTY, MOKOO, 'todas', `/?loja=${GLOOTY}`)).toBe(true)
+    expect(pickIsNoop(MOKOO, MOKOO, 'todas', `/?loja=${GLOOTY}`)).toBe(false)
+    expect(pickIsNoop('todas', MOKOO, 'todas', `/?loja=${GLOOTY}`)).toBe(false)
+    // null: nothing loads, the screen decides.
     expect(pickIsNoop(MOKOO, MOKOO, undefined, null)).toBe(true)
+    // A URL without loja shows the remembered store: never Todas.
+    expect(pickIsNoop('todas', 'todas', undefined, '/campaigns?periodo=today')).toBe(false)
+    expect(pickIsNoop(MOKOO, MOKOO, undefined, '/campaigns?periodo=today')).toBe(true)
+  })
+
+  // Regression: on a Resumo opened from Todas, "Ontem" then "Todas as lojas"
+  // while it loaded did nothing — the period picker's URL carries loja=todas,
+  // read as "already Todas" — and the Resumo landed still on the MOKOO.
+  it('a one-store page still loading with loja=todas only carries Todas: every entry still navigates', () => {
+    const periodOnResumo = '/?loja=todas&periodo=yesterday'
+    expect(pickIsNoop('todas', MOKOO, 'todas', periodOnResumo)).toBe(false)
+    expect(pickIsNoop(MOKOO, MOKOO, 'todas', periodOnResumo)).toBe(false)
+    expect(pickIsNoop(EPOCH, MOKOO, 'todas', periodOnResumo)).toBe(false)
+    // The same from the other one-store pages, and a sidebar link from Todas to one of them.
+    expect(pickIsNoop('todas', MOKOO, 'todas', '/attribution?loja=todas&parte=50')).toBe(false)
+    expect(pickIsNoop('todas', MOKOO, 'todas', '/profit?loja=todas&periodo=30d')).toBe(false)
+    expect(pickIsNoop('todas', MOKOO, 'todas', '/settings?loja=todas#lojas')).toBe(false)
+    expect(pickIsNoop('todas', 'todas', undefined, '/?loja=todas')).toBe(false)
+  })
+
+  it('a page that shows Todas still loading is Todas: picking it again changes nothing', () => {
+    // A period on /overview, or on Campanhas · Todas.
+    expect(pickIsNoop('todas', 'todas', undefined, '/overview?loja=todas&periodo=yesterday')).toBe(true)
+    expect(pickIsNoop('todas', 'todas', undefined, '/campaigns?loja=todas&periodo=yesterday')).toBe(true)
+    // Todas picked on a store-pinned page (opens /overview), then picked again.
+    expect(pickIsNoop('todas', MOKOO, undefined, '/overview?loja=todas')).toBe(true)
+    // From a Resumo opened from Todas, a sidebar link to Campanhas (which shows
+    // Todas) is not undone by "Todas as lojas" — it would open /overview instead.
+    expect(pickIsNoop('todas', MOKOO, 'todas', '/campaigns?loja=todas')).toBe(true)
+    expect(pickIsNoop(MOKOO, MOKOO, 'todas', '/campaigns?loja=todas')).toBe(false)
+  })
+})
+
+describe('isStoreOnlyPath', () => {
+  it('matches each one-store page and its subpaths, and only those', () => {
+    for (const p of ['/', '/attribution', '/profit', '/settings', '/settings/chaves', '/facebook/accounts', '/creatives/120249693989210625']) {
+      expect(isStoreOnlyPath(p), p).toBe(true)
+    }
+    for (const p of ['/overview', '/campaigns', '/products', '/countries', '/dev/ui', '/profits', '/settingsx']) {
+      expect(isStoreOnlyPath(p), p).toBe(false)
+    }
+  })
+
+  // The list repeats what each page asks getPageContext for; this keeps the two
+  // from drifting apart (a page moved to scope 'store' without the list would
+  // let "Todas as lojas" do nothing again while it loads).
+  it('agrees with the scope every shell page asks getPageContext for', () => {
+    const appDir = path.resolve(__dirname, '../../../app')
+    const pages: string[] = []
+    const walk = (dir: string) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, e.name)
+        if (e.isDirectory()) walk(full)
+        else if (e.name === 'page.tsx') pages.push(full)
+      }
+    }
+    walk(appDir)
+    let checked = 0
+    for (const file of pages) {
+      const src = readFileSync(file, 'utf8')
+      const usesShell = /getPageContext\(|<PickerPage\b/.test(src)
+      if (!usesShell) continue
+      const storeOnly = /scope:\s*'store'/.test(src) || /<PickerPage\b/.test(src)
+      const route = '/' + path.relative(appDir, path.dirname(file)).split(path.sep)
+        .filter(seg => seg && !/^\(.*\)$/.test(seg))
+        .map(seg => (seg.startsWith('[') ? 'x' : seg))
+        .join('/')
+      expect(isStoreOnlyPath(route), `${route} (${path.relative(appDir, file)})`).toBe(storeOnly)
+      checked++
+    }
+    expect(checked).toBeGreaterThanOrEqual(10)
   })
 })

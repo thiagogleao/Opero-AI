@@ -26,6 +26,16 @@ export const ONE_SHOT_KEYS = [
 ] as const
 
 /**
+ * Keys that name an object of ONE store (a campaign id on Campanhas →
+ * Criativos, and that list's "mostrar todos"). Another store has no such
+ * campaign, so the store picker drops them like the one-shot keys; the period
+ * picker keeps them (same store). Carried along, the MOKOO's ?campanha= opened
+ * EPOCH on "Filtro de campanha de outra loja", and picking the MOKOO again
+ * brought the old filter back without anyone asking for it.
+ */
+export const STORE_SCOPED_KEYS = ['campanha', 'mostrar'] as const
+
+/**
  * Pages that show one object of one store (an ad). Another store has no such
  * object, so picking another store opens the list the object belongs to (with
  * the state kept), and the sidebar lights that list's item. Reloading the same
@@ -61,9 +71,9 @@ export function hrefFor(pathname: string, stateQuery: string): string {
 
 /**
  * Where the store picker goes from `pathname` with the server-built
- * `stateQuery` of the chosen store: the same page with its own keys, or, on a
- * detail page (DETAIL_ROUTES), the list it belongs to with the list's keys.
- * `currentSearch` defaults to the browser's.
+ * `stateQuery` of the chosen store: the same page with its own keys (minus
+ * STORE_SCOPED_KEYS), or, on a detail page (DETAIL_ROUTES), the list it
+ * belongs to with the list's keys. `currentSearch` defaults to the browser's.
  */
 export function storeSwitchHref(pathname: string, stateQuery: string, currentSearch?: string): string {
   const d = detailRoute(pathname)
@@ -72,7 +82,23 @@ export function storeSwitchHref(pathname: string, stateQuery: string, currentSea
     return q < 0 ? `${d.list}${mergeQuery(stateQuery, '')}` : `${d.list.slice(0, q)}${mergeQuery(stateQuery, d.list.slice(q))}`
   }
   const search = currentSearch ?? (typeof window === 'undefined' ? '' : window.location.search)
-  return `${pathname}${mergeQuery(stateQuery, search)}`
+  const cur = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search)
+  for (const k of STORE_SCOPED_KEYS) cur.delete(k)
+  return `${pathname}${mergeQuery(stateQuery, cur.toString())}`
+}
+
+/**
+ * Pages that always show ONE store (their getPageContext scope is 'store').
+ * Opened with ?loja=todas they show the remembered store and only CARRY Todas
+ * in their links (lib/views/page carriedLoja), so on these paths a URL's
+ * loja=todas does not mean Todas is on screen. Each entry covers its subpaths
+ * ('/' only itself). __tests__/url.test.ts checks the list against every
+ * page's own scope, so a page that changes scope fails the test.
+ */
+export const STORE_ONLY_ROUTES: readonly string[] = ['/', '/attribution', '/creatives', '/facebook', '/profit', '/settings']
+
+export function isStoreOnlyPath(pathname: string): boolean {
+  return STORE_ONLY_ROUTES.some(r => (r === '/' ? pathname === '/' : pathname === r || pathname.startsWith(`${r}/`)))
 }
 
 /**
@@ -81,12 +107,26 @@ export function storeSwitchHref(pathname: string, stateQuery: string, currentSea
  * page opened from Todas (`carriedId` 'todas', lib/views/page carriedLoja) the
  * store on screen can still be picked, which pins it and ends the Todas the
  * sidebar was carrying. "Todas as lojas" is compared with what is shown, so
- * from there it still opens /overview. `opening` (inFlightParam('loja'): the
- * loja of a navigation still loading, null for none, undefined when nothing
- * loads) wins over both.
+ * from there it still opens /overview.
+ *
+ * `openingHref` (navigationInFlight(): the URL of a navigation still loading,
+ * null when nothing loads) wins over both, read by the same rule: its loja is
+ * the choice, except that loja=todas on a one-store page (STORE_ONLY_ROUTES)
+ * only carries Todas. That page will show a store, so every entry still
+ * navigates — "Todas as lojas" opens /overview, a store pins it — exactly as
+ * once it has landed. Reading the bare loja instead, "Todas as lojas" picked
+ * while "Ontem" loaded on a Resumo opened from Todas (the period picker's URL
+ * carries loja=todas) did nothing, and the Resumo landed still on the MOKOO.
  */
-export function pickIsNoop(pickedId: string, currentId: string, carriedId?: string, opening?: string | null): boolean {
-  if (opening !== undefined) return pickedId === (opening ?? currentId)
+export function pickIsNoop(pickedId: string, currentId: string, carriedId?: string, openingHref?: string | null): boolean {
+  if (openingHref != null) {
+    const u = new URL(openingHref, 'http://x')
+    const loja = u.searchParams.get('loja')
+    if (loja === 'todas' && isStoreOnlyPath(u.pathname)) return false
+    // A URL without loja shows the remembered store, never Todas.
+    if (pickedId === 'todas') return loja === 'todas'
+    return pickedId === (loja ?? currentId)
+  }
   if (pickedId === 'todas') return currentId === 'todas'
   return pickedId === (carriedId ?? currentId)
 }

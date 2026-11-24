@@ -7,7 +7,7 @@ vi.mock('next/navigation', () => ({ notFound: vi.fn(), redirect: vi.fn() }))
 import { getViewer, listStores, resolveStore, type StoreRef } from '../../access'
 import { notFound } from 'next/navigation'
 import {
-  ALL_STORES, buildHref, carriedLoja, getPageContext, MAX_WINDOW_DAYS, MIN_PAGE_DATE, pageMetadata, parsePageParams,
+  ALL_STORES, buildHref, carriedLoja, clockLabel, getPageContext, MAX_WINDOW_DAYS, MIN_PAGE_DATE, pageMetadata, parsePageParams,
   resolvePeriodWindow, toStoreOption, type PageParams, type SearchParams,
 } from '../page'
 
@@ -79,6 +79,17 @@ describe('resolvePeriodWindow', () => {
     expect(w.periodPhrase).toBe('em 28 out – 3 nov')
     expect(w.comparisonText).toBe('vs 7 dias anteriores (21–27 out)')
   })
+  // lib/views/store comparisonPlan and portfolio loadComparison cut the last
+  // comparison day of any window ending today (cutLast = sameTimeOfDay ||
+  // range.to >= today); the engine's comparisonRange says sameTimeOfDay false
+  // for a custom range, and the text named the whole 31 out – 9 nov for a
+  // profit that stops at this hour.
+  it('a custom range ending today names the cut of its comparison', () => {
+    const w = resolvePeriodWindow('custom', '2026-11-10', '2026-11-17', 'America/Sao_Paulo', NOW)
+    expect(w.partial).toBe(true)
+    expect(w.comparison.sameTimeOfDay).toBe(false)
+    expect(w.comparisonText).toBe('vs 8 dias anteriores (2–9 nov, até esta hora de 9 nov)')
+  })
 })
 
 describe('buildHref', () => {
@@ -142,7 +153,8 @@ describe('custom range limits (regression: ?de=1990-01-01 priced 13,470 days in 
     expect(MAX_WINDOW_DAYS).toBe(366)
     expect(w.comparison.from).toBe('2024-11-16')
     expect(w.comparison.to).toBe('2025-11-16')
-    expect(w.comparisonText).toBe('vs 366 dias anteriores (16 nov 2024 – 16 nov 2025)')
+    // The window ends today, so the views cut its comparison's last day at this hour.
+    expect(w.comparisonText).toBe('vs 366 dias anteriores (16 nov 2024 – 16 nov 2025, até esta hora de 16 nov 2025)')
     expect(w.rangeNote).toBe('O período pedido passa de 366 dias, o máximo por página: aqui estão os últimos 366, 17 nov 2025 – 17 nov 2026.')
   })
 
@@ -286,5 +298,42 @@ describe('Todas is never silently turned into one store (regression: Todas → R
     expect(ctx.allowAll).toBe(false)
     expect(ctx.fromAll).toBe(false)
     expect(ctx.navHref('/campaigns')).toBe(`/campaigns?loja=${EPOCH.id}`)
+  })
+})
+
+describe('the store on screen as the shell shows it (regression: an archived store read "Fuso —")', () => {
+  const store = (id: string, name: string, timezone: string, domain: string | null, archived = false): StoreRef =>
+    ({ id, name, shopName: name, domain, timezone, archived, userId: null })
+  const MOKOO = store('user_3CV', 'MOKOO', 'America/Belem', '6k7fjw-jt.myshopify.com')
+  // Archived stores are opened by id (their history) but listStores leaves them out.
+  const SQUISHY = store('75cb', 'Squishy World', 'America/Sao_Paulo', '7ad04d-2g.myshopify.com', true)
+  const OLD_TOKYO = store('old-jp', 'Velha', 'Asia/Tokyo', null, true)
+  const ARCHIVED = [SQUISHY, OLD_TOKYO]
+
+  beforeEach(() => {
+    vi.mocked(getViewer).mockResolvedValue({ kind: 'owner' })
+    vi.mocked(listStores).mockResolvedValue([MOKOO])
+    vi.mocked(resolveStore).mockImplementation(async (_v, urlId) => ({
+      store: (urlId ? [MOKOO, ...ARCHIVED].find(s => s.id === urlId) : MOKOO) ?? null, stores: [MOKOO],
+    }))
+  })
+
+  it('an archived store gets its city, code and day label although storeOptions leaves it out', async () => {
+    const ctx = await getPageContext({ loja: SQUISHY.id, periodo: 'custom', de: '2026-06-02', ate: '2026-10-31' }, { now: NOW })
+    expect(ctx.storeOptions.map(o => o.id)).toEqual([MOKOO.id])
+    expect(ctx.storeOption).toMatchObject({ id: SQUISHY.id, code: '7ad04d', city: 'São Paulo', dayLabel: null, archived: true })
+    expect(clockLabel(ctx)).toBe('São Paulo')
+    const jp = await getPageContext({ loja: OLD_TOKYO.id }, { now: NOW })
+    expect(jp.storeOption).toMatchObject({ city: 'Tóquio', dayLabel: 'dia de Tóquio' })
+    expect(clockLabel(jp)).toBe('Tóquio')
+  })
+
+  it('an active store reads the same as its picker option; Todas has none and says how it counts', async () => {
+    const one = await getPageContext({ loja: MOKOO.id }, { now: NOW })
+    expect(one.storeOption).toEqual(one.storeOptions[0])
+    expect(clockLabel(one)).toBe('Belém')
+    const all = await getPageContext({ loja: ALL_STORES }, { now: NOW })
+    expect(all.storeOption).toBeNull()
+    expect(clockLabel(all)).toBe('Brasília · cada loja no seu fuso')
   })
 })

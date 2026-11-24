@@ -111,7 +111,9 @@ export function DailyProfitBars({
   // just beyond them, and must not run into the day labels or the band label.
   const pad = (hi - lo) * 0.12
   const ticks = niceTicks(lo < 0 ? lo - pad : 0, hi > 0 ? hi + pad : 0, 5)
-  const tickText = (t: number) => (t === 0 ? '$0' : formatMoneyAxis(t))
+  // One format for the whole axis: cents on every tick when the step is
+  // under a dollar (small ads), whole dollars otherwise.
+  const tickText = (t: number) => formatMoneyAxis(t, ticks)
   // The left margin fits the widest tick ("−$1.000" spilled out of a 340-wide
   // phone chart with a fixed 44).
   const m = {

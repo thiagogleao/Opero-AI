@@ -31,7 +31,7 @@
 import { Suspense, type ReactNode } from 'react'
 import Link from 'next/link'
 import type { Period } from '@/lib/engine/dates'
-import { ALL_STORES, MAX_WINDOW_DAYS, MIN_PAGE_DATE, toStoreOption, type PageContext } from '@/lib/views/page'
+import { ALL_STORES, clockLabel, MAX_WINDOW_DAYS, MIN_PAGE_DATE, type PageContext } from '@/lib/views/page'
 import { CopilotLauncher } from '@/components/ai/CopilotLauncher'
 import { Freshness, FreshnessFallback } from './Freshness'
 import { NavLinks, type NavItem } from './NavLinks'
@@ -83,7 +83,7 @@ export function AppShell({ ctx, children, copilot = true }: { ctx: PageContext; 
   ]
   // An archived store opened by id (its history) is listed too, so the picker
   // names what is on screen instead of silently showing another store.
-  const listed = ctx.store?.archived ? [...ctx.storeOptions, toStoreOption(ctx.store)] : ctx.storeOptions
+  const listed = ctx.store?.archived && ctx.storeOption ? [...ctx.storeOptions, ctx.storeOption] : ctx.storeOptions
   // On a page that shows only one kind of scope, the other kind opens the page
   // that has it (a one-store page cannot show Todas, the overview cannot show
   // one store); everywhere else the choice reloads the same page — except a
@@ -102,10 +102,10 @@ export function AppShell({ ctx, children, copilot = true }: { ctx: PageContext; 
       }
     : null
   const toOption = (p: { key: Period; label: string }): PeriodOption => ({ ...p, query: go('', { periodo: p.key }) })
-  const tzNote = ctx.scope === 'store' ? ctx.storeOptions.find(o => o.id === ctx.store?.id)?.dayLabel ?? null : null
-  const clock = ctx.scope === 'all'
-    ? 'Brasília · cada loja no seu fuso'
-    : ctx.storeOptions.find(o => o.id === ctx.store?.id)?.city ?? '—'
+  // From the store on screen itself (ctx.storeOption), not a lookup in
+  // storeOptions, which leaves out an archived store opened for its history.
+  const tzNote = ctx.storeOption?.dayLabel ?? null
+  const clock = clockLabel(ctx)
 
   const sidebar = (
     <>

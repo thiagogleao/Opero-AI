@@ -26,6 +26,8 @@
  *   roasSummary(roas, breakEven, facts)    "ROAS 1,95× · empate 1,58× → no lucro"
  *   storeRoas(totals, configured)          the same on the store's ad channel
  *   judgedStores(stores) / isIdle(totals)  which stores a sum is made of
+ *   notSellingYet(store, range)            the window ends before the store's first sale
+ *   noSalesCashHit(totals)                 "2 chargebacks: −$186 no caixa" for a row with no sale
  */
 
 import type { PnL } from '../engine/pnl'
@@ -109,6 +111,23 @@ export interface VerdictStore {
    *  absent when unknown. A window that ends before it is "the store did not
    *  sell yet", not a dead month. */
   firstOrderDate?: string | null
+  /** Archived: not synced any more, so its current day never fills in and
+   *  has no running clock (no "parcial", no countdown, no "ainda"). */
+  archived?: boolean
+}
+
+/** The window a verdict compares with. */
+export interface ComparisonWindow {
+  from: string
+  to: string
+  /** "7 dias anteriores", "ontem até esta hora", "mesmos dias do mês passado". */
+  label: string
+  /** The last day was cut at the current time of day (the window includes a
+   *  day still running), so the comparison is NOT the whole of from–to. */
+  sameTimeOfDay: boolean
+  /** Minutes into `to` where it was cut, when known (one clock for every cut
+   *  store); null or absent: "esta hora". */
+  cutoffMinutes?: number | null
 }
 
 export interface VerdictInput {
@@ -124,8 +143,10 @@ export interface VerdictInput {
   /** Minutes into the anchor's day, for "parcial · até 13h38" with several
    *  stores. Defaults to the latest running store's clock. */
   anchorMinutes?: number
-  /** The comparison window and its exact label from comparisonRange(). */
-  comparison: { from: string; to: string; label: string; sameTimeOfDay: boolean } | null
+  /** The comparison window and its exact label from comparisonRange(), with
+   *  where its last day was cut (PortfolioComparison sameTimeOfDay and
+   *  cutoffMinutes). */
+  comparison: ComparisonWindow | null
   /** Subject of a several-store sentence ("As lojas", "Suas lojas"). */
   subject?: string
   /** Partner view: money results are halved (never margins or ROAS). */
@@ -268,6 +289,70 @@ export function isIdle(t: Pick<PnL, 'orders' | 'revenue' | 'adSpend' | 'adjustme
   return t.orders === 0 && zero(t.revenue) && zero(t.adSpend) && zero(t.adjustments) && zero(t.fixedCosts)
 }
 
+/**
+ * The store had not started selling in the window: nothing happened in it
+ * (isIdle) and its first order is after the window's last day. Such a store
+ * is out of a sum's count for that reason — whatever its cost settings. Glooty
+ * (no costs, first sale 6 nov) read "sem custos configurados" for October
+ * while Hibikura, in the same situation, read "ainda não vendia".
+ */
+export function notSellingYet(
+  s: { totals: Pick<PnL, 'orders' | 'revenue' | 'adSpend' | 'adjustments' | 'fixedCosts'>; firstOrderDate?: string | null },
+  range: DateRange,
+): boolean {
+  return !!s.firstOrderDate && range.to < s.firstOrderDate && isIdle(s.totals)
+}
+
+/** "2 chargebacks", "1 reembolso e 2 chargebacks"; null when none is counted. */
+export function adjustmentsWhat(t: Pick<PnL, 'refundCount' | 'chargebackCount'>): string | null {
+  const what = [
+    t.refundCount > 0 ? plural(t.refundCount, 'reembolso', 'reembolsos') : null,
+    t.chargebackCount > 0 ? plural(t.chargebackCount, 'chargeback', 'chargebacks') : null,
+  ].filter((x): x is string => x !== null)
+  return what.length ? joinNames(what) : null
+}
+
+export interface CashHit {
+  /** adjustmentsWhat(); null when no count came with the money (then say
+   *  "reembolsos e chargebacks"). */
+  what: string | null
+  /** Negative: what left the cash (refunded margin + chargebacks + fees).
+   *  NOT halved: halve at render for the partner view. */
+  amount: number
+}
+
+/**
+ * Money that left a store with no sale in the window: refunds and chargebacks
+ * of older orders arrive whether or not it sold (CAMP HALLOW, 17–23 nov: 0
+ * orders, 2 chargebacks, −$186). Null when it sold or nothing left. One rule
+ * for the verdict's line, the phone's store list and the desktop store table
+ * (components/portfolio/model re-exports it), so a row never reads idle while
+ * the verdict and the ledger count the hit.
+ */
+export function noSalesCashHit(t: Pick<PnL, 'orders' | 'revenue' | 'adjustments' | 'refundCount' | 'chargebackCount'>): CashHit | null {
+  if (t.orders > 0 || t.revenue > 0 || !(t.adjustments >= 0.005)) return null
+  return { what: adjustmentsWhat(t), amount: -t.adjustments }
+}
+
+/** Refunds and chargebacks this big against a window's result get a top
+ *  line of their own (with sales: with none, any amount does). */
+export const CASH_HIT_SHARE = 0.25
+
+/**
+ * Whole minutes left in a day that is `minutes` into it, never rounded up:
+ * the clock counts the minute it is in (00h00 is minute 0), so 1440 − 0 read
+ * "Faltam 24h00" — a full day — just after midnight. At most 23h59.
+ */
+export function dayLeftMinutes(minutes: number): number {
+  return Math.max(0, Math.min(1439, Math.floor(1440 - minutes)))
+}
+
+/** "Falta 1 min" / "Falta 1h20" / "Faltam 2h05": the verb agrees with the
+ *  count that leads the duration (formatDuration). */
+export function dayLeftVerb(left: number): 'Falta' | 'Faltam' {
+  return (left < 60 ? left : Math.floor(left / 60)) === 1 ? 'Falta' : 'Faltam'
+}
+
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
 const line = (...parts: (string | { text: string; strong?: boolean; tone?: 'pos' | 'neg' | 'warn' })[]): VerdictLine => {
   const ps = parts.map(p => (typeof p === 'string' ? { text: p } : p))
@@ -294,18 +379,28 @@ function moved(cur: number, prev: number, up: string, down: string): string | nu
  * that agree: "Sobraram 12 centavos", "Sobrou 1 centavo", "Sobrou menos de 1
  * centavo" (a 0,32% margin read "Sobraram 0 centavos" beside "lucrou"),
  * "Faltaram $2,25" past a dollar (not "225 centavos").
+ *
+ * `running`: the window is still open (it includes a day not yet over), so
+ * the line is in the present and says "até agora": "Faltam 33 centavos em
+ * cada dólar vendido para empatar, até agora." The past tense read as a
+ * closed result beside "Faltam 7h41 para o dia fechar".
  */
-export function perDollarLine(marginPct: number, inProfit: boolean): VerdictLine {
+export function perDollarLine(marginPct: number, inProfit: boolean, running = false): VerdictLine {
   const c = Math.round(Math.abs(marginPct))
   const cents = (n: number) => `${n} ${n === 1 ? 'centavo' : 'centavos'}`
+  // Singular and plural, past or present: "Sobrou/Sobraram", "Sobra/Sobram".
+  const verb = (one: boolean, past: [string, string], now: [string, string]) => `${(running ? now : past)[one ? 0 : 1]} `
+  const left = (one: boolean) => verb(one, ['Sobrou', 'Sobraram'], ['Sobra', 'Sobram'])
+  const lacked = (one: boolean) => verb(one, ['Faltou', 'Faltaram'], ['Falta', 'Faltam'])
+  const end = running ? ', até agora.' : '.'
   if (inProfit) {
-    if (c < 1) return line('Sobrou ', strong('menos de 1 centavo de cada dólar vendido'), '.')
-    return line(c === 1 ? 'Sobrou ' : 'Sobraram ', strong(`${cents(c)} de cada dólar vendido`), '.')
+    if (c < 1) return line(left(true), strong('menos de 1 centavo de cada dólar vendido'), end)
+    return line(left(c === 1), strong(`${cents(c)} de cada dólar vendido`), end)
   }
-  if (c < 1) return line('Faltou ', strong('menos de 1 centavo em cada dólar vendido', 'neg'), ' para empatar.')
-  if (c < 100) return line(c === 1 ? 'Faltou ' : 'Faltaram ', strong(`${cents(c)} em cada dólar vendido`, 'neg'), ' para empatar.')
+  if (c < 1) return line(lacked(true), strong('menos de 1 centavo em cada dólar vendido', 'neg'), ` para empatar${end}`)
+  if (c < 100) return line(lacked(c === 1), strong(`${cents(c)} em cada dólar vendido`, 'neg'), ` para empatar${end}`)
   // pt-BR keeps the singular below 2 ("Faltou $1,40").
-  return line(c < 200 ? 'Faltou ' : 'Faltaram ', strong(`${formatMoney(c / 100, { cents: 'always' })} em cada dólar vendido`, 'neg'), ' para empatar.')
+  return line(lacked(c < 200), strong(`${formatMoney(c / 100, { cents: 'always' })} em cada dólar vendido`, 'neg'), ` para empatar${end}`)
 }
 
 /** "MOKOO e Glooty", "MOKOO, EPOCH e Glooty". */
@@ -333,20 +428,40 @@ export function periodPhrase(period: Period, range: DateRange, today: string): s
 
 /** The comparison as a phrase after "do que": "nos 7 dias anteriores",
  *  "ontem até esta hora", "no mês anterior". Built from the engine's exact
- *  label so the sentence never claims a different base than the chip. */
-export function comparisonPhrase(label: string): string {
+ *  label so the sentence never claims a different base than the chip. With
+ *  `sameTimeOfDay` (a window of several days ending today, compared with its
+ *  last day cut at this hour) it says so: "nos 10 dias anteriores até esta
+ *  hora" — the bare label read as the whole earlier window. */
+export function comparisonPhrase(label: string, sameTimeOfDay = false): string {
   if (label === 'ontem até esta hora') return 'ontem até esta hora'
-  if (label === 'dia anterior') return 'no dia anterior'
-  if (label === 'mês anterior') return 'no mês anterior'
-  if (/^mesmos dias/.test(label)) return `nos ${label}`
-  if (/dias anteriores$/.test(label)) return `nos ${label}`
-  return `em ${label}`
+  const cut = sameTimeOfDay ? ' até esta hora' : ''
+  if (label === 'dia anterior') return `no dia anterior${cut}`
+  if (label === 'mês anterior') return `no mês anterior${cut}`
+  if (/^mesmos dias/.test(label)) return `nos ${label}${cut}`
+  if (/dias anteriores$/.test(label)) return `nos ${label}${cut}`
+  return `em ${label}${cut}`
 }
 
-/** "vs 7 dias anteriores (3–9 nov)", "vs ontem até esta hora". */
-export function comparisonText(c: { from: string; to: string; label: string; sameTimeOfDay: boolean }, today: string): string {
+/**
+ * "até 04h16 de 9 nov": where the comparison stops when its last day was cut
+ * at the current time of day; null when whole days are compared, and for
+ * "ontem até esta hora", whose label already says it. Every place that names
+ * the comparison's dates must add it: Hibikura's 31 out – 9 nov read "$35,65
+ * de lucro" when the whole range lost $127,78 — the $35,65 stopped at 04h16
+ * of 9 nov. Exported for the phone's pair cell and the desktop KPIs.
+ */
+export function comparisonCut(c: ComparisonWindow, today: string): string | null {
+  if (!c.sameTimeOfDay || c.label === 'ontem até esta hora') return null
+  const clock = typeof c.cutoffMinutes === 'number' ? formatClock(c.cutoffMinutes) : 'esta hora'
+  return `até ${clock} de ${formatDate(c.to, today)}`
+}
+
+/** "vs 7 dias anteriores (3–9 nov)", "vs ontem até esta hora",
+ *  "vs 10 dias anteriores (31 out – 9 nov, até 04h16 de 9 nov)". */
+export function comparisonText(c: ComparisonWindow, today: string): string {
   if (c.label === 'ontem até esta hora') return 'vs ontem até esta hora'
-  return `vs ${c.label} (${formatRangeLabel({ from: c.from, to: c.to }, today)})`
+  const cut = comparisonCut(c, today)
+  return `vs ${c.label} (${formatRangeLabel({ from: c.from, to: c.to }, today)}${cut ? `, ${cut}` : ''})`
 }
 
 /**
@@ -433,7 +548,13 @@ export function buildVerdict(input: VerdictInput): Verdict {
   const k = split ? SPLIT_SHARE : 1
   const money = (v: number) => formatMoney(v)
 
-  const { judged, excluded: excludedStores } = judgedStores(stores)
+  const { judged, excluded: unconfigured } = judgedStores(stores)
+  // A store without costs that had not started selling yet is out of the sum
+  // because it did not exist, not for its settings: it joins the "ainda não
+  // vendia" note with the configured ones in the same case (notYet below),
+  // with no "sem custos" chip and no "fica fora da soma" line.
+  const excludedStores = unconfigured.filter(s => !notSellingYet(s, input.range))
+  const preStartUnconfigured = unconfigured.filter(s => !excludedStores.includes(s))
   const withCosts = judged.length > 0 && judged.every(s => s.configured)
   // A store with nothing in the window adds nothing to the sum: "6 lojas na
   // soma" with CAMP HALLOW idle overstated what the amount is made of.
@@ -456,13 +577,24 @@ export function buildVerdict(input: VerdictInput): Verdict {
   // only started selling on 7 nov.
   const firstOrder = single ? stores[0].firstOrderDate ?? null : null
   const beforeStart = !!firstOrder && noSales && !spent && input.range.to < firstOrder
+  // Dates are printed with their year whenever the window or the comparison
+  // is (either one in another year than today's): "começou a vender em 11
+  // abr" beside "23 nov 2024 – 23 nov 2025" read as 11 abr 2025.
+  const thisYear = input.today.slice(0, 4)
+  const yearsShown = [input.range.from, input.range.to, input.comparison?.from, input.comparison?.to]
+    .some(d => !!d && d.slice(0, 4) !== thisYear)
+  const dayText = (iso: string) => (yearsShown ? `${formatDate(iso)} ${iso.slice(0, 4)}` : formatDate(iso, input.today))
 
   const rawAmount = resultOf(totals)
   const amount = noSales && !spent ? null : rawAmount * k
 
-  // Clock: the store's own for one store, the anchor's for several.
-  const running = judged.filter(s => s.partial)
+  // Clock: the store's own for one store, the anchor's for several. An
+  // archived store has no running day: it is not synced, so nothing will
+  // arrive before "the day closes" (Squishy World read "ainda não vendeu
+  // hoje · Faltam 19h42 para o dia fechar").
+  const running = judged.filter(s => s.partial && !s.archived)
   const partial = running.length > 0
+  const frozenToday = single && !!stores[0].archived && stores[0].partial && noSales && !spent
   const minutes = single
     ? stores[0].minutesCovered
     : input.anchorMinutes ?? (running.length ? Math.max(...running.map(s => s.minutesCovered)) : 1440)
@@ -486,7 +618,8 @@ export function buildVerdict(input: VerdictInput): Verdict {
   // ── Chips
   const chips: VerdictChip[] = []
   if (noSales) {
-    if (beforeStart) chips.push(chip('comecando', `Vende desde ${formatDate(firstOrder!, input.today)}`))
+    if (beforeStart) chips.push(chip('comecando', `Vende desde ${dayText(firstOrder!)}`))
+    else if (frozenToday) chips.push(chip('sem_vendas', 'Sem sincronização'))
     else if (spent && !earlyDay) chips.push(chip('prejuizo'))
     else if (spent) chips.push(chip('cedo'))
     else chips.push(chip('sem_vendas', partial ? 'Sem vendas ainda' : 'Sem vendas no período'))
@@ -522,14 +655,20 @@ export function buildVerdict(input: VerdictInput): Verdict {
   const pl = !single
   const city = single && fuso ? tzCity(stores[0].timezone) : null
   const cmp = input.comparison
-  const cp = cmp ? comparisonPhrase(cmp.label) : ''
+  const cp = cmp ? comparisonPhrase(cmp.label, cmp.sameTimeOfDay) : ''
+  // The earlier window by its dates, with where its last day stops when it
+  // was cut: "em 31 out – 9 nov (até 04h16 de 9 nov)".
+  const cmpCut = cmp ? comparisonCut(cmp, input.today) : null
+  const cmpRange = cmp ? `${formatRangeLabel({ from: cmp.from, to: cmp.to }, input.today)}${cmpCut ? ` (${cmpCut})` : ''}` : ''
 
   let headline: string
   if (beforeStart) {
     const span = input.period === 'lastmonth' ? monthLong(input.range.from)
       : input.range.from === input.range.to ? formatDate(input.range.from, input.today)
         : formatRangeLabel(input.range, input.today)
-    headline = `${subject} começou a vender em ${formatDate(firstOrder!, input.today)} — não há dados de ${span}.`
+    headline = `${subject} começou a vender em ${dayText(firstOrder!)} — não há dados de ${span}.`
+  } else if (frozenToday) {
+    headline = `${subject} está arquivada e não sincroniza mais: não há vendas ${P} para mostrar.`
   } else if (noSales) {
     if (spent) {
       headline = partial
@@ -578,7 +717,9 @@ export function buildVerdict(input: VerdictInput): Verdict {
   // ── Amount caption
   let amountCaption: string
   if (amount === null) {
-    amountCaption = beforeStart ? 'a loja ainda não vendia nesse período' : partial ? 'nenhum pedido até agora' : 'nenhum pedido no período'
+    amountCaption = beforeStart ? 'a loja ainda não vendia nesse período'
+      : frozenToday ? 'loja arquivada: nenhum pedido novo chega'
+        : partial ? 'nenhum pedido até agora' : 'nenhum pedido no período'
   } else if (basis === 'revenue_minus_ads') {
     amountCaption = 'de receita menos anúncios, sem o custo dos produtos'
   } else if (noSales) {
@@ -608,24 +749,36 @@ export function buildVerdict(input: VerdictInput): Verdict {
     })
   }
   if (beforeStart) {
-    cand.push({ p: 99, l: line('Escolha um período a partir de ', strong(formatDate(firstOrder!, input.today)), ' para ver o resultado.') })
+    cand.push({ p: 99, l: line('Escolha um período a partir de ', strong(dayText(firstOrder!)), ' para ver o resultado.') })
+  }
+  if (frozenToday) {
+    cand.push({ p: 99, l: line('Para ver o histórico, escolha um período de quando a loja ainda sincronizava.') })
   }
   // Money can leave with no sale in the window: refunds and chargebacks of
   // older orders. "Sem vendas" alone hid CAMP HALLOW's −$343 of chargebacks
-  // while the ledger beside it ended in "Resultado de caixa −$343".
-  if (noSales && totals.adjustments >= 0.005) {
-    const lead = spent ? 'E' : 'Mas'
-    const out = strong(`${money(-totals.adjustments * k)} no caixa`, 'neg')
-    const what = [
-      totals.refundCount > 0 ? plural(totals.refundCount, 'reembolso', 'reembolsos') : null,
-      totals.chargebackCount > 0 ? plural(totals.chargebackCount, 'chargeback', 'chargebacks') : null,
-    ].filter((x): x is string => x !== null)
+  // while the ledger beside it ended in "Resultado de caixa −$343". With
+  // sales, the same money is said when it is big against the result or turns
+  // the cash negative: CAMP HALLOW's 30 days read "No lucro · $582" over 12
+  // chargebacks (−$1.346) and a cash result of −$764.
+  const adj = totals.adjustments
+  const cashHit = adj >= 0.005 && (noSales
+    || (rawAmount >= 0
+      ? (basis === 'profit' && totals.cashResult < 0) || adj >= CASH_HIT_SHARE * rawAmount
+      : adj >= CASH_HIT_SHARE * -rawAmount))
+  if (cashHit) {
+    const lead = noSales ? (spent ? 'E' : 'Mas') : rawAmount >= 0 ? 'Mas' : 'E'
+    const out = strong(`${money(-adj * k)} no caixa`, 'neg')
+    const what = adjustmentsWhat(totals)
     const n = totals.refundCount + totals.chargebackCount
+    // With sales the cash result is the other half of the story: the amount
+    // above is the profit before refunds and chargebacks.
+    const cash = !noSales && basis === 'profit' ? totals.cashResult * k : null
+    const tail = cash === null ? ['.'] : [' — o resultado de caixa ficou em ', strong(money(cash), cash < 0 ? 'neg' : undefined), '.']
     cand.push({
-      p: 97,
-      l: what.length
-        ? line(`${lead} ${n === 1 ? 'chegou' : 'chegaram'} ${joinNames(what)}: `, out, '.')
-        : line(`${lead} reembolsos e chargebacks tiraram `, out, '.'),
+      p: noSales ? 97 : 96,
+      l: what
+        ? line(`${lead} ${n === 1 ? 'chegou' : 'chegaram'} ${what}: `, out, ...tail)
+        : line(`${lead} reembolsos e chargebacks tiraram `, out, ...tail),
     })
   }
   if (early) {
@@ -643,14 +796,14 @@ export function buildVerdict(input: VerdictInput): Verdict {
     cand.push({ p: 92, l: line('Vendas ', strong(money(totals.revenue)), ' − anúncios ', strong(money(totals.adSpend)), '. Configure o custo dos produtos, o frete e as taxas para ver o lucro real.') })
   }
   if (basis === 'profit' && !noSales && !early && totals.revenue > 0 && margin !== null) {
-    cand.push({ p: 90, l: perDollarLine(margin, rawAmount >= 0) })
+    cand.push({ p: 90, l: perDollarLine(margin, rawAmount >= 0, partial) })
   }
   if (fewOrders) {
     cand.push({ p: 85, l: line(`Só ${plural(orders, 'pedido', 'pedidos')} no período: pouca amostra para cravar uma tendência.`) })
   }
   if (cmp && comparisonTotals && comparable && !noSales && !early) {
     const prev = resultOf(comparisonTotals)
-    const where = cmp.label === 'ontem até esta hora' ? 'ontem até esta hora' : `em ${formatRangeLabel({ from: cmp.from, to: cmp.to }, input.today)}`
+    const where = cmp.label === 'ontem até esta hora' ? 'ontem até esta hora' : `em ${cmpRange}`
     // A percentage only between two positive results: "376% a menos" from a
     // profit to a loss says nothing a reader can use. And only over a base
     // big enough to mean something: $250 after $1,89 read "13.123% a mais";
@@ -670,8 +823,8 @@ export function buildVerdict(input: VerdictInput): Verdict {
         : line(`${basis === 'profit' ? 'O lucro' : 'Vendas − anúncios'} ${prev >= 0 ? 'era' : 'foi'} `, strong(money(prev * k), prev < 0 ? 'neg' : undefined), ` ${where}${tail}`),
     })
   } else if (cmp && !noSales && !early && !comparable && input.period !== 'today') {
-    const started = firstOrder && cmp.to < firstOrder ? `: a loja começou a vender em ${formatDate(firstOrder, input.today)}` : ''
-    cand.push({ p: 45, l: line(`Sem vendas para comparar em ${formatRangeLabel({ from: cmp.from, to: cmp.to }, input.today)}${started}.`) })
+    const started = firstOrder && cmp.to < firstOrder ? `: a loja começou a vender em ${dayText(firstOrder)}` : ''
+    cand.push({ p: 45, l: line(`Sem vendas para comparar em ${cmpRange}${started}.`) })
   }
   if (cmp && comparisonTotals && !noSales && !early && comparisonTotals.revenue > 0) {
     const rvText = moved(totals.revenue, comparisonTotals.revenue, 'subiram', 'caíram')
@@ -690,8 +843,8 @@ export function buildVerdict(input: VerdictInput): Verdict {
   // ── Notes: the fine print about the clock and the timezones.
   const notes: VerdictLine[] = []
   if (partial && input.period !== 'mtd' && input.range.from === input.range.to) {
-    const left = 1440 - minutes
-    if (left > 0) notes.push(line('Faltam ', strong(formatDuration(left)), ` para o dia fechar${city ? ` em ${city}` : ''}.`))
+    const left = dayLeftMinutes(minutes)
+    if (left > 0) notes.push(line(`${dayLeftVerb(left)} `, strong(formatDuration(left)), ` para o dia fechar${city ? ` em ${city}` : ''}.`))
   }
   if (!single) {
     const closed = stores.filter(s => s.dayState === 'closed')
@@ -706,8 +859,10 @@ export function buildVerdict(input: VerdictInput): Verdict {
     }
     // Idle stores are out of the count in `when`; say who they are (a store
     // whose day has not started is already explained above). One that had not
-    // made its first sale yet is not "parada": say that instead.
-    const notYet = idleStores.filter(s => s.dayState !== 'not_started' && !!s.firstOrderDate && input.range.to < s.firstOrderDate)
+    // made its first sale yet is not "parada": say that instead — with or
+    // without cost settings (preStartUnconfigured), in the stores' order.
+    const notYet = stores.filter(s => s.dayState !== 'not_started'
+      && ((idleStores.includes(s) && notSellingYet(s, input.range)) || preStartUnconfigured.includes(s)))
     if (notYet.length && nStores > 0) {
       notes.push(line(strong(joinNames(notYet.map(s => s.name))), ` ainda não ${notYet.length === 1 ? 'vendia' : 'vendiam'} ${P}: ${notYet.length === 1 ? 'fica' : 'ficam'} fora da contagem de lojas.`))
     }
@@ -724,7 +879,7 @@ export function buildVerdict(input: VerdictInput): Verdict {
   // A window that starts before the first order: its early days are empty
   // because the store was not selling yet, not because sales stopped.
   if (firstOrder && !beforeStart && input.range.from < firstOrder && firstOrder <= input.range.to) {
-    notes.push(line(`${subject} só começou a vender em `, strong(formatDate(firstOrder, input.today)), ': o período tem dias antes disso.'))
+    notes.push(line(`${subject} só começou a vender em `, strong(dayText(firstOrder)), ': o período tem dias antes disso.'))
   }
 
   // ── When
@@ -821,6 +976,7 @@ export function verdictInputFromPortfolio(
       // Read when the portfolio row carries it (the first order on the
       // store's own calendar); without it the verdict reads as before.
       firstOrderDate: r.firstOrderDate ?? null,
+      archived: !!r.archived,
     })),
     period: view.period,
     range: view.range,
@@ -830,6 +986,8 @@ export function verdictInputFromPortfolio(
     comparison: {
       from: view.comparison.from, to: view.comparison.to,
       label: view.comparison.label, sameTimeOfDay: view.comparison.sameTimeOfDay,
+      // Older answers (a phone holding a cached response) have no field.
+      cutoffMinutes: view.comparison.cutoffMinutes ?? null,
     },
     subject: opts.subject,
     split: opts.split,

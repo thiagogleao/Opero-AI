@@ -53,7 +53,7 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 import type { StoreOption } from '@/lib/views/page'
 import { Avatar } from '@/components/ui/Card'
 import { Icon } from '@/components/ui/Icon'
-import { inFlightParam, navigationInFlight, NAV_LAYER, onTopOfInFlight, pickIsNoop, storeSwitchHref } from './url'
+import { navigationInFlight, NAV_LAYER, onTopOfInFlight, pickIsNoop, storeSwitchHref } from './url'
 import { useShellNavigation } from './useShellNavigation'
 import s from './shell.module.css'
 
@@ -168,8 +168,9 @@ export function StorePicker({ options, all, currentId, carriedId }: StorePickerP
     // While another choice is loading, the store that counts is the one being
     // opened: picking the store still on screen then takes the choice back.
     // On a one-store page opened from Todas, the store on screen is not yet a
-    // choice (pickIsNoop): picking it pins it.
-    if (pickIsNoop(e.id, currentId, carriedId, inFlightParam('loja'))) return
+    // choice (pickIsNoop): picking it pins it — and the same holds for such a
+    // page still loading (a period picked there carries loja=todas).
+    if (pickIsNoop(e.id, currentId, carriedId, navigationInFlight())) return
     // Another page (href) starts clean; the same page keeps its own keys,
     // except on a page of one store's object (an ad), which opens that list
     // of the chosen store instead (./url DETAIL_ROUTES). A period or split

@@ -161,7 +161,11 @@ export function resolvePeriodWindow(
     periodPhrase: periodPhrase(period, range, today),
     comparison,
     comparisonRangeLabel: formatRangeLabel({ from: comparison.from, to: comparison.to }, today),
-    comparisonText: comparisonText(comparison, today),
+    // A window ending today is compared with its last day cut at this hour
+    // (lib/views/store comparisonPlan, portfolio loadComparison: cutLast =
+    // sameTimeOfDay || range.to >= today), even when comparisonRange says
+    // sameTimeOfDay false (a custom range): the text must name that cut.
+    comparisonText: comparisonText({ ...comparison, sameTimeOfDay: comparison.sameTimeOfDay || range.to >= today }, today),
     timezone: tz, today, partial, minutesIntoDay: minutes,
     partialLabel: partial ? `parcial · até ${formatClock(minutes)}` : null,
     rangeNote,
@@ -265,6 +269,11 @@ export interface PageContext extends PeriodWindow {
   mode: 'either' | 'store' | 'all'
   /** The store shown, or null for Todas (and when the viewer has no store). */
   store: StoreRef | null
+  /** `store` as the shell shows it (code pill, city, "dia de Tóquio"), null
+   *  for Todas. Built from the store itself, never looked up in storeOptions:
+   *  an archived store opened for its history is not there, and the lookup
+   *  left its sidebar reading "Fuso —" under a header that names its clock. */
+  storeOption: StoreOption | null
   /** The stores in scope: [store] or every active store. */
   selected: StoreRef[]
   storeIds: string[]
@@ -358,6 +367,7 @@ export async function getPageContext(
     storeOptions: stores.map(toStoreOption),
     allowAll,
     scope, mode, store, selected,
+    storeOption: store ? toStoreOption(store) : null,
     storeIds: selected.map(s => s.id),
     scopeName: scope === 'all' ? 'Todas as lojas' : store?.name ?? 'Nenhuma loja',
     params,
@@ -370,6 +380,12 @@ export async function getPageContext(
     navHref: (path, overrides) => buildHref(path, navParams, overrides, defaultPeriod),
     now,
   }
+}
+
+/** The sidebar footer's "Fuso": the clock the page counts days in — the
+ *  store's city, or Todas' rule (each store closes its day in its own zone). */
+export function clockLabel(ctx: Pick<PageContext, 'scope' | 'storeOption'>): string {
+  return ctx.scope === 'all' ? 'Brasília · cada loja no seu fuso' : ctx.storeOption?.city ?? '—'
 }
 
 // ─── The tab title (and the 404 title) ───────────────────────────────────────

@@ -90,7 +90,10 @@ describe('storeKpis', () => {
     const span = kpiDays(range, daily, { firstOrderDate: '2026-04-11', runningDay: null })
     const k = storeKpis(t, null, true, range, daily, span)
     expect(k.avgRange).toBeNull()
+    expect(k.salesAvgRange).toBeNull()
+    expect(k.metaAvgRange).toBeNull()
     expect(k.avgDays).toBe(7)
+    expect(k.salesAvgDays).toBe(7)
     expect(k.revenuePerDay).toBeCloseTo(10942 / 7, 6)
     expect(k.ordersPerDay).toBeCloseTo(134 / 7, 6)
     expect(k.metaPerDay).toBeCloseTo(5624 / 7, 6)
@@ -119,7 +122,7 @@ describe('storeKpis', () => {
     ]
     const totals = sumPnL(daily)
     const span = kpiDays(mtd, daily, { firstOrderDate: '2026-11-07', runningDay: '2026-11-18' })
-    expect(span).toEqual({ startedOn: '2026-11-07', avg: { from: '2026-11-07', to: '2026-11-17' }, avgDays: 11, spanDays: 12 })
+    expect(span).toEqual({ startedOn: '2026-11-07', avg: { from: '2026-11-07', to: '2026-11-17' }, avgDays: 11, salesAvg: { from: '2026-11-07', to: '2026-11-17' }, salesAvgDays: 11, spanDays: 12 })
     const k = storeKpis(totals, null, true, mtd, daily, span)
     const closed = daily.filter(d => d.date >= '2026-11-07' && d.date <= '2026-11-17')
     expect(k.avgRange).toEqual({ from: '2026-11-07', to: '2026-11-17' })
@@ -136,11 +139,64 @@ describe('kpiDays', () => {
   const mtd = { from: '2026-11-01', to: '2026-11-18' }
   const quiet = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => day(`2026-11-${String(from + i).padStart(2, '0')}`))
 
-  it('starts on the first ad when the ads came before the first sale (Glooty: ads 4 nov, sale 6 nov)', () => {
-    const daily = [...quiet(1, 3), day('2026-11-04', { metaSpend: 74.48 }), day('2026-11-05', { metaSpend: 155.99 }),
-      day('2026-11-06', { revenue: 403.71, orders: 4, metaSpend: 267.99 }), ...quiet(7, 18)]
-    const r = kpiDays(mtd, daily, { firstOrderDate: '2026-11-06', runningDay: '2026-11-18' })
-    expect(r).toEqual({ startedOn: '2026-11-04', avg: { from: '2026-11-04', to: '2026-11-17' }, avgDays: 14, spanDays: 15 })
+  // Glooty, Este mês on 18 nov (engine daily rows): ads from 4 nov, first
+  // order on 6 nov, $1.117,60 in 14 orders up to 17 nov.
+  const glooty = () => [...quiet(1, 3),
+    day('2026-11-04', { metaSpend: 74.48 }), day('2026-11-05', { metaSpend: 155.99 }),
+    day('2026-11-06', { revenue: 403.71, orders: 4, metaSpend: 267.99 }), day('2026-11-07', { revenue: 60.95, orders: 1, metaSpend: 649.69 }),
+    day('2026-11-08', { revenue: 371.76, orders: 5, metaSpend: 607.94 }), day('2026-11-09', { revenue: 124.88, orders: 2, metaSpend: 349.44 }),
+    day('2026-11-10', { revenue: 156.3, orders: 2, metaSpend: 274.31 }), day('2026-11-11', { metaSpend: 171.94 }),
+    day('2026-11-12', { metaSpend: 137.78 }), day('2026-11-13', { metaSpend: 95.52 }), day('2026-11-14', { metaSpend: 64.18 }),
+    day('2026-11-15', { metaSpend: 75.77 }), ...quiet(16, 18)]
+
+  it('spend starts on the first ad, revenue and orders on the first sale (Glooty: ads 4 nov, sale 6 nov)', () => {
+    const r = kpiDays(mtd, glooty(), { firstOrderDate: '2026-11-06', runningDay: '2026-11-18' })
+    expect(r).toEqual({
+      startedOn: '2026-11-04', avg: { from: '2026-11-04', to: '2026-11-17' }, avgDays: 14,
+      salesAvg: { from: '2026-11-06', to: '2026-11-17' }, salesAvgDays: 12, spanDays: 15,
+    })
+  })
+
+  it('divides revenue and orders by the selling days, Meta by the store days, and names both', () => {
+    // The page read "$79,83 por dia em 4–17 nov" next to "só começou a vender em 6 nov".
+    const daily = glooty()
+    const k = storeKpis(sumPnL(daily), null, false, mtd, daily, kpiDays(mtd, daily, { firstOrderDate: '2026-11-06', runningDay: '2026-11-18' }))
+    expect(k.revenuePerDay).toBeCloseTo(1117.6 / 12, 6)
+    expect(k.revenuePerDay).toBeCloseTo(93.13, 2)
+    expect(k.ordersPerDay).toBeCloseTo(14 / 12, 6)
+    expect(k.metaPerDay).toBeCloseTo(2925.03 / 14, 6)
+    expect(k.salesAvgRange).toEqual({ from: '2026-11-06', to: '2026-11-17' })
+    expect(k.avgRange).toEqual({ from: '2026-11-04', to: '2026-11-17' })
+    expect(k.metaAvgRange).toEqual({ from: '2026-11-04', to: '2026-11-17' })
+  })
+
+  it('names the whole window under Meta when only the revenue starts later (custom 4–10 nov)', () => {
+    const range = { from: '2026-11-04', to: '2026-11-10' }
+    const daily = glooty().filter(d => d.date >= range.from && d.date <= range.to)
+    const k = storeKpis(sumPnL(daily), null, false, range, daily, kpiDays(range, daily, { firstOrderDate: '2026-11-06', runningDay: null }))
+    expect(k.avgRange).toBeNull()
+    expect(k.metaAvgRange).toEqual(range)
+    expect(k.salesAvgRange).toEqual({ from: '2026-11-06', to: '2026-11-10' })
+    expect(k.revenuePerDay).toBeCloseTo(1117.6 / 5, 6)
+    expect(k.metaPerDay).toBeCloseTo(sumPnL(daily).metaSpend / 7, 6)
+  })
+
+  it('a first sale before an ad that ran in the days before the window still starts the revenue (custom 5–10 nov)', () => {
+    // Glooty's 4 nov ad makes 5 nov a store day; it sold nothing until 6 nov.
+    const range = { from: '2026-11-05', to: '2026-11-10' }
+    const all = glooty()
+    const daily = all.filter(d => d.date >= range.from && d.date <= range.to)
+    const before = all.filter(d => d.date < range.from)
+    const r = kpiDays(range, daily, { firstOrderDate: '2026-11-06', before, runningDay: null })
+    expect(r.avg).toEqual(range)
+    expect(r.salesAvg).toEqual({ from: '2026-11-06', to: '2026-11-10' })
+    expect(storeKpis(sumPnL(daily), null, false, range, daily, r).revenuePerDay).toBeCloseTo(1117.6 / 5, 6)
+  })
+
+  it('without a known first sale, revenue and orders use the store days', () => {
+    const r = kpiDays(mtd, glooty(), { firstOrderDate: null, runningDay: '2026-11-18' })
+    expect(r.salesAvg).toEqual(r.avg)
+    expect(r.salesAvgDays).toBe(14)
   })
 
   it('agrees with the chart line: activity in the days before the window means the store existed', () => {
@@ -148,7 +204,7 @@ describe('kpiDays', () => {
     const range = { from: '2026-11-01', to: '2026-11-10' }
     const before = [day('2026-10-25', { metaSpend: 40 }), day('2026-10-26')]
     const r = kpiDays(range, daily, { firstOrderDate: '2026-11-07', before, runningDay: null })
-    expect(r).toEqual({ startedOn: null, avg: range, avgDays: 10, spanDays: 10 })
+    expect(r).toEqual({ startedOn: null, avg: range, avgDays: 10, salesAvg: { from: '2026-11-07', to: '2026-11-10' }, salesAvgDays: 4, spanDays: 10 })
     // The chart's own rule on the same days keeps every window day too.
     expect(windowDaysSinceStart(chartSeries(before, daily, []), '2026-11-07').startedOn).toBeNull()
   })
@@ -156,13 +212,13 @@ describe('kpiDays', () => {
   it('leaves only the running day out of an established store (MOKOO, Este mês)', () => {
     const daily = quiet(1, 18).map(d => ({ ...d, revenue: 100, orders: 1 }))
     expect(kpiDays(mtd, daily, { firstOrderDate: '2026-04-11', runningDay: '2026-11-18' }))
-      .toEqual({ startedOn: null, avg: { from: '2026-11-01', to: '2026-11-17' }, avgDays: 17, spanDays: 18 })
+      .toEqual({ startedOn: null, avg: { from: '2026-11-01', to: '2026-11-17' }, avgDays: 17, salesAvg: { from: '2026-11-01', to: '2026-11-17' }, salesAvgDays: 17, spanDays: 18 })
   })
 
   it('has no closed day to average on the first day of a window that is running', () => {
     const today = { from: '2026-11-18', to: '2026-11-18' }
     expect(kpiDays(today, [day('2026-11-18', { revenue: 50, orders: 1 })], { firstOrderDate: '2026-04-11', runningDay: '2026-11-18' }))
-      .toEqual({ startedOn: null, avg: null, avgDays: 0, spanDays: 1 })
+      .toEqual({ startedOn: null, avg: null, avgDays: 0, salesAvg: null, salesAvgDays: 0, spanDays: 1 })
   })
 
   it('ignores a running day outside the window and a window before the first sale', () => {

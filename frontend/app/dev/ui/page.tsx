@@ -12,7 +12,7 @@ import {
   RoasGauge, Skeleton, SkeletonBlock, StatusDot, Tabs, VerdictCard, VerdictChips,
 } from '@/components/ui'
 import { DailyProfitBars, DailyProfitLegend, HorizontalBars, IntradayCurve, IntradayLegend, MiniBars, Sparkline } from '@/components/charts'
-import { AppShell, PageHeader, PeriodNote } from '@/components/shell'
+import { AppShell, PageHeader, PeriodNote, SplitChip } from '@/components/shell'
 import { InsightsCard } from '@/components/ai/InsightsCard'
 import { SegmentedDemo } from './SegmentedDemo'
 import s from './page.module.css'
@@ -107,6 +107,10 @@ export default async function StyleguidePage({ searchParams }: { searchParams: P
             <Chip tone="info" icon="clock">dia de Tóquio</Chip>
             <Chip tone="info" icon="clock" size="sm">parcial · até 13h38</Chip>
             <Chip tone="mut" size="sm">arquivada</Chip>
+            {/* The header's partner-split chip (?parte=50): a page that halves
+                profit, and one that halves nothing (PageHeader halved={false}). */}
+            <SplitChip halved />
+            <SplitChip halved={false} />
           </div>
           <div className={s.row} style={{ marginTop: 12 }}>
             <Badge tone="pos">▲ Escalar</Badge>

@@ -23,13 +23,19 @@
  *   width?          viewBox width (default 680; use ~340 for a phone column so the
  *                   labels stay at their real size — the SVG is always fluid).
  *   showOrders?     orders-per-hour strip (default true).
+ *   share?          the partner split (ctx.splitFactor; default 1 = no split). Points,
+ *                   reference and referenceValue are the WHOLE day's; the curve, the
+ *                   reference and the end label draw value × share, and each hour's
+ *                   tooltip shows "sua parte (50%)" next to the whole "lucro acumulado
+ *                   do dia" — the same contract as DailyProfitBars, so the bar and the
+ *                   curve of one day never name the same halved number differently.
  *   ariaLabel       what the chart shows.
  */
 
 import { useId } from 'react'
-import { formatClock, formatCount, formatMoney, formatMoneyAxis } from '@/lib/format'
+import { formatClock, formatCount, formatMoney, formatMoneyAxis, formatPct } from '@/lib/format'
 import { ChartTips } from './ChartTips'
-import { linear, niceTicks, svgId, tipAttr } from './scale'
+import { linear, niceTicks, svgId, tipAttr, type ChartTip } from './scale'
 import s from './charts.module.css'
 
 export interface IntradayPointIn {
@@ -49,13 +55,14 @@ export interface IntradayCurveProps {
   height?: number
   width?: number
   showOrders?: boolean
+  share?: number
   ariaLabel: string
 }
 
 const hh = (h: number) => `${String(h).padStart(2, '0')}h`
 
 export function IntradayCurve({
-  points, nowMinutes, nowLabel, reference, referenceValue, tzNote = '', height = 230, width = 680, showOrders = true, ariaLabel,
+  points, nowMinutes, nowLabel, reference, referenceValue, tzNote = '', height = 230, width = 680, showOrders = true, share = 1, ariaLabel,
 }: IntradayCurveProps) {
   const uid = useId()
   const clipA = svgId(uid, 'a')
@@ -69,13 +76,15 @@ export function IntradayCurve({
   const ih = H - m.t - m.b
   const running = typeof nowMinutes === 'number'
   const nowH = running ? Math.min(24, Math.max(0, nowMinutes / 60)) : 24
+  const split = share !== 1
+  const shareLabel = `sua parte (${formatPct(share * 100, { digits: 0 })})`
 
   // x position of each point: the end of its hour, but never past "now".
   const pts = [{ t: 0, p: 0, r: 0, o: 0, h: -1 }, ...points.map(pt => ({
-    t: Math.min(pt.hour + 1, running ? nowH : 24), p: pt.cumProfit, r: pt.cumRevenue ?? 0, o: pt.orders ?? 0, h: pt.hour,
+    t: Math.min(pt.hour + 1, running ? nowH : 24), p: pt.cumProfit * share, r: pt.cumRevenue ?? 0, o: pt.orders ?? 0, h: pt.hour,
   }))]
-  const refPts = reference ? [{ t: 0, p: 0 }, ...reference.points.map(pt => ({ t: pt.hour + 1, p: pt.cumProfit }))] : []
-  const all = [...pts.map(p => p.p), ...refPts.map(p => p.p), ...(referenceValue ? [referenceValue.value] : [])]
+  const refPts = reference ? [{ t: 0, p: 0 }, ...reference.points.map(pt => ({ t: pt.hour + 1, p: pt.cumProfit * share }))] : []
+  const all = [...pts.map(p => p.p), ...refPts.map(p => p.p), ...(referenceValue ? [referenceValue.value * share] : [])]
   const ticks = niceTicks(Math.min(0, ...all), Math.max(0, ...all), 4)
   const x = linear([0, 24], [m.l, m.l + iw])
   const y = linear([ticks[0], ticks[ticks.length - 1]], [m.t + ih, m.t])
@@ -113,7 +122,7 @@ export function IntradayCurve({
         {ticks.map(t => (
           <g key={t}>
             <line x1={m.l} x2={W - m.r} y1={y(t)} y2={y(t)} className={t === 0 ? s.zero : s.grid} />
-            <text x={m.l - 8} y={y(t) + 4} textAnchor="end" fontSize={10.5}>{t === 0 ? '$0' : formatMoneyAxis(t)}</text>
+            <text x={m.l - 8} y={y(t) + 4} textAnchor="end" fontSize={10.5}>{formatMoneyAxis(t, ticks)}</text>
           </g>
         ))}
         {[0, 6, 12, 18, 24].map(h => (
@@ -135,8 +144,8 @@ export function IntradayCurve({
 
         {referenceValue && (
           <g>
-            <line x1={m.l} x2={W - m.r} y1={y(referenceValue.value)} y2={y(referenceValue.value)} className={s.refLine} />
-            <text x={m.l + 4} y={y(referenceValue.value) - 5} fontSize={10} className={s.txNeu}>{referenceValue.label}</text>
+            <line x1={m.l} x2={W - m.r} y1={y(referenceValue.value * share)} y2={y(referenceValue.value * share)} className={s.refLine} />
+            <text x={m.l + 4} y={y(referenceValue.value * share) - 5} fontSize={10} className={s.txNeu}>{referenceValue.label}</text>
           </g>
         )}
         {reference && refPts.length > 1 && (
@@ -175,6 +184,11 @@ export function IntradayCurve({
           const t0 = p.hour
           const t1 = Math.min(p.hour + 1, running ? nowH : 24)
           const inProgress = running && i === points.length - 1 && t1 < p.hour + 1
+          // Split: the drawn share, named, next to the whole day's running total.
+          const part = p.cumProfit * share
+          const profitRows: NonNullable<ChartTip['rows']> = split
+            ? [[shareLabel, formatMoney(part), part < 0 ? 'neg' : 'pos'], ['lucro acumulado do dia', formatMoney(p.cumProfit)]]
+            : [['lucro acumulado', formatMoney(p.cumProfit), p.cumProfit < 0 ? 'neg' : 'pos']]
           return (
             <g
               key={p.hour}
@@ -183,11 +197,11 @@ export function IntradayCurve({
               // hours); Tab lands on the latest hour.
               tabIndex={i === points.length - 1 ? 0 : -1}
               role="img"
-              aria-label={`até ${hh(p.hour + 1)}: lucro acumulado ${formatMoney(p.cumProfit)}`}
+              aria-label={`até ${hh(p.hour + 1)}: ${split ? `${shareLabel} ${formatMoney(part)}, lucro acumulado do dia ${formatMoney(p.cumProfit)}` : `lucro acumulado ${formatMoney(p.cumProfit)}`}`}
               data-tip={tipAttr({
                 title: `${hh(t0)}–${hh(p.hour + 1)}${inProgress ? ' · em andamento' : ''}${tzNote}`,
                 rows: [
-                  ['lucro acumulado', formatMoney(p.cumProfit), p.cumProfit < 0 ? 'neg' : 'pos'],
+                  ...profitRows,
                   ...(p.cumRevenue !== undefined ? [['receita acumulada', formatMoney(p.cumRevenue)] as [string, string]] : []),
                   ...(p.orders !== undefined ? [['pedidos na hora', formatCount(p.orders)] as [string, string]] : []),
                 ],

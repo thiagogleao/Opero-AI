@@ -37,7 +37,7 @@ import {
 } from '../engine/pnl'
 import { daysBetween, minutesIntoDay, safeTz, shiftDate, todayInTz, type Comparison, type DateRange, type Period } from '../engine/dates'
 import { getChargebackHealth, type ChargebackHealth } from '../adjustments'
-import { getCampaignReport, type CampaignReport, type CampaignRow } from '../data/campaigns'
+import { getCampaignReport, spentAds, type CampaignReport, type CampaignRow } from '../data/campaigns'
 import type { CampaignAction } from '../campaignSignal'
 import { adChannelOf, channelRoas, type AdChannel } from './adChannel'
 import {
@@ -213,13 +213,23 @@ async function loadSaleCurrency(storeId: string): Promise<string | null> {
 export interface StoreKpis {
   /** Days in the window. */
   days: number
-  /** Days the per-day averages divide by (kpiDays): the window's closed days
-   *  from the store's start on. Below 2 the page shows no average. */
+  /** Days the spend per day divides by (kpiDays): the window's closed days
+   *  from the store's start on (first sale or first ad). Below 2 the page
+   *  shows no average. */
   avgDays: number
   /** Those days when they are not the whole window — the store started inside
    *  it, or its last day is still running — so the note names them ("por dia
    *  em 7–17 nov"); null when they are the window. */
   avgRange: DateRange | null
+  /** Days revenue and orders per day divide by: the window's closed days from
+   *  the first sale on (Glooty, Este mês: 6–17 nov, while its ads began on
+   *  4 nov). Below 2 the page shows no average. */
+  salesAvgDays: number
+  /** Those days when they are not the whole window; null when they are. */
+  salesAvgRange: DateRange | null
+  /** The days to name under Meta per day: avgRange, or the whole window when
+   *  the revenue's days differ from it; null when no note needs to name any. */
+  metaAvgRange: DateRange | null
   /** The store's start, when the window has days before it (Hibikura, Este
    *  mês: 7 nov); else null. */
   startedOn: string | null
@@ -227,11 +237,12 @@ export interface StoreKpis {
    *  "de N dias" of the Shopify ads note. */
   spanDays: number
   revenue: number
-  /** Revenue of the avgDays ÷ avgDays. */
+  /** Revenue of the salesAvgDays ÷ salesAvgDays. */
   revenuePerDay: number
   orders: number
   /** Revenue ÷ orders. */
   aov: number | null
+  /** Orders of the salesAvgDays ÷ salesAvgDays. */
   ordersPerDay: number
   /** Store revenue ÷ Meta spend (engine roas). */
   metaRoas: number | null
@@ -249,6 +260,7 @@ export interface StoreKpis {
   metaSpend: number
   /** Meta spend per dollar sold, in cents (0..100+). */
   metaCents: number | null
+  /** Meta spend of the avgDays ÷ avgDays. */
   metaPerDay: number
   shopSpend: number
   shopCents: number | null
@@ -328,23 +340,34 @@ export function ledgerAdCents(t: PnL, configured: boolean): { meta: number | nul
 
 /** Which window days the KPI averages divide by (kpiDays). */
 export interface KpiDays {
+  /** The store's start (first sale or first ad, the earlier) when the window
+   *  has days before it; else null. */
   startedOn: string | null
-  /** First and last day averaged; null when no day is (window idle before
-   *  the start, or only the running day). */
+  /** The store's days, for spend per day: first and last day averaged; null
+   *  when no day is (window idle before the start, or only the running day). */
   avg: DateRange | null
   avgDays: number
+  /** The selling days, for revenue and orders per day: the same days from the
+   *  first sale on. Equal to `avg` unless ads ran before the first sale. */
+  salesAvg: DateRange | null
+  salesAvgDays: number
   spanDays: number
 }
 
 /**
- * The days behind "por dia" on the Resumo, by the rule the daily chart's
- * summary line already follows (windowDaysSinceStart), so the KPIs and the
- * chart judge the same days:
- *  - from the store's start: its first kept order or its first day with any
- *    activity (ads before the first sale are real days of the store), the 30
- *    days before the window included when the caller read them. Hibikura,
- *    Este mês: the KPIs divided by 18 days next to a chart that said "desde
- *    que a loja começou (7 nov)" — $490 a day instead of about $734;
+ * The days behind "por dia" on the Resumo:
+ *  - spend per day, from the store's start, by the rule the daily chart's
+ *    summary line already follows (windowDaysSinceStart), so the KPIs and the
+ *    chart judge the same days: its first kept order or its first day with
+ *    any activity (ads before the first sale are real spend), the 30 days
+ *    before the window included when the caller read them. Hibikura, Este
+ *    mês: the KPIs divided by 18 days next to a chart that said "desde que a
+ *    loja começou (7 nov)" — $490 a day instead of about $734;
+ *  - revenue and orders per day, from the first sale: a day before it could
+ *    not sell. Glooty, Este mês: its ads began on 4 nov and its first order
+ *    came on 6 nov; "$79,83 por dia em 4–17 nov" sat next to "só começou a
+ *    vender em 6 nov" ($1.117,60 ÷ 12 selling days is $93,13). Without a
+ *    known first sale (the read failed) both use the store's start;
  *  - without the running day: its sales so far are a fraction of a day (the
  *    chart leaves it out of "8 de 11 dias no lucro" for the same reason). At
  *    01h on the 2nd, "Este mês" halved the first day's average.
@@ -356,46 +379,62 @@ export function kpiDays(
 ): KpiDays {
   const since = windowDaysSinceStart(chartSeries([...(opts.before ?? [])], [...daily], []), opts.firstOrderDate)
   const start = since.startedOn ?? range.from
+  const salesStart = opts.firstOrderDate && opts.firstOrderDate > start ? opts.firstOrderDate : start
   const running = opts.runningDay && opts.runningDay >= range.from && opts.runningDay <= range.to ? opts.runningDay : null
   const lastClosed = running ? shiftDate(running, -1) : range.to
-  const avgDays = start <= lastClosed ? daysBetween(start, lastClosed) : 0
+  const closedFrom = (from: string) => (from <= lastClosed ? daysBetween(from, lastClosed) : 0)
+  const avgDays = closedFrom(start)
+  const salesAvgDays = closedFrom(salesStart)
   return {
     startedOn: since.startedOn,
     avg: avgDays > 0 ? { from: start, to: lastClosed } : null,
     avgDays,
+    salesAvg: salesAvgDays > 0 ? { from: salesStart, to: lastClosed } : null,
+    salesAvgDays,
     spanDays: start <= range.to ? daysBetween(start, range.to) : 0,
   }
 }
+
+type AvgKey = 'revenue' | 'orders' | 'metaSpend'
 
 export function storeKpis(t: PnL, prev: PnL | null, configured: boolean, range: DateRange, daily: DayPnL[] = [], span?: KpiDays): StoreKpis {
   const days = daysBetween(range.from, range.to)
   // Without a span (tests, callers that do not know the start): the whole
   // window, as before.
-  const sp: KpiDays = span ?? { startedOn: null, avg: range, avgDays: days, spanDays: days }
-  const whole = !!sp.avg && sp.avg.from === range.from && sp.avg.to === range.to
+  const sp: KpiDays = span ?? { startedOn: null, avg: range, avgDays: days, salesAvg: range, salesAvgDays: days, spanDays: days }
+  const isWhole = (r: DateRange | null) => !!r && r.from === range.from && r.to === range.to
   // The averaged days' own sums (the engine's daily rows add up to the
   // totals); the totals themselves when the days are the whole window.
-  const avgRows = whole || !sp.avg ? [] : daily.filter(d => d.date >= sp.avg!.from && d.date <= sp.avg!.to)
-  const avgSum = (k: 'revenue' | 'orders' | 'metaSpend') => (whole ? t[k] : avgRows.reduce((a, d) => a + d[k], 0))
-  const avgPer = (k: 'revenue' | 'orders' | 'metaSpend') => (sp.avgDays > 0 ? avgSum(k) / sp.avgDays : 0)
+  const perDayOver = (r: DateRange | null, n: number, k: AvgKey): number => {
+    if (!r || n <= 0) return 0
+    const sum = isWhole(r) ? t[k] : daily.filter(d => d.date >= r.from && d.date <= r.to).reduce((a, d) => a + d[k], 0)
+    return sum / n
+  }
+  const whole = isWhole(sp.avg)
+  const salesWhole = isWhole(sp.salesAvg)
   return {
     days,
     avgDays: sp.avgDays,
     avgRange: whole ? null : sp.avg,
+    salesAvgDays: sp.salesAvgDays,
+    salesAvgRange: salesWhole ? null : sp.salesAvg,
+    // Named whenever the two notes average different days, so "$93 por dia
+    // em 6–17 nov" over "$57/dia" never reads as the same days.
+    metaAvgRange: whole ? (salesWhole || !sp.salesAvg ? null : range) : sp.avg,
     startedOn: sp.startedOn,
     spanDays: sp.spanDays,
     revenue: t.revenue,
-    revenuePerDay: avgPer('revenue'),
+    revenuePerDay: perDayOver(sp.salesAvg, sp.salesAvgDays, 'revenue'),
     orders: t.orders,
     aov: per(t.revenue, t.orders),
-    ordersPerDay: avgPer('orders'),
+    ordersPerDay: perDayOver(sp.salesAvg, sp.salesAvgDays, 'orders'),
     metaRoas: t.metaSpend > 0 ? t.roas : null,
     roasChannel: adChannelOf(t),
     channelRoas: channelRoas(t),
     breakEven: configured ? t.breakEvenRoas : null,
     metaSpend: t.metaSpend,
     metaCents: t.revenue > 0 ? (t.metaSpend / t.revenue) * 100 : null,
-    metaPerDay: avgPer('metaSpend'),
+    metaPerDay: perDayOver(sp.avg, sp.avgDays, 'metaSpend'),
     shopSpend: t.shopSpend,
     shopCents: t.revenue > 0 ? (t.shopSpend / t.revenue) * 100 : null,
     shopDays: daily.filter(d => d.shopSpend > 0).length,
@@ -716,7 +755,7 @@ export function campaignHighlights(report: Pick<CampaignReport, 'campaigns' | 's
     listed: campaigns.length,
     unsynced: {
       spend: buckets.reduce((s, c) => s + c.spend, 0),
-      ads: buckets.reduce((s, c) => s + (c.unsyncedAds ?? []).filter(a => a.spend >= 0.005).length, 0),
+      ads: buckets.reduce((s, c) => s + spentAds(c.unsyncedAds ?? []).length, 0),
     },
     actions,
     attributedShare: report.storeRevenue > 0 ? (own / report.storeRevenue) * 100 : null,

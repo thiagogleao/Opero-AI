@@ -4,7 +4,8 @@
  * Pure and dependency-free so it runs in server components, client
  * components and tests alike. Rules (from the UI brief):
  *   money     $1.313 without cents from $100 up; $9,80 below; negatives with a
- *             true minus sign (−$201); exactly zero is "$0".
+ *             true minus sign (−$201); exactly zero is "$0". Chart axes in whole
+ *             dollars unless their ticks have cents (formatMoneyAxis).
  *   percent   12,0%        ROAS   1,95×        count  1.174
  *   dates     17 nov · ter, 17 nov · ranges 10–16 nov (engine formatRange)
  *   time      13h38 · relative "há 4 min"
@@ -72,9 +73,22 @@ export function formatSignedMoney(v: Num, opts: Omit<MoneyOptions, 'sign'> = {})
   return formatMoney(v, { ...opts, sign: true })
 }
 
-/** Money on a chart axis: always whole dollars ("$1.200", "−$800"). */
-export function formatMoneyAxis(v: number): string {
-  return formatMoney(v, { cents: 'never' })
+/** True when `v` is not a whole number of dollars once rounded to the cent. */
+const hasCents = (v: number) => Math.round(Math.abs(v) * 100) % 100 !== 0
+
+/**
+ * Money on a chart axis. Whole dollars ("$1.200", "−$800") while every tick
+ * of the axis is a whole dollar; cents on every tick ("−$1,50", "−$0,20",
+ * "−$1,00") as soon as one is not, so no two ticks read the same: a small
+ * ad's axis of −2, −1,5, −1, −0,5 used to print "−$2 | −$2 | −$1 | −$1".
+ * Pass the axis's `ticks` so all its labels share one format; without them
+ * the value decides alone. Zero is "$0" either way.
+ */
+export function formatMoneyAxis(v: number, ticks?: readonly number[]): string {
+  if (!isNum(v)) return EMPTY
+  if (Math.round(Math.abs(v) * 100) === 0) return '$0'
+  const cents = (ticks?.length ? ticks : [v]).some(t => isNum(t) && hasCents(t))
+  return formatMoney(v, { cents: cents ? 'always' : 'never' })
 }
 
 export interface PctOptions { digits?: number; sign?: boolean; empty?: string }

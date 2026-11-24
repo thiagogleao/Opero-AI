@@ -10,7 +10,15 @@
  * PageHeader props: { ctx: PageContext; title?: ReactNode (default ctx.scopeName);
  *   sub?: ReactNode (default "<periodLabel> · <rangeLabel>"; a custom period,
  *   whose label is its range, reads "Período escolhido · 1–10 nov"); badges?: ReactNode;
- *   actions?: ReactNode; code?: string|null (default the store's domain code) }
+ *   actions?: ReactNode; code?: string|null (default the store's domain code);
+ *   halved?: boolean (default true) — under ?parte=50, whether this page shows
+ *   a money result halved (profit, profit/order, cash result, refunds: it uses
+ *   ctx.part). Pass false on a page with none of them (Produtos, Países e
+ *   clientes, Atribuição, Campanhas · Todas, Ajustes): the chip then says
+ *   nothing on the page is halved, instead of "sua parte (50%)" over a
+ *   whole-store contribution that reads as the partner's half. }
+ * SplitChip props: { halved: boolean } — that chip alone (splitChipText(halved)
+ * gives its label and title).
  * PeriodNote props: { ctx: PageContext } — returns null when there is nothing to say.
  * periodNoteText(ctx) returns the same sentence as a string (or null).
  * periodName(ctx) is the bold name before the range ("Últimos 7 dias", or
@@ -31,10 +39,31 @@ export function periodName(ctx: Pick<PageContext, 'periodLabel' | 'rangeLabel'>)
   return ctx.periodLabel === ctx.rangeLabel ? 'Período escolhido' : ctx.periodLabel
 }
 
-export function PageHeader({ ctx, title, sub, badges, actions, code }: {
-  ctx: PageContext; title?: ReactNode; sub?: ReactNode; badges?: ReactNode; actions?: ReactNode; code?: string | null
+/** The partner-view chip's words: what the page halves, and what it never does. */
+export function splitChipText(halved: boolean): { label: string; title: string } {
+  return halved
+    ? {
+        label: 'sua parte (50%)',
+        title: 'Visão de sócio: lucro, lucro por pedido, resultado de caixa e reembolsos aparecem pela metade, a sua parte. Vendas, gastos, contribuição, margens, ROAS e empate ficam inteiros.',
+      }
+    : {
+        label: 'sua parte (50%) · nada é dividido aqui',
+        title: 'Visão de sócio: só lucro, lucro por pedido, resultado de caixa e reembolsos aparecem pela metade, e esta página não mostra nenhum deles. Vendas, gastos, contribuição, margens e ROAS aparecem inteiros.',
+      }
+}
+
+/** The header's chip under ?parte=50 (see PageHeader `halved`). */
+export function SplitChip({ halved }: { halved: boolean }) {
+  const { label, title } = splitChipText(halved)
+  return <Chip tone={halved ? 'neu' : 'mut'} icon="split" size="sm" title={title}>{label}</Chip>
+}
+
+export function PageHeader({ ctx, title, sub, badges, actions, code, halved = true }: {
+  ctx: PageContext; title?: ReactNode; sub?: ReactNode; badges?: ReactNode; actions?: ReactNode; code?: string | null; halved?: boolean
 }) {
-  const opt = ctx.scope === 'store' ? ctx.storeOptions.find(o => o.id === ctx.store?.id) : undefined
+  // The store itself, not a lookup in storeOptions: an archived store's
+  // history page lost its code pill and "dia de …" chip that way.
+  const opt = ctx.storeOption
   const pill = code === undefined ? opt?.code ?? null : code
   return (
     <div className={s.pageHead}>
@@ -44,7 +73,7 @@ export function PageHeader({ ctx, title, sub, badges, actions, code }: {
           {pill && <CodePill>{pill}</CodePill>}
           {opt?.dayLabel && <Chip tone="info" icon="clock" size="sm">{opt.dayLabel}</Chip>}
           {ctx.store?.archived && <Chip tone="mut" size="sm">arquivada</Chip>}
-          {ctx.split && <Chip tone="neu" icon="split" size="sm">sua parte (50%)</Chip>}
+          {ctx.split && <SplitChip halved={halved} />}
           {ctx.rangeNote && <Chip tone="warn" icon="alert" size="sm" title={ctx.rangeNote}>período ajustado</Chip>}
           {badges}
         </div>
