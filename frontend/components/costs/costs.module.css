@@ -136,7 +136,10 @@
 .pcost { width: 150px; }
 .pfree { width: 110px; }
 .more { display: flex; justify-content: center; padding: 12px; border-top: 1px solid var(--line); }
-.tableWrap { overflow-x: auto; }
+/* position: relative makes the scroller the containing block of the rows'
+   absolutely positioned .sr-only labels; without it they escaped the clip and
+   stretched the whole page to 536px at 390. */
+.tableWrap { overflow-x: auto; position: relative; }
 
 /* ── Country lists ── */
 .clist { border: 1px solid var(--line-2); border-radius: 12px; background: var(--card-2); }

@@ -67,6 +67,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
         code={pillCode(store)}
         title={store ? `Ajustes · ${store.name}` : 'Ajustes'}
         sub="Loja, Shopify, contas de anúncio e lojas da conta"
+        halved={false}
       />
       <ReturnBanner params={flags} />
       {store?.archived && <ArchivedNote name={store.name} what="custos, contas de anúncio e a conexão com a Shopify não podem ser alterados" />}

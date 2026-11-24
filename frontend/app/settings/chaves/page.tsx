@@ -38,6 +38,7 @@ export default async function KeysPage({ searchParams }: { searchParams: Promise
         title="Chaves da Shopify"
         code={null}
         sub="Cada chave é testada agora na Shopify, não só conferida no banco"
+        halved={false}
         actions={<ButtonLink href={ctx.hrefWith('/settings')} size="sm" variant="ghost">Voltar para Ajustes</ButtonLink>}
       />
       <ReturnBanner params={flags} />

@@ -23,6 +23,7 @@ import { ArchivedNote } from '@/components/settings/ArchivedNote'
 import { OnboardingWizard, type OnboardingStore } from '@/components/settings/Onboarding'
 import s from '@/components/settings/settings.module.css'
 import { storePageMetadata } from '@/components/settings/pageMetadata'
+import { askedStoreId } from '@/components/settings/storeParam'
 
 export const dynamic = 'force-dynamic'
 export const generateMetadata = storePageMetadata('Adicionar loja', { legacyStoreKey: true })
@@ -37,7 +38,10 @@ export default async function OnboardingPage({ searchParams }: { searchParams: P
 
   let store: OnboardingStore | null = null
   let archivedName: string | null = null
-  const id = one(sp.loja) ?? one(sp.store)
+  // ?loja=todas ("Todas as lojas", carried from any other page) names no store
+  // to continue: a new connection starts, where it used to 404 under the tab
+  // title "Adicionar loja". Read by the same function as generateMetadata.
+  const id = askedStoreId(sp, { legacyStoreKey: true })
   if (id) {
     try {
       const ref = await requireStore(viewer, id)
@@ -56,7 +60,8 @@ export default async function OnboardingPage({ searchParams }: { searchParams: P
   const step = !store || shopifyError ? 'shopify' : fbConnected ? 'import' : 'facebook'
   // Links out keep the site's URL state (loja, periodo, de/ate, parte), like
   // every other page; the flow's own keys (addStore, fb_connected…) stay here.
-  const state = parsePageParams({ ...sp, loja: id })
+  // Todas stays in them: "Voltar para Ajustes" goes back to where the person was.
+  const state = parsePageParams({ ...sp, loja: one(sp.loja) ?? one(sp.store) })
   const href = (path: string) => buildHref(path, state)
   // The period alone, for the wizard's own links (their store is the one it connects).
   const keep = buildHref('/', { ...state, loja: null }).split('?')[1] ?? ''

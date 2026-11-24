@@ -50,7 +50,7 @@ export async function PickerPage({ searchParams, role }: { searchParams: Promise
 
   return (
     <AppShell ctx={ctx}>
-      <PageHeader ctx={ctx} title={title} sub={store ? `Loja: ${store.name}` : undefined} actions={<ButtonLink href={settings} size="sm" variant="ghost">Voltar para Ajustes</ButtonLink>} />
+      <PageHeader ctx={ctx} title={title} sub={store ? `Loja: ${store.name}` : undefined} halved={false} actions={<ButtonLink href={settings} size="sm" variant="ghost">Voltar para Ajustes</ButtonLink>} />
       {!store ? (
         <EmptyState icon="store" title="Nenhuma loja">Conecte uma loja antes de ligar contas de anúncio.</EmptyState>
       ) : store.archived ? (

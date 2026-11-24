@@ -12,7 +12,9 @@ import { useEffect } from 'react'
  * The shell's pickers navigate by code (router.push), so links cannot catch
  * them. They announce a change with a cancelable window event first:
  *  - 'opero:before-store-change' (StorePicker): another store unmounts this
- *    editor, so it asks, and preventDefault() keeps the person here;
+ *    editor, so it asks, and preventDefault() keeps the person here; picking
+ *    the store already on screen (pinning it from Todas) is not leaving
+ *    (storeChangeLeaves);
  *  - 'opero:before-period-change' (PeriodPicker): the editor stays mounted and
  *    the draft is re-priced for the new window (PE18), so a period change on
  *    this page and store is not leaving and goes through without a prompt. It
@@ -82,6 +84,29 @@ export function leavesEditor(to: URL, here: URL, shownStoreId: string): boolean 
   return target !== shownStoreId
 }
 
+/**
+ * Whether a store picker announcement ('opero:before-store-change', detail
+ * { from, to, href }) leaves the editor showing `shownStoreId`.
+ *
+ * On a one-store page opened from Todas the picker lets the person pick the
+ * store already on screen, to pin it (shell/url pickIsNoop): only ?loja changes
+ * from 'todas' to that id, the editor (keyed by store id) stays mounted with its
+ * draft, so asking "Sair mesmo assim?" there was false. The destination is read
+ * from detail.href when there is one (the same rule as links: another page or
+ * another store leaves), else from detail.to (a store id). An event that says
+ * neither may go anywhere, so it still counts as leaving.
+ */
+export function storeChangeLeaves(e: Event, here: URL, shownStoreId: string): boolean {
+  const d = (e as CustomEvent<unknown>).detail
+  if (!d || typeof d !== 'object') return true
+  const rec = d as Record<string, unknown>
+  if (typeof rec.href === 'string' && rec.href.length > 0) {
+    try { return leavesEditor(new URL(rec.href, here), here, shownStoreId) } catch { /* unreadable href: try detail.to */ }
+  }
+  if (typeof rec.to === 'string' && rec.to.length > 0) return rec.to !== shownStoreId
+  return true
+}
+
 /** `storeId`: the store the editor shows (the page resolved it from the URL or
  *  the remembered store), so links naming it are not leaving. */
 export function useLeaveGuard(active: boolean, message: string, storeId: string) {
@@ -107,6 +132,7 @@ export function useLeaveGuard(active: boolean, message: string, storeId: string)
     const onStoreChange = (e: Event) => {
       storeEventSeen = true
       if (performance.now() - fallbackConfirmedAt < SAME_CHOICE_MS) { fallbackConfirmedAt = -Infinity; return }
+      if (!storeChangeLeaves(e, new URL(window.location.href), storeId)) return
       if (!window.confirm(message)) e.preventDefault()
     }
     const onPeriodChange = (e: Event) => {

@@ -3,12 +3,8 @@ import 'server-only'
 import type { Metadata } from 'next'
 import { notFound } from 'next/navigation'
 import { AccessError, getViewer, requireStore } from '@/lib/access'
-import { ALL_STORES, type SearchParams } from '@/lib/views/page'
-
-const first = (v: string | string[] | undefined): string | null => {
-  const s = (Array.isArray(v) ? v[0] : v)?.trim()
-  return s ? s : null
-}
+import type { SearchParams } from '@/lib/views/page'
+import { askedStoreId } from './storeParam'
 
 /**
  * generateMetadata for a page that opens one store from ?loja (or, with
@@ -26,8 +22,8 @@ const first = (v: string | string[] | undefined): string | null => {
 export function storePageMetadata(title: string, opts: { legacyStoreKey?: boolean } = {}) {
   return async function generateMetadata({ searchParams }: { searchParams: Promise<SearchParams> }): Promise<Metadata> {
     const sp = await searchParams
-    const id = first(sp.loja) ?? (opts.legacyStoreKey ? first(sp.store) : null)
-    if (id && id !== ALL_STORES) {
+    const id = askedStoreId(sp, opts)
+    if (id) {
       let missing = false
       try {
         const viewer = await getViewer()

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { BEFORE_PERIOD_CHANGE, eventDestination, leavesEditor } from '../useLeaveGuard'
+import { BEFORE_PERIOD_CHANGE, BEFORE_STORE_CHANGE, eventDestination, leavesEditor, storeChangeLeaves } from '../useLeaveGuard'
 
 const here = new URL('http://localhost:3100/profit?loja=a&periodo=7d')
 
@@ -46,5 +46,36 @@ describe('leave guard: what counts as leaving the cost editor', () => {
     expect(eventDestination(ev({ period: '30d' }), here.href)).toBeNull()
     expect(eventDestination(ev(null), here.href)).toBeNull()
     expect(eventDestination(new Event(BEFORE_PERIOD_CHANGE), here.href)).toBeNull()
+  })
+})
+
+describe('leave guard: the store picker announcement', () => {
+  const at = (path: string) => new URL(`http://localhost:3100${path}`)
+  const pick = (detail: unknown) => new CustomEvent(BEFORE_STORE_CHANGE, { cancelable: true, detail })
+
+  it('opened from Todas, picking the store already on screen pins it: not leaving', () => {
+    // The picker sends from = to = the shown store and only ?loja changes from
+    // 'todas' to its id; the editor stays mounted with the draft. This asked
+    // "Sair mesmo assim?" (round 4).
+    const todas = at('/profit?loja=todas&periodo=7d')
+    expect(storeChangeLeaves(pick({ from: 'a', to: 'a', href: '/profit?loja=a&periodo=7d' }), todas, 'a')).toBe(false)
+    // Same with no ?loja at all (the remembered store) and with a period in flight.
+    expect(storeChangeLeaves(pick({ from: 'a', to: 'a', href: '/profit?loja=a' }), at('/profit'), 'a')).toBe(false)
+    expect(storeChangeLeaves(pick({ from: 'a', to: 'a', href: '/profit?loja=a&periodo=30d' }), todas, 'a')).toBe(false)
+  })
+
+  it('another store, or the same store on another page, still leaves', () => {
+    expect(storeChangeLeaves(pick({ from: 'a', to: 'b', href: '/profit?loja=b&periodo=7d' }), here, 'a')).toBe(true)
+    expect(storeChangeLeaves(pick({ from: 'a', to: 'a', href: '/overview?loja=a' }), here, 'a')).toBe(true)
+    // Todas from a page that names the store: it may open another store.
+    expect(storeChangeLeaves(pick({ from: 'a', to: 'todas', href: '/profit?loja=todas' }), here, 'a')).toBe(true)
+  })
+
+  it('without an href it compares detail.to with the store on screen; with neither it asks', () => {
+    expect(storeChangeLeaves(pick({ from: 'todas', to: 'a' }), here, 'a')).toBe(false)
+    expect(storeChangeLeaves(pick({ from: 'a', to: 'b' }), here, 'a')).toBe(true)
+    expect(storeChangeLeaves(pick({ from: 'a' }), here, 'a')).toBe(true)
+    expect(storeChangeLeaves(pick(null), here, 'a')).toBe(true)
+    expect(storeChangeLeaves(new Event(BEFORE_STORE_CHANGE), here, 'a')).toBe(true)
   })
 })
