@@ -7,6 +7,8 @@ import { resolveToolName, runTool, toolLabel, TOOLS } from '../tools'
 
 vi.mock('../insights/facts', () => ({
   factSheetText: () => '- Receita: $1,000.00 · 10 pedidos\n- Lucro operacional: $120.00',
+  // The sheet above has sales: the empty-sheet refusal is tested in insights.test.ts.
+  nothingToRead: () => false,
 }))
 const { generateInsights, InsightsFailure, insightsRequest } = await import('../insights/run')
 

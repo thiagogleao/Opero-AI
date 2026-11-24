@@ -1,6 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { INSIGHTS_MAX_ITEMS } from '../config'
 import { insightsKey, TtlCache } from '../insights/cache'
+import { nothingToRead, type InsightsFacts } from '../insights/facts'
+import { generateInsights, InsightsFailure } from '../insights/run'
+import type { TotalsView } from '../views'
 import { INSIGHTS_SCHEMA, insightsSystemPrompt } from '../insights/prompt'
 import { numberIndex, parseInsights, valueVerified } from '../insights/result'
 
@@ -118,5 +121,46 @@ describe('insights cache', () => {
     expect(insightsKey('s1', w, true)).not.toBe(insightsKey('s1', w, false))
     expect(insightsKey('s1', w, false)).not.toBe(insightsKey('s2', w, false))
     expect(insightsKey('s1', w, false)).not.toBe(insightsKey('s1', { ...w, from: '2026-10-19' }, false))
+  })
+})
+
+describe('empty fact sheet (nothingToRead)', () => {
+  // A window before the store's first sale (Hibikura 28 out – 3 nov, first
+  // sale 7 nov): every total is zero, here and in the window before. The model
+  // call is paid; generateInsights refuses before making it.
+  const zero = {
+    revenue: 0, orders: 0, units: 0, aov: null, productCost: 0, shipping: 0, fees: 0, perOrderExtras: 0,
+    variableCosts: 0, contribution: 0, contributionMargin: null, metaSpend: 0, shopSpend: 0, fixedCosts: 0,
+    operatingProfit: 0, margin: null, profitPerOrder: null, refundGross: 0, refundCount: 0, refunds: 0,
+    chargebacks: 0, chargebackFees: 0, chargebackCount: 0, cashResult: 0, breakEvenRoas: null, roas: null,
+    metaRoas: null, metaPurchaseValue: 0, metaPurchases: 0, cac: null,
+  } satisfies TotalsView
+  const facts = (totals: TotalsView, previousTotals: TotalsView | null) => ({ totals, previousTotals })
+
+  it('is true only when the window and the one before are both empty', () => {
+    expect(nothingToRead(facts(zero, zero))).toBe(true)
+    expect(nothingToRead(facts(zero, null))).toBe(true)
+    // Fixed costs run by the calendar: not activity.
+    expect(nothingToRead(facts({ ...zero, fixedCosts: 120, operatingProfit: -120 }, null))).toBe(true)
+    // A quiet window after a busy one still goes to the model.
+    expect(nothingToRead(facts(zero, { ...zero, revenue: 980, orders: 12 }))).toBe(false)
+    // Ad spend before launch was really spent.
+    expect(nothingToRead(facts({ ...zero, metaSpend: 41.2 }, null))).toBe(false)
+    expect(nothingToRead(facts({ ...zero, shopSpend: 5 }, null))).toBe(false)
+    expect(nothingToRead(facts({ ...zero, refundCount: 1 }, null))).toBe(false)
+    expect(nothingToRead(facts({ ...zero, chargebackCount: 1 }, null))).toBe(false)
+    expect(nothingToRead(facts({ ...zero, revenue: null }, null))).toBe(true)
+  })
+
+  it('generateInsights refuses with no_data without opening a model stream', async () => {
+    const open = vi.fn()
+    const send = vi.fn()
+    const f = { ...facts(zero, null), ctx: { id: 's', name: 'Hibikura' } } as unknown as InsightsFacts
+    const err = await generateInsights(f, send, new AbortController().signal, open, { viewerKey: 'v', ttlMs: 1 })
+      .then(() => null, (e: unknown) => e)
+    expect(err).toBeInstanceOf(InsightsFailure)
+    expect((err as InsightsFailure).code).toBe('no_data')
+    expect(open).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
   })
 })

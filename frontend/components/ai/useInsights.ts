@@ -126,7 +126,13 @@ export function useInsights({ storeId, from, to, split }: InsightsRequest) {
     const live = () => !ac.signal.aborted && keyRef.current === myKey
     const previous = state.kind === 'ready' ? state.result : state.kind === 'failed' ? state.previous : null
     let win: InsightsWindowInfo | null = state.kind === 'idle' ? state.window : previous?.window ?? null
-    const fail = (error: UiError) => { if (live()) setState({ kind: 'failed', window: win, error, previous }) }
+    // A failure trying again cannot fix (no data, no access) and nothing to
+    // keep on screen: the same "unavailable" state the cache check shows,
+    // instead of a red callout over no button.
+    const fail = (error: UiError) => {
+      if (!live()) return
+      setState(!error.retry && !previous ? { kind: 'unavailable', error } : { kind: 'failed', window: win, error, previous })
+    }
     setState({ kind: 'generating', window: win, phase: 'starting', startedAt: Date.now(), previous })
     let ended = false
     try {

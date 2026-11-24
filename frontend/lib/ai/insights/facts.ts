@@ -84,6 +84,29 @@ export async function buildInsightsFacts(
   }
 }
 
+const CENT = 0.005
+
+/** Something happened in these totals: an order, a sale, ad spend, or a
+ *  refund or chargeback arriving. Fixed costs alone do not count — they run
+ *  by the calendar, not by anything the store did. */
+function hasActivity(t: TotalsView | null): boolean {
+  if (!t) return false
+  const money = (n: number | null) => (n ?? 0) > CENT
+  return t.orders > 0 || money(t.revenue) || money(t.metaSpend) || money(t.shopSpend)
+    || t.refundCount > 0 || t.chargebackCount > 0
+}
+
+/**
+ * Neither the window nor the one before it has anything in it — a store that
+ * did not sell yet (Hibikura before 7 nov), or one long dead. The sheet would
+ * be zeros only, and the model call is paid: generateInsights refuses before
+ * making it. A quiet window after a busy one still goes to the model ("vendas
+ * caíram a zero" is worth reading).
+ */
+export function nothingToRead(f: Pick<InsightsFacts, 'totals' | 'previousTotals'>): boolean {
+  return !hasActivity(f.totals) && !hasActivity(f.previousTotals)
+}
+
 // ─── The sheet as text ────────────────────────────────────────────────────────
 
 const VERDICT_PT: Record<string, string> = { kill: 'desligar', scale: 'escalar', refresh: 'trocar criativo', ok: 'ok' }

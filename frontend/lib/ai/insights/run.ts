@@ -3,7 +3,7 @@ import { INSIGHTS_EFFORT, INSIGHTS_MAX_TOKENS, INSIGHTS_MODEL } from '../config'
 import { logUsage, messageText, type AiErrorCode, type OpenStream } from '../claude'
 import type { Send } from '../sse'
 import type { InsightsWindow } from '../window'
-import { factSheetText, type InsightsFacts } from './facts'
+import { factSheetText, nothingToRead, type InsightsFacts } from './facts'
 import { INSIGHTS_SCHEMA, insightsSystemPrompt, insightsUserMessage } from './prompt'
 import { numberIndex, parseInsights, type InsightCard } from './result'
 
@@ -52,7 +52,9 @@ export interface InsightsResult {
   dataGaps: string[]
 }
 
-export type InsightsErrorCode = AiErrorCode | 'refused' | 'truncated' | 'invalid_output' | 'no_closed_days'
+/** no_data: the window and the one before it are empty (facts nothingToRead);
+ *  refused before the model call, never cached. */
+export type InsightsErrorCode = AiErrorCode | 'refused' | 'truncated' | 'invalid_output' | 'no_closed_days' | 'no_data'
 
 export type InsightsEvent =
   | { type: 'start'; store: { id: string; name: string }; window: InsightsWindowInfo; split: boolean; model: string }
@@ -103,13 +105,19 @@ export function insightsRequest(f: InsightsFacts) {
 
 /**
  * One Opus call over the fact sheet, streamed. Resolves with the validated
- * result; throws InsightsFailure for a refusal, a cut-off answer or unusable
- * output (none of which is ever cached), and the SDK's own errors otherwise.
+ * result; throws InsightsFailure for an empty sheet (before any call), a
+ * refusal, a cut-off answer or unusable output (none of which is ever cached),
+ * and the SDK's own errors otherwise.
  */
 export async function generateInsights(
   f: InsightsFacts, send: Send<InsightsEvent>, signal: AbortSignal, open: OpenStream,
   opts: { viewerKey: string; ttlMs: number; now?: Date },
 ): Promise<InsightsResult> {
+  // The Resumo hides the button for a window before the first sale; this
+  // keeps any other caller (an old tab, /dev/ui) from paying for zeros.
+  if (nothingToRead(f)) {
+    throw new InsightsFailure('no_data', 'Não há vendas nem gasto em anúncios neste período nem no anterior: a IA não tem o que ler. Escolha outro período.')
+  }
   const { sheet, params } = insightsRequest(f)
   const startedAt = Date.now()
   const stream = open(params, signal)

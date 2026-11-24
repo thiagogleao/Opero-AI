@@ -98,6 +98,26 @@ export const PHASE_TEXT: Record<Phase, string> = {
   waiting: 'Esta mesma leitura já está sendo gerada (outra aba ou outra pessoa). Aguardando o resultado…',
 }
 
+/**
+ * The window ends before the store's first sale and has nothing in it — the
+ * page's own rule (components/campaigns/storeStart isBeforeStart), which the
+ * verdict, the ledger and every block already follow. The card then says the
+ * same thing instead of offering a paid generation over an empty sheet
+ * (Hibikura 28 out – 3 nov, first sale 7 nov; Glooty in October).
+ */
+export interface NotStarted {
+  storeName: string
+  /** The first sale as the page writes it: "7 nov". */
+  firstSale: string
+}
+
+export function notStartedText(n: NotStarted): { title: string; text: string } {
+  return {
+    title: 'A loja ainda não vendia nesse período',
+    text: `A ${n.storeName} começou a vender em ${n.firstSale}: a IA não tem números para ler antes disso. Escolha um período a partir de ${n.firstSale}.`,
+  }
+}
+
 /** "18 out – 16 nov · dias completos" plus why it differs from the period asked. */
 export function windowNote(w: InsightsWindowInfo): string | null {
   if (w.shortened) return `Limitada aos últimos ${w.days} dias completos.`

@@ -75,6 +75,8 @@ export function describeAiError(input: Input, surface: AiSurface): UiError {
       return e('invalid_output', 'Resposta fora do formato', 'A IA devolveu uma resposta fora do formato. Tente de novo.')
     case 'no_closed_days':
       return e('no_closed_days', 'Sem dias completos', 'A leitura usa só dias completos e este período ainda não tem nenhum. Escolha um período que termine ontem ou antes.', false)
+    case 'no_data':
+      return e('no_data', 'Nada para ler neste período', 'Não há vendas nem gasto em anúncios neste período nem no anterior: a IA não tem o que ler. Escolha outro período.', false)
     case 'aborted':
       return e('aborted', 'Interrompida', surface === 'insights'
         ? 'A análise em andamento foi interrompida. Tente de novo.'

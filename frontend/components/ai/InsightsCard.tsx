@@ -10,7 +10,11 @@
  *          from: string      — window start, YYYY-MM-DD (store's timezone)
  *          to: string        — window end, YYYY-MM-DD
  *          split: boolean    — partner view: the money stays whole-store and a
- *                              "Sua parte (50%)" line comes from the API }
+ *                              "Sua parte (50%)" line comes from the API
+ *          notStarted?: { storeName, firstSale } | null
+ *                            — the window ends before the store's first sale
+ *                              (the page's isBeforeStart): the card says so and
+ *                              neither offers a generation nor asks the server }
  *
  * Generated only on click; on load it only shows a reading already cached for
  * this exact store + window + split, with its age. The server reads closed
@@ -27,7 +31,9 @@ import { Count, Money, Pct } from '@/components/ui/Display'
 import { Icon } from '@/components/ui/Icon'
 import { RoasGauge } from '@/components/ui/RoasGauge'
 import { formatRelativeTime, plural } from '@/lib/format'
-import { adChannelOf, channelRoas, CONFIDENCE, KIND, PHASE_TEXT, ROAS_LABEL, TARGET, windowNote } from './insightsModel'
+import {
+  adChannelOf, channelRoas, CONFIDENCE, KIND, notStartedText, PHASE_TEXT, ROAS_LABEL, TARGET, windowNote, type NotStarted,
+} from './insightsModel'
 import { useInsights, type InsightsState } from './useInsights'
 import s from './Insights.module.css'
 
@@ -36,6 +42,9 @@ export interface InsightsCardProps {
   from: string
   to: string
   split: boolean
+  /** Set by the page when the window ends before the store's first sale and
+   *  has nothing in it (components/campaigns/storeStart isBeforeStart). */
+  notStarted?: NotStarted | null
 }
 
 const HOW_TO = 'O que mudou e o que fazer, escrito pela IA a partir dos números do Opero — os mesmos desta página. Só é gerada quando você pede.'
@@ -80,7 +89,24 @@ function useNow(everyMs: number, active: boolean): number {
   return now
 }
 
-export function InsightsCard({ storeId, from, to, split }: InsightsCardProps) {
+export function InsightsCard({ notStarted, ...req }: InsightsCardProps) {
+  // Two components, not a flag inside one: the live card's hook asks the
+  // server on mount, and a store that did not exist yet has nothing to ask.
+  return notStarted ? <NotStartedCard n={notStarted} /> : <LiveInsightsCard {...req} />
+}
+
+/** Every block on the page says the store did not sell yet; so does this one,
+ *  with no "Gerar leitura" (a paid call over an empty fact sheet). */
+function NotStartedCard({ n }: { n: NotStarted }) {
+  const t = notStartedText(n)
+  return (
+    <Block title="Leitura da IA" howTo={HOW_TO} info={INFO} infoLabel="Como a leitura da IA é feita">
+      <EmptyState compact icon="clock" title={t.title}>{t.text}</EmptyState>
+    </Block>
+  )
+}
+
+function LiveInsightsCard({ storeId, from, to, split }: Omit<InsightsCardProps, 'notStarted'>) {
   const { state, generate, regenerate, cancel, recheck } = useInsights({ storeId, from, to, split })
   const generating = state.kind === 'generating'
   const now = useNow(generating ? 1000 : 30_000, generating || state.kind === 'ready' || state.kind === 'failed')
@@ -132,7 +158,7 @@ export function InsightsCard({ storeId, from, to, split }: InsightsCardProps) {
         )}
 
         {state.kind === 'unavailable' && (
-          <EmptyState compact icon={state.error.code === 'no_closed_days' ? 'calendar' : 'lock'} title={state.error.title}>
+          <EmptyState compact icon={state.error.code === 'no_closed_days' || state.error.code === 'no_data' ? 'calendar' : 'lock'} title={state.error.title}>
             {state.error.message}
           </EmptyState>
         )}
