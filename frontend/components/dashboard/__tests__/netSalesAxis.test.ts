@@ -6,9 +6,11 @@ import { NetSalesBars, type NetDay } from '../NetSalesBars'
 
 // A y tick is a grid <line> followed by its end-anchored label, in one <g>
 // (the day columns are <g>s that open with a hit <rect>, never a <line>).
+// The text is compared as read: lib/format may glue a sign to its "$" with an
+// invisible word joiner (U+2060), which draws nothing.
 const ticks = (html: string) =>
   [...html.matchAll(/<g><line[^>]*>(?:<\/line>)?<text x="([^"]+)"[^>]*text-anchor="end"[^>]*>([^<]*)<\/text><\/g>/g)]
-    .map(m => ({ x: Number(m[1]), text: m[2] }))
+    .map(m => ({ x: Number(m[1]), text: m[2].replace(/⁠/g, '') }))
 const render = (days: NetDay[], share?: number) =>
   ticks(renderToStaticMarkup(createElement(NetSalesBars, { days, share, ariaLabel: 'x' })))
 const day = (date: string, value: number): NetDay => ({ date, value, revenue: Math.max(0, value), adSpend: Math.max(0, -value), orders: 0 })

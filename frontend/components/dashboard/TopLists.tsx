@@ -2,15 +2,27 @@
  * TopProducts and TopCountries — the five biggest products and countries of the
  * period, from the same engine pass as the verdict (lib/views/store), with
  * captions that say what the numbers are and are not. Server components.
+ * An empty window that is not "no sales" (before the first sale, or after an
+ * archived store's archive day: `empty`, ./emptyWindow) says why instead of
+ * "Nenhum pedido no período".
  */
 
 import Link from 'next/link'
 import type { PageContext } from '@/lib/views/page'
 import type { StoreSummary } from '@/lib/views/store'
 import { countryName, SMALL_SAMPLE, TERRITORIES_NOTE } from '@/lib/data/countries'
-import { formatMoney, formatPct, plural } from '@/lib/format'
+import { formatCount, formatMoney, formatPct, plural } from '@/lib/format'
 import { Badge, Block, EmptyState, Icon, Money, initials } from '@/components/ui'
+import { emptyWindowText, type EmptyWindow } from './emptyWindow'
 import s from './dashboard.module.css'
+
+/** The empty list's state: the verdict's reason when it has one. */
+function EmptyList({ ctx, empty, icon, title, text }: {
+  ctx: PageContext; empty: EmptyWindow | null; icon: 'box' | 'globe'; title: string; text: string
+}) {
+  const t = empty ? emptyWindowText(empty, ctx.rangeLabel) : null
+  return <EmptyState compact icon={t ? 'clock' : icon} title={t ? t.title : title}>{t ? t.text : text}</EmptyState>
+}
 
 function Share({ pct }: { pct: number | null }) {
   return (
@@ -20,7 +32,7 @@ function Share({ pct }: { pct: number | null }) {
   )
 }
 
-export function TopProducts({ ctx, summary }: { ctx: PageContext; summary: StoreSummary }) {
+export function TopProducts({ ctx, summary, empty = null }: { ctx: PageContext; summary: StoreSummary; empty?: EmptyWindow | null }) {
   const list = summary.products
   const configured = summary.pnl.configured
   const link = <Link className={s.link} href={ctx.hrefWith('/products')}>Ver todos os produtos <Icon name="arrowRight" size={12} /></Link>
@@ -43,7 +55,7 @@ export function TopProducts({ ctx, summary }: { ctx: PageContext; summary: Store
       ) : undefined}
     >
       {list.rows.length === 0 ? (
-        <EmptyState compact icon="box" title="Nenhum produto vendido no período">Sem pedidos em {ctx.rangeLabel}.</EmptyState>
+        <EmptyList ctx={ctx} empty={empty} icon="box" title="Nenhum produto vendido no período" text={`Sem pedidos em ${ctx.rangeLabel}.`} />
       ) : (
         <div className={s.rank}>
           {list.rows.map(p => (
@@ -52,7 +64,7 @@ export function TopProducts({ ctx, summary }: { ctx: PageContext; summary: Store
               <div style={{ minWidth: 0 }}>
                 <div className={s.rankName} title={p.title}>{p.title}</div>
                 <div className={s.rankMeta}>
-                  <span><b>{p.units}</b> {p.units === 1 ? 'unidade' : 'unidades'} · {plural(p.orders, 'pedido', 'pedidos')}</span>
+                  <span><b>{formatCount(p.units)}</b> {p.units === 1 ? 'unidade' : 'unidades'} · {plural(p.orders, 'pedido', 'pedidos')}</span>
                   {configured && p.contributionMargin !== null && (
                     <span>margem antes dos anúncios <b className={p.contribution < 0 ? 'neg' : undefined}>{formatPct(p.contributionMargin, { digits: 0 })}</b></span>
                   )}
@@ -71,7 +83,7 @@ export function TopProducts({ ctx, summary }: { ctx: PageContext; summary: Store
   )
 }
 
-export function TopCountries({ ctx, summary }: { ctx: PageContext; summary: StoreSummary }) {
+export function TopCountries({ ctx, summary, empty = null }: { ctx: PageContext; summary: StoreSummary; empty?: EmptyWindow | null }) {
   const list = summary.countries
   const hasUs = list.rows.some(r => r.country === 'US')
   return (
@@ -92,7 +104,7 @@ export function TopCountries({ ctx, summary }: { ctx: PageContext; summary: Stor
       ) : undefined}
     >
       {list.rows.length === 0 ? (
-        <EmptyState compact icon="globe" title="Nenhum pedido no período">Sem endereços de entrega em {ctx.rangeLabel}.</EmptyState>
+        <EmptyList ctx={ctx} empty={empty} icon="globe" title="Nenhum pedido no período" text={`Sem endereços de entrega em ${ctx.rangeLabel}.`} />
       ) : (
         <div className={s.rank}>
           {list.rows.map(c => (

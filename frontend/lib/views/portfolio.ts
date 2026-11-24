@@ -135,6 +135,11 @@ export interface PortfolioStoreRow {
    *  unknown (no order yet, or not loaded). A window before it is "the store
    *  did not sell yet", not a dead month (lib/views/verdict reads it). */
   firstOrderDate: string | null
+  /** An archived store's archive day on its own calendar (YYYY-MM-DD): nothing
+   *  is synced after it, so a later window has no data rather than "no sales"
+   *  (lib/views/verdict reads it). Null for active stores or when unknown;
+   *  absent in older answers. */
+  archivedOn?: string | null
 }
 
 export interface PortfolioComparison extends DateRange {
@@ -275,7 +280,7 @@ export interface StoreAwaiting {
 /** Ninety-day dispute health. The rate that matters to Shopify Payments is
  *  per store (each store is its own merchant account), hence `byStore`. */
 export interface PortfolioChargebackHealth extends ChargebackHealth {
-  byStore: { storeId: string; name: string; count: number; orders: number; rate: number; open: number; amount: number }[]
+  byStore: { storeId: string; name: string; count: number; orders: number; rate: number; open: number; amount: number; prevented: number }[]
   /** Every dispute that can still be answered, soonest deadline first: the
    *  whole list, not the first rows (getChargebackHealth reads 5 per store,
    *  and the phone showed 4 of 12 under a heading that read as the to-do list). */
@@ -284,6 +289,28 @@ export interface PortfolioChargebackHealth extends ChargebackHealth {
   awaitingByStore: { storeId: string; name: string; count: number }[]
   /** Disputes still waiting for evidence whose deadline already passed. */
   overdue: number
+  /** Stores whose token cannot read Shopify Payments disputes (health
+   *  readable === false): their zero is no proof. Optional: an answer cached
+   *  on the phone from before the field has none. */
+  unreadable?: { storeId: string; name: string }[]
+  /**
+   * At least one of these stores had a dispute read at any time, not only in
+   * the 90 days (the desktop's loadChargebacks neverSeen, inverted). With no
+   * dispute in the 90 days, this is what tells "none lately" (a clean record)
+   * from "never read one" (maybe no permission): `hasData` is the 90 days'
+   * count, so it was false exactly when the list was empty and the clean
+   * state could never show. Optional: an older cached answer has none.
+   */
+  everRead?: boolean
+  /**
+   * Stores whose 90-day orders are left out of `orders` and `rate`: not one
+   * of their disputes was ever read (everRead false) or their token cannot
+   * read them (readable false), so their zero is unknown, not "no dispute".
+   * Counted as zero, Glooty's and Hibikura's 216 orders put Todas at 1,95%
+   * (180 of 9.247) where the stores read gave 1,99% (180 of 9.031). Optional:
+   * an older cached answer has none.
+   */
+  rateLeftOut?: { storeId: string; name: string; orders: number }[]
 }
 
 export interface PortfolioFreshness {
@@ -340,7 +367,17 @@ export interface PortfolioIncludes {
   liveFeed?: boolean
   chargebackHealth?: boolean
   freshness?: boolean
+  /**
+   * A custom window compared by a preset's rule (only 'mtd' or 'lastmonth',
+   * COMPARE_AS; anything else is ignored): the phone sends it for the dates a
+   * store row of "Todas · Este mês" opened, so Hibikura's 1–23 nov is compared
+   * with "mesmos dias do mês passado" as Todas is, not "23 dias anteriores".
+   */
+  compareAs?: Period
 }
+
+/** Presets whose comparison rule a custom window may borrow (compareAs). */
+export const COMPARE_AS: readonly Period[] = ['mtd', 'lastmonth']
 
 export class PortfolioInputError extends Error {}
 
@@ -516,16 +553,35 @@ export function combineIntraday(series: IntradayStoreSeries[]): IntradayPoint[] 
   return out
 }
 
+/**
+ * A store with no dispute in the 90 days whose zero proves nothing: none of
+ * its disputes was ever read (everRead false: "nenhuma disputa lida"), or its
+ * token cannot read them (readable false). everRead absent means "not looked
+ * up" (callers that did not load it), read as before.
+ */
+function unknownDisputes(e: { health: ChargebackHealth; everRead?: boolean }): boolean {
+  return e.health.count === 0 && (e.everRead === false || e.health.readable === false)
+}
+
 /** Several stores' 90-day dispute health, summed. The rate is recomputed from
  *  the summed counts: averaging rates would let a store with four orders weigh
- *  as much as one with four thousand. */
+ *  as much as one with four thousand. Orders of stores whose disputes are
+ *  unknown (unknownDisputes) stay out of the rate and are named
+ *  (rateLeftOut). */
 export function combineHealth(
-  each: { store: PortfolioStoreInput; health: ChargebackHealth; awaiting?: StoreAwaiting }[],
+  each: { store: PortfolioStoreInput; health: ChargebackHealth; awaiting?: StoreAwaiting; everRead?: boolean }[],
 ): PortfolioChargebackHealth {
-  const sum = { count: 0, orders: 0, amount: 0, fees: 0, open: 0, lost: 0, won: 0, overdue: 0 }
-  for (const { health: h, awaiting } of each) {
-    sum.count += h.count; sum.orders += h.orders; sum.amount += h.amount; sum.fees += h.fees
+  // prevented and other too (lib/adjustments sets them), so the parts add up
+  // to the count here as on the desktop Resumo.
+  const sum = { count: 0, orders: 0, amount: 0, fees: 0, open: 0, lost: 0, won: 0, prevented: 0, other: 0, overdue: 0 }
+  const rateLeftOut: { storeId: string; name: string; orders: number }[] = []
+  for (const e of each) {
+    const { health: h, awaiting } = e
+    if (unknownDisputes(e)) rateLeftOut.push({ storeId: e.store.id, name: e.store.name, orders: h.orders })
+    else sum.orders += h.orders
+    sum.count += h.count; sum.amount += h.amount; sum.fees += h.fees
     sum.open += h.open; sum.lost += h.lost; sum.won += h.won
+    sum.prevented += h.prevented ?? 0; sum.other += h.other ?? 0
     sum.overdue += awaiting?.overdue ?? 0
   }
   // The complete list when it was loaded; health.dueSoon (5 rows per store)
@@ -542,10 +598,15 @@ export function combineHealth(
       .filter(a => a.count > 0)
       .sort((a, b) => b.count - a.count),
     hasData: each.some(e => e.health.hasData),
+    // A dispute in the 90 days is one read, whatever the all-time lookup said.
+    everRead: each.some(e => e.everRead || e.health.count > 0),
+    unreadable: each.filter(e => e.health.readable === false).map(e => ({ storeId: e.store.id, name: e.store.name })),
+    rateLeftOut,
     byStore: each
       .filter(e => e.health.count > 0)
       .map(({ store, health: h }) => ({
         storeId: store.id, name: store.name, count: h.count, orders: h.orders, rate: h.rate, open: h.open, amount: h.amount,
+        prevented: h.prevented ?? 0,
       }))
       .sort((a, b) => b.rate - a.rate),
   }
@@ -573,6 +634,9 @@ export interface PortfolioInputs {
    *  Optional: without it every row's firstOrderDate is null and the verdict
    *  reads a window before the store opened as "sem vendas". */
   firstOrderDates?: ReadonlyMap<string, string>
+  /** Archived stores' archive day on their own calendar (loadArchiveDates).
+   *  Optional: without it a window after the archive date reads "sem vendas". */
+  archiveDates?: ReadonlyMap<string, string>
   /** rangeCutNote of the window, when buildPortfolio had to cut it. */
   rangeNote?: string | null
 }
@@ -604,6 +668,7 @@ export function assemblePortfolio(i: PortfolioInputs): PortfolioView {
       dayState, dayClosed: dayState === 'closed', storeToday, minutesCovered: p.minutesCovered,
       totals: p.totals, comparison, badges: [], freshness,
       firstOrderDate: i.firstOrderDates?.get(s.id) ?? null,
+      archivedOn: i.archiveDates?.get(s.id) ?? null,
     }
     row.badges = badgesFor(row, i.range)
     rows.push(row)
@@ -713,6 +778,41 @@ export function assemblePortfolio(i: PortfolioInputs): PortfolioView {
   }
 }
 
+// ─── Comparison of an archived store (pure) ──────────────────────────────────
+
+/** comparisonRange's label for "Este mês" (and row dates compared like it). */
+export const MTD_LABEL = 'mesmos dias do mês passado'
+
+/**
+ * What an archived store's window is compared with. Nothing is read after its
+ * archive day (`archivedOn`, null when unknown) and its day never runs:
+ *  - a window that runs past the archive day is compared on the days that
+ *    were read (the verdict's frozenTail: "não teve vendas em 1–10 nov"):
+ *    "Este mês" 1–24 nov, archived on 10 nov, with 1–10 out — the same days
+ *    of the month before, as for "Mês passado" cut by the archive — and any
+ *    other window with as many days right before them. It compared 10 read
+ *    days with 24 ("caiu 100% vs 1–24 out até 14h23");
+ *  - otherwise the same window, whole: "ontem até esta hora" is the day before.
+ * The same rule as the desktop page context (lib/views/page archivedWindow),
+ * and idempotent: a comparison it already moved maps to itself. Here so that
+ * buildPortfolio (the phone, /api/mobile) and lib/views/store (the Resumo,
+ * which re-exports it) compare an archived store alike; store.ts imports this
+ * module, so it cannot live there without an import cycle. The hour cut itself
+ * is left out by the pricing (store comparisonPlan, loadComparison below). A
+ * store that is not archived keeps `cmp`.
+ */
+export function archivedComparison(
+  store: { archived?: boolean }, archivedOn: string | null, range: DateRange, cmp: Comparison, tz: string, now: Date,
+): Comparison {
+  if (!store.archived) return cmp
+  if (archivedOn && range.from <= archivedOn && archivedOn < range.to) {
+    const read = { from: range.from, to: archivedOn }
+    const sameDays = cmp.label === MTD_LABEL || cmp.label === 'mês anterior'
+    return { ...comparisonRange(sameDays ? 'mtd' : 'custom', read, tz, now), sameTimeOfDay: false }
+  }
+  return { ...cmp, sameTimeOfDay: false, label: cmp.label === 'ontem até esta hora' ? 'dia anterior' : cmp.label }
+}
+
 // ─── Loading ──────────────────────────────────────────────────────────────────
 
 /**
@@ -723,6 +823,10 @@ export function assemblePortfolio(i: PortfolioInputs): PortfolioView {
  *  - Several days ending today ("Este mês", a custom range): the earlier
  *    window with its last day cut the same way.
  *  - Anything else: whole days.
+ * An archived store is never cut: it is not synced, so its day does not run
+ * and "até esta hora" means nothing for it (Squishy World's Este mês on the
+ * phone read "vs 1–24 out, até 15h11 de 24 out", the hour following the
+ * clock). Same rule as lib/views/store comparisonPlan(…, archived).
  */
 async function loadComparison(
   stores: readonly PortfolioStoreInput[], range: DateRange, cmp: Comparison, anchorToday: string, now: Date,
@@ -730,29 +834,37 @@ async function loadComparison(
   const ids = stores.map(s => s.id)
   const out = new Map<string, StoreComparison>()
   const tzOf = new Map(stores.map(s => [s.id, safeTz(s.timezone)]))
+  const archived = new Set(stores.filter(s => s.archived).map(s => s.id))
   // A store whose window has not begun has no "same time" to compare with.
   const notStarted = (id: string) => range.from > todayInTz(tzOf.get(id) ?? 'UTC', now)
   const whole: DateRange = { from: cmp.from, to: cmp.to }
   const put = (id: string, included: boolean, cutoffMinutes: number | null, totals: PnL) =>
     out.set(id, { included, range: whole, cutoffMinutes: included ? cutoffMinutes : null, totals: included ? totals : sumPnL([]) })
 
-  const cutLast = cmp.sameTimeOfDay || range.to >= anchorToday
+  const cutLast = !stores.every(s => s.archived) && (cmp.sameTimeOfDay || range.to >= anchorToday)
   if (!cutLast) {
     for (const [id, p] of await computePnL(ids, whole, {}, now)) put(id, true, null, p.totals)
     return out
   }
 
   if (range.from === range.to && cmp.from === cmp.to && cmp.to === shiftDate(range.to, -1)) {
-    for (const [id, p] of await computeSameTimeComparison(ids, range.to, now)) {
-      put(id, !notStarted(id), p.cutoffMinutes, p.totals)
-    }
+    // Archived stores beside running ones: yesterday whole, never cut.
+    const liveIds = ids.filter(id => !archived.has(id))
+    const archivedIds = ids.filter(id => archived.has(id))
+    const [sameTime, wholeDay] = await Promise.all([
+      computeSameTimeComparison(liveIds, range.to, now),
+      archivedIds.length ? computePnL(archivedIds, whole, {}, now) : Promise.resolve(new Map<string, StorePnL>()),
+    ])
+    for (const [id, p] of sameTime) put(id, !notStarted(id), p.cutoffMinutes, p.totals)
+    for (const [id, p] of wholeDay) put(id, !notStarted(id), null, p.totals)
     return out
   }
 
   // Several days, the last one cut: the engine only cuts single-day windows, so
-  // the run-up and the last day are priced apart and added.
+  // the run-up and the last day are priced apart and added. An archived
+  // store's last day is priced whole (no cut).
   const cut: Record<string, number | null> = {}
-  for (const [id, tz] of tzOf) cut[id] = todayInTz(tz, now) === range.to ? minutesIntoDay(tz, now) : null
+  for (const [id, tz] of tzOf) cut[id] = !archived.has(id) && todayInTz(tz, now) === range.to ? minutesIntoDay(tz, now) : null
   const [lastDay, runUp] = await Promise.all([
     computePnL(ids, { from: cmp.to, to: cmp.to }, { cutoffMinutes: cut }, now),
     cmp.from < cmp.to
@@ -867,6 +979,20 @@ async function loadSyncRows(ids: string[]): Promise<SyncRow[]> {
 }
 
 /**
+ * The day each archived store was archived, on its own calendar (timestamptz
+ * converted once, in the store's timezone). Active stores are absent. Exported
+ * for one-store callers that assemble the view themselves (lib/views/store).
+ */
+export async function loadArchiveDates(ids: readonly string[]): Promise<Map<string, string>> {
+  if (!ids.length) return new Map()
+  const rows = await query<{ id: string; d: string | null }>(
+    `SELECT id, (archived_at AT TIME ZONE COALESCE(timezone, 'UTC'))::date::text AS d
+       FROM tenants
+      WHERE id = ANY($1::text[]) AND archived_at IS NOT NULL`, [[...ids]])
+  return new Map(rows.filter(r => isIsoDate(r.d)).map(r => [r.id, r.d as string]))
+}
+
+/**
  * Each store's first kept order, as a date on the store's own calendar — the
  * same timezone and the same "kept" rule the engine dates orders with
  * (lib/engine/pnl loadOrders), so "começou a vender em 7 nov" is the first day
@@ -920,12 +1046,24 @@ async function loadAwaiting(ids: readonly string[]): Promise<Map<string, StoreAw
   return out
 }
 
+/** The stores among `ids` with at least one dispute ever read (any date). */
+async function loadEverRead(ids: readonly string[]): Promise<Set<string>> {
+  if (!ids.length) return new Set()
+  const rows = await query<{ tenant_id: string }>(
+    `SELECT DISTINCT tenant_id FROM order_adjustments
+      WHERE tenant_id = ANY($1::text[]) AND kind = 'chargeback'`, [[...ids]])
+  return new Set(rows.map(r => r.tenant_id))
+}
+
 async function loadHealth(stores: readonly PortfolioStoreInput[]): Promise<PortfolioChargebackHealth> {
-  const [each, awaiting] = await Promise.all([
+  const ids = stores.map(s => s.id)
+  const [each, awaiting, everRead] = await Promise.all([
     Promise.all(stores.map(async store => ({ store, health: await getChargebackHealth(store.id) }))),
-    loadAwaiting(stores.map(s => s.id)),
+    loadAwaiting(ids),
+    // Context for an empty 90 days only: a failed lookup leaves the hedge.
+    loadEverRead(ids).catch(() => new Set<string>()),
   ])
-  return combineHealth(each.map(e => ({ ...e, awaiting: awaiting.get(e.store.id) })))
+  return combineHealth(each.map(e => ({ ...e, awaiting: awaiting.get(e.store.id), everRead: everRead.has(e.store.id) })))
 }
 
 /**
@@ -954,15 +1092,28 @@ export async function buildPortfolio(
   // A custom range is cut the way the desktop pages cut it (portfolioLimits):
   // ?from=1990-01-01 priced 13.470 days per store, plus a 1953–1989 comparison.
   const { range, note: rangeNote } = resolvePortfolioWindow(period, anchor, from, to, now)
-  const cmp = comparisonRange(period, range, anchor, now)
+  // Dates a store row opened from "Este mês" or "Mês passado" are compared by
+  // that preset's rule (PortfolioIncludes.compareAs), not as "N dias anteriores".
+  const cmpPeriod = period === 'custom' && include.compareAs && COMPARE_AS.includes(include.compareAs) ? include.compareAs : period
+  const cmp = comparisonRange(cmpPeriod, range, anchor, now)
   const nameOf = new Map(unique.map(s => [s.id, s.name]))
   // Archived stores are not selling: no feed, and no "missing webhook" noise.
   const feedIds = unique.filter(s => !s.archived).map(s => s.id)
 
   const noFeed = { items: [] as LiveOrderItem[], covered: new Set<string>(ids) }
-  const [current, compared, chargebackHealth, feed, syncRows, firstOrderDates] = await Promise.all([
+  const archivedIds = unique.filter(s => s.archived).map(s => s.id)
+  // Wording only ("arquivada desde 10 nov"): only archived stores ask. A lone
+  // archived store's comparison also waits for it (archivedComparison): its
+  // Este mês is compared on the days read (1–10 out), as on the desktop
+  // Resumo, not "1–24 out, até 15h11". Any other view resolves it at once.
+  const archiveP = archivedIds.length
+    ? loadArchiveDates(archivedIds).catch(err => { console.error('[portfolio] archive dates', err); return new Map<string, string>() })
+    : Promise.resolve(new Map<string, string>())
+  const lone = unique.length === 1 && unique[0].archived ? unique[0] : null
+  const cmpP = lone ? archiveP.then(m => archivedComparison(lone, m.get(lone.id) ?? null, range, cmp, anchor, now)) : Promise.resolve(cmp)
+  const [current, compared, chargebackHealth, feed, syncRows, firstOrderDates, archiveDates, comparison] = await Promise.all([
     computePnL(ids, range, {}, now),
-    ids.length ? loadComparison(unique, range, cmp, anchorToday, now) : Promise.resolve(new Map<string, StoreComparison>()),
+    ids.length ? cmpP.then(c => loadComparison(unique, range, c, anchorToday, now)) : Promise.resolve(new Map<string, StoreComparison>()),
     // These blocks are context, not the P&L: a failure must not blank the screen.
     want.chargebackHealth && ids.length
       ? loadHealth(unique).catch(err => { console.error('[portfolio] chargeback health', err); return null })
@@ -978,11 +1129,13 @@ export async function buildPortfolio(
     // Wording only ("começou a vender em 7 nov"): without it the verdict
     // falls back to "sem vendas", never to wrong numbers.
     loadFirstOrderDates(ids).catch(err => { console.error('[portfolio] first orders', err); return new Map<string, string>() }),
+    archiveP,
+    cmpP,
   ])
 
   return assemblePortfolio({
-    stores: unique, period, range, comparison: cmp, anchorTimezone: anchor, now,
+    stores: unique, period, range, comparison, anchorTimezone: anchor, now,
     current, compared, chargebackHealth,
-    liveFeed: feed.items, liveCovered: feed.covered, syncRows, firstOrderDates, rangeNote,
+    liveFeed: feed.items, liveCovered: feed.covered, syncRows, firstOrderDates, archiveDates, rangeNote,
   })
 }

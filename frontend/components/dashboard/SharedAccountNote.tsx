@@ -23,7 +23,9 @@ import type { SharedAdAccount } from '@/lib/attributionModels'
 import { formatMoney, plural } from '@/lib/format'
 import { ButtonLink, Callout } from '@/components/ui'
 import { loadSharedInWindow, loadSharedPairs, SHARED_LOOKBACK_DAYS } from '@/components/portfolio/data'
-import { pairOrdersIn } from '@/components/portfolio/model'
+import { pairBeforeSalesStart, pairBeforeStartText, pairOrdersIn } from '@/components/portfolio/model'
+import { loadFirstOrderDates } from '@/lib/views/portfolio'
+import { dateBeside } from '@/components/campaigns/storeStart'
 
 export async function SharedAccountNote({ ctx, store }: { ctx: PageContext; store: StoreRef }) {
   // The viewer's other stores are the only candidates: a partner never sees a
@@ -36,6 +38,12 @@ export async function SharedAccountNote({ ctx, store }: { ctx: PageContext; stor
     loadSharedInWindow(stores, ctx.range),
   ])
   if (!pairs.length) return null
+  // The sales stores' first sales: a window before one did not exist for it
+  // (CAMP HALLOW before 24 jul 2026), and there is no
+  // earlier period to add up. Only stores in a pair pay for this read; a
+  // failure keeps the plain wording.
+  const firstSales = await loadFirstOrderDates([...new Set(pairs.map(p => p.salesStoreId))])
+    .catch(err => { console.error('[resumo] shared pair first sale', err); return new Map<string, string>() })
   const all = <ButtonLink href={ctx.hrefWith('/overview', { loja: null })} size="sm" icon="arrowRight">Ver as lojas juntas</ButtonLink>
   const history = (p: SharedAdAccount) => `Nos últimos ${SHARED_LOOKBACK_DAYS} dias, ${plural(p.orders, 'pedido', 'pedidos')} da ${p.salesStoreName} (${formatMoney(p.revenue)}) vieram de anúncios pagos pela ${p.adStoreName}.`
   return (
@@ -45,6 +53,7 @@ export async function SharedAccountNote({ ctx, store }: { ctx: PageContext; stor
         const sells = p.salesStoreId === store.id
         // null: the window read failed — keep the cautious, 90-day wording.
         const now = pairOrdersIn(inWindow, p)
+        const salesFirst = firstSales.get(p.salesStoreId) ?? null
         // Past tense when the window has none of it: history, not the present.
         const title = sells
           ? `Os anúncios da ${p.salesStoreName} ${now === 0 ? 'rodaram' : 'rodam'} na conta da ${p.adStoreName}`
@@ -52,8 +61,12 @@ export async function SharedAccountNote({ ctx, store }: { ctx: PageContext; stor
         if (now === 0) {
           return (
             <Callout key={key} tone="info" icon="swap" title={title}>
-              {history(p)} Em {ctx.rangeLabel}, nenhum pedido rastreado da {p.salesStoreName} veio de anúncios da {p.adStoreName}:
-              o resultado deste período não está misturado. Para períodos anteriores, some as duas lojas.{' '}{all}
+              {history(p)}{' '}
+              {salesFirst && pairBeforeSalesStart(salesFirst, ctx.range)
+                // Before the sales store existed: no earlier period to add up.
+                ? pairBeforeStartText(p.salesStoreName, dateBeside(salesFirst, [ctx.range.from, ctx.range.to, ctx.comparison.from, ctx.comparison.to], ctx.today), ctx.rangeLabel)
+                : <>Em {ctx.rangeLabel}, nenhum pedido rastreado da {p.salesStoreName} veio de anúncios da {p.adStoreName}:
+                  o resultado deste período não está misturado. Para períodos anteriores, some as duas lojas.</>}{' '}{all}
             </Callout>
           )
         }

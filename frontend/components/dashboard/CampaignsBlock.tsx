@@ -14,9 +14,11 @@ import type { StoreSummary } from '@/lib/views/store'
 import { empateGap, loadCampaignSummary } from '@/lib/views/store'
 import type { CampaignRow } from '@/lib/data/campaigns'
 import { ACTION_LABEL, type CampaignAction, type CampaignDecision } from '@/lib/campaignSignal'
-import { formatMoney, formatPct, formatRangeLabel, formatRoas, plural } from '@/lib/format'
+import { formatCount, formatDate, formatMoney, formatPct, formatRangeLabel, formatRoas, plural } from '@/lib/format'
 import { Badge, Block, DataTable, EmptyState, ErrorState, Icon, Money, type ChipTone, type IconName } from '@/components/ui'
 import { RoasVsEmpate } from './RoasVsEmpate'
+import { creditedWithoutSalesText, ownAttributedRoas } from '@/components/campaigns/adsVerdict'
+import { emptyWindowText, type EmptyWindow } from './emptyWindow'
 import s from './dashboard.module.css'
 
 const ACTION_STYLE: Record<CampaignAction, { tone: ChipTone; icon: IconName }> = {
@@ -50,8 +52,10 @@ function status(c: CampaignRow): string {
   return `${st} · ${plural(Math.round(c.purchases), 'compra atribuída', 'compras atribuídas')}`
 }
 
-export async function CampaignsBlock({ ctx, summary, storeNames }: {
+export async function CampaignsBlock({ ctx, summary, storeNames, empty = null }: {
   ctx: PageContext; summary: StoreSummary; storeNames: ReadonlyMap<string, string>
+  /** The verdict's reason the window is empty (./emptyWindow emptyWindowOf). */
+  empty?: EmptyWindow | null
 }) {
   const title = 'Campanhas no Meta'
   let data
@@ -68,6 +72,15 @@ export async function CampaignsBlock({ ctx, summary, storeNames }: {
   const decided = formatRangeLabel(report.decisionWindow, ctx.today)
   const link = ctx.hrefWith('/campaigns')
   const elsewhere = report.billedElsewhere
+  // The action is judged on the last 7 closed days; an archived store was not
+  // read on the ones after its archive day, so an action from them ("sem
+  // gasto nos 7 dias julgados", Squishy World on 17–23 nov) is about days
+  // without data. Such a block shows no action and says why.
+  const archivedOn = summary.row.archived ? summary.row.archivedOn ?? null : null
+  const unjudged = summary.row.archived && (!archivedOn || report.decisionWindow.to > archivedOn)
+  const judgedText = unjudged
+    ? <>Sem ação: ela é julgada nos últimos 7 dias fechados ({decided}), e a loja foi arquivada{archivedOn ? <> em {formatDate(archivedOn, ctx.today)}</> : ''} — esses dias não foram lidos.</>
+    : <>A ação é julgada nos últimos 7 dias fechados ({decided}), como na página Campanhas.</>
 
   // Ads the sync has not tied to a campaign: their spend is named apart, so
   // the counts here equal the campaigns page's and the money still adds up.
@@ -76,6 +89,20 @@ export async function CampaignsBlock({ ctx, summary, storeNames }: {
   )
 
   if (!h.top.length) {
+    // Before the first sale, or after an archived store's archive day, "this
+    // store had no Meta spend" is not what happened: the verdict's reason. Ads
+    // billed to another store's account still say where they ran.
+    const why = empty && !elsewhere.length && !unsyncedLine ? emptyWindowText(empty, ctx.rangeLabel) : null
+    if (why) {
+      return (
+        <Block title={title} howTo={`Campanhas com gasto em ${ctx.rangeLabel}.`}>
+          <EmptyState compact icon="clock" title={why.title}
+            action={<Link className={s.link} href={link}>Abrir Campanhas <Icon name="arrowRight" size={12} /></Link>}>
+            {why.text}
+          </EmptyState>
+        </Block>
+      )
+    }
     return (
       <Block title={title} howTo={`Campanhas com gasto em ${ctx.rangeLabel}.`}>
         <EmptyState compact icon="camp" title={`Nenhuma campanha com gasto em ${ctx.rangeLabel}`}
@@ -91,18 +118,24 @@ export async function CampaignsBlock({ ctx, summary, storeNames }: {
   }
 
   const attributed = h.attributedShare
+  // No sale at all: attributedShare is null, and the block dropped its Meta
+  // sentence, so "2 compras atribuídas $167 · ROAS 2,85×" sat under "A Glooty
+  // gastou $230 em anúncios e não vendeu nada" (1–5 nov). The words are the
+  // Campanhas page's (adsVerdict), over the store's own campaigns.
+  const noSaleCredit = creditedWithoutSalesText(ownAttributedRoas(report).value, report.storeRevenue, ctx.partial)
   return (
     <Block
       title={title}
-      howTo={<>{h.top.length === 1 ? 'A campanha que mais gastou' : `As ${h.top.length} campanhas que mais gastaram`} em {ctx.rangeLabel}. A ação é julgada nos últimos 7 dias fechados ({decided}), como na página Campanhas; o ROAS é comparado com o empate da loja{be ? ` (${formatRoas(be)})` : ''}.</>}
+      howTo={<>{h.top.length === 1 ? 'A campanha que mais gastou' : `As ${h.top.length} campanhas que mais gastaram`} em {ctx.rangeLabel}. {judgedText} O ROAS é comparado com o empate da loja{be ? ` (${formatRoas(be)})` : ''}.</>}
       info={report.formula}
       // The number the linked page shows on its tab ("Campanhas 6").
-      actions={<Link className={s.link} href={link}>Ver {h.listed > h.top.length ? `as ${h.listed} campanhas` : 'campanhas'} <Icon name="arrowRight" size={12} /></Link>}
+      actions={<Link className={s.link} href={link}>Ver {h.listed > h.top.length ? `as ${formatCount(h.listed)} campanhas` : 'campanhas'} <Icon name="arrowRight" size={12} /></Link>}
       flush
       footer={
         <div className={s.footLinks}>
           <span>
-            {attributed !== null && attributed > 100
+            {noSaleCredit ? <>{noSaleCredit} </>
+              : attributed !== null && attributed > 100
               // Hibikura's day: $1.259 credited against $1.245 sold read "(101%)"
               // as if it were a share; it is Meta counting more than happened.
               ? <>O Meta atribui <b>{formatMoney(report.storeRevenue * (attributed / 100))}</b> às campanhas desta loja, mais do que os <b>{formatMoney(report.storeRevenue)}</b> que ela vendeu: a atribuição do Meta não fecha com os pedidos. </>
@@ -142,7 +175,12 @@ export async function CampaignsBlock({ ctx, summary, storeNames }: {
               ? <RoasVsEmpate roas={c.roas} breakEven={c.shared ? null : be} gap={c.shared ? 'shared' : gap} size="mini" paused={!c.running} />
               : <span className="mut">—</span>,
             profit: c.estimatedProfit === null ? <span className="mut">—</span> : <Money value={ctx.part(c.estimatedProfit)} sign tone="auto" />,
-            action: (
+            action: unjudged ? (
+              <span className={s.actionCell}>
+                <Badge tone="mut">sem ação</Badge>
+                <span className={s.reason}>loja arquivada: os 7 dias julgados não foram lidos</span>
+              </span>
+            ) : (
               <span className={s.actionCell}>
                 <ActionBadge decision={c.decision} />
                 <span className={s.reason}>{c.shared ? c.shared.note : c.decision.reason}</span>

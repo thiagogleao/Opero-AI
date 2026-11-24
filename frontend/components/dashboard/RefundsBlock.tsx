@@ -5,9 +5,11 @@
  * soonest four, then "Mostrar as outras N") and a count of those past their
  * deadline.
  *
- * The period part is synchronous (it is in the window's engine totals); the
- * 90-day health is a property of the store, not of the period, and streams in
- * its own <Suspense> (ChargebackHealthPart).
+ * The period part is synchronous (it is in the window's engine totals), except
+ * the status today of the period's chargebacks (WindowDisputes, one small
+ * query, streams); the 90-day health is a property of the store, not of the
+ * period, and streams in its own <Suspense> (ChargebackHealthPart). Both name
+ * every status, so their parts add up to the count next to them.
  *
  * Partner split: refund cost and cash result are money results and are halved;
  * dispute counts, rates and the amounts disputed are facts and stay whole.
@@ -17,30 +19,26 @@ import { Suspense } from 'react'
 import type { PageContext } from '@/lib/views/page'
 import type { StoreSummary } from '@/lib/views/store'
 import { CHARGEBACK_LIMIT_PCT, CHARGEBACK_WATCH_PCT, dueInTz, loadChargebacks } from '@/lib/views/store'
-import type { ChargebackHealth } from '@/lib/adjustments'
-import { formatClock, formatDate, formatMoney, formatNumber, formatPct, plural } from '@/lib/format'
+import { getWindowDisputeStatuses, type ChargebackHealth } from '@/lib/adjustments'
+import { formatClock, formatCount, formatDate, formatMoney, formatNumber, formatPct, plural } from '@/lib/format'
 import { Block, Callout, Chip, ErrorState, Money, Skeleton } from '@/components/ui'
+import { disputeReasonText } from '@/lib/views/verdict'
+import { healthParts, rateWithoutPrevented, windowStatusText } from './disputes'
+import { emptyWindowText, type EmptyWindow } from './emptyWindow'
 import s from './dashboard.module.css'
 
-/** Shopify's dispute reason codes, in words. Unknown codes are shown as they come. */
-const REASON: Record<string, string> = {
-  product_unacceptable: 'produto não aceitável',
-  product_not_received: 'produto não recebido',
-  fraudulent: 'fraude (compra não reconhecida)',
-  unrecognized: 'cobrança não reconhecida',
-  credit_not_processed: 'reembolso não processado',
-  duplicate: 'cobrança duplicada',
-  subscription_canceled: 'assinatura cancelada',
-  general: 'motivo geral',
-  noncompliant: 'fora das regras da bandeira',
-  customer_initiated: 'iniciada pelo cliente',
-  debit_not_authorized: 'débito não autorizado',
-}
-
-export function RefundsBlock({ ctx, summary }: { ctx: PageContext; summary: StoreSummary }) {
+export function RefundsBlock({ ctx, summary, empty = null }: {
+  ctx: PageContext; summary: StoreSummary
+  /** The verdict's reason the window is empty (./emptyWindow emptyWindowOf). */
+  empty?: EmptyWindow | null
+}) {
   const t = summary.pnl.totals
   const configured = summary.pnl.configured
   const none = t.refundCount === 0 && t.chargebackCount === 0
+  // Before the first sale nothing can be refunded, and after an archived
+  // store's archive day nothing is read: "nenhum reembolso chegou" would
+  // claim a reading that never happened. Whatever did arrive is still shown.
+  const why = empty && none ? emptyWindowText(empty, ctx.rangeLabel).note : null
   // Nothing happened at all (a day that just started): "$0" would be the fake
   // zero the verdict above already refuses ("—, nenhum pedido até agora").
   const idle = none && t.orders === 0 && t.revenue <= 0 && t.adSpend <= 0 && t.fixedCosts <= 0
@@ -57,43 +55,72 @@ export function RefundsBlock({ ctx, summary }: { ctx: PageContext; summary: Stor
       <div className={s.adjGrid}>
         <div className={s.adjItem}>
           <span className="lbl">Reembolsos</span>
-          <span className={s.adjValue}>{t.refundCount ? <Money value={-ctx.part(t.refunds)} tone="auto" /> : <span className="mut">nenhum</span>}</span>
+          <span className={s.adjValue}>{t.refundCount ? <Money value={-ctx.part(t.refunds)} tone="auto" /> : <span className="mut">{why ? '—' : 'nenhum'}</span>}</span>
           <span className={s.adjNote}>
             {t.refundCount
               ? <>{plural(t.refundCount, 'reembolso', 'reembolsos')}, <b>{formatMoney(t.refundGross)}</b> devolvidos aos clientes; no lucro pesa a margem que voltou{half}</>
-              : 'nenhum reembolso chegou no período'}
+              : why ?? 'nenhum reembolso chegou no período'}
           </span>
         </div>
         <div className={s.adjItem}>
           <span className="lbl">Chargebacks</span>
-          <span className={s.adjValue}>{t.chargebackCount ? <Money value={-ctx.part(t.chargebacks + t.chargebackFees)} tone="auto" /> : <span className="mut">nenhum</span>}</span>
+          <span className={s.adjValue}>{t.chargebackCount ? <Money value={-ctx.part(t.chargebacks + t.chargebackFees)} tone="auto" /> : <span className="mut">{why ? '—' : 'nenhum'}</span>}</span>
+          {/* Every chargeback that arrived and was not won weighs here, open
+              or closed: calling them all "disputas abertas" read 37 open for
+              EPOCH's October, where 16 were. The split streams below. */}
           <span className={s.adjNote}>
             {t.chargebackCount
-              ? <>{plural(t.chargebackCount, 'disputa aberta', 'disputas abertas')}: <b>{formatMoney(t.chargebacks)}</b> disputados + <b>{formatMoney(t.chargebackFees)}</b> em taxas{half}</>
-              : 'nenhuma disputa aberta no período'}
+              ? <>{plural(t.chargebackCount, 'disputa pesa', 'disputas pesam')} no período: <b>{formatMoney(t.chargebacks)}</b> disputados + <b>{formatMoney(t.chargebackFees)}</b> em taxas{half}</>
+              : why ?? 'nenhuma disputa pesa no período'}
           </span>
+          <Suspense fallback={null}>
+            <WindowDisputes storeId={summary.store.id} from={ctx.range.from} to={ctx.range.to}
+              archived={summary.row.archived ? { on: summary.row.archivedOn ?? null, today: ctx.today } : null} />
+          </Suspense>
         </div>
         <div className={s.adjItem}>
           <span className="lbl">Resultado de caixa{ctx.split ? ' (sua parte)' : ''}</span>
           <span className={s.adjValue}>
-            {configured && !idle ? <Money value={ctx.part(t.cashResult)} tone="auto" /> : <span className="mut">—</span>}
+            {configured && !idle && !why ? <Money value={ctx.part(t.cashResult)} tone="auto" /> : <span className="mut">—</span>}
           </span>
           <span className={s.adjNote}>
-            {configured
+            {why ?? (configured
               ? idle
                 ? <>sem vendas, anúncios, reembolsos nem chargebacks no período</>
                 : none
                 ? <>igual ao lucro real: nada chegou para descontar</>
                 : <>lucro real <b>{formatMoney(ctx.part(t.operatingProfit))}</b> − <b>{formatMoney(ctx.part(t.adjustments))}</b> de reembolsos e chargebacks</>
-              : 'sem custos configurados não há lucro real de onde descontar'}
+              : 'sem custos configurados não há lucro real de onde descontar')}
           </span>
         </div>
       </div>
       <Suspense fallback={<div className={s.health}><Skeleton width={220} height={14} /><Skeleton height={6} /><Skeleton width="60%" height={11} /></div>}>
-        <ChargebackHealthPart storeId={summary.store.id} today={ctx.today} timezone={ctx.timezone} />
+        <ChargebackHealthPart storeId={summary.store.id} today={ctx.today} timezone={ctx.timezone}
+          archived={summary.row.archived ? { on: summary.row.archivedOn ?? null } : null} />
       </Suspense>
     </Block>
   )
+}
+
+/**
+ * What became of the period's chargebacks, by their status today (streams:
+ * one small query). The parts that cost add up to the count above; the won
+ * ones, which cost nothing, are said apart. Nothing on failure: the line
+ * above is complete without it.
+ */
+async function WindowDisputes({ storeId, from, to, archived }: {
+  storeId: string; from: string; to: string
+  /** An archived store: the status is the one read when it was archived. */
+  archived: { on: string | null; today: string } | null
+}) {
+  let text: string | null
+  try {
+    text = windowStatusText(await getWindowDisputeStatuses(storeId, from, to), archived)
+  } catch (err) {
+    console.error('[resumo] period disputes', err)
+    return null
+  }
+  return text ? <span className={s.adjNote}>{text}</span> : null
 }
 
 /** A dispute's deadline in words. The list holds only disputes still in time
@@ -117,13 +144,20 @@ function DueRow({ d, today, timezone }: { d: ChargebackHealth['dueSoon'][number]
   return (
     <div className={s.dueRow}>
       <b className="num">{d.currency && d.currency.toUpperCase() !== 'USD' ? `${d.currency.toUpperCase()} ${formatNumber(d.amount)}` : formatMoney(d.amount)}</b>
-      <span>{d.reason ? (Object.hasOwn(REASON, d.reason) ? REASON[d.reason] : d.reason.replace(/_/g, ' ')) : 'motivo não informado'}</span>
+      {/* The phone's words too (lib/views/verdict): CAMP HALLOW's dispute read
+          "produto não aceitável" on one screen only. */}
+      <span>{d.reason ? disputeReasonText(d.reason) : 'motivo não informado'}</span>
       <DueBy dueBy={d.dueBy} today={today} timezone={timezone} />
     </div>
   )
 }
 
-async function ChargebackHealthPart({ storeId, today, timezone }: { storeId: string; today: string; timezone: string }) {
+async function ChargebackHealthPart({ storeId, today, timezone, archived }: {
+  storeId: string; today: string; timezone: string
+  /** An archived store (its archive day when known): it is not read any more,
+   *  so nothing about its disputes is "agora". */
+  archived: { on: string | null } | null
+}) {
   let data
   try {
     data = await loadChargebacks(storeId)
@@ -138,7 +172,19 @@ async function ChargebackHealthPart({ storeId, today, timezone }: { storeId: str
   const overdue = h.overdue ?? 0
   const scaleMax = CHARGEBACK_LIMIT_PCT * 2
   const fill = Math.min(100, (h.rate / scaleMax) * 100)
-  const levelChip = data.level === 'over'
+  const withoutPrevented = rateWithoutPrevented(h)
+  // Not one dispute was ever read for this store (Glooty, Hibikura): a token
+  // without the disputes permission gives the same zero, so no "0,00%", no
+  // empty gauge and no reassuring chip — the callout below says why.
+  const unread = data.neverSeen
+  // The latest refunds/disputes pass hit the 403 (lib/adjustments
+  // disputesReadable): the token cannot read disputes at all — said plainly.
+  const forbidden = h.readable === false
+  const levelChip = forbidden
+    ? <Chip tone="warn" icon="alert" size="sm">sem permissão para ler disputas</Chip>
+    : unread
+    ? <Chip tone="neu" icon="info" size="sm">nenhuma disputa lida</Chip>
+    : data.level === 'over'
     ? <Chip tone="neg" icon="alert" size="sm">acima do limite</Chip>
     : data.level === 'watch'
       ? <Chip tone="warn" icon="alert" size="sm">perto do limite</Chip>
@@ -153,24 +199,38 @@ async function ChargebackHealthPart({ storeId, today, timezone }: { storeId: str
           <span className="lbl">Chargebacks nos últimos 90 dias</span>{' '}{levelChip}
         </span>
         <span>
-          <span className={`${s.healthRate} ${data.level === 'over' ? 'neg' : data.level === 'watch' ? 'warn' : ''}`}>{formatPct(h.rate, { digits: 2 })}</span>
-          <span className="mut"> · {h.count} de {formatNumber(h.orders)} pedidos</span>
+          {unread ? <>
+            <span className={`${s.healthRate} mut`}>—</span>
+            <span className="mut"> · {formatCount(h.orders)} pedidos</span>
+          </> : <>
+            <span className={`${s.healthRate} ${data.level === 'over' ? 'neg' : data.level === 'watch' ? 'warn' : ''}`}>{formatPct(h.rate, { digits: 2 })}</span>
+            <span className="mut"> · {formatCount(h.count)} de {formatCount(h.orders)} pedidos</span>
+          </>}
         </span>
       </div>
-      <div>
+      {!unread && <div>
         <div className={s.rateTrack} role="img" aria-label={`Taxa de chargeback ${formatPct(h.rate, { digits: 2 })}; limite do Shopify Payments ${formatPct(CHARGEBACK_LIMIT_PCT)}`}>
           <span className={`${s.rateFill} ${data.level === 'over' ? s.rateOver : data.level === 'watch' ? s.rateWatch : s.rateOk}`} style={{ width: `${fill}%` }} />
           <span className={s.rateMark} style={{ left: `${(CHARGEBACK_WATCH_PCT / scaleMax) * 100}%`, opacity: 0.5 }} />
           <span className={s.rateMark} style={{ left: '50%' }} />
         </div>
         <div className={s.rateScale}><span>0%</span><span>limite {formatPct(CHARGEBACK_LIMIT_PCT)}</span><span>{formatPct(scaleMax)}</span></div>
-      </div>
+      </div>}
       <span className={s.adjNote}>
         Taxa por contagem de pedidos, a que o processador acompanha, por loja.
-        {h.count > 0 && <> {h.open} em aberto · {h.lost} perdidas · {h.won} ganhas · <b>{formatMoney(h.amount)}</b> disputados + <b>{formatMoney(h.fees)}</b> em taxas.</>}
+        {/* Every status is named, so the parts add up to the count; the
+            prevented ones are in the rate (the prudent side) and the rate
+            without them is given, since the data does not say whether the
+            processor counts them. */}
+        {h.count > 0 && <> {healthParts(h).join(' · ')} · <b>{formatMoney(h.amount)}</b> disputados + <b>{formatMoney(h.fees)}</b> em taxas.</>}
+        {withoutPrevented !== null && <> As evitadas entram na taxa; sem elas, {formatPct(withoutPrevented, { digits: 2 })}.</>}
       </span>
       {h.open > 0 && due.length === 0 && overdue === 0 && (
-        <span className={s.adjNote}>Nenhuma das abertas espera resposta da loja agora: estão em análise.</span>
+        <span className={s.adjNote}>
+          {archived
+            ? `${archived.on ? `Até ${formatDate(archived.on, today)}, quando` : 'Quando'} a loja foi arquivada, nenhuma das abertas esperava resposta da loja.`
+            : 'Nenhuma das abertas espera resposta da loja agora: estão em análise.'}
+        </span>
       )}
       {due.length > 0 && (
         <div className={s.due}>
@@ -195,7 +255,12 @@ async function ChargebackHealthPart({ storeId, today, timezone }: { storeId: str
           <b className="neg">{plural(overdue, 'disputa', 'disputas')}</b> sem resposta já {overdue === 1 ? 'passou' : 'passaram'} do prazo: não dá mais para enviar a defesa.
         </span>
       )}
-      {data.neverSeen && (
+      {forbidden ? (
+        <Callout tone="warn">
+          O app não tem permissão para ler as disputas desta loja no Shopify Payments: {unread ? 'zero aqui não prova que não houve nenhuma' : 'disputas novas não estão sendo lidas, e o estado das abertas pode ter mudado'}.
+          Reconecte a loja em Ajustes para dar a permissão.
+        </Callout>
+      ) : data.neverSeen && (
         <Callout tone="neu">Nenhuma disputa foi lida desta loja até hoje. Se o app não tiver permissão para ler disputas na Shopify, zero aqui não prova que não houve.</Callout>
       )}
     </div>

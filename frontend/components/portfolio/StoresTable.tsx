@@ -23,16 +23,24 @@ import {
 import { MiniBars } from '@/components/charts'
 import { empateGap } from '@/lib/views/store'
 import { RoasVsEmpate } from '@/components/dashboard/RoasVsEmpate'
+import { dateBeside } from '@/components/campaigns/storeStart'
 import type { SharedAdAccount } from '@/lib/attributionModels'
 import { loadRowExtras, type RowExtras } from './data'
-import { adChannels, freshnessCell, idleReasons, lastSaleDate, noSalesCashHit, notSellingYet, pairOrdersIn, resultSortValue, resumoLinkOverrides, rowResult, sharedAccountBadges, sumMembers, trailGap, trailProfitCount, trailSinceStart, type TrailGap } from './model'
+import {
+  adChannels, freshnessCell, lastSaleDate, linkOpensDates, noSalesCashHit, notSellingYet, pairOrdersIn, resultSortValue, resumoLinkOverrides,
+  rowBeforeFirstSale, rowResult, sharedAccountBadges, sumMembers, totalRowIdle, trailGap, trailProfitCount, trailSinceStart, type TrailGap,
+} from './model'
 import s from './portfolio.module.css'
 
 function StoreCell({ ctx, row, extras }: { ctx: PageContext; row: PortfolioStoreRow; extras: RowExtras }) {
   const opt = ctx.storeOptions.find(o => o.id === row.id)
   // The same chips as the phone store list (storeStatusChips): the status, and
   // "custos não configurados" second whenever the status says something else.
-  const chips = storeStatusChips(row, { singleDay: ctx.range.from === ctx.range.to })
+  // With the window, a store whose first sale came after it reads "ainda não
+  // vendia" and nothing else, as the phone, the verdict and this row's own
+  // result say — not "sem vendas · custos não configurados" (Glooty, Mês
+  // passado; every row of January).
+  const chips = storeStatusChips(row, { singleDay: ctx.range.from === ctx.range.to, range: ctx.range })
   const shared = sharedAccountBadges(row.id, extras.shared, 'Nos últimos 90 dias')
   const currency = extras.currencies.get(row.id)
   const dayBadge = row.badges.find(b => b.code === 'dia_encerrado' || b.code === 'dia_nao_comecou')
@@ -70,6 +78,15 @@ function CashHitLine({ ctx, row }: { ctx: PageContext; row: PortfolioStoreRow })
   )
 }
 
+/** The store did not exist yet in the window (model rowBeforeFirstSale): the
+ *  result cell says "ainda não vendia · 1ª venda em …", so the money cells
+ *  beside it show "—", not "$0 · 0", and the ad cells drop what the store
+ *  "used to" do. A store that spent before its first sale is not one: it
+ *  shows $0 · 0 beside its loss. */
+function beforeFirstSale(row: PortfolioStoreRow, range: PageContext['range']): boolean {
+  return rowBeforeFirstSale(row, range)
+}
+
 function ResultCell({ ctx, row, extras }: { ctx: PageContext; row: PortfolioStoreRow; extras: RowExtras }) {
   const r = rowResult(row)
   // A row without orders says when the store last sold (Glooty: 10 nov), so a
@@ -77,9 +94,16 @@ function ResultCell({ ctx, row, extras }: { ctx: PageContext; row: PortfolioStor
   const last = row.totals.orders === 0 ? lastSaleDate(extras.lastActivity.get(row.id)?.lastSaleAt, row.timezone) : null
   // A store that had not made its first sale yet (Hibikura, Mês passado) read
   // "sem vendas · última 18 nov", a sale after the window, as if it had
-  // stopped: say when it started, as the verdict does.
-  const lastText = row.totals.orders === 0 && row.firstOrderDate && notSellingYet(row, ctx.range)
-    ? `ainda não vendia · 1ª venda em ${formatDate(row.firstOrderDate, ctx.today)}`
+  // stopped: say when it started, as the verdict does — with the year when
+  // the window or its comparison is in another year ("1ª venda em 11 abr"
+  // beside "15 dez 2025 – 15 jan 2026" read as 11 abr 2025). One that spent
+  // on ads before that first sale did sell nothing in a window it existed in:
+  // "sem vendas", with the same first sale instead of a later "última".
+  const first = row.totals.orders === 0 && notSellingYet(row, ctx.range) && row.firstOrderDate
+    ? dateBeside(row.firstOrderDate, [ctx.range.from, ctx.range.to, ctx.comparison.from, ctx.comparison.to], ctx.today)
+    : null
+  const lastText = first
+    ? beforeFirstSale(row, ctx.range) ? `ainda não vendia · 1ª venda em ${first}` : `sem vendas · 1ª venda em ${first}`
     : last ? `sem vendas · última ${formatDate(last, ctx.today)}` : 'sem vendas'
   // In a narrow table the sparkline column is hidden and the same bars sit
   // under the result (portfolio.module.css, container query).
@@ -199,10 +223,13 @@ function AdsCell({ row }: { row: PortfolioStoreRow }) {
   )
 }
 
-function RoasCell({ row, extras }: { row: PortfolioStoreRow; extras: RowExtras }) {
+function RoasCell({ row, extras, range }: { row: PortfolioStoreRow; extras: RowExtras; range: PageContext['range'] }) {
   const { gauge, spendOnly } = adChannels(row.totals, row.configured)
   if (!gauge) {
-    const sold = extras.shared.find(p => p.salesStoreId === row.id)
+    // Before its first sale the store did not exist yet: "antes vendia com
+    // anúncios pagos pela EPOCH" told a past that is in the window's future
+    // (CAMP HALLOW, dez 2025 – abr 2026; first sale 24 jul 2026).
+    const sold = beforeFirstSale(row, range) ? undefined : extras.shared.find(p => p.salesStoreId === row.id)
     const soldNow = sold ? pairOrdersIn(extras.sharedNow, sold) : 0
     return (
       <span className={s.none}>
@@ -231,12 +258,14 @@ export async function StoresTable({ ctx, view, verdict, shared, sharedNow }: {
   sharedNow: SharedAdAccount[] | null
 }) {
   const extras = await loadRowExtras(ctx.selected, ctx.range, ctx.now, shared, sharedNow)
+  // Each row's link to its store, on the dates the row shows (model resumoLinkOverrides).
+  const links = new Map(view.stores.map(row => [row.id, resumoLinkOverrides(row, ctx)]))
   const rows: DataRow[] = view.stores.map(row => {
     const r = rowResult(row)
     const t = row.totals
     return {
       key: row.id,
-      href: ctx.hrefWith('/', resumoLinkOverrides(row, ctx)),
+      href: ctx.hrefWith('/', links.get(row.id)),
       // Greyed only when nothing happened: a row whose chargebacks took money
       // out (noSalesCashHit) is news, not an idle store.
       tone: r.kind === 'none' && !noSalesCashHit(t) ? 'mut' : undefined,
@@ -244,11 +273,11 @@ export async function StoresTable({ ctx, view, verdict, shared, sharedNow }: {
         store: <StoreCell ctx={ctx} row={row} extras={extras} />,
         result: <ResultCell ctx={ctx} row={row} extras={extras} />,
         trail: <span className={s.colTrail}><TrailCell ctx={ctx} row={row} extras={extras} /></span>,
-        revenue: <RevenueCell row={row} />,
-        orders: <Count value={t.orders} />,
+        revenue: beforeFirstSale(row, ctx.range) ? <span className="num mut">—</span> : <RevenueCell row={row} />,
+        orders: beforeFirstSale(row, ctx.range) ? <span className="num mut">—</span> : <Count value={t.orders} />,
         margin: <span className={s.colMargin}>{row.configured && t.margin !== null ? <Pct value={t.margin} tone={t.margin < 0 ? 'neg' : 'none'} /> : <span className="mut">—</span>}</span>,
         ads: <AdsCell row={row} />,
-        roas: <RoasCell row={row} extras={extras} />,
+        roas: <RoasCell row={row} extras={extras} range={ctx.range} />,
       },
       sort: {
         store: row.name.toLowerCase(),
@@ -261,17 +290,23 @@ export async function StoresTable({ ctx, view, verdict, shared, sharedNow }: {
     }
   })
 
-  // Stores whose own day is not Brasília's right now (see model resumoLinkOverrides).
-  const shifted = view.stores.filter(r => r.storeToday !== ctx.today).map(r => r.name)
+  // Stores whose link carries the row's dates instead of the preset (model
+  // linkOpensDates): a store whose clock is ahead but names the same dates
+  // ("Mês passado" in Tokyo) opens the preset and is not named.
+  const shifted = view.stores.filter(r => linkOpensDates(ctx, links.get(r.id) ?? {})).map(r => r.name)
   const vt = verdict.totals
   // Counted like the verdict ("4 lojas na soma"): stores with costs that had
   // something in the window; the rest are named, not counted.
   const members = sumMembers(view.stores)
   const excluded = verdict.excluded.map(e => e.name)
   // Named the way the verdict's notes name them: a store that had not made its
-  // first sale yet is not a store with "sem movimento".
-  const idle = idleReasons(members.idle, ctx.range)
+  // first sale yet is not a store with "sem movimento", with or without costs
+  // (Glooty in October, model totalRowIdle).
+  const idle = totalRowIdle(view.stores, ctx.range)
   const names = (rows: PortfolioStoreRow[]) => rows.map(r => r.name).join(', ')
+  // A window before every store's first sale: the verdict says so, and the
+  // Total row read "— sem vendas $0 0", a fake $0 beside it.
+  const notYet = !!verdict.beforeStart
   const footer = view.stores.length > 1 ? {
     store: (
       <span className={s.foot}>
@@ -285,17 +320,20 @@ export async function StoresTable({ ctx, view, verdict, shared, sharedNow }: {
     result: (
       <span className={s.money}>
         {verdict.amount === null ? <span className="num mut">—</span> : <Money value={verdict.amount} tone="auto" />}
-        <small>{verdict.basis === 'profit' ? `lucro real${ctx.split ? ' · sua parte' : ''}` : verdict.basis === 'revenue_minus_ads' ? 'receita − anúncios' : 'sem vendas'}</small>
+        {/* The amount follows the partner split in both bases (verdict k). */}
+        <small>{notYet ? 'ainda não vendiam'
+          : verdict.basis === 'profit' ? `lucro real${ctx.split ? ' · sua parte' : ''}`
+            : verdict.basis === 'revenue_minus_ads' ? `receita − anúncios${ctx.split ? ' · sua parte' : ''}` : 'sem vendas'}</small>
       </span>
     ),
     trail: <span className={s.colTrail} />,
-    revenue: (
+    revenue: notYet ? <span className="num mut">—</span> : (
       <span className={s.revenue}>
         <Money value={vt.revenue} />
         {verdict.basis === 'profit' && vt.margin !== null && <small className={s.inlineMargin}>margem <Pct value={vt.margin} /></small>}
       </span>
     ),
-    orders: <Count value={vt.orders} />,
+    orders: notYet ? <span className="num mut">—</span> : <Count value={vt.orders} />,
     margin: <span className={s.colMargin}>{verdict.basis === 'profit' && vt.margin !== null ? <Pct value={vt.margin} /> : <span className="mut">—</span>}</span>,
     ads: (
       <span className={s.channels}>
@@ -308,7 +346,7 @@ export async function StoresTable({ ctx, view, verdict, shared, sharedNow }: {
   return (
     <Block
       title="Lojas"
-      howTo={`Cada loja em ${ctx.rangeLabel}, no calendário do próprio fuso, ordenadas por lucro. Clique numa loja para abrir o Resumo dela no mesmo período${shifted.length && ctx.period !== 'custom' ? ` (${shifted.join(', ')}: nas mesmas datas, ${formatRangeLabel(ctx.range, ctx.today)})` : ''}.`}
+      howTo={`Cada loja em ${ctx.rangeLabel}, no calendário do próprio fuso, ordenadas por lucro. Clique numa loja para abrir o Resumo dela no mesmo período${shifted.length ? ` (${shifted.join(', ')}: nas mesmas datas, ${formatRangeLabel(ctx.range, ctx.today)})` : ''}.`}
       info={<>Lucro real = receita − produto − frete − taxas − Anúncios Meta − Anúncios Shopify − custos fixos, pelo mesmo motor de todas as telas.
         Uma loja sem custos configurados mostra receita − anúncios e fica fora do total. O ROAS de cada loja é comparado com o empate dela
         (receita ÷ contribuição). Ao lado da cidade de cada loja, a leitura mais antiga das fontes dela: pedidos ou Meta.</>}
@@ -322,7 +360,7 @@ export async function StoresTable({ ctx, view, verdict, shared, sharedNow }: {
           caption={`Lojas em ${ctx.rangeLabel}, com lucro, receita, pedidos, margem, anúncios e ROAS`}
           initialSort={{ key: 'result', dir: 'desc' }}
           columns={[
-            { key: 'store', label: 'Loja', sortable: true, info: 'Ao lado da cidade: a última leitura bem-sucedida da fonte mais antiga da loja (pedidos ou Meta). Âmbar: atrasada; coral: a última tentativa falhou.' },
+            { key: 'store', label: 'Loja', sortable: true, info: 'Ao lado da cidade: a última leitura bem-sucedida da fonte mais antiga da loja (pedidos ou Meta). Âmbar: atrasada; coral: atrasada e a última tentativa falhou. Uma tentativa que falhou com a leitura ainda em dia não muda a cor: aparece na dica ao passar o mouse.' },
             { key: 'result', label: `Lucro${ctx.split ? ' (sua parte)' : ''}`, numeric: true, sortable: true, info: `Lucro real no período e a variação ${ctx.comparisonText}. Sem custos configurados: receita − anúncios, fora do total.` },
             { key: 'trail', label: <span className={s.colTrail}>Lucro por dia</span>, info: `Lucro real de cada dia em ${formatRangeLabel(extras.trailRange, ctx.today)} (uma loja mais nova, desde que começou: a primeira venda ou o primeiro anúncio), na escala de cada loja. A parte sombreada é o período escolhido.${ctx.split ? ` Na visão de sócio, cada barra é a ${shareLabel(ctx)} do lucro do dia; a dica traz também a soma da loja inteira.` : ''}` },
             { key: 'revenue', label: 'Receita', numeric: true, sortable: true },

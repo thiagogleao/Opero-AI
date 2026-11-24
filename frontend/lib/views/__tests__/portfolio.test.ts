@@ -331,4 +331,78 @@ describe('combineHealth', () => {
     expect(out.awaitingByStore.reduce((a, x) => a + x.count, 0)).toBe(out.dueSoon.length)
     expect(out.overdue).toBe(1)
   })
+  // lib/adjustments returns prevented and other: summed, the parts add up to
+  // the count on the phone and in the export too (CAMP HALLOW: 31 = 7 + 5 +
+  // 11 + 8). A fixture without them counts as zero.
+  it('sums prevented and other, so the parts add up to the count', () => {
+    const h = (o: { open: number; lost: number; won: number; prevented?: number; other?: number }) => {
+      const count = o.open + o.lost + o.won + (o.prevented ?? 0) + (o.other ?? 0)
+      return { count, orders: 1000, rate: count / 10, amount: 0, fees: 0, dueSoon: [], hasData: count > 0, ...o }
+    }
+    const out = combineHealth([
+      { store: { id: 'camp', name: 'CAMP HALLOW', timezone: 'UTC' }, health: h({ open: 7, lost: 5, won: 11, prevented: 8, other: 0 }) },
+      { store: { id: 'epoch', name: 'EPOCH', timezone: 'UTC' }, health: h({ open: 1, lost: 0, won: 0, prevented: 2, other: 1 }) },
+      { store: { id: 'old', name: 'Fixture', timezone: 'UTC' }, health: h({ open: 0, lost: 1, won: 0 }) },
+    ])
+    expect(out).toMatchObject({ count: 36, open: 8, lost: 6, won: 11, prevented: 10, other: 1 })
+    expect(out.open + out.lost + out.won + out.prevented! + out.other!).toBe(out.count)
+    expect(out.byStore.find(s => s.storeId === 'camp')!.prevented).toBe(8)
+    expect(out.byStore.find(s => s.storeId === 'old')!.prevented).toBe(0)
+  })
+  it('names the stores whose token cannot read disputes (readable false), not the unknown ones', () => {
+    const h = (readable: boolean | null | undefined) => ({
+      count: 0, orders: 200, rate: 0, amount: 0, fees: 0, open: 0, lost: 0, won: 0, dueSoon: [], hasData: false, readable,
+    })
+    const out = combineHealth([
+      { store: { id: 'glooty', name: 'Glooty', timezone: 'UTC' }, health: h(false) },
+      { store: { id: 'hib', name: 'Hibikura', timezone: 'Asia/Tokyo' }, health: h(null) },
+      { store: { id: 'mokoo', name: 'MOKOO', timezone: 'UTC' }, health: h(true) },
+      { store: { id: 'old', name: 'Fixture', timezone: 'UTC' }, health: h(undefined) },
+    ])
+    expect(out.unreadable).toEqual([{ storeId: 'glooty', name: 'Glooty' }])
+  })
+  // Regression: the phone branched on hasData (the 90 days' count), false
+  // exactly when the 90-day list is empty, so "Nenhuma disputa nos últimos 90
+  // dias" could never show and a clean store read "nenhuma disputa lida".
+  it('tells a clean 90 days (disputes read before) from never having read one (everRead)', () => {
+    const h = (count: number) => ({ count, orders: 300, rate: count / 3, amount: 0, fees: 0, open: 0, lost: count, won: 0, dueSoon: [], hasData: count > 0 })
+    const clean = combineHealth([{ store: { id: 'mokoo', name: 'MOKOO', timezone: 'UTC' }, health: h(0), everRead: true }])
+    expect(clean.byStore).toEqual([])
+    expect(clean.hasData).toBe(false)
+    expect(clean.everRead).toBe(true)
+    const never = combineHealth([
+      { store: { id: 'glooty', name: 'Glooty', timezone: 'UTC' }, health: h(0), everRead: false },
+      { store: { id: 'hib', name: 'Hibikura', timezone: 'Asia/Tokyo' }, health: h(0) },
+    ])
+    expect(never.everRead).toBe(false)
+    // A dispute in the 90 days is one read, whatever the lookup said.
+    expect(combineHealth([{ store: { id: 'e', name: 'EPOCH', timezone: 'UTC' }, health: h(2) }]).everRead).toBe(true)
+  })
+  // Todas: "Somando as lojas: 1,95% (180 de 9.247)" counted Glooty's 14 and
+  // Hibikura's 202 orders, whose disputes were never read, as zero disputes.
+  it('leaves the orders of stores with unknown disputes out of the summed rate, and names them', () => {
+    const h = (count: number, orders: number, readable?: boolean) => ({
+      count, orders, rate: orders ? (count / orders) * 100 : 0, amount: 0, fees: 0, open: 0, lost: count, won: 0, dueSoon: [], hasData: count > 0, readable,
+    })
+    const out = combineHealth([
+      { store: { id: 'camp', name: 'CAMP HALLOW', timezone: 'UTC' }, health: h(31, 700), everRead: true },
+      { store: { id: 'epoch', name: 'EPOCH', timezone: 'UTC' }, health: h(149, 8331), everRead: true },
+      { store: { id: 'glooty', name: 'Glooty', timezone: 'UTC' }, health: h(0, 14), everRead: false },
+      { store: { id: 'hib', name: 'Hibikura', timezone: 'Asia/Tokyo' }, health: h(0, 202), everRead: false },
+      // A clean record (disputes read before) stays in the rate.
+      { store: { id: 'clean', name: 'Clean', timezone: 'UTC' }, health: h(0, 100), everRead: true },
+      // A token that cannot read them: out too.
+      { store: { id: 'blind', name: 'Blind', timezone: 'UTC' }, health: h(0, 50, false), everRead: true },
+    ])
+    expect(out.count).toBe(180)
+    expect(out.orders).toBe(700 + 8331 + 100)
+    expect(out.rate).toBeCloseTo((180 / 9131) * 100, 6)
+    expect(out.rateLeftOut).toEqual([
+      { storeId: 'glooty', name: 'Glooty', orders: 14 },
+      { storeId: 'hib', name: 'Hibikura', orders: 202 },
+      { storeId: 'blind', name: 'Blind', orders: 50 },
+    ])
+    // Not looked up (everRead absent): counted as before.
+    expect(combineHealth([{ store: { id: 'x', name: 'X', timezone: 'UTC' }, health: h(0, 40) }]).rateLeftOut).toEqual([])
+  })
 })

@@ -21,9 +21,9 @@ import { ALL_STORES, getPageContext, pageMetadata, type PageContext, type Search
 import type { StoreRef } from '@/lib/access'
 import { empateGap, loadStoreSummary, type StoreSummary } from '@/lib/views/store'
 import { buildVerdict, verdictInputFromPortfolio } from '@/lib/views/verdict'
-import { AppShell, PageHeader, PeriodNote } from '@/components/shell'
+import { AppShell, PageHeader, PeriodNote, periodName } from '@/components/shell'
 import { BreakdownLedger, ButtonLink, Callout, Card, Chip, EmptyState, ErrorState, SkeletonBlock, VerdictCard } from '@/components/ui'
-import { InsightsCard } from '@/components/ai/InsightsCard'
+import { InsightsSlot } from '@/components/ai/InsightsSlot'
 import { BlockBoundary } from '@/components/dashboard/BlockBoundary'
 import { StoreKpis } from '@/components/dashboard/StoreKpis'
 import { ProfitChartBlock } from '@/components/dashboard/ProfitChartBlock'
@@ -32,8 +32,8 @@ import { TopCountries, TopProducts } from '@/components/dashboard/TopLists'
 import { RefundsBlock } from '@/components/dashboard/RefundsBlock'
 import { SharedAccountNote } from '@/components/dashboard/SharedAccountNote'
 import { QuietStoreNote } from '@/components/dashboard/QuietStoreNote'
-import { beforeStartText, isBeforeStart } from '@/components/campaigns/storeStart'
-import { formatDate } from '@/lib/format'
+import { emptyWindowOf, frozenTailOf } from '@/components/dashboard/emptyWindow'
+import { formatRangeLabel } from '@/lib/format'
 import s from '@/components/dashboard/dashboard.module.css'
 
 // Absolute: the root layout's "%s · Opero" template only reaches child
@@ -54,7 +54,7 @@ function headerCode(ctx: PageContext, store: StoreRef): string | null | undefine
  *  1–12 nov"): name it once. */
 function customSub(ctx: PageContext) {
   if (ctx.period !== 'custom') return undefined
-  return <><b>Período escolhido</b> · <span className="num">{ctx.rangeLabel}</span></>
+  return <><b>{periodName(ctx)}</b> · <span className="num">{ctx.rangeLabel}</span></>
 }
 export const dynamic = 'force-dynamic'
 
@@ -114,20 +114,27 @@ export default async function ResumoPage({ searchParams }: { searchParams: Promi
     )
   }
 
-  const v = buildVerdict(verdictInputFromPortfolio(summary.view, { split: ctx.split }))
+  const input = verdictInputFromPortfolio(summary.view, { split: ctx.split })
+  const judged = buildVerdict(input)
+  // Nothing in the window was read (an archived store after its archive day):
+  // there is nothing to compare, and "hoje · vs ontem até esta hora" sat
+  // beside "não há dados hoje".
+  const v = judged.frozen ? buildVerdict({ ...input, comparison: null }) : judged
   const configured = summary.pnl.configured
   const sold = summary.pnl.totals.revenue > 0
-  const t = summary.pnl.totals
-  // A window that ends before the first sale: the store did not sell yet, so
-  // the ledger says that instead of "Sem vendas no período" next to a verdict
-  // that reads "A Hibikura começou a vender em 7 nov" (components/campaigns/
-  // storeStart: the rule and the words every page uses).
-  const firstOrder = summary.row.firstOrderDate
-  const beforeStart = firstOrder && isBeforeStart(firstOrder, ctx.range, { orders: t.orders, revenue: t.revenue, spend: t.adSpend })
-    ? beforeStartText({ storeName: store.name, firstOrderDate: firstOrder, period: ctx.period, range: ctx.range, today: ctx.today })
-    : null
-  // "A Hibikura começou a vender em 7 nov — não há dados de …" → its first half.
-  const startedLine = beforeStart ? beforeStart.headline.slice(0, beforeStart.headline.lastIndexOf(' — ')) : null
+  // A window before the first sale (the store did not sell yet) or after an
+  // archived store's archive day (nothing is read): the verdict says so, and
+  // every block beside it says the same instead of "$0 · nenhum pedido no
+  // período" — the ledger, the KPIs, the lists, refunds, the chart, the
+  // campaigns and the AI card. One reading, the verdict's (beforeStart /
+  // frozen), with its dates as it prints them ("7 nov", "11 abr 2026").
+  const empty = emptyWindowOf(v)
+  const notYet = v.beforeStart ?? null
+  const frozen = v.frozen ?? null
+  // A window read only up to the archive day (the verdict's "não teve vendas
+  // em 1–10 nov"): the ledger names those days, not the whole window.
+  const tail = summary.row.archived ? frozenTailOf(summary.row.archivedOn, ctx.range) : null
+  const readLabel = tail ? formatRangeLabel({ from: ctx.range.from, to: tail }, ctx.today) : ctx.rangeLabel
   const storeNames = new Map(ctx.stores.map(st => [st.id, st.name]))
   if (!storeNames.has(store.id)) storeNames.set(store.id, store.name)
 
@@ -145,7 +152,7 @@ export default async function ResumoPage({ searchParams }: { searchParams: Promi
           )}
         />
         {fromAll && <FromAllNote ctx={ctx} store={store} />}
-        <PeriodNote ctx={ctx} />
+        <PeriodNote ctx={ctx} compared />
         {!configured && (
           <Callout tone="warn" title="Custos não configurados">
             Sem o custo dos produtos, do frete e das taxas, esta tela mostra receita − anúncios, que não é lucro.{' '}
@@ -177,37 +184,44 @@ export default async function ResumoPage({ searchParams }: { searchParams: Promi
               // "De cada $1: 0¢ Meta" over $0 of sales: no bar to split, and the sub says so.
               bar={sold}
               title="Para onde foi cada dólar"
-              sub={sold ? `De cada $1,00 vendido em ${ctx.rangeLabel}` : `Nenhuma venda em ${ctx.rangeLabel}`}
-              emptyTitle={startedLine ? 'A loja ainda não vendia' : undefined}
-              emptyText={startedLine ? `${startedLine}: escolha um período a partir dessa data.` : undefined} />
+              sub={sold ? `De cada $1,00 vendido em ${ctx.rangeLabel}` : frozen ? `Sem dados de ${ctx.rangeLabel}` : `Nenhuma venda em ${readLabel}`}
+              // The phone's words (app/m/_components/Home.tsx VerdictBlock).
+              emptyTitle={notYet ? 'A loja ainda não vendia' : frozen ? 'Sem dados neste período' : undefined}
+              emptyText={notYet
+                ? `A ${store.name} começou a vender em ${notYet.text}: escolha um período a partir dessa data.`
+                : frozen ? `A loja está arquivada${frozen.text ? ` desde ${frozen.text}` : ''} e não sincroniza mais: nada é lido depois disso.`
+                  : tail ? `Nenhum pedido e nenhum gasto com anúncios em ${readLabel}. Depois disso a loja já estava arquivada: nada foi lido.` : undefined} />
           }
         />
 
-        <StoreKpis ctx={ctx} summary={summary} />
+        <StoreKpis ctx={ctx} summary={summary} empty={empty} />
 
         <Suspense fallback={<SkeletonBlock height={240} lines={1} />}>
-          <ProfitChartBlock ctx={ctx} summary={summary} />
+          <ProfitChartBlock ctx={ctx} summary={summary} empty={empty} />
         </Suspense>
 
         <Suspense fallback={<SkeletonBlock height={220} lines={2} />}>
-          <CampaignsBlock ctx={ctx} summary={summary} storeNames={storeNames} />
+          <CampaignsBlock ctx={ctx} summary={summary} storeNames={storeNames} empty={empty} />
         </Suspense>
 
         <div className={s.grid2}>
-          <TopProducts ctx={ctx} summary={summary} />
-          <TopCountries ctx={ctx} summary={summary} />
+          <TopProducts ctx={ctx} summary={summary} empty={empty} />
+          <TopCountries ctx={ctx} summary={summary} empty={empty} />
         </div>
 
         <div className={s.grid2}>
-          <RefundsBlock ctx={ctx} summary={summary} />
+          <RefundsBlock ctx={ctx} summary={summary} empty={empty} />
           <Suspense fallback={<SkeletonBlock height={120} lines={2} />}>
             {/* Keyed: a soft navigation to another store or window keeps this
                 class component mounted, and a failure would stick to the next one. */}
             <BlockBoundary key={`${store.id}:${ctx.range.from}:${ctx.range.to}:${ctx.split}`} title="Leitura da IA">
-              {/* Before the first sale the AI has nothing to read: the card says
-                  so, as the verdict and the ledger do, with no paid "Gerar leitura". */}
-              <InsightsCard storeId={store.id} from={ctx.range.from} to={ctx.range.to} split={ctx.split}
-                notStarted={beforeStart && firstOrder ? { storeName: store.name, firstSale: formatDate(firstOrder, ctx.today) } : null} />
+              {/* A window the server would refuse (before the first sale, an
+                  archived store after its archive day, this window and the one
+                  before it empty) says so, as the verdict does, with no paid
+                  "Gerar leitura" that can only come back as "no data". */}
+              <InsightsSlot store={store} range={ctx.range} split={ctx.split} daily={summary.pnl.daily} now={ctx.now}
+                notStarted={notYet ? { storeName: store.name, firstSale: notYet.text } : null}
+                frozen={frozen ? { archivedOn: frozen.text } : undefined} />
             </BlockBoundary>
           </Suspense>
         </div>

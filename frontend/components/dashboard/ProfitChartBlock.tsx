@@ -11,33 +11,58 @@
  * tooltips show the whole day beside "sua parte" and a margin that is never
  * halved); a series with no sale,
  * no spend and no cost on any day is said in words instead of drawn.
+ *
+ * An archived store has no running day: nothing is read after its archive
+ * day, so today is neither drawn ("hoje $0") nor called "parcial", a window
+ * after the archive day (the verdict's `frozen`, ./emptyWindow) says "sem
+ * dados" instead of drawing $0 bars, and a window that runs past it draws
+ * and judges its days up to the archive day only.
  */
 
 import type { PageContext } from '@/lib/views/page'
 import type { StoreSummary } from '@/lib/views/store'
-import { chartSeries, chartValue, loadProfitTrail, seriesIdle, TRAIL_DAYS, windowDaysSinceStart } from '@/lib/views/store'
-import { formatClock, formatDate, formatMoney, formatRangeLabel, formatWeekdayDate, plural, tzCity, dayOfLabel } from '@/lib/format'
+import { chartSeries, chartValue, daysRead, loadProfitTrail, seriesIdle, TRAIL_DAYS, windowDaysSinceStart } from '@/lib/views/store'
+import { formatClock, formatMoney, formatRangeLabel, formatWeekdayDate, plural, tzCity, dayOfLabel } from '@/lib/format'
 import { Block, EmptyState, ErrorState } from '@/components/ui'
 import { DailyProfitBars, DailyProfitLegend, IntradayCurve, IntradayLegend } from '@/components/charts'
 import { NetSalesBars, NetSalesLegend } from './NetSalesBars'
+import { dateBeside } from '@/components/campaigns/storeStart'
+import { emptyWindowText, frozenTailOf, type EmptyWindow } from './emptyWindow'
 import s from './dashboard.module.css'
 
 /**
  * Whether a band label fits between the band's first bar and the right edge,
  * on the geometry DailyProfitBars and NetSalesBars share (1000 wide, 56 left
  * and 8 right margins, the label 8 units into the band, about 6 units per
- * character at 11,5px).
+ * character at 11,5px). The word joiner formatMoney glues a sign to its "$"
+ * with (lib/format SIGN_JOIN) takes no room: counted, it hid a label that
+ * still fit by 6 units or less.
  */
 export function bandLabelFits(series: { inWindow: boolean }[], label: string): boolean {
   const first = series.findIndex(d => d.inWindow)
   if (first < 0) return true
   const bar = (1000 - 56 - 8) / Math.max(1, series.length)
-  return 56 + first * bar + 8 + label.length * 6 <= 1000 - 8
+  return 56 + first * bar + 8 + label.replace(/\u2060/g, '').length * 6 <= 1000 - 8
 }
 
-export async function ProfitChartBlock({ ctx, summary }: { ctx: PageContext; summary: StoreSummary }) {
+export async function ProfitChartBlock({ ctx, summary, empty = null }: {
+  ctx: PageContext; summary: StoreSummary
+  /** The verdict's reason the window is empty (./emptyWindow emptyWindowOf). */
+  empty?: EmptyWindow | null
+}) {
   const configured = summary.pnl.configured
   const title = configured ? 'Lucro real por dia' : 'Receita − anúncios por dia'
+  const half = ctx.split ? ' (sua parte)' : ''
+  const why = empty ? emptyWindowText(empty, ctx.rangeLabel) : null
+  // Nothing in the window was read (archived store): no bars at $0, no context to load.
+  if (empty?.kind === 'frozen' && why) {
+    return (
+      <Block title={`${title}${half}`}>
+        <EmptyState compact icon="clock" title={why.title}>{why.text}</EmptyState>
+      </Block>
+    )
+  }
+  const archived = summary.row.archived
   let trail
   try {
     trail = await loadProfitTrail(summary.store.id, ctx.range, ctx.today, ctx.now)
@@ -46,8 +71,17 @@ export async function ProfitChartBlock({ ctx, summary }: { ctx: PageContext; sum
     return <Block title={title}><ErrorState compact /></Block>
   }
 
-  const series = chartSeries(trail.before, summary.pnl.daily, trail.after)
-  const partialDate = series.some(d => d.date === ctx.today) && (ctx.partial || trail.after.length) ? ctx.today : null
+  // The first sale keeps the quiet context days of a store that already sold
+  // (lib/views/store chartSeries): "desde que a loja começou" only when it did
+  // start inside them. An archived store gets no "today": nothing arrives.
+  const after = archived ? [] : trail.after
+  // Nor the days after its archive day, which were never read: Squishy
+  // World's 30 dias drew $0 bars for 11–23 nov and read "3 de 30 dias no
+  // lucro" under a verdict saying those days have no data.
+  const archivedOn = archived ? summary.row.archivedOn ?? null : null
+  const tailFrom = frozenTailOf(archivedOn, ctx.range)
+  const series = daysRead(chartSeries(trail.before, summary.pnl.daily, after, summary.row.firstOrderDate), archivedOn)
+  const partialDate = !archived && series.some(d => d.date === ctx.today) && (ctx.partial || after.length) ? ctx.today : null
   const partialNote = `parcial · até ${formatClock(ctx.minutesIntoDay)}`
   const name = summary.store.name
   // The summary line judges closed window days from the store's start on:
@@ -58,7 +92,6 @@ export async function ProfitChartBlock({ ctx, summary }: { ctx: PageContext; sum
   const sumBefore = before.reduce((a, d) => a + d.profit, 0)
   const windowIdle = series.filter(d => d.inWindow).every(d => d.orders === 0 && d.revenue === 0 && d.metaSpend === 0 && d.shopSpend === 0)
   const single = ctx.range.from === ctx.range.to
-  const half = ctx.split ? ' (sua parte)' : ''
 
   // Nothing at all to draw (Hibikura and Glooty in October, before either
   // store sold): the bars sat on a $0–$1 axis printed "$0 $0 $0 $0 $1 $1 $1".
@@ -67,7 +100,9 @@ export async function ProfitChartBlock({ ctx, summary }: { ctx: PageContext; sum
   if (seriesIdle(series, configured)) {
     return (
       <Block title={`${title}${half}`}>
-        <EmptyState compact icon="clock" title={`Nenhuma venda e nenhum gasto em ${ctx.rangeLabel}`} />
+        {why
+          ? <EmptyState compact icon="clock" title={why.title}>{why.text}</EmptyState>
+          : <EmptyState compact icon="clock" title={`Nenhuma venda e nenhum gasto em ${ctx.rangeLabel}`} />}
       </Block>
     )
   }
@@ -76,23 +111,24 @@ export async function ProfitChartBlock({ ctx, summary }: { ctx: PageContext; sum
   // 942–1014 of 1000). Then the band keeps its shading without a label: the
   // window's total is the verdict's headline. A non-empty blank selectedLabel
   // suppresses both the range and the sum in DailyProfitBars.
-  const band = ctx.range
+  // An archived store's band ends on its archive day, with its bars.
+  const band = tailFrom ? { from: ctx.range.from, to: tailFrom } : ctx.range
   // Both charts draw the viewer's share (lib/views/store chartValue): the
   // verdict halves revenue − ads as well as profit in the split view.
   const bandSum = series.filter(d => d.inWindow)
     .reduce((a, d) => a + chartValue(d, configured, ctx.splitFactor), 0)
-  const bandLabel = bandLabelFits(series, `${formatRangeLabel(ctx.range, ctx.today)} · ${formatMoney(bandSum)}`) ? undefined : ' '
+  const bandLabel = bandLabelFits(series, `${formatRangeLabel(band, ctx.today)} · ${formatMoney(bandSum)}`) ? undefined : ' '
 
   const footer = configured ? (
     <div className={s.footLinks}>
       <span>
         {windowIdle
-          ? 'Sem vendas nem anúncios no período.'
+          ? why ? `No período, ${why.note}.` : 'Sem vendas nem anúncios no período.'
           : inWindow.length > 1 && (() => {
             const best = inWindow.reduce((a, b) => (b.profit > a.profit ? b : a))
             const worst = inWindow.reduce((a, b) => (b.profit < a.profit ? b : a))
             return <>
-              No período{since.startedOn ? `, desde que a loja começou (${formatDate(since.startedOn, ctx.today)})` : ''}: <b>{inWindow.filter(d => d.profit > 0).length} de {inWindow.length}</b> dias no lucro · melhor {formatWeekdayDate(best.date, ctx.today)}, <b>{formatMoney(ctx.part(best.profit))}</b>
+              No período{since.startedOn ? `, desde que a loja começou (${dateBeside(since.startedOn, [ctx.range.from, ctx.range.to, ctx.comparison.from, ctx.comparison.to], ctx.today)})` : ''}{tailFrom ? `, até ser arquivada (${dateBeside(tailFrom, [ctx.range.from, ctx.range.to, ctx.comparison.from, ctx.comparison.to], ctx.today)})` : ''}: <b>{inWindow.filter(d => d.profit > 0).length} de {inWindow.length}</b> dias no lucro · melhor {formatWeekdayDate(best.date, ctx.today)}, <b>{formatMoney(ctx.part(best.profit))}</b>
               {' '}· pior {formatWeekdayDate(worst.date, ctx.today)}, <b className={worst.profit < 0 ? 'neg' : undefined}>{formatMoney(ctx.part(worst.profit))}</b>
             </>
           })()}
@@ -126,7 +162,7 @@ export async function ProfitChartBlock({ ctx, summary }: { ctx: PageContext; sum
   // A day with nothing in it (CAMP HALLOW today) drew a flat line on a $0–$1
   // axis labelled "$0 $0 $1 $1 $1"; the footer already says "Sem vendas nem
   // anúncios no período".
-  const showCurve = configured && single && !windowIdle && (summary.pnl.hourly?.length ?? 0) > 0
+  const showCurve = configured && single && !windowIdle && !archived && (summary.pnl.hourly?.length ?? 0) > 0
   const refLabel = ctx.range.from === ctx.today ? 'ontem inteiro' : 'dia anterior inteiro'
 
   return (

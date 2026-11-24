@@ -22,12 +22,13 @@ import { buildVerdict, verdictInputFromPortfolio } from '@/lib/views/verdict'
 import { listStores } from '@/lib/access'
 import { formatMoney, plural } from '@/lib/format'
 import type { SharedAdAccount } from '@/lib/attributionModels'
-import { AppShell, PageHeader, PeriodNote } from '@/components/shell'
+import { AppShell, PageHeader, PeriodNote, periodName } from '@/components/shell'
 import { BreakdownLedger, ButtonLink, Callout, Card, EmptyState, ErrorState, SkeletonBlock, VerdictCard } from '@/components/ui'
 import { StoresTable } from '@/components/portfolio/StoresTable'
 import { ProfitShare } from '@/components/portfolio/ProfitShare'
 import { loadSharedInWindow, loadSharedPairs, SHARED_LOOKBACK_DAYS } from '@/components/portfolio/data'
-import { pairOrdersIn, pairsMixedIn, sumMembers } from '@/components/portfolio/model'
+import { pairBeforeSalesStart, pairBeforeStartText, pairOrdersIn, pairsMixedIn, sumMembers } from '@/components/portfolio/model'
+import { dateBeside } from '@/components/campaigns/storeStart'
 import { ARCHIVED_PARAM, ArchivedClosed, ArchivedList } from '@/components/portfolio/ArchivedSection'
 import s from '@/components/portfolio/portfolio.module.css'
 
@@ -38,7 +39,7 @@ export const dynamic = 'force-dynamic'
  *  1–12 nov"): name it once. */
 function customSub(ctx: PageContext) {
   if (ctx.period !== 'custom') return undefined
-  return <><b>Período escolhido</b> · <span className="num">{ctx.rangeLabel}</span> · {ctx.selected.length} lojas</>
+  return <><b>{periodName(ctx)}</b> · <span className="num">{ctx.rangeLabel}</span> · {ctx.selected.length} lojas</>
 }
 
 export default async function OverviewPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
@@ -68,7 +69,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: Pro
   try {
     ;[view, shared, sharedNow] = await Promise.all([
       buildPortfolio(ctx.selected, ctx.period, ctx.params.de, ctx.params.ate, ctx.now,
-        { liveFeed: false, chargebackHealth: false, freshness: false }),
+        { liveFeed: false, chargebackHealth: false, freshness: false, compareAs: ctx.comparePeriod }),
       loadSharedPairs(ctx.selected, ctx.timezone, ctx.now),
       loadSharedInWindow(ctx.selected, ctx.range),
     ])
@@ -94,7 +95,14 @@ export default async function OverviewPage({ searchParams }: { searchParams: Pro
   // something in the window.
   const { summed } = sumMembers(view.stores)
   const withCosts = v.excluded.length ? ' com custos' : ''
-  const ledgerSub = !sold
+  // A window before every store's first sale (the verdict's beforeStart for
+  // Todas): the ledger says so, as the single-store Resumo does, instead of
+  // the dead-window "Sem vendas no período" next to "Nenhuma das lojas
+  // vendia ainda".
+  const notYet = v.beforeStart ?? null
+  const ledgerSub = notYet
+    ? `Nenhuma das lojas vendia em ${ctx.rangeLabel}`
+    : !sold
     ? `Nenhuma venda em ${ctx.rangeLabel}${v.excluded.length ? ' nas lojas com custos' : ''}`
     : `De cada $1,00 vendido em ${ctx.rangeLabel}${v.storeCount > 1 ? `, somando ${plural(summed.length, 'loja', 'lojas')}${withCosts}` : ''}`
 
@@ -110,17 +118,25 @@ export default async function OverviewPage({ searchParams }: { searchParams: Pro
           footer={<ProfitShare view={view} verdict={v} part={ctx.part} split={ctx.split} shared={mixed} />}
           aside={
             <BreakdownLedger pnl={v.totals} configured={v.basis !== 'revenue_minus_ads'} split={ctx.split}
-              bar={sold} title="Para onde foi cada dólar" sub={ledgerSub} />
+              bar={sold} title="Para onde foi cada dólar" sub={ledgerSub}
+              emptyTitle={notYet ? 'Nenhuma das lojas vendia ainda' : undefined}
+              emptyText={notYet ? `A primeira venda foi em ${notYet.text}: escolha um período a partir dessa data.` : undefined} />
           }
         />
 
         {shared.map(p => {
           const now = pairOrdersIn(sharedNow, p)
+          // A window before the sales store's first sale: it did not exist
+          // yet, so there is no "períodos anteriores" to add up.
+          const salesFirst = view.stores.find(r => r.id === p.salesStoreId)?.firstOrderDate ?? null
+          const notYet = now === 0 && pairBeforeSalesStart(salesFirst, ctx.range)
           return (
             <Callout key={`${p.adStoreId}-${p.salesStoreId}`} tone={now === 0 ? 'info' : 'warn'} icon="swap" title={`${p.salesStoreName} ${now === 0 ? 'vendia' : 'vende'} com anúncios pagos pela ${p.adStoreName}`}>
               Nos últimos {SHARED_LOOKBACK_DAYS} dias, {plural(p.orders, 'pedido', 'pedidos')} da {p.salesStoreName} ({formatMoney(p.revenue)}) vieram de anúncios
               da conta da {p.adStoreName}.{' '}
-              {now === 0
+              {notYet && salesFirst
+                ? pairBeforeStartText(p.salesStoreName, dateBeside(salesFirst, [ctx.range.from, ctx.range.to, ctx.comparison.from, ctx.comparison.to], ctx.today), ctx.rangeLabel)
+                : now === 0
                 ? <>Em {ctx.rangeLabel}, nenhum pedido rastreado: o resultado deste período não está misturado. Para períodos anteriores, some as duas lojas.</>
                 : <>{now !== null && <>Em {ctx.rangeLabel}, {plural(now, 'pedido', 'pedidos')}. </>}O gasto fica na {p.adStoreName} e a venda na {p.salesStoreName}: o lucro de uma parece maior e o da outra menor do que é. Some as duas para julgar.</>}
             </Callout>

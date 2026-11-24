@@ -16,15 +16,22 @@
  *   trailProfitCount        its "dias no lucro N de M", the running day out
  *   idleReasons(idle, rng)  why an idle store is out of the total (its day
  *                           has not begun, it had not sold yet, or quiet)
+ *   totalRowIdle(st, rng)   those reasons for every store the total row names
+ *                           (the verdict's groups, costs or not)
+ *   rowBeforeFirstSale      the store did not exist yet in the window: no
+ *                           activity and its first sale after it
+ *   resumoLinkOverrides     a row's link to that store, on the row's dates
+ *   linkOpensDates          that link carries fixed dates for a preset
  *   storeDayOf(at, tz)      a database instant on the store's own calendar
  */
 
 import type { PnL } from '@/lib/engine/pnl'
-import { daysBetween, shiftDate, todayInTz, type DateRange } from '@/lib/engine/dates'
+import { daysBetween, resolveRange, shiftDate, todayInTz, type DateRange, type Period } from '@/lib/engine/dates'
 import type { SharedAdAccount } from '@/lib/attributionModels'
 import { formatDate, formatRelativeTime, plural } from '@/lib/format'
 import { adChannelOf, channelRoas, type AdChannel } from '@/lib/views/store'
-import { isIdle, judgedStores } from '@/lib/views/verdict'
+import { rowDateClocks, settleRowDates, type PageParams } from '@/lib/views/page'
+import { isIdle, judgedStores, notSellingYet as notSellingYetVerdict } from '@/lib/views/verdict'
 
 // ─── The money of a row ──────────────────────────────────────────────────────
 
@@ -81,9 +88,45 @@ export function idleReasons<T extends { dayState: string; firstOrderDate: string
 }
 
 /** The store's first sale came after the window (and its day has begun):
- *  the verdict's "ainda não vendia". */
+ *  the verdict's "ainda não vendia". Dates only: for a row's own cells use
+ *  rowBeforeFirstSale, which also asks that nothing happened. */
 export function notSellingYet(s: { dayState: string; firstOrderDate: string | null }, range: DateRange): boolean {
   return s.dayState !== 'not_started' && !!s.firstOrderDate && range.to < s.firstOrderDate
+}
+
+/**
+ * A row whose store did not exist yet in the window: its first sale came
+ * after it AND nothing happened in it (the verdict's notSellingYet: no order,
+ * sale, ad spend, refund or chargeback). Such a row says "ainda não vendia ·
+ * 1ª venda em …" and shows "—" for revenue and orders. A store that spent on
+ * ads before its first sale (Glooty, 4–5 nov: $230 of Meta; MOKOO, March:
+ * $1.130) had a losing window, not an absent one: its row read "—" beside "no
+ * prejuízo −$230", while its chip, the verdict, its Resumo and the phone row
+ * all said it spent and sold nothing.
+ */
+export function rowBeforeFirstSale(
+  s: { dayState: string; firstOrderDate: string | null; totals: PnL }, range: DateRange,
+): boolean {
+  return notSellingYet(s, range) && notSellingYetVerdict(s, range)
+}
+
+/**
+ * Every store the total row must explain besides the ones without costs
+ * (verdict.excluded), sorted by reason (idleReasons), in the stores' order.
+ * The verdict names two groups as "ainda não vendia" (lib/views/verdict, the
+ * notes under "Todas"): idle stores with costs AND stores without costs that
+ * had not made their first sale yet — it leaves the latter out of `excluded`,
+ * since they are out for not existing yet, not for their settings. The total
+ * row looked only at sumMembers().idle (stores with costs), so Todas · Mês
+ * passado read "5 de 7 lojas — Hibikura: ainda não vendia" under a verdict
+ * naming Glooty and Hibikura, and Glooty was in no list at all.
+ */
+export function totalRowIdle<T extends { configured: boolean; totals: PnL; dayState: string; firstOrderDate: string | null }>(
+  stores: readonly T[], range: DateRange,
+): { notStarted: T[]; notYet: T[]; quiet: T[] } {
+  const { idle, excluded } = sumMembers(stores)
+  const preStart = excluded.filter(s => notSellingYetVerdict(s, range))
+  return idleReasons(stores.filter(s => idle.includes(s) || preStart.includes(s)), range)
 }
 
 /** Sort value for the profit column: unconfigured and idle rows sort last,
@@ -154,6 +197,26 @@ export function sharedAccountBadges(storeId: string, pairs: SharedAdAccount[], l
     }
   }
   return out
+}
+
+/**
+ * The window ends before the pair's sales store made its first sale (CAMP
+ * HALLOW, first sale 24 jul 2026, in dez 2025 – abr 2026): nothing in it can
+ * be mixed, and "antes vendia com anúncios pagos pela EPOCH" or "Para períodos
+ * anteriores, some as duas lojas" told a past that is in the window's future.
+ * The store simply did not exist yet. `salesFirstOrder`: the sales store's
+ * first kept order (lib/views/portfolio loadFirstOrderDates); unknown → false.
+ */
+export function pairBeforeSalesStart(salesFirstOrder: string | null | undefined, range: DateRange): boolean {
+  return !!salesFirstOrder && range.to < salesFirstOrder
+}
+
+/** "Em 1 dez 2025 – 30 abr 2026, a CAMP HALLOW ainda não vendia (1ª venda em
+ *  24 jul 2026): nada deste período está misturado." — the pair note for a
+ *  window before the sales store's first sale (pairBeforeSalesStart).
+ *  `firstSale` as printed beside the window (storeStart dateBeside). */
+export function pairBeforeStartText(salesStoreName: string, firstSale: string, rangeLabel: string): string {
+  return `Em ${rangeLabel}, a ${salesStoreName} ainda não vendia (1ª venda em ${firstSale}): nada deste período está misturado.`
 }
 
 /** Orders of a 90-day pair inside the page's window (data loadSharedInWindow):
@@ -306,14 +369,84 @@ export function quietNote(i: QuietInput): QuietNote | null {
  * lands a day later (the "Hoje" row showed the closed 17 nov at $589, the
  * click opened 18 nov at $281). Such a row opens on its exact dates instead,
  * so the number clicked is the number shown. Same calendar, or a custom
- * window (already explicit dates): the period travels as it is.
+ * window the owner picked (already explicit dates): the period travels as it
+ * is.
+ *
+ * Those dates are the row's, not a period the owner chose, so they carry the
+ * owner's preset with them (`volta`, the phone's name for it: app/m/_lib/
+ * selection rowPreset). Without it the opened page took them for the owner's
+ * own period: the store picker, the sidebar and "Todas as lojas" carried
+ * "24 nov" everywhere, and a reload the next day still opened it. With it,
+ * lib/views/page brings the preset back as soon as the owner leaves that store
+ * or picks a period, and once the dates are no longer that preset on any of
+ * the stores' clocks (the next day).
+ *
+ * A page already on such dates (it has `volta` itself) priced its rows on
+ * them, so every row opens them. The preset travels with them only when the
+ * store page opened keeps them (rowKeepsDates): a store page holds row dates
+ * that are the preset on Todas' clock or on its own, and turns any others
+ * into the preset on its own clock. Todas opened on Hibikura's "Ontem" (24
+ * nov, from Atribuição) handed `volta` to the MOKOO row too, and the MOKOO
+ * opened its own Ontem, 23 nov, under a row that showed 24 nov. Such a row
+ * gets the plain dates instead.
+ *
+ * A preset that names the same dates on the store's own clock stays the
+ * preset (the phone's rowOpensDates, app/m/_lib/selection): "Mês passado" is
+ * 1–31 out in Tokyo too, and fixed dates compared it with "31 dias
+ * anteriores" instead of the month before. Needs the row's timezone and the
+ * page's clock; without them (a bare { id, storeToday }) the dates travel,
+ * and on a page with `volta` they travel without it.
  */
 export function resumoLinkOverrides(
-  row: { id: string; storeToday: string },
-  page: { today: string; period: string; range: DateRange },
-): { loja: string; periodo?: 'custom'; de?: string; ate?: string } {
-  if (row.storeToday === page.today || page.period === 'custom') return { loja: row.id }
-  return { loja: row.id, periodo: 'custom', de: page.range.from, ate: page.range.to }
+  row: { id: string; storeToday: string; timezone?: string },
+  page: {
+    today: string; period: Period; range: DateRange; now?: Date; params?: { periodo: Period; volta?: Period }
+    /** Every store of the viewer (PageContext.stores): Todas' clock, on which
+     *  a store page keeps row dates (lib/views/page rowDateClocks). */
+    stores?: readonly { timezone: string }[]
+  },
+): { loja: string; periodo?: 'custom'; de?: string; ate?: string; volta?: Period } {
+  const volta = page.params?.volta
+  if (page.period === 'custom') {
+    if (!volta) return { loja: row.id }
+    const dates = { loja: row.id, periodo: 'custom' as const, de: page.range.from, ate: page.range.to }
+    return rowKeepsDates(row, page, volta) ? { ...dates, volta } : dates
+  }
+  if (row.storeToday === page.today) return { loja: row.id }
+  if (row.timezone && page.now) {
+    const own = resolveRange(page.period, row.timezone, null, null, page.now)
+    if (own.from === page.range.from && own.to === page.range.to) return { loja: row.id }
+  }
+  return { loja: row.id, periodo: 'custom', de: page.range.from, ate: page.range.to, volta: page.period }
+}
+
+/**
+ * Whether the store page a row opens shows the page's row dates when they
+ * travel with `volta`: what that page's getPageContext does with them
+ * (lib/views/page settleRowDates on rowDateClocks('store')) — keeps them, or
+ * turns them into the preset, which must then name the same dates on the
+ * store's own clock. Unknown clocks: false (the plain dates are always the
+ * dates shown).
+ */
+function rowKeepsDates(
+  row: { id: string; timezone?: string },
+  page: { range: DateRange; now?: Date; stores?: readonly { timezone: string }[] },
+  volta: Period,
+): boolean {
+  if (!row.timezone || !page.now || !page.stores?.length) return false
+  const p: PageParams = { loja: row.id, periodo: 'custom', de: page.range.from, ate: page.range.to, parte: false, volta }
+  const settled = settleRowDates(p, row.timezone, rowDateClocks('store', page.stores.map(s => s.timezone)), page.now)
+  if (settled === p) return true
+  const opened = resolveRange(settled.periodo, row.timezone, settled.de, settled.ate, page.now)
+  return opened.from === page.range.from && opened.to === page.range.to
+}
+
+/** The row's link carries fixed dates while the page shows a preset (the
+ *  store's own clock names other dates: resumoLinkOverrides) — the stores the
+ *  "Lojas" help line names as opening "nas mesmas datas", as the phone's
+ *  rowOpensDates does. */
+export function linkOpensDates(page: { period: Period }, link: { periodo?: Period }): boolean {
+  return page.period !== 'custom' && link.periodo === 'custom'
 }
 
 // ─── Sparkline window ────────────────────────────────────────────────────────
