@@ -147,6 +147,12 @@ export interface JourneyTouch {
   adId: string | null
   adName: string | null
   landingPage: string | null
+  /** One of this login's connected accounts has the ad (catalog row or
+   *  spend). An unnamed ad there is "ainda não sincronizado"; only an unnamed
+   *  ad no account has is "de conta não conectada" (the ad table's rule,
+   *  components/attribution/CreativeTable). Optional: a page from before the
+   *  field existed reads as before. */
+  adInAccount?: boolean
 }
 
 export interface JourneyOrder {

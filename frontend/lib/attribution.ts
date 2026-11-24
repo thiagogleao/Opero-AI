@@ -1,6 +1,7 @@
 import { query } from './db'
 import { KEPT_ORDER_SQL, PHANTOM_PURCHASE_VALUE, purchaseValueSql, purchasesSql } from './engine/pnl'
 import type { DateRange } from './engine/dates'
+import { formatCount } from './format'
 // Types and labels live apart so the client can import them without pulling
 // this module — and its database pool — into the browser bundle.
 import type {
@@ -275,7 +276,8 @@ export function othersRow(rest: CreativeAttribution[]): (CreativeAttribution & {
     spend: a.spend + r.spend, metaPurchases: a.metaPurchases + r.metaPurchases, metaRevenue: a.metaRevenue + r.metaRevenue,
   }), { orders: 0, revenue: 0, siblingOrders: 0, siblingRevenue: 0, spend: 0, metaPurchases: 0, metaRevenue: 0 })
   return {
-    adId: 'outros', name: `Outros ${rest.length} anúncios`, campaignName: null, thumbnail: null, adStoreId: null,
+    // "Outros 1.478 anúncios", beside "Todos os 1.518 anúncios".
+    adId: 'outros', name: `Outros ${formatCount(rest.length)} anúncios`, campaignName: null, thumbnail: null, adStoreId: null,
     ...s,
     roasJourney: s.spend > 0 ? (s.revenue + s.siblingRevenue) / s.spend : null,
     roasMeta: s.spend > 0 ? s.metaRevenue / s.spend : null,
@@ -563,6 +565,14 @@ export async function getJourneyPage(
   }
 }
 
+/**
+ * A touch as this module builds it: `adInAccount` (optional on the shared
+ * JourneyTouch, for pages from before it existed) is always set here. MOKOO
+ * #5399 read "anúncio de conta não conectada" for an ad of its own account
+ * that the ad table listed as "Anúncio sem nome".
+ */
+export type JourneyTouchOwned = JourneyTouch & { adInAccount: boolean }
+
 async function attachTouches(
   storeId: string,
   orders: {
@@ -576,13 +586,21 @@ async function attachTouches(
   const touches = await query<{
     order_id: string; seq: number; occurred_at: string | null; occurred_local: string | null
     source: string | null; utm_medium: string | null
-    ad_id: string | null; ad_name: string | null; landing_page: string | null
+    ad_id: string | null; ad_name: string | null; ad_in_account: boolean | null; landing_page: string | null
   }>(`
     WITH ${ACCOUNT_CTE}
     SELECT p.order_id, p.seq,
            to_char(p.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')               AS occurred_at,
            to_char(p.occurred_at AT TIME ZONE COALESCE(t.timezone, 'UTC'), 'YYYY-MM-DD HH24:MI') AS occurred_local,
-           p.source, p.utm_medium, p.ad_id, a.name AS ad_name, p.landing_page
+           p.source, p.utm_medium, p.ad_id, a.name AS ad_name,
+           -- The ad runs in one of this login's accounts: a catalog row, or
+           -- spend on record (the ad table's owner rule, creativeRows). An ad
+           -- with spend and no catalog row is one the sync has not described
+           -- yet, not an account Opero cannot read.
+           (p.ad_id IS NOT NULL AND (a.ad_id IS NOT NULL OR EXISTS (
+              SELECT 1 FROM fb_ad_daily_metrics m
+               WHERE m.ad_id = p.ad_id AND m.tenant_id IN (SELECT id FROM acct)))) AS ad_in_account,
+           p.landing_page
       FROM order_touchpoints p
       JOIN tenants t ON t.id = p.tenant_id
       -- Ad names only from this login's own accounts (fb_ads is shared by all).
@@ -591,7 +609,7 @@ async function attachTouches(
      ORDER BY p.order_id, p.seq
   `, [storeId, orders.map(o => o.order_id)])
 
-  const byOrder = new Map<string, JourneyTouch[]>()
+  const byOrder = new Map<string, JourneyTouchOwned[]>()
   for (const t of touches) {
     const list = byOrder.get(t.order_id) ?? []
     list.push({
@@ -602,6 +620,7 @@ async function attachTouches(
       utmMedium: t.utm_medium,
       adId: t.ad_id,
       adName: t.ad_name,
+      adInAccount: !!t.ad_in_account,
       landingPage: t.landing_page,
     })
     byOrder.set(t.order_id, list)

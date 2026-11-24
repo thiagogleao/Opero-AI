@@ -15,7 +15,10 @@ import type { DateRange, Period } from '@/lib/engine/dates'
  *  - a window that runs past the other clock's today (Tokyo's "hoje", or
  *    "este mês" on Tokyo's 1st): those dates have not started over there, and
  *    the period name is the closest match.
- * parte is not touched: hrefWith keeps it.
+ * parte is not touched: hrefWith keeps it. The dates carry the period they
+ * stand for (`volta`, lib/views/page PageParams.volta): they are this store's
+ * days, so Todas brings the preset back once the owner picks a store, and a
+ * reload the next day opens the preset instead of these dates frozen.
  *
  * `all` is the same period resolved on the Todas clock (resolveRange) and
  * that clock's today.
@@ -23,9 +26,9 @@ import type { DateRange, Period } from '@/lib/engine/dates'
 export function allStoresWindow(
   page: { period: Period; range: DateRange },
   all: { range: DateRange; today: string },
-): { periodo?: 'custom'; de?: string; ate?: string } {
+): { periodo?: 'custom'; de?: string; ate?: string; volta?: Period } {
   if (page.period === 'custom') return {}
   if (all.range.from === page.range.from && all.range.to === page.range.to) return {}
   if (page.range.to > all.today) return {}
-  return { periodo: 'custom', de: page.range.from, ate: page.range.to }
+  return { periodo: 'custom', de: page.range.from, ate: page.range.to, volta: page.period }
 }

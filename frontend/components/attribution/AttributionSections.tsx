@@ -24,6 +24,8 @@ import { SharedAccountNote } from './SharedAccountNote'
 import { SourceBars } from './SourceBars'
 import { buildAttributionVerdict } from './verdict'
 import { loadFirstSale } from '@/components/campaigns/firstSale'
+import { loadArchivedStore } from '@/components/dashboard/archivedStore'
+import { emptyWindowWords, windowWhy } from '@/components/campaigns/emptyWhy'
 
 /** Rows in the creative table; the rest are summed into "outros". */
 export const CREATIVE_LIMIT = 40
@@ -58,6 +60,7 @@ export async function AttributionReportSection({ ctx, model }: { ctx: PageContex
       getSharedAdAccountsForStore(store.id, { from: shiftDate(ctx.range.to, -(SHARED_LOOKBACK_DAYS - 1)), to: ctx.range.to }, nameMap)
         .catch((e: unknown): SharedAdAccount[] => { console.error('[attribution] shared lookback', e); return [] }),
       loadFirstSale(ctx),
+      loadArchivedStore(ctx),
     ])
   } catch (e) {
     console.error('[attribution] report', e)
@@ -69,7 +72,7 @@ export async function AttributionReportSection({ ctx, model }: { ctx: PageContex
       </Card>
     )
   }
-  const [report, pnl, recent, firstSale] = data
+  const [report, pnl, recent, firstSale, archived] = data
   const t = report.totals
   const sales = { revenue: pnl?.totals.revenue ?? 0, orders: pnl?.totals.orders ?? 0 }
   const verdict = buildAttributionVerdict({
@@ -86,7 +89,10 @@ export async function AttributionReportSection({ ctx, model }: { ctx: PageContex
     shared: report.sharedAccounts,
     journeysAge: report.coverage.journeysUpdatedAt ? formatRelativeTime(report.coverage.journeysUpdatedAt, ctx.now) : null,
     firstSale,
+    archived,
   })
+  // Before the first sale or after the archive day, the blocks say why.
+  const why = verdict.empty ? emptyWindowWords(verdict.empty, ctx.rangeLabel) : null
   const sharedAdStore = report.sharedAccounts.find(p => p.salesStoreId === store.id)?.adStoreName ?? null
   const hrefs = Object.fromEntries(MODEL_ORDER.map(m => [m, modelHref(ctx, m)])) as Record<Model, string>
 
@@ -106,8 +112,8 @@ export async function AttributionReportSection({ ctx, model }: { ctx: PageContex
         />
       )}
       <ModelPicker active={model} hrefs={hrefs} />
-      <CreativeTable report={report} storeId={store.id} storeName={store.name} names={names} model={model} rangeLabel={ctx.rangeLabel} now={ctx.now} />
-      <SourceBars sources={report.sources} rangeLabel={ctx.rangeLabel} />
+      <CreativeTable report={report} storeId={store.id} storeName={store.name} names={names} model={model} rangeLabel={ctx.rangeLabel} now={ctx.now} why={why} />
+      <SourceBars sources={report.sources} rangeLabel={ctx.rangeLabel} why={why} />
     </>
   )
 }
@@ -116,12 +122,20 @@ export async function JourneySection({ ctx }: { ctx: PageContext }) {
   const store = ctx.store
   if (!store) return null
   let initial: JourneyPage | null = null
-  try {
-    initial = await getJourneyPage(store.id, ctx.range.from, ctx.range.to, { limit: 30 })
-  } catch (e) {
-    // The reader shows its own error state and retries through the API.
-    console.error('[attribution] journeys', e)
-  }
+  const [page, firstSale, archived] = await Promise.all([
+    getJourneyPage(store.id, ctx.range.from, ctx.range.to, { limit: 30 })
+      // The reader shows its own error state and retries through the API.
+      .catch((e: unknown) => { console.error('[attribution] journeys', e); return null }),
+    loadFirstSale(ctx),
+    loadArchivedStore(ctx),
+  ])
+  initial = page
+  // A window before the first sale, or after the archive day, has no order
+  // for that reason (the verdict's), not "A loja não teve pedidos". Orders
+  // only: ad spend before the first sale does not make an order.
+  const why = initial && initial.total === 0
+    ? windowWhy({ range: ctx.range, rangeLabel: ctx.rangeLabel, today: ctx.today, spend: 0, firstOrderDate: firstSale?.firstOrderDate ?? null, archived })
+    : null
   return (
     <Block
       title="Pedidos e seus caminhos"
@@ -136,6 +150,7 @@ export async function JourneySection({ ctx }: { ctx: PageContext }) {
         to={ctx.range.to}
         today={ctx.today}
         initial={initial}
+        why={why ? { title: why.title, text: why.text } : null}
       />
     </Block>
   )

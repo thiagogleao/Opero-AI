@@ -51,6 +51,12 @@ describe('othersRow', () => {
     expect(r.roasJourney).toBeCloseTo(45 / 15)
     expect(othersRow([])).toBeNull()
   })
+
+  it('names a count of 1.000 or more with the separator (regression: "Outros 1478 anúncios")', () => {
+    const r = othersRow(Array.from({ length: 1478 }, () => ad({ spend: 1 })))!
+    expect(r.count).toBe(1478)
+    expect(r.name).toBe('Outros 1.478 anúncios')
+  })
 })
 
 describe('journey cursor', () => {

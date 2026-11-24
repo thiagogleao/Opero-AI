@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { adGap, adSpendState, conversionDelay, formatLocalStamp, formatOrders, landingPath, leftOutSpend, liveThumbnail, modelFromParam, modelParam, ordersLabel, sourceLabel, storeRoasLabel } from '../model'
+import { adGap, adSpendState, adTouchLabel, conversionDelay, formatLocalStamp, formatOrders, landingPath, leftOutSpend, liveThumbnail, modelFromParam, modelParam, ordersLabel, sourceLabel, storeRoasLabel } from '../model'
 import { adChannelOf, channelRoas } from '@/lib/views/adChannel'
 
 describe('model URL key', () => {
@@ -156,5 +156,19 @@ describe('adSpendState', () => {
     expect(adSpendState(ad({ adId: 'outros', adStoreId: null, spend: 12 }))).toBe('amount')
     expect(adSpendState(ad({ spend: 40, orders: 1 }))).toBe('amount')
     expect(adSpendState(ad({}))).toBe('amount')
+  })
+})
+
+describe('adTouchLabel', () => {
+  const touch = { seq: 1, occurredAt: null, occurredAtLocal: null, source: 'facebook', utmMedium: 'paid', adId: '120250058246960625', adName: null, landingPage: null }
+  it("tells an unsynced ad of the store's own account from one of an account Opero cannot read", () => {
+    // MOKOO #5399: the ad table listed it as "Anúncio sem nome", the reader as "conta não conectada".
+    expect(adTouchLabel({ ...touch, adInAccount: true })).toEqual({
+      title: 'Anúncio sem nome · 120250058246960625', summary: 'anúncio sem nome (ainda não sincronizado)', badge: 'ainda não sincronizado',
+    })
+    expect(adTouchLabel({ ...touch, adInAccount: false }).badge).toBe('conta não conectada')
+    // A touch without the field (older page) keeps the old wording.
+    expect(adTouchLabel(touch).summary).toBe('anúncio de conta não conectada')
+    expect(adTouchLabel({ ...touch, adName: 'Capy UGC 3', adInAccount: true })).toEqual({ title: 'Capy UGC 3', summary: 'Capy UGC 3', badge: null })
   })
 })

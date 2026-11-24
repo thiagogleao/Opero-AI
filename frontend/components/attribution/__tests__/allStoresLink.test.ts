@@ -35,15 +35,15 @@ describe('allStoresWindow: one store → Todas keeps the days on screen', () => 
   })
 
   it("Tokyo's ontem and 7 dias after noon in Brasília travel as their exact dates", () => {
-    expect(linkFor('yesterday', TOKYO)).toEqual({ periodo: 'custom', de: '2026-11-18', ate: '2026-11-18' })
-    expect(linkFor('7d', TOKYO)).toEqual({ periodo: 'custom', de: '2026-11-12', ate: '2026-11-18' })
+    expect(linkFor('yesterday', TOKYO)).toEqual({ periodo: 'custom', de: '2026-11-18', ate: '2026-11-18', volta: 'yesterday' })
+    expect(linkFor('7d', TOKYO)).toEqual({ periodo: 'custom', de: '2026-11-12', ate: '2026-11-18', volta: '7d' })
   })
 
   it('Mês passado keeps its name mid-month, and travels as dates on Tokyo\'s 1st', () => {
     expect(linkFor('lastmonth', TOKYO)).toEqual({})
     // 30 nov, 15h in Brasília = 1 dez in Tokyo: "Mês passado" is November there.
     expect(linkFor('lastmonth', TOKYO, new Date('2026-11-30T18:00:00Z')))
-      .toEqual({ periodo: 'custom', de: '2026-11-01', ate: '2026-11-30' })
+      .toEqual({ periodo: 'custom', de: '2026-11-01', ate: '2026-11-30', volta: 'lastmonth' })
   })
 
   it("a window past Brasília's today (Tokyo's hoje, este mês) keeps the period name", () => {
@@ -60,6 +60,6 @@ describe('allStoresWindow: one store → Todas keeps the days on screen', () => 
 
     const yesterday: PageParams = { loja: HIBIKURA, periodo: 'yesterday', de: null, ate: null, parte: true }
     expect(buildHref('/overview', yesterday, { loja: ALL_STORES, ...linkFor('yesterday', TOKYO) }))
-      .toBe('/overview?loja=todas&periodo=custom&de=2026-11-18&ate=2026-11-18&parte=50')
+      .toBe('/overview?loja=todas&periodo=custom&de=2026-11-18&ate=2026-11-18&volta=yesterday&parte=50')
   })
 })

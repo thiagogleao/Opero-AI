@@ -6,12 +6,17 @@
 
 import type { SourceRow } from '@/lib/attributionModels'
 import { SOURCE_RULE } from '@/lib/attributionModels'
-import { formatPct, plural } from '@/lib/format'
+import { formatShare, plural } from '@/lib/format'
 import { Block, EmptyState } from '@/components/ui'
 import { HorizontalBars, type HorizontalBarItem } from '@/components/charts'
 import { sourceLabel } from './model'
+import { WhyEmpty, type EmptyWindowText } from '@/components/campaigns/emptyWhy'
 
-export function SourceBars({ sources, rangeLabel }: { sources: SourceRow[]; rangeLabel: string }) {
+export function SourceBars({ sources, rangeLabel, why = null }: {
+  sources: SourceRow[]; rangeLabel: string
+  /** The verdict's reason the window is empty (components/campaigns/emptyWhy). */
+  why?: EmptyWindowText | null
+}) {
   const total = sources.reduce((a, r) => a + r.revenue, 0)
   // Raw names that read the same once translated ("an unknown source" and a
   // missing source; "https://shop.com/" and "https://www.shop.com/") are one bar.
@@ -28,7 +33,7 @@ export function SourceBars({ sources, rangeLabel }: { sources: SourceRow[]; rang
       label,
       sub: plural(r.orders, 'pedido', 'pedidos'),
       value: r.revenue,
-      note: total > 0 ? formatPct((r.revenue / total) * 100, { digits: 0 }) : undefined,
+      note: total > 0 ? formatShare((r.revenue / total) * 100) : undefined,
       tone: r.source === 'Anúncio pago' ? 'meta' : r.source === 'Sem rastreio' ? 'mut' : 'neu',
     }))
   return (
@@ -43,7 +48,8 @@ export function SourceBars({ sources, rangeLabel }: { sources: SourceRow[]; rang
     >
       {items.length
         ? <HorizontalBars items={items} ariaLabel={`Vendas por origem da primeira visita, ${rangeLabel}`} />
-        : <EmptyState compact icon="ring" title="Sem pedidos no período">Nenhum pedido entre {rangeLabel} para mostrar a origem.</EmptyState>}
+        : why ? <WhyEmpty why={why} />
+          : <EmptyState compact icon="ring" title="Sem pedidos no período">Nenhum pedido entre {rangeLabel} para mostrar a origem.</EmptyState>}
     </Block>
   )
 }

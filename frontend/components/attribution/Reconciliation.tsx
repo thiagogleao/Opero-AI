@@ -6,12 +6,13 @@
  */
 
 import type { AttributionTotals, SharedAdAccount } from '@/lib/attributionModels'
-import { formatPct, plural } from '@/lib/format'
+import { formatShare, plural } from '@/lib/format'
 import { EmptyState } from '@/components/ui'
 import { HorizontalBars, type HorizontalBarItem } from '@/components/charts'
 import { AsideNote, AsideTitle } from './AttributionHeader'
 import { formatOrders, ordersLabel } from './model'
 import type { AttributionVerdict } from './verdict'
+import { WhyEmpty, emptyWindowWords } from '@/components/campaigns/emptyWhy'
 
 export function Reconciliation({ verdict, totals: t, sales, shared, storeId, rangeLabel }: {
   verdict: AttributionVerdict
@@ -23,10 +24,13 @@ export function Reconciliation({ verdict, totals: t, sales, shared, storeId, ran
 }) {
   const title = <AsideTitle title="O que cada lado conta" sub={`Vendas de ${rangeLabel}, na mesma escala`} />
   if (verdict.state === 'no_sales') {
+    // Before the first sale or after the archive day: the verdict's reason,
+    // not a window read and found empty.
+    if (verdict.empty) return <>{title}<WhyEmpty why={emptyWindowWords(verdict.empty, rangeLabel)} /></>
     return <>{title}<EmptyState compact icon="ring" title="Nada para comparar">Sem pedidos e sem gasto no Meta neste período.</EmptyState></>
   }
 
-  const share = (v: number) => (sales.revenue > 0 ? formatPct((v / sales.revenue) * 100, { digits: 0 }) : undefined)
+  const share = (v: number) => (sales.revenue > 0 ? formatShare((v / sales.revenue) * 100) : undefined)
   const storeBar: HorizontalBarItem = {
     key: 'store', label: 'Vendas da loja', sub: `${plural(sales.orders, 'pedido', 'pedidos')} · tudo o que a Shopify registrou`,
     value: sales.revenue, tone: 'neu',

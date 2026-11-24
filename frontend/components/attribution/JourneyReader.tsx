@@ -21,11 +21,11 @@
  */
 
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import type { JourneyFilter, JourneyOrder, JourneyPage, JourneyTouch } from '@/lib/attributionModels'
+import type { JourneyFilter, JourneyOrder, JourneyPage } from '@/lib/attributionModels'
 import { JOURNEY_FILTERS } from '@/lib/attributionModels'
 import { formatCount, plural } from '@/lib/format'
 import { Badge, Button, EmptyState, ErrorState, Icon, Money, Segmented } from '@/components/ui'
-import { conversionDelay, formatLocalStamp, landingPath, sourceLabel } from './model'
+import { adTouchLabel, conversionDelay, formatLocalStamp, landingPath, sourceLabel, type AdTouch } from './model'
 import s from './JourneyReader.module.css'
 
 const PAGE_SIZE = 30
@@ -38,6 +38,10 @@ export interface JourneyReaderProps {
   today: string
   /** The server-rendered first page (filter "Todos"), or null if it failed. */
   initial: JourneyPage | null
+  /** Why the window has no order when it was not read and found empty: before
+   *  the store's first sale, or after an archived store's archive day
+   *  (components/campaigns/emptyWhy windowWhy). Null otherwise. */
+  why?: { title: string; text: string } | null
 }
 
 interface ListState {
@@ -79,7 +83,7 @@ function merge(a: JourneyOrder[], b: JourneyOrder[]): JourneyOrder[] {
   return [...a, ...b.filter(o => !seen.has(o.orderId))]
 }
 
-export function JourneyReader({ storeId, from, to, today, initial }: JourneyReaderProps) {
+export function JourneyReader({ storeId, from, to, today, initial, why = null }: JourneyReaderProps) {
   const [list, setList] = useState<ListState>(() => listOf(initial))
   const [filter, setFilter] = useState<JourneyFilter>('all')
   const [input, setInput] = useState('')
@@ -104,6 +108,7 @@ export function JourneyReader({ storeId, from, to, today, initial }: JourneyRead
   // button while there are more pages, else to the first order the page
   // added (or the count line), or to "Tentar de novo" when it failed.
   const root = useRef<HTMLDivElement>(null)
+  const searchInput = useRef<HTMLInputElement>(null)
   const focusAfterMore = useRef<number | null>(null)
   useEffect(() => {
     const firstNew = focusAfterMore.current
@@ -181,6 +186,9 @@ export function JourneyReader({ storeId, from, to, today, initial }: JourneyRead
   function clearSearch() {
     setInput('')
     setApplied('')
+    // The × unmounts once the search is cleared: focus would fall to <body>
+    // and a keyboard user lose their place. The box stays; focus goes there.
+    searchInput.current?.focus()
     void load({ filter, search: '', cursor: null })
   }
 
@@ -211,6 +219,7 @@ export function JourneyReader({ storeId, from, to, today, initial }: JourneyRead
           <span className={s.searchBox}>
             <Icon name="search" size={14} />
             <input
+              ref={searchInput}
               id={`busca-${storeId}`}
               value={input}
               onChange={e => setInput(e.target.value)}
@@ -245,6 +254,9 @@ export function JourneyReader({ storeId, from, to, today, initial }: JourneyRead
           action={<Button size="sm" icon="refresh" onClick={() => load(last.current)}>Tentar de novo</Button>}>
           {error.text}
         </ErrorState>
+      ) : list.orders.length === 0 && busy !== 'list' && why && !applied ? (
+        // Every filter is empty for the same reason: the verdict's.
+        <EmptyState compact icon="clock" title={why.title}>{why.text}</EmptyState>
       ) : list.orders.length === 0 && busy !== 'list' ? (
         <EmptyState compact icon="ring" title={applied ? `Nenhum pedido com “${applied}” no número` : filter !== 'all' ? 'Nenhum pedido com esse filtro' : 'Nenhum pedido neste período'}>
           {applied ? 'Confira o número ou limpe a busca.'
@@ -290,7 +302,7 @@ function OrderRow({ order: o, today, isOpen, onToggle }: { order: JourneyOrder; 
         <span className={s.orderPath}>
           {visits === 0 ? <span className="mut">sem visitas registradas</span> : plural(visits, 'visita', 'visitas')}
           {delay && visits > 0 ? ` · ${delay}` : ''}
-          {firstAd && <span className={s.viaAd}><i aria-hidden="true" />{firstAd.adName ?? 'anúncio de conta não conectada'}</span>}
+          {firstAd && <span className={s.viaAd}><i aria-hidden="true" />{adTouchLabel(firstAd).summary}</span>}
         </span>
         <span className={s.orderWhen}>{formatLocalStamp(o.createdAt, today)}</span>
       </button>
@@ -312,16 +324,17 @@ function OrderRow({ order: o, today, isOpen, onToggle }: { order: JourneyOrder; 
   )
 }
 
-function TouchRow({ t, today }: { t: JourneyTouch; today: string }) {
+function TouchRow({ t, today }: { t: AdTouch; today: string }) {
   const paidNoId = !t.adId && t.utmMedium === 'paid'
   const path = landingPath(t.landingPage)
+  const ad = t.adId ? adTouchLabel(t) : null
   return (
     <li className={s.touch} data-kind={t.adId ? 'ad' : paidNoId ? 'paid' : 'other'}>
       <span className={s.dot} aria-hidden="true" />
       <div className={s.touchText}>
         <span className={s.touchTitle}>
-          {t.adId ? (t.adName ?? `Anúncio ${t.adId}`) : sourceLabel(t.source)}
-          {t.adId && !t.adName && <Badge tone="mut">conta não conectada</Badge>}
+          {ad ? ad.title : sourceLabel(t.source)}
+          {ad?.badge && <Badge tone="mut">{ad.badge}</Badge>}
           {paidNoId && <Badge tone="warn" icon="alert">pago, sem identificar o anúncio</Badge>}
         </span>
         <span className={s.touchMeta}>

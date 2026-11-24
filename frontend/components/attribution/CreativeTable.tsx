@@ -7,9 +7,10 @@
  */
 
 import type { AttributionReport, CreativeAttribution, Model } from '@/lib/attributionModels'
-import { formatMoney, plural } from '@/lib/format'
+import { formatCount, formatMoney, plural } from '@/lib/format'
 import { Badge, Block, DataTable, EmptyState, Money, Pct, Roas, type DataColumn, type DataRow } from '@/components/ui'
 import { adGap, adSpendState, liveThumbnail, MODEL_TEXT, ordersLabel } from './model'
+import { WhyEmpty, type EmptyWindowText } from '@/components/campaigns/emptyWhy'
 import s from './CreativeTable.module.css'
 
 type Row = CreativeAttribution & { count?: number }
@@ -26,7 +27,7 @@ function AdCell({ c, storeId, names, now }: { c: Row; storeId: string; names: Re
   if (c.adId === 'outros') {
     return (
       <div className={s.ad}>
-        <span className={`${s.thumb} ${s.thumbOthers}`} aria-hidden="true">+{c.count}</span>
+        <span className={`${s.thumb} ${s.thumbOthers}`} aria-hidden="true">+{formatCount(c.count ?? 0)}</span>
         <div className={s.adText}>
           <span className={s.adName}>{c.name}</span>
           <span className={s.adSub}>somados: os de menor gasto no período</span>
@@ -56,7 +57,7 @@ function AdCell({ c, storeId, names, now }: { c: Row; storeId: string; names: Re
   )
 }
 
-export function CreativeTable({ report, storeId, storeName, names, model, rangeLabel, now }: {
+export function CreativeTable({ report, storeId, storeName, names, model, rangeLabel, now, why = null }: {
   report: AttributionReport
   storeId: string
   storeName: string
@@ -66,6 +67,8 @@ export function CreativeTable({ report, storeId, storeName, names, model, rangeL
   rangeLabel: string
   /** The page's clock, to skip thumbnails whose CDN link expired. */
   now: Date
+  /** The verdict's reason the window is empty (components/campaigns/emptyWhy). */
+  why?: EmptyWindowText | null
 }) {
   const all: Row[] = report.others ? [...report.creatives, report.others] : report.creatives
   const siblingIds = [...new Set(report.sharedAccounts.filter(p => p.adStoreId === storeId).map(p => p.salesStoreName))]
@@ -139,7 +142,7 @@ export function CreativeTable({ report, storeId, storeName, names, model, rangeL
   return (
     <Block
       title="Anúncio por anúncio"
-      howTo={`Gasto de cada anúncio ao lado das vendas que a Shopify liga a ele (${MODEL_TEXT[model].label.toLowerCase()}) e do que o Meta declara, ${rangeLabel}. Ordenado por gasto; ${report.others ? `os ${report.others.count} menores estão somados em “outros”` : 'todos os anúncios com atividade'}.`}
+      howTo={`Gasto de cada anúncio ao lado das vendas que a Shopify liga a ele (${MODEL_TEXT[model].label.toLowerCase()}) e do que o Meta declara, ${rangeLabel}. Ordenado por gasto; ${report.others ? `os ${formatCount(report.others.count)} menores estão somados em “outros”` : 'todos os anúncios com atividade'}.`}
       info={<>
         <p><b>Gasto</b>: o do anúncio no período, na conta de anúncios que o roda (pode ser a de outra loja da sua conta).</p>
         <p><b>Vendas pela jornada</b>: vendas e pedidos desta loja que a jornada da Shopify credita ao anúncio, por {MODEL_TEXT[model].label.toLowerCase()}.</p>
@@ -160,7 +163,7 @@ export function CreativeTable({ report, storeId, storeName, names, model, rangeL
         initialSort={{ key: 'spend', dir: 'desc' }}
         maxHeight={560}
         dense
-        empty={<EmptyState compact icon="ring" title="Nenhum anúncio com gasto ou venda neste período">A conta de anúncios desta loja não gastou e nenhum pedido passou por anúncio entre {rangeLabel}.</EmptyState>}
+        empty={why ? <WhyEmpty why={why} /> : <EmptyState compact icon="ring" title="Nenhum anúncio com gasto ou venda neste período">A conta de anúncios desta loja não gastou e nenhum pedido passou por anúncio entre {rangeLabel}.</EmptyState>}
         footer={all.length ? {
           ad: <span className={s.footLabel}>Todos os {plural(adCount, 'anúncio', 'anúncios')}{footNote && <small>{footNote}</small>}</span>,
           spend: formatMoney(sum.spend),

@@ -23,12 +23,14 @@ import type {
   AttributionTotals, Coverage, Model, PhantomDisclosure, SharedAdAccount,
 } from '@/lib/attributionModels'
 import type { VerdictLine } from '@/lib/views/verdict'
-import { MIN_ORDERS } from '@/lib/views/verdict'
+import { MIN_ORDERS, sumTotals } from '@/lib/views/verdict'
 import type { IconName } from '@/components/ui/Icon'
 import type { ChipTone } from '@/components/ui/Chip'
 import { formatMoney, formatPct, plural } from '@/lib/format'
 import { MODEL_TEXT } from './model'
 import { beforeStartText, isBeforeStart, type BeforeStartInput } from '@/components/campaigns/storeStart'
+import type { ArchivedStoreInput } from '@/components/dashboard/archivedStore'
+import { archivedEmptyVerdict, type EmptyWindow } from '@/components/dashboard/emptyWindow'
 
 /** Within ±10% Meta and Shopify "batem": attribution windows alone move that much. */
 export const MATCH_BAND_PCT = 10
@@ -77,6 +79,10 @@ export interface AttributionVerdictInput {
   /** The store's first sale: a window that ends before it, with nothing in
    *  it, reads "Vende desde 7 nov" like the Resumo (campaigns/storeStart). */
   firstSale?: BeforeStartInput | null
+  /** One archived store (components/dashboard/archivedStore): a window after
+   *  its archive day, with nothing in it, reads "sem dados" word for word as
+   *  the Resumo, not "não teve vendas nem gasto" for days never read. */
+  archived?: ArchivedStoreInput | null
 }
 
 export interface AttributionVerdict {
@@ -95,6 +101,10 @@ export interface AttributionVerdict {
   fewOrders: boolean
   /** Store sales no journey links to any ad (organic, e-mail, direct…). */
   withoutAd: number
+  /** Why the window has nothing in it, when it was not read and found empty:
+   *  before the first sale, or after an archived store's archive day. The
+   *  blocks under the card say the same (components/campaigns/emptyWhy). */
+  empty?: EmptyWindow | null
 }
 
 type Part = string | { text: string; strong?: boolean; tone?: 'pos' | 'neg' | 'warn' }
@@ -151,6 +161,29 @@ export function buildAttributionVerdict(input: AttributionVerdictInput): Attribu
       hero: { value: '—', tone: 'mut', caption: text.caption },
       details: [text.detail], notes: [],
       gapPct: null, gapAmount: null, fewOrders: false, withoutAd: 0,
+      empty: { kind: 'before_start', firstSale: text.first },
+    }
+  }
+  // An archived store's empty window, by the Resumo's rule: after the archive
+  // day it is "sem dados" (nothing read: the blocks below say so too, `empty`);
+  // one that runs past it (Este mês, 1–24 nov, archived on 10 nov) "não teve
+  // vendas em 1–10 nov" with the archive note — 1–10 nov were read, so the
+  // blocks keep their own empty states. It read "não teve vendas nem gasto no
+  // Meta neste mês", days after the archive included.
+  const ar = input.archived
+  // Only the card's words are used: the totals are an empty placeholder.
+  const av = state === 'no_sales' && ar
+    ? archivedEmptyVerdict({ ...ar, rangeLabel: input.rangeLabel, dayLabel: null, totals: sumTotals([]) }, { orders: sales.orders, revenue: sales.revenue, spend: t.spend })
+    : null
+  if (av) {
+    return {
+      state, chips: av.chips.map(c => ({ key: c.code, label: c.label, tone: c.tone, icon: c.icon })),
+      when: `${input.rangeLabel} · ${MODEL_TEXT[input.model].label}`,
+      headline: av.headline,
+      hero: { value: '—', tone: 'mut', caption: av.amountCaption },
+      details: av.details, notes: av.notes,
+      gapPct: null, gapAmount: null, fewOrders: false, withoutAd: 0,
+      ...(av.frozen ? { empty: { kind: 'frozen' as const, archivedOn: av.frozen.text ?? null } } : {}),
     }
   }
 

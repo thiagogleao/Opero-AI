@@ -4,11 +4,29 @@
  * date labels of the order reader. No database, safe in the browser.
  */
 
-import type { CreativeAttribution, Model } from '@/lib/attributionModels'
+import type { CreativeAttribution, JourneyTouch, Model } from '@/lib/attributionModels'
 import type { PnL } from '@/lib/engine/pnl'
 import { liveSignedUrl } from '@/lib/data/metaCdn'
 import { CHANNEL_LABEL, type AdChannel } from '@/lib/views/adChannel'
 import { formatClock, formatDate, formatMoney, formatNumber } from '@/lib/format'
+
+/** A journey touch as lib/attribution sends it, with `adInAccount` (on the
+ *  shared JourneyTouch). */
+export type AdTouch = JourneyTouch
+
+/**
+ * How an ad touch is named, by the ad table's rule (CreativeTable): the
+ * catalog's name when there is one; an unnamed ad of a connected account is
+ * "sem nome", not yet synced; only an ad no connected account has is "de
+ * conta não conectada". MOKOO #5399 read "anúncio de conta não conectada" for
+ * an ad of its own account, listed as "Anúncio sem nome" in the ad table.
+ */
+export function adTouchLabel(t: AdTouch): { title: string; summary: string; badge: string | null } {
+  if (t.adName) return { title: t.adName, summary: t.adName, badge: null }
+  return t.adInAccount
+    ? { title: `Anúncio sem nome · ${t.adId ?? ''}`, summary: 'anúncio sem nome (ainda não sincronizado)', badge: 'ainda não sincronizado' }
+    : { title: `Anúncio ${t.adId ?? ''}`, summary: 'anúncio de conta não conectada', badge: 'conta não conectada' }
+}
 
 /** URL key of the credit model (Portuguese, like loja/periodo). */
 export const MODEL_KEY = 'modelo'
