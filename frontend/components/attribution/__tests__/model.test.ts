@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { adGap, conversionDelay, formatLocalStamp, formatOrders, landingPath, leftOutSpend, liveThumbnail, modelFromParam, modelParam, ordersLabel, sourceLabel, storeRoasLabel } from '../model'
+import { adGap, adSpendState, conversionDelay, formatLocalStamp, formatOrders, landingPath, leftOutSpend, liveThumbnail, modelFromParam, modelParam, ordersLabel, sourceLabel, storeRoasLabel } from '../model'
 import { adChannelOf, channelRoas } from '@/lib/views/adChannel'
 
 describe('model URL key', () => {
@@ -135,5 +135,26 @@ describe('modelFromParam with keys of Object.prototype', () => {
       expect(modelFromParam(k)).toBe('first')
     }
     expect(modelFromParam(' Ultimo ')).toBe('last')
+  })
+})
+
+describe('adSpendState', () => {
+  const ad = (over: Partial<{ adId: string; adStoreId: string | null; spend: number; orders: number; siblingOrders: number }>) =>
+    ({ adId: '1', adStoreId: 'epoch', spend: 0, orders: 0, siblingOrders: 0, ...over })
+
+  it('labels every ad with no spend and sales in the window the same way, here or in the sibling store', () => {
+    // EPOCH 28 out – 3 nov, dividido: "Novo anúncio de Vendas — Cópia — Cópia"
+    // ($0, 1 pedido na CAMP HALLOW) read "$0" next to its sibling ad's
+    // "sem gasto no período".
+    expect(adSpendState(ad({ orders: 1 }))).toBe('none')
+    expect(adSpendState(ad({ siblingOrders: 1 }))).toBe('none')
+    expect(adSpendState(ad({ siblingOrders: 0.5 }))).toBe('none')
+  })
+
+  it('keeps unknown spend apart from zero, and a real amount as an amount', () => {
+    expect(adSpendState(ad({ adStoreId: null, orders: 1 }))).toBe('unknown')
+    expect(adSpendState(ad({ adId: 'outros', adStoreId: null, spend: 12 }))).toBe('amount')
+    expect(adSpendState(ad({ spend: 40, orders: 1 }))).toBe('amount')
+    expect(adSpendState(ad({}))).toBe('amount')
   })
 })

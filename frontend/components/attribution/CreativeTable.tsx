@@ -9,7 +9,7 @@
 import type { AttributionReport, CreativeAttribution, Model } from '@/lib/attributionModels'
 import { formatMoney, plural } from '@/lib/format'
 import { Badge, Block, DataTable, EmptyState, Money, Pct, Roas, type DataColumn, type DataRow } from '@/components/ui'
-import { adGap, liveThumbnail, MODEL_TEXT, ordersLabel } from './model'
+import { adGap, adSpendState, liveThumbnail, MODEL_TEXT, ordersLabel } from './model'
 import s from './CreativeTable.module.css'
 
 type Row = CreativeAttribution & { count?: number }
@@ -85,9 +85,11 @@ export function CreativeTable({ report, storeId, storeName, names, model, rangeL
   const rows: DataRow[] = all.map(c => {
     const others = c.adId === 'outros'
     const g = adGap(c)
-    // No connected account reports this ad: its spend is unknown, not zero.
-    const unknownSpend = !others && !c.adStoreId
-    const pausedCredit = !unknownSpend && c.spend <= 0.005 && c.orders > 0
+    // Unknown spend (no connected account reports the ad) or no spend with
+    // sales here or in the sibling store: ./model adSpendState.
+    const spendState = adSpendState(c)
+    const unknownSpend = spendState === 'unknown'
+    const pausedCredit = spendState === 'none'
     return {
       key: c.adId,
       tone: others ? 'mut' : undefined,

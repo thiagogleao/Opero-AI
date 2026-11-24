@@ -91,6 +91,21 @@ export function adGap(c: Pick<CreativeAttribution, 'revenue' | 'siblingRevenue' 
   return c.metaRevenue > 0.005 ? { kind: 'only_meta' } : { kind: 'none' }
 }
 
+/**
+ * What the Gasto cell of an ad says:
+ *   unknown  no connected account reports the ad: its spend is unknown, not zero
+ *   none     no spend in the window but sales in it, here OR in the sibling
+ *            store's column ("sem gasto no período"); an ad whose only sale
+ *            landed in CAMP HALLOW read "$0" next to one labelled in words
+ *   amount   the spend itself
+ */
+export type AdSpendState = 'unknown' | 'none' | 'amount'
+
+export function adSpendState(c: Pick<CreativeAttribution, 'adId' | 'adStoreId' | 'spend' | 'orders' | 'siblingOrders'>): AdSpendState {
+  if (c.adId !== 'outros' && !c.adStoreId) return 'unknown'
+  return c.spend <= 0.005 && (c.orders > 0 || c.siblingOrders > 0) ? 'none' : 'amount'
+}
+
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/
 
 /** Calendar days from a to b ("YYYY-MM-DD", both on the store's clock). */

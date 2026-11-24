@@ -97,6 +97,33 @@ export function JourneyReader({ storeId, from, to, today, initial }: JourneyRead
   const last = useRef<Request>({ filter: 'all', search: '', cursor: null })
   useEffect(() => () => ctrl.current?.abort(), [])
 
+  // Keyboard focus across "Carregar mais". The button is disabled while the
+  // page loads (the browser drops focus from it) and unmounts after the last
+  // page, so focus fell to <body> and a keyboard or screen-reader user lost
+  // their place in a long list. Once the page lands focus goes back to the
+  // button while there are more pages, else to the first order the page
+  // added (or the count line), or to "Tentar de novo" when it failed.
+  const root = useRef<HTMLDivElement>(null)
+  const focusAfterMore = useRef<number | null>(null)
+  useEffect(() => {
+    const firstNew = focusAfterMore.current
+    if (firstNew === null || busy !== null) return
+    focusAfterMore.current = null
+    const el = root.current
+    if (!el) return
+    const target = error?.where === 'more'
+      ? el.querySelector<HTMLElement>('[data-retry-more]')
+      : list.hasMore && !error
+        ? el.querySelector<HTMLElement>('[data-load-more]')
+        : el.querySelectorAll<HTMLElement>('[data-order-btn]')[firstNew] ?? el.querySelector<HTMLElement>('[data-count]')
+    target?.focus()
+  }, [busy, error, list])
+
+  function loadMore() {
+    focusAfterMore.current = list.orders.length
+    void load({ filter, search: applied, cursor: list.cursor })
+  }
+
   async function load(req: Request) {
     ctrl.current?.abort()
     const c = new AbortController()
@@ -104,6 +131,9 @@ export function JourneyReader({ storeId, from, to, today, initial }: JourneyRead
     const id = ++seq.current
     last.current = req
     const where = req.cursor ? 'more' : 'list'
+    // A new list (filter, search) replaces a "carregar mais" in flight: its
+    // focus move must not land on the new list.
+    if (where === 'list') focusAfterMore.current = null
     setBusy(where)
     setError(null)
     try {
@@ -167,7 +197,7 @@ export function JourneyReader({ storeId, from, to, today, initial }: JourneyRead
   const typedNonDigits = /\D/.test(input)
 
   return (
-    <div className={s.reader}>
+    <div className={s.reader} ref={root}>
       <div className={s.toolbar}>
         <Segmented
           ariaLabel="Filtrar pedidos"
@@ -201,7 +231,7 @@ export function JourneyReader({ storeId, from, to, today, initial }: JourneyRead
       </div>
       {typedNonDigits && <p id={`busca-dica-${storeId}`} className={s.hint}>Só o número conta: letras e símbolos são ignorados na busca.</p>}
 
-      {error?.where !== 'list' && <p className={s.count} aria-live="polite">
+      {error?.where !== 'list' && <p className={s.count} aria-live="polite" tabIndex={-1} data-count>
         {busy === 'list' ? 'Carregando pedidos…'
           : <>
             <b className="num">{formatCount(list.total)}</b> {list.total === 1 ? 'pedido' : 'pedidos'}
@@ -233,12 +263,12 @@ export function JourneyReader({ storeId, from, to, today, initial }: JourneyRead
         <div className={s.moreError} role="alert">
           <Icon name="alert" size={14} />
           <span>{error.text}</span>
-          <Button size="sm" variant="ghost" icon="refresh" onClick={() => load(last.current)}>Tentar de novo</Button>
+          <Button size="sm" variant="ghost" icon="refresh" data-retry-more onClick={() => { focusAfterMore.current = list.orders.length; void load(last.current) }}>Tentar de novo</Button>
         </div>
       )}
 
       {list.hasMore && !error && busy !== 'list' && (
-        <Button className={s.more} pending={busy === 'more'} onClick={() => load({ filter, search: applied, cursor: list.cursor })}>
+        <Button className={s.more} pending={busy === 'more'} data-load-more onClick={loadMore}>
           {busy === 'more' ? 'Carregando…' : `Carregar mais · ${formatCount(list.orders.length)} de ${formatCount(list.total)}`}
         </Button>
       )}
@@ -253,7 +283,7 @@ function OrderRow({ order: o, today, isOpen, onToggle }: { order: JourneyOrder; 
   const panelId = `jornada-${o.orderId}`
   return (
     <li className={s.order}>
-      <button type="button" className={s.orderBtn} onClick={onToggle} aria-expanded={isOpen} aria-controls={panelId}>
+      <button type="button" className={s.orderBtn} onClick={onToggle} aria-expanded={isOpen} aria-controls={panelId} data-order-btn>
         <Icon name={isOpen ? 'chev' : 'chevRight'} size={12} className={s.chev} />
         <span className={s.orderNo}>#{o.orderNumber ?? '—'}</span>
         <span className={s.orderTotal}><Money value={o.total} tone="none" /></span>

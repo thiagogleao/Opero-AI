@@ -29,7 +29,7 @@ export default async function AttributionPage({ searchParams }: { searchParams: 
   if (!store) {
     return (
       <AppShell ctx={ctx}>
-        <PageHeader ctx={ctx} title="Atribuição" sub="Nenhuma loja ligada ao seu acesso" />
+        <PageHeader ctx={ctx} title="Atribuição" sub="Nenhuma loja ligada ao seu acesso" halved={false} />
         <EmptyState icon="store" title="Nenhuma loja para mostrar">
           Quando uma loja estiver ligada à sua conta, o caminho de cada venda aparece aqui.
         </EmptyState>
@@ -55,6 +55,7 @@ export default async function AttributionPage({ searchParams }: { searchParams: 
       <PageHeader
         ctx={ctx}
         sub={<><b>Atribuição</b> · {periodName(ctx)} · <span className="num">{ctx.rangeLabel}</span></>}
+        halved={false}
       />
       {fromAll && (
         <Callout tone="neu" icon="store" title={`Mostrando a ${store.name}`}>
