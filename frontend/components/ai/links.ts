@@ -39,8 +39,17 @@ export function internalHref(url: string | null | undefined): string | null {
   return u
 }
 
-/** The desktop site's page state in the URL (lib/views/page.ts). */
-const PAGE_STATE = ['loja', 'periodo', 'de', 'ate', 'parte'] as const
+/**
+ * The desktop site's page state in the URL (lib/views/page.ts). `volta` rides
+ * with row dates (PageParams.volta): without it an answer link opened a
+ * store row's "Hoje" as a frozen "Período escolhido" that kept those dates the
+ * next day; with it settleRowDates brings the preset back once the dates are
+ * no longer it.
+ */
+const PAGE_STATE = ['loja', 'periodo', 'de', 'ate', 'volta', 'parte'] as const
+/** The keys `volta` belongs to: a link that sets any of them has its own
+ *  window, and the address's volta would turn its dates into that preset. */
+const WINDOW_KEYS = ['periodo', 'de', 'ate'] as const
 
 /**
  * An app link from an answer, carrying the store the conversation is about
@@ -60,7 +69,9 @@ export function withPageState(href: string, currentSearch: string, storeId: stri
   if (path === '/m' || path.startsWith('/m/')) return href
   const out = new URLSearchParams(query)
   const current = new URLSearchParams(currentSearch)
+  const ownWindow = WINDOW_KEYS.some(k => out.has(k))
   for (const k of PAGE_STATE) {
+    if (k === 'volta' && ownWindow) continue
     const v = k === 'loja' && storeId ? storeId : current.get(k)
     if (v !== null && !out.has(k)) out.set(k, v)
   }

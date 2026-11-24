@@ -113,8 +113,9 @@ export async function generateInsights(
   f: InsightsFacts, send: Send<InsightsEvent>, signal: AbortSignal, open: OpenStream,
   opts: { viewerKey: string; ttlMs: number; now?: Date },
 ): Promise<InsightsResult> {
-  // The Resumo hides the button for a window before the first sale; this
-  // keeps any other caller (an old tab, /dev/ui) from paying for zeros.
+  // The Resumo asks this up front (./readable quietInsightsWindow) and hides
+  // the button; this keeps any other caller (an old tab, /dev/ui) from paying
+  // for zeros.
   if (nothingToRead(f)) {
     throw new InsightsFailure('no_data', 'Não há vendas nem gasto em anúncios neste período nem no anterior: a IA não tem o que ler. Escolha outro período.')
   }

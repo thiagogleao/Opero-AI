@@ -118,6 +118,32 @@ export function notStartedText(n: NotStarted): { title: string; text: string } {
   }
 }
 
+/**
+ * The window has nothing the AI could read, though the store did exist: an
+ * archived store after its archive day (the verdict's `frozen`), or a window
+ * and the one before it with no order, spend, refund or chargeback (lib/ai/
+ * insights/readable quietInsightsWindow — the server's own no_data rule).
+ * The card says so instead of a "Gerar leitura" that can only be refused.
+ */
+export type NothingToRead =
+  /** `archivedOn` as the page prints it ("10 nov"), null when unknown. */
+  | { kind: 'frozen'; storeName: string; archivedOn: string | null }
+  /** The labels of the AI window and the one before it ("20–23 nov", "16–19 nov"). */
+  | { kind: 'quiet'; window: string; previous: string }
+
+export function nothingToReadText(n: NothingToRead): { title: string; text: string } {
+  if (n.kind === 'frozen') {
+    return {
+      title: 'Sem dados para a IA ler',
+      text: `A ${n.storeName} está arquivada${n.archivedOn ? ` desde ${n.archivedOn}` : ''} e não sincroniza mais: a IA não tem números deste período para ler.${n.archivedOn ? ` Escolha um período até ${n.archivedOn}.` : ''}`,
+    }
+  }
+  return {
+    title: 'Nada para a IA ler neste período',
+    text: `Nenhuma venda, gasto em anúncios, reembolso ou chargeback em ${n.window} nem em ${n.previous}: a IA não tem o que ler. Escolha outro período.`,
+  }
+}
+
 /** "18 out – 16 nov · dias completos" plus why it differs from the period asked. */
 export function windowNote(w: InsightsWindowInfo): string | null {
   if (w.shortened) return `Limitada aos últimos ${w.days} dias completos.`
