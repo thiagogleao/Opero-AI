@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { rollUpCountries, type CountryRow } from '@/lib/data/countries'
 import type { PnL } from '@/lib/engine/pnl'
-import { countryCounts, foldCountryRows } from '../fold'
+import { countryCounts, foldCountryRows, shopifyCountryRows } from '../fold'
 import { buildCountriesVerdict, customerMixShares } from '../countriesVerdict'
-import { coverageText } from '../CountryTables'
+import { allStoresCoverageText, captureSub, captureTitle, coverageText } from '../CountryTables'
 
 function row(country: string, orders: number, revenue: number, contribution: number, spend = 0): CountryRow {
   return {
@@ -125,5 +125,85 @@ describe('customer mix and coverage wording', () => {
     expect(one).toBe('A divisão por país do Meta cobre 0% do gasto ($0 de $216). Falta 1 dia com gasto sem divisão por país.')
     const many = coverageText({ coveredSpend: 17771, totalSpend: 25491, coveragePct: 69.7, missingDays: Array.from({ length: 12 }, (_, i) => `d${i}`) })
     expect(many).toContain('Faltam 12 dias com gasto sem divisão por país.')
+  })
+
+  it('says the capture counts only the days the split covers whole', () => {
+    const text = coverageText({
+      coveredSpend: 15557, totalSpend: 30080, coveragePct: 51.7, missingDays: Array.from({ length: 17 }, (_, i) => `d${i}`),
+      partialDays: ['2026-10-05', '2026-10-09', '2026-10-13'], captureSpendDays: 11,
+    })
+    expect(text).toBe('A divisão por país do Meta cobre 52% do gasto ($15.557 de $30.080). Faltam 17 dias com gasto sem divisão por país.'
+      + ' Em 3 dias, ela cobre só parte do gasto. Por isso a captura compara compras e pedidos só nos dias em que a divisão cobre todo o gasto (11 dias com gasto).')
+    expect(coverageText({ coveredSpend: 0, totalSpend: 216, coveragePct: 0, missingDays: ['2026-11-18'], partialDays: [], captureSpendDays: 0 }))
+      .toContain('Nenhum dia com gasto tem a divisão inteira')
+    // Whole split: nothing about the capture.
+    expect(coverageText({ coveredSpend: 500, totalSpend: 500, coveragePct: 100, missingDays: [], partialDays: [], captureSpendDays: 7 }))
+      .toBe('A divisão por país do Meta cobre 100% do gasto ($500 de $500).')
+  })
+
+  it('shows the capture figures only when they differ from the columns', () => {
+    const r = row('US', 373, 30000, 12000, 9000)
+    expect(captureTitle({ ...r, meta: { ...r.meta, purchases: 179, captureOrders: 177, capturePurchases: 154 } }))
+      .toBe('154 compras ÷ 177 pedidos nos dias com divisão inteira')
+    expect(captureTitle({ ...r, meta: { ...r.meta, purchases: 179, captureOrders: 373, capturePurchases: 179 } })).toBeNull()
+    expect(captureTitle(r)).toBeNull()
+    expect(captureSub({ ...r, meta: { ...r.meta, purchases: 179, captureOrders: 177, capturePurchases: 154 } })).toBe('154 ÷ 177')
+    expect(captureSub(r)).toBeNull()
+  })
+
+  it('folds the capture over the comparable days of the folded rows', () => {
+    const a = { ...row('US', 100, 9000, 4000, 900), meta: { spend: 900, purchases: 50, purchaseValue: 0, capturePct: 80, captureOrders: 50, capturePurchases: 40 } }
+    const b = { ...row('GB', 20, 900, 400, 90), meta: { spend: 90, purchases: 8, purchaseValue: 0, capturePct: 50, captureOrders: 10, capturePurchases: 5 } }
+    const c = { ...row('DE', 10, 800, 300, 80), meta: { spend: 80, purchases: 4, purchaseValue: 0, capturePct: null, captureOrders: 0, capturePurchases: 0 } }
+    const folded = foldCountryRows([a, b, c], 1, 10700)
+    expect(folded[1].meta).toMatchObject({ purchases: 12, captureOrders: 10, capturePurchases: 5, capturePct: 50 })
+  })
+})
+
+// Glooty 4–5 nov: "Nenhum pedido na Glooty" over a Shopify table of
+// "US 0 · $0 · — das vendas", "MX 0 · $0" … — countries where only Meta spent.
+describe('shopifyCountryRows', () => {
+  it('keeps countries with orders only; the Meta-only ones stay for the Meta table', () => {
+    const shop = shopifyCountryRows(ALL)
+    expect(shop.map(r => r.country)).toEqual(['US', 'MX', 'GB', 'DE'])
+    // Nothing with money is dropped: the table still adds up to the store.
+    expect(shop.reduce((t, r) => t + r.revenue, 0)).toBe(9185)
+    expect(shopifyCountryRows([row('US', 0, 0, 0, 87), row('MX', 0, 0, 0, 34)])).toEqual([])
+    // Folded, its "outros" names only countries with orders.
+    const folded = foldCountryRows(shop, 2, 9185)
+    expect(folded[2].name).toBe('Outros 2 países')
+  })
+
+  it('renames an "outros" row already in the list to its countries with orders', () => {
+    const outros = { ...row('outros', 19, 1385, 900, 70), name: 'Outros 3 países · +3 só com gasto do Meta', mergedCountries: 6, mergedWithOrders: 3 }
+    const [r] = shopifyCountryRows([outros])
+    expect(r).toMatchObject({ name: 'Outros 3 países', mergedCountries: 3, mergedWithOrders: 3, orders: 19 })
+  })
+})
+
+// Países · Todas, 17–23 nov: the Meta rows added up to $13,7 mil of $20.737,
+// MOKOO's $6.618 missing without a word.
+describe('allStoresCoverageText', () => {
+  it('names the stores without a split and the ones only partly covered', () => {
+    const text = allStoresCoverageText([
+      { name: 'MOKOO', coveredSpend: 0, totalSpend: 6618.66, missingDays: ['1', '2', '3', '4', '5', '6', '7'] },
+      { name: 'Dumpling Squishy · 8jcp3a', coveredSpend: 96.32, totalSpend: 474.33, missingDays: ['1', '2', '3', '4', '5'] },
+      { name: 'EPOCH ®️', coveredSpend: 7918.65, totalSpend: 7925.03, missingDays: [] },
+      { name: 'Hibikura', coveredSpend: 5720.13, totalSpend: 5720.28, missingDays: [] },
+      { name: 'CAMP HALLOW', coveredSpend: 0, totalSpend: 0, missingDays: [] },
+    ])
+    expect(text).toBe('A divisão por país do Meta cobre 66% do gasto ($13.735 de $20.738); a MOKOO não tem divisão por país neste período; na Dumpling Squishy · 8jcp3a ela cobre só 20%, com 5 dias sem divisão.')
+  })
+
+  it('says only the share when every store is covered, a missing day when the share rounds up, and nothing without spend', () => {
+    expect(allStoresCoverageText([{ name: 'EPOCH ®️', coveredSpend: 500, totalSpend: 500, missingDays: [] }]))
+      .toBe('A divisão por país do Meta cobre 100% do gasto ($500 de $500).')
+    expect(allStoresCoverageText([{ name: 'EPOCH ®️', coveredSpend: 990, totalSpend: 1000, missingDays: ['2026-11-18'] }]))
+      .toBe('A divisão por país do Meta cobre 99% do gasto ($990 de $1.000); na EPOCH ®️ falta 1 dia com gasto sem divisão.')
+    expect(allStoresCoverageText([
+      { name: 'MOKOO', coveredSpend: 0, totalSpend: 100, missingDays: ['a'] },
+      { name: 'Glooty', coveredSpend: 0, totalSpend: 50, missingDays: ['a'] },
+    ])).toBe('A divisão por país do Meta cobre 0% do gasto ($0 de $150); a MOKOO e a Glooty não têm divisão por país neste período.')
+    expect(allStoresCoverageText([{ name: 'CAMP HALLOW', coveredSpend: 0, totalSpend: 0, missingDays: [] }])).toBeNull()
   })
 })

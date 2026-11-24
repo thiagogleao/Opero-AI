@@ -18,6 +18,9 @@ export function metaCountriesEmpty(input: {
   /** Where this store's ads are paid when another store's books carry them
    *  (metaElsewhereText); null when none. */
   elsewhere?: string | null
+  /** "Todas": the sentence speaks of the stores ("A loja não teve gasto"
+   *  read as one store on a page of seven). */
+  many?: boolean
 }): { title: string; body: string } {
   if (input.metaSpend > 0) {
     return { title: 'Sem divisão por país do Meta neste período', body: 'O Meta não entregou o detalhamento por país para estas datas.' }
@@ -30,7 +33,9 @@ export function metaCountriesEmpty(input: {
   }
   return {
     title: 'Sem gasto no Meta neste período',
-    body: input.elsewhere ?? 'A loja não teve gasto com anúncios do Meta nestas datas: não há divisão por país para mostrar.',
+    body: input.elsewhere ?? (input.many
+      ? 'As lojas não tiveram gasto com anúncios do Meta nestas datas: não há divisão por país para mostrar.'
+      : 'A loja não teve gasto com anúncios do Meta nestas datas: não há divisão por país para mostrar.'),
   }
 }
 

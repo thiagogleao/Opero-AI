@@ -5,7 +5,8 @@
  * lib/data/countries rollUpCountries, applied to finished rows so the page can
  * also count, from the full list, how many countries actually had orders (the
  * full list includes countries where only Meta spent). Rows with nothing in
- * them never get here: rollUpCountries drops them. Pure.
+ * them never get here: rollUpCountries drops them. The Shopify table folds
+ * shopifyCountryRows(all) instead, the Meta table the full list. Pure.
  */
 
 import type { CountryRow } from '@/lib/data/countries'
@@ -23,7 +24,9 @@ export function foldCountryRows(all: CountryRow[], limit: number, storeRevenue: 
     orders: a.orders + r.orders, revenue: a.revenue + r.revenue, variableCosts: a.variableCosts + r.variableCosts,
     contribution: a.contribution + r.contribution, spend: a.spend + r.meta.spend, purchases: a.purchases + r.meta.purchases,
     value: a.value + r.meta.purchaseValue,
-  }), { orders: 0, revenue: 0, variableCosts: 0, contribution: 0, spend: 0, purchases: 0, value: 0 })
+    captureOrders: a.captureOrders + (r.meta.captureOrders ?? r.orders),
+    capturePurchases: a.capturePurchases + (r.meta.capturePurchases ?? r.meta.purchases),
+  }), { orders: 0, revenue: 0, variableCosts: 0, contribution: 0, spend: 0, purchases: 0, value: 0, captureOrders: 0, capturePurchases: 0 })
   // An "outros" row already in the list carries its own counts.
   const merged = tail.reduce((n, r) => n + (r.mergedCountries ?? 1), 0)
   const withOrders = tail.reduce((n, r) => n + (r.country === 'outros' ? r.mergedWithOrders ?? (r.orders > 0 ? 1 : 0) : r.orders > 0 ? 1 : 0), 0)
@@ -38,10 +41,38 @@ export function foldCountryRows(all: CountryRow[], limit: number, storeRevenue: 
     contributionMargin: pct(sum.contribution, sum.revenue),
     contributionPerOrder: sum.orders > 0 ? sum.contribution / sum.orders : null,
     smallSample: sum.orders < SMALL_SAMPLE,
-    meta: { spend: sum.spend, purchases: sum.purchases, purchaseValue: sum.value, capturePct: sum.orders > 0 ? (sum.purchases / sum.orders) * 100 : null },
+    // The capture of the folded rows over their comparable days only, as
+    // each row's own (lib/data/countries captureDays).
+    meta: {
+      spend: sum.spend, purchases: sum.purchases, purchaseValue: sum.value,
+      capturePct: pct(sum.capturePurchases, sum.captureOrders),
+      captureOrders: sum.captureOrders, capturePurchases: sum.capturePurchases,
+    },
     mergedCountries: merged,
     mergedWithOrders: withOrders,
   }]
+}
+
+const CENT = 0.005
+
+/**
+ * The rows of the Shopify table ("Vendas por país" / "Contribuição por país"):
+ * only countries with an order or money from orders. The full list also holds
+ * countries where only Meta spent (rollUpCountries keeps them for the Meta
+ * table), and they read as "0 · $0 · — das vendas" rows under a verdict that
+ * said "Nenhum pedido na Glooty". Those stay in the Meta table only. An
+ * "outros" row already in the list keeps only its countries with orders in
+ * its name. Dropped rows carry no orders or money, so the table still adds
+ * up to the store. Fold the result with foldCountryRows. Pure.
+ */
+export function shopifyCountryRows(all: CountryRow[]): CountryRow[] {
+  const sold = (r: CountryRow) => r.orders > 0 || Math.abs(r.revenue) >= CENT
+    || Math.abs(r.variableCosts) >= CENT || Math.abs(r.contribution) >= CENT
+  return all.filter(sold).map(r => {
+    if (r.country !== 'outros') return r
+    const withOrders = r.mergedWithOrders ?? (r.orders > 0 ? 1 : 0)
+    return { ...r, name: outrosLabel(withOrders, 0), mergedCountries: withOrders, mergedWithOrders: withOrders }
+  })
 }
 
 /** Countries with at least one order, and how many of them are under the

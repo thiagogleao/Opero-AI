@@ -11,9 +11,12 @@
  *
  * Meta's side is shown apart and named "atribuído pelo Meta": spend, purchases
  * and value from Meta's own country breakdown, and the capture (Meta purchases
- * ÷ real orders). Ads are not charged to countries: per-country attribution is
- * not reliable enough to decide on (CLAUDE.md measured 17%–140% capture at
- * EPOCH), so the store's ad spend stays one line below the table.
+ * ÷ real orders, both counted only on the days the breakdown covers whole:
+ * it is a separate pull with missing and partial days, and dividing part of
+ * the purchases by every order made Meta look blind to half the sales). Ads
+ * are not charged to countries: per-country attribution is not reliable
+ * enough to decide on (CLAUDE.md measured 17%–140% capture at EPOCH), so the
+ * store's ad spend stays one line below the table.
  *
  * Meta's side leaves out the store's shared-account campaigns (in its books,
  * sales mostly in another shop), by the Campanhas rule (lib/data/campaigns
@@ -23,7 +26,7 @@
  */
 
 import { query } from '../db'
-import { computeStorePnL, purchaseValueSql, purchasesSql, type CountryPnL, type PnL } from '../engine/pnl'
+import { computeStorePnL, KEPT_ORDER_SQL, purchaseValueSql, purchasesSql, type CountryPnL, type PnL } from '../engine/pnl'
 import { isIsoDate, type DateRange } from '../engine/dates'
 import { getSharedAdAccountsForStore } from '../attribution'
 import { SHARED_ACCOUNT_NOTE, type SharedAdAccount } from '../attributionModels'
@@ -37,9 +40,21 @@ export interface MetaCountryAttribution {
   purchases: number
   /** Phantom ad-days removed. */
   purchaseValue: number
-  /** Meta purchases ÷ Shopify orders of the country, in %. Above or below 100
-   *  is Meta's attribution error, not a conversion rate. Null without orders. */
+  /** capturePurchases ÷ captureOrders, in %. Above or below 100 is Meta's
+   *  attribution error, not a conversion rate. Null without such orders. */
   capturePct: number | null
+  /** The country's Shopify orders the capture divides by: only those of the
+   *  days Meta's country split can be compared on (captureDays). Below
+   *  `orders` when some days with Meta spend have no split, or only part of
+   *  one: MOKOO's October read US "179 compras · 373 pedidos · Captura 48%"
+   *  with the split covering 52% of the spend, while the Funil on the same
+   *  page said Meta saw 86% of the orders. Optional for rows built by hand
+   *  (then the row's orders). */
+  captureOrders?: number
+  /** Meta's purchases of the country on those same days (shared-account
+   *  campaigns left out, as `purchases`). Optional for rows built by hand
+   *  (then `purchases`). */
+  capturePurchases?: number
 }
 
 export interface CountryRow {
@@ -125,6 +140,14 @@ export interface CountryReport {
     coveragePct: number | null
     /** Days with Meta spend that have no country breakdown. */
     missingDays: string[]
+    /** Days with Meta spend whose country breakdown holds only part of the
+     *  day's spend (below FULL_DAY_SHARE). They and `missingDays` are left
+     *  out of the capture, on both sides. Optional for reports built by hand. */
+    partialDays?: string[]
+    /** Days with Meta spend the capture is counted on. 0 with spend in the
+     *  window: no day can be compared, and every capturePct is null.
+     *  Optional for reports built by hand. */
+    captureSpendDays?: number
   }
   notes: string[]
 }
@@ -168,7 +191,13 @@ export function countryName(code: string): string {
 
 const pct = (a: number, b: number): number | null => (b > 0 ? (a / b) * 100 : null)
 
-function toRow(c: CountryPnL & { purchases: number }, storeRevenue: number): CountryRow {
+/** A country of the engine with Meta's purchases, and what the capture
+ *  divides when it is not the whole window (absent: orders and purchases). */
+export type CountryInput = CountryPnL & { purchases: number; captureOrders?: number; capturePurchases?: number }
+
+function toRow(c: CountryInput, storeRevenue: number): CountryRow {
+  const captureOrders = c.captureOrders ?? c.orders
+  const capturePurchases = c.capturePurchases ?? c.purchases
   return {
     country: c.country,
     name: countryName(c.country),
@@ -184,9 +213,94 @@ function toRow(c: CountryPnL & { purchases: number }, storeRevenue: number): Cou
       spend: c.metaSpend,
       purchases: c.purchases,
       purchaseValue: c.metaPurchaseValue,
-      capturePct: c.orders > 0 ? (c.purchases / c.orders) * 100 : null,
+      capturePct: captureOrders > 0 ? (capturePurchases / captureOrders) * 100 : null,
+      captureOrders,
+      capturePurchases,
     },
   }
+}
+
+/** A day counts for the capture when Meta's country split holds at least
+ *  this share of the day's Meta spend. MOKOO's October had days at 2%, 75%
+ *  and 82%: their orders went in whole and their purchases only in part. */
+export const FULL_DAY_SHARE = 0.95
+
+/**
+ * Split the window's days by how Meta's country breakdown covers them:
+ * `missing` (Meta spend, no split at all), `partial` (a split holding less
+ * than FULL_DAY_SHARE of the day's spend) and `comparable` (every other day,
+ * days without Meta spend included, as the Funil's capture counts them).
+ * `splitSpend` has one entry per day the breakdown has rows for.
+ */
+export function captureDays(
+  daily: readonly { date: string; metaSpend: number }[], splitSpend: ReadonlyMap<string, number>,
+): { comparable: string[]; partial: string[]; missing: string[]; comparableSpendDays: number } {
+  const comparable: string[] = [], partial: string[] = [], missing: string[] = []
+  let comparableSpendDays = 0
+  for (const d of daily) {
+    if (!(d.metaSpend > 0)) { comparable.push(d.date); continue }
+    const split = splitSpend.get(d.date)
+    if (split === undefined) missing.push(d.date)
+    else if (split < d.metaSpend * FULL_DAY_SHARE) partial.push(d.date)
+    else { comparable.push(d.date); comparableSpendDays++ }
+  }
+  return { comparable, partial, missing, comparableSpendDays }
+}
+
+/** How Meta's country split covers one store's Meta spend in a window. */
+export interface MetaSplitCoverage {
+  /** Spend the split holds over the window (what the country rows add up to). */
+  coveredSpend: number
+  /** The store's Meta spend in the window (the engine's). */
+  totalSpend: number
+  coveragePct: number | null
+  /** Days with Meta spend and no split at all. */
+  missingDays: string[]
+  /** Days with Meta spend whose split holds less than FULL_DAY_SHARE of it. */
+  partialDays: string[]
+}
+
+/**
+ * The coverage of one store from its daily Meta spend (the engine's daily
+ * rows) and the split's spend per day. The "Todas" Países block sums every
+ * store's country rows; MOKOO's split was empty for the whole week and its
+ * $6.618 disappeared from the sum without a word (13,7 mil shown of 20,7 mil).
+ * Pure.
+ */
+export function metaSplitCoverage(
+  daily: readonly { date: string; metaSpend: number }[], splitByDay: ReadonlyMap<string, number>, totalSpend: number,
+): MetaSplitCoverage {
+  const days = captureDays(daily, splitByDay)
+  const inWindow = new Set(daily.map(d => d.date))
+  let covered = 0
+  for (const [d, spend] of splitByDay) if (inWindow.has(d)) covered += spend
+  covered = Math.round(covered * 100) / 100
+  return { coveredSpend: covered, totalSpend, coveragePct: pct(covered, totalSpend), missingDays: days.missing, partialDays: days.partial }
+}
+
+/**
+ * metaSplitCoverage for several stores, in one read of the split's daily
+ * spend. Stores with no row in the split get an empty map (every day with
+ * spend is missing).
+ */
+export async function getMetaSplitCoverage(
+  stores: readonly { storeId: string; daily: readonly { date: string; metaSpend: number }[]; totalSpend: number }[],
+  range: DateRange,
+): Promise<Map<string, MetaSplitCoverage>> {
+  const out = new Map<string, MetaSplitCoverage>()
+  if (!stores.length) return out
+  const rows = await query<{ tenant_id: string; d: string; spend: number }>(
+    `SELECT tenant_id, date::text AS d, COALESCE(SUM(spend), 0)::float8 AS spend
+       FROM fb_ad_breakdowns
+      WHERE tenant_id = ANY($1::text[]) AND breakdown_type = 'country' AND date BETWEEN $2::date AND $3::date
+      GROUP BY 1, 2`,
+    [stores.map(s => s.storeId), range.from, range.to],
+  )
+  for (const s of stores) {
+    const split = new Map(rows.filter(r => r.tenant_id === s.storeId).map(r => [r.d, Number(r.spend) || 0]))
+    out.set(s.storeId, metaSplitCoverage(s.daily, split, s.totalSpend))
+  }
+  return out
 }
 
 const CENT = 0.005
@@ -223,18 +337,20 @@ export function outrosLabel(withOrders: number, metaOnly: number): string {
  * nothing in them are dropped first (hasCountryActivity).
  */
 export function rollUpCountries(
-  countries: (CountryPnL & { purchases: number })[], storeRevenue: number, limit: number,
+  countries: CountryInput[], storeRevenue: number, limit: number,
 ): CountryRow[] {
   const sorted = countries.filter(hasCountryActivity).sort((a, b) => b.revenue - a.revenue || b.metaSpend - a.metaSpend)
   const head = sorted.slice(0, Math.max(0, limit)).map(c => toRow(c, storeRevenue))
   const tail = sorted.slice(Math.max(0, limit))
   if (!tail.length) return head
-  const sum = tail.reduce((a, c) => ({
+  const sum = tail.reduce<Required<CountryInput>>((a, c) => ({
     country: 'outros', orders: a.orders + c.orders, revenue: a.revenue + c.revenue,
     variableCosts: a.variableCosts + c.variableCosts, contribution: a.contribution + c.contribution,
     metaSpend: a.metaSpend + c.metaSpend, metaPurchaseValue: a.metaPurchaseValue + c.metaPurchaseValue,
     purchases: a.purchases + c.purchases,
-  }), { country: 'outros', orders: 0, revenue: 0, variableCosts: 0, contribution: 0, metaSpend: 0, metaPurchaseValue: 0, purchases: 0 })
+    captureOrders: a.captureOrders + (c.captureOrders ?? c.orders),
+    capturePurchases: a.capturePurchases + (c.capturePurchases ?? c.purchases),
+  }), { country: 'outros', orders: 0, revenue: 0, variableCosts: 0, contribution: 0, metaSpend: 0, metaPurchaseValue: 0, purchases: 0, captureOrders: 0, capturePurchases: 0 })
   const withOrders = tail.filter(c => c.orders > 0).length
   return [...head, {
     ...toRow(sum, storeRevenue),
@@ -251,7 +367,7 @@ interface CountryMeta { country: string; spend: number; pv: number; pc: number }
  * each country's Meta columns. Shopify's side is untouched, so the rows still
  * add up to the store. Never below zero (rounding).
  */
-export function withoutShared<T extends CountryPnL & { purchases: number }>(countries: T[], shared: readonly CountryMeta[]): T[] {
+export function withoutShared<T extends CountryInput>(countries: T[], shared: readonly CountryMeta[]): T[] {
   if (!shared.length) return countries
   const by = new Map(shared.map(r => [r.country, r]))
   const cut = (a: number, b: number) => Math.max(0, Math.round((a - b) * 100) / 100)
@@ -290,6 +406,56 @@ function sharedLeftOutOf(split: OwnSharedFacts | null): CountrySharedLeftOut | n
   }
 }
 
+/** Counts keyed by country as the engine keys them: no code (null or "")
+ *  is "??", so both land in one entry. */
+function sumByCountry(rows: readonly { country: string | null; n: number }[]): Map<string, number> {
+  const out = new Map<string, number>()
+  for (const r of rows) {
+    const key = r.country || '??'
+    out.set(key, (out.get(key) ?? 0) + (Number(r.n) || 0))
+  }
+  return out
+}
+
+/**
+ * Orders and Meta purchases per country on the comparable days only, for the
+ * capture. Null when every day is comparable (the window's own counts are the
+ * right ones). With no comparable day that had Meta spend, both maps are empty
+ * and every capture is null: purchases from days without spend against their
+ * orders would read as 0%. Orders follow the engine's rules (kept orders, the
+ * store's own calendar, no country = "??"); purchases leave out the
+ * shared-account ads, as the Meta columns do.
+ */
+async function loadCaptureCounts(
+  storeId: string, range: DateRange, days: ReturnType<typeof captureDays>, sharedAds: string[],
+): Promise<{ orders: Map<string, number>; purchases: Map<string, number> } | null> {
+  if (!days.missing.length && !days.partial.length) return null
+  if (days.comparableSpendDays === 0) return { orders: new Map(), purchases: new Map() }
+  const [orders, purchases] = await Promise.all([
+    query<{ country: string | null; n: number }>(
+      `SELECT o.country_code AS country, COUNT(*)::int AS n
+         FROM shopify_orders o
+         JOIN tenants t ON t.id = o.tenant_id
+        WHERE o.tenant_id = $1
+          AND o.created_at >= ($2::date - 2)::timestamptz
+          AND o.created_at <  ($3::date + 3)::timestamptz
+          AND (o.created_at AT TIME ZONE COALESCE(t.timezone, 'UTC'))::date = ANY($4::date[])
+          AND ${KEPT_ORDER_SQL}
+        GROUP BY 1`,
+      [storeId, range.from, range.to, days.comparable],
+    ),
+    query<{ country: string | null; n: number }>(
+      `SELECT breakdown_value AS country, COALESCE(SUM(${purchasesSql()}), 0)::float8 AS n
+         FROM fb_ad_breakdowns
+        WHERE tenant_id = $1 AND breakdown_type = 'country' AND date = ANY($2::date[])
+          AND COALESCE(ad_id, '') <> ALL($3::text[])
+        GROUP BY 1`,
+      [storeId, days.comparable, sharedAds],
+    ),
+  ])
+  return { orders: sumByCountry(orders), purchases: sumByCountry(purchases) }
+}
+
 // ─── Loading ──────────────────────────────────────────────────────────────────
 
 /**
@@ -312,9 +478,10 @@ export async function getCountryReport(
         GROUP BY 1`,
       [store.id, range.from, range.to],
     ),
-    query<{ d: string }>(
-      `SELECT DISTINCT date::text AS d FROM fb_ad_breakdowns
-        WHERE tenant_id = $1 AND breakdown_type = 'country' AND date BETWEEN $2::date AND $3::date`,
+    query<{ d: string; spend: number }>(
+      `SELECT date::text AS d, COALESCE(SUM(spend), 0)::float8 AS spend FROM fb_ad_breakdowns
+        WHERE tenant_id = $1 AND breakdown_type = 'country' AND date BETWEEN $2::date AND $3::date
+        GROUP BY 1`,
       [store.id, range.from, range.to],
     ),
     getSharedAdAccountsForStore(store.id, range).catch(() => [] as SharedAdAccount[]),
@@ -327,9 +494,13 @@ export async function getCountryReport(
   const sharedLeftOut = sharedLeftOutOf(split)
   const sharedAds = split && sharedLeftOut ? [...new Set(split.shared.map(f => f.adId))] : []
   const sharedByCountry = await loadCountryMetaOfAds(store.id, range, sharedAds)
-  const pcBy = new Map(purchases.map(r => [r.country || '??', Number(r.pc) || 0]))
-  const countries = withoutShared((pnl.countries ?? []).map(c => ({ ...c, purchases: pcBy.get(c.country) ?? 0 })), sharedByCountry)
-  const covered = new Set(breakdownDays.map(r => r.d))
+  const pcBy = sumByCountry(purchases.map(r => ({ country: r.country, n: r.pc })))
+  const days = captureDays(pnl.daily, new Map(breakdownDays.map(r => [r.d, Number(r.spend) || 0])))
+  const capture = await loadCaptureCounts(store.id, range, days, sharedAds)
+  const countries = withoutShared((pnl.countries ?? []).map(c => ({
+    ...c, purchases: pcBy.get(c.country) ?? 0,
+    ...(capture ? { captureOrders: capture.orders.get(c.country) ?? 0, capturePurchases: capture.purchases.get(c.country) ?? 0 } : {}),
+  })), sharedByCountry)
   const coveredSpend = countries.reduce((s, c) => s + c.metaSpend, 0)
   const totalSpend = Math.max(0, pnl.totals.metaSpend - (sharedLeftOut?.spend ?? 0))
 
@@ -354,7 +525,9 @@ export async function getCountryReport(
       coveredSpend,
       totalSpend,
       coveragePct: pct(coveredSpend, totalSpend),
-      missingDays: pnl.daily.filter(d => d.metaSpend > 0 && !covered.has(d.date)).map(d => d.date),
+      missingDays: days.missing,
+      partialDays: days.partial,
+      captureSpendDays: days.comparableSpendDays,
     },
     notes,
   }

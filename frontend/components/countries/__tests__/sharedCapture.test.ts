@@ -105,3 +105,22 @@ describe('sharedLeftOutText', () => {
       .toContain('1 campanha de conta compartilhada ($50,00 de gasto, 1 compra do Meta), porque as vendas dela caíram em outra loja')
   })
 })
+
+describe('sumFunnels capture (Todas)', () => {
+  // A store with no ad account (Dumpling Squishy · hzsjyp): its orders are
+  // out of the capture's denominator. 27 out – 3 nov: 221 ÷ 275, not ÷ 323.
+  const withAds = buildFunnel('ads', RANGE, { own: [fact({ spend: 5000, purchases: 221, impressions: 900_000, linkClicks: 9_000 })], shared: [], sharedGroups: [] }, { orders: 275, abandonedCheckouts: 60 }, 0)
+  const noAds = buildFunnel('hzsjyp', RANGE, { own: [], shared: [], sharedGroups: [] }, { orders: 48, abandonedCheckouts: 22 }, 0)
+
+  it('divides Meta purchases only by orders of stores Meta can see', () => {
+    const sum = sumFunnels([withAds, noAds], new Set(['ads', 'hzsjyp']), RANGE)
+    expect(sum.shopify.orders).toBe(323)
+    expect(sum.captureOrders).toBe(275)
+    expect(sum.metaCapturePct).toBeCloseTo((221 / 275) * 100, 6)
+  })
+
+  it('one store: the capture divides by all its orders', () => {
+    expect(withAds.captureOrders).toBe(275)
+    expect(noAds.captureOrders).toBeNull()
+  })
+})

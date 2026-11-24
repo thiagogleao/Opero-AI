@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { countryName, outrosLabel, rollUpCountries } from '../countries'
+import { captureDays, countryName, metaSplitCoverage, outrosLabel, rollUpCountries } from '../countries'
 
 const c = (country: string, orders: number, revenue: number, contribution: number, metaSpend = 0, purchases = 0) => ({
   country, orders, revenue, variableCosts: revenue - contribution, contribution, metaSpend, metaPurchaseValue: 0, purchases,
@@ -77,5 +77,50 @@ describe('rollUpCountries', () => {
     expect(outrosLabel(3, 0)).toBe('Outros 3 países')
     expect(outrosLabel(1, 0)).toBe('Outros 1 país')
     expect(outrosLabel(0, 4)).toBe('4 países só com gasto do Meta')
+  })
+})
+
+describe('capture on the days Meta split by country', () => {
+  it('leaves out days with Meta spend and no split, or only part of one; keeps days without spend', () => {
+    // MOKOO, October: 1 and 2 out had no split, 9 out had 2% of the spend in it.
+    const daily = [
+      { date: '2026-10-01', metaSpend: 1560.13 }, { date: '2026-10-03', metaSpend: 1517.26 },
+      { date: '2026-10-09', metaSpend: 1002.4 }, { date: '2026-10-08', metaSpend: 2656.51 }, { date: '2026-10-10', metaSpend: 0 },
+    ]
+    const split = new Map([['2026-10-03', 1516.8], ['2026-10-09', 16.59], ['2026-10-08', 2650.38]])
+    expect(captureDays(daily, split)).toEqual({
+      comparable: ['2026-10-03', '2026-10-08', '2026-10-10'], partial: ['2026-10-09'], missing: ['2026-10-01'], comparableSpendDays: 2,
+    })
+  })
+
+  it('divides the purchases of the comparable days by the orders of the same days', () => {
+    // US, MOKOO October: 179 purchases over 373 orders read "Captura 48%" with
+    // the split covering 52% of the spend; on the comparable days it is 154 of 177.
+    const us = { ...c('US', 373, 30000, 12000, 9000, 179), captureOrders: 177, capturePurchases: 154 }
+    const gb = { ...c('GB', 63, 4000, 1500, 1000, 26), captureOrders: 28, capturePurchases: 22 }
+    const de = { ...c('DE', 41, 2500, 900, 300, 21), captureOrders: 21, capturePurchases: 19 }
+    const rows = rollUpCountries([us, gb, de], 36500, 1)
+    expect(rows[0].meta).toMatchObject({ purchases: 179, captureOrders: 177, capturePurchases: 154 })
+    expect(rows[0].meta.capturePct).toBeCloseTo((154 / 177) * 100)
+    // "outros" sums the capture's own figures, not the window's.
+    expect(rows[1].meta).toMatchObject({ purchases: 47, captureOrders: 49, capturePurchases: 41 })
+    expect(rows[1].meta.capturePct).toBeCloseTo((41 / 49) * 100)
+    // No comparable day with spend: both sides 0, so no capture rather than 0%.
+    expect(rollUpCountries([{ ...c('US', 10, 900, 300, 50, 4), captureOrders: 0, capturePurchases: 0 }], 900, 5)[0].meta.capturePct).toBeNull()
+  })
+})
+
+describe('metaSplitCoverage', () => {
+  it('sums the split over the window and names the days it misses or only partly holds', () => {
+    const daily = [
+      { date: '2026-11-17', metaSpend: 100 }, { date: '2026-11-18', metaSpend: 100 },
+      { date: '2026-11-19', metaSpend: 0 }, { date: '2026-11-20', metaSpend: 80 },
+    ]
+    // 18 nov has no split; 20 nov only half; a day outside the window is ignored.
+    const split = new Map([['2026-11-17', 99.5], ['2026-11-20', 40], ['2026-11-25', 999]])
+    const c = metaSplitCoverage(daily, split, 280)
+    expect(c).toEqual({ coveredSpend: 139.5, totalSpend: 280, coveragePct: (139.5 / 280) * 100, missingDays: ['2026-11-18'], partialDays: ['2026-11-20'] })
+    // MOKOO, 17–23 nov: no split at all.
+    expect(metaSplitCoverage(daily, new Map(), 280)).toMatchObject({ coveredSpend: 0, missingDays: ['2026-11-17', '2026-11-18', '2026-11-20'] })
   })
 })

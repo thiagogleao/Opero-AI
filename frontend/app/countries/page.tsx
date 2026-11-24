@@ -1,23 +1,26 @@
 import { Suspense } from 'react'
 import { getPageContext, pageMetadata, type PageContext, type SearchParams } from '@/lib/views/page'
-import { computePnL, type CountryPnL, type PnL } from '@/lib/engine/pnl'
+import { computePnL, type CountryPnL, type PnL, type StorePnL } from '@/lib/engine/pnl'
 import type { StoreRef } from '@/lib/access'
-import { getCountryReport, rollUpCountries, TERRITORIES_NOTE, type CountryReport, type CountryRow } from '@/lib/data/countries'
+import { getCountryReport, getMetaSplitCoverage, rollUpCountries, TERRITORIES_NOTE, type CountryReport, type CountryRow, type MetaSplitCoverage } from '@/lib/data/countries'
 import { getCustomerLtv, getCustomerSplit, type CustomerSplit } from '@/lib/data/customers'
 import { getFunnel, sumFunnels, type FunnelReport } from '@/lib/data/funnel'
 import { sumTotals } from '@/lib/views/verdict'
-import { formatMoney, formatPct, plural } from '@/lib/format'
+import { formatMoney, formatShare, plural } from '@/lib/format'
 import { AppShell, PageHeader, PeriodNote } from '@/components/shell'
 import { Block, Callout, EmptyState, ErrorState, SkeletonBlock, VerdictCard } from '@/components/ui'
 import { HorizontalBars } from '@/components/charts'
-import { CountryTable, MetaCountries, coverageText } from '@/components/countries/CountryTables'
+import { CountryTable, MetaCountries, allStoresCoverageText, coverageText } from '@/components/countries/CountryTables'
 import { metaElsewhereText } from '@/components/countries/metaEmpty'
 import { getSharedAdAccountsForStore } from '@/lib/attribution'
 import { CustomersByStore, CustomersSplit, FunnelBlock, LtvBlock, type StoreCustomers } from '@/components/countries/CustomerBlocks'
 import { buildCountriesVerdict } from '@/components/countries/countriesVerdict'
-import { countryCounts, foldCountryRows } from '@/components/countries/fold'
+import { countryCounts, foldCountryRows, shopifyCountryRows } from '@/components/countries/fold'
 import { sharedLeftOutText } from '@/components/countries/sharedText'
-import { loadFirstSale } from '@/components/campaigns/firstSale'
+import { loadFirstSale, loadFirstSales } from '@/components/campaigns/firstSale'
+import { firstSaleOfAll } from '@/components/campaigns/storeStart'
+import { emptyWhy, type EmptyWindowText } from '@/components/campaigns/emptyWhy'
+import { loadArchivedStore } from '@/components/dashboard/archivedStore'
 import s from '@/components/countries/countries.module.css'
 
 /**
@@ -50,6 +53,7 @@ export default async function CountriesPage({ searchParams }: { searchParams: Pr
     getCountryReport(store, ctx.range, { limit: 250 }),
     getCustomerSplit(store, ctx.range),
     loadFirstSale(ctx),
+    loadArchivedStore(ctx),
   ]).catch(err => { console.error('[countries]', err); return null })
   if (!loaded || !loaded[0]) {
     return (
@@ -59,15 +63,21 @@ export default async function CountriesPage({ searchParams }: { searchParams: Pr
       </AppShell>
     )
   }
-  const [report, split, firstSale] = loaded as [CountryReport, CustomerSplit, Awaited<ReturnType<typeof loadFirstSale>>]
+  const [report, split, firstSale, archived] = loaded as [CountryReport, CustomerSplit, Awaited<ReturnType<typeof loadFirstSale>>, Awaited<ReturnType<typeof loadArchivedStore>>]
   const all = report.rows
+  // Meta's table keeps the countries where only Meta spent; the Shopify
+  // table, its aside and the verdict list countries with orders only.
   const rows = foldCountryRows(all, ROWS, report.totals.revenue)
+  const shopRows = foldCountryRows(shopifyCountryRows(all), ROWS, report.totals.revenue)
   const opt = ctx.storeOption
   const verdict = buildCountriesVerdict({
-    subjectOf: `da ${store.name}`, subjectIn: `na ${store.name}`, rows, counts: countryCounts(all), totals: report.totals,
+    subjectOf: `da ${store.name}`, subjectIn: `na ${store.name}`, rows: shopRows, counts: countryCounts(all), totals: report.totals,
     configured: report.configured, customers: split, rangeLabel: ctx.rangeLabel, periodPhrase: ctx.periodPhrase,
-    partialLabel: ctx.partialLabel, dayLabel: opt?.dayLabel ?? null, split: ctx.split, firstSale,
+    partialLabel: ctx.partialLabel, dayLabel: opt?.dayLabel ?? null, split: ctx.split, firstSale, archived,
   })
+  // Before the first sale or after the archive day, every block says the
+  // verdict's reason instead of "Nenhum pedido" / "Sem gasto no Meta".
+  const why = emptyWhy(verdict, ctx.rangeLabel)
   const notes = report.notes.filter(n => n !== TERRITORIES_NOTE)
   const coverage = coverageText(report.meta)
   const nameOf = (id: string) => ctx.stores.find(x => x.id === id)?.name ?? null
@@ -76,24 +86,26 @@ export default async function CountriesPage({ searchParams }: { searchParams: Pr
   // Only a store with no Meta spend of its own asks where its ads are paid
   // (CAMP HALLOW's run in EPOCH's account): the table then says so instead
   // of blaming a missing Meta report.
-  const elsewhere = report.meta.totalSpend > 0 || sharedSpend > 0 ? null : await adsPaidElsewhere(store, ctx)
+  const elsewhere = why || report.meta.totalSpend > 0 || sharedSpend > 0 ? null : await adsPaidElsewhere(store, ctx)
 
   return (
     <AppShell ctx={ctx}>
       {header}
       <PeriodNote ctx={ctx} />
-      <VerdictCard verdict={verdict} roas={false} aside={<CountryAside rows={rows} totals={report.totals} configured={report.configured} rangeLabel={ctx.rangeLabel} />} />
+      <VerdictCard verdict={verdict} roas={false} aside={<CountryAside rows={shopRows} totals={report.totals} configured={report.configured} rangeLabel={ctx.rangeLabel} />} />
       <Block
         title={report.configured ? 'Contribuição por país' : 'Vendas por país'}
-        howTo={`Pedidos reais da Shopify por país de entrega em ${ctx.rangeLabel}${report.configured ? ', cada um com o custo do próprio país' : ' — sem custos configurados, só vendas e pedidos'}.${rows.some(r => r.country === 'outros') ? ' A linha "outros" fecha a conta com a loja.' : ''}`}
+        howTo={`Pedidos reais da Shopify por país de entrega em ${ctx.rangeLabel}${report.configured ? ', cada um com o custo do próprio país' : ' — sem custos configurados, só vendas e pedidos'}.${shopRows.some(r => r.country === 'outros') ? ' A linha "outros" fecha a conta com a loja.' : ''}`}
         info="Os anúncios ficam numa linha só da loja, não divididos por país: a divisão por país do Meta não é confiável para isso."
         flush
-        footer={<>
-          <span>{TERRITORIES_NOTE}</span>
+        // The territories note is about US orders: over an empty table it
+        // explained rows that are not there.
+        footer={shopRows.some(r => r.country === 'US') || notes.length ? <>
+          {shopRows.some(r => r.country === 'US') && <span>{TERRITORIES_NOTE}</span>}
           {notes.map((n, i) => <span key={i}>{n}</span>)}
-        </>}
+        </> : undefined}
       >
-        <CountryTable rows={rows} totals={report.totals} configured={report.configured} rangeLabel={ctx.rangeLabel} />
+        <CountryTable rows={shopRows} totals={report.totals} configured={report.configured} rangeLabel={ctx.rangeLabel} why={why} />
       </Block>
       <Block
         title="O que o Meta atribui a cada país"
@@ -106,15 +118,15 @@ export default async function CountriesPage({ searchParams }: { searchParams: Pr
           {coverage && <span>{coverage}</span>}
         </> : undefined}
       >
-        <MetaCountries rows={rows} purchasesKnown rangeLabel={ctx.rangeLabel} metaSpend={report.meta.totalSpend} sharedSpend={sharedSpend} elsewhere={elsewhere} />
+        <MetaCountries rows={rows} purchasesKnown rangeLabel={ctx.rangeLabel} metaSpend={report.meta.totalSpend} sharedSpend={sharedSpend} elsewhere={elsewhere} why={why} />
       </Block>
-      <CustomersSplit split={split} today={ctx.today} rangeLabel={ctx.rangeLabel} />
+      <CustomersSplit split={split} today={ctx.today} rangeLabel={ctx.rangeLabel} why={why} />
       <div className={s.grid2}>
         <Suspense fallback={<SkeletonBlock lines={4} height={140} />}>
           <StoreLtv store={store} today={ctx.today} />
         </Suspense>
         <Suspense fallback={<SkeletonBlock lines={4} height={140} />}>
-          <StoreFunnel store={store} ctx={ctx} />
+          <StoreFunnel store={store} ctx={ctx} why={why} />
         </Suspense>
       </div>
     </AppShell>
@@ -139,7 +151,7 @@ function CountryAside({ rows, totals, configured, rangeLabel }: { rows: CountryR
           const v = configured ? r.contribution : r.revenue
           return {
             key: r.country, label: r.name, sub: `${plural(r.orders, 'pedido', 'pedidos')}${r.smallSample ? ' · amostra pequena' : ''}`,
-            value: v, tone: v < 0 ? 'neg' : configured ? 'pos' : 'neu', note: formatPct(base > 0 ? (v / base) * 100 : null, { digits: 0 }),
+            value: v, tone: v < 0 ? 'neg' : configured ? 'pos' : 'neu', note: formatShare(base > 0 ? (v / base) * 100 : null),
           }
         })}
       />
@@ -167,12 +179,12 @@ async function StoreLtv({ store, today }: { store: StoreRef; today: string }) {
   return <LtvBlock ltv={ltv} today={today} />
 }
 
-async function StoreFunnel({ store, ctx }: { store: StoreRef; ctx: PageContext }) {
+async function StoreFunnel({ store, ctx, why }: { store: StoreRef; ctx: PageContext; why: EmptyWindowText | null }) {
   const funnel = await getFunnel(store, ctx.range).catch(err => { console.error('[countries] funnel', err); return null })
   if (!funnel) return <Block title="Funil"><ErrorState compact /></Block>
   const nameOf = (id: string) => ctx.stores.find(x => x.id === id)?.name ?? null
   const sharedNote = funnel.sharedLeftOut ? sharedLeftOutText(funnel.sharedLeftOut, nameOf, 'do funil, da captura e do gasto por pedido') : null
-  return <FunnelBlock funnel={funnel} rangeLabel={ctx.rangeLabel} sharedNote={sharedNote} />
+  return <FunnelBlock funnel={funnel} rangeLabel={ctx.rangeLabel} sharedNote={sharedNote} why={why} />
 }
 
 // ─── Todas as lojas ──────────────────────────────────────────────────────────
@@ -191,10 +203,32 @@ function sumCountries(lists: CountryPnL[][]): (CountryPnL & { purchases: number 
   return [...by.values()]
 }
 
+/** The "Todas" Meta block's coverage line over the stores whose country rows
+ *  it sums; null when none of them spent on Meta or the read fails (the
+ *  table then stands without it, as before). */
+async function loadAllCoverage(pnls: StorePnL[], ctx: PageContext, name: Map<string, string>): Promise<string | null> {
+  const spent = pnls.filter(p => p.totals.metaSpend > 0)
+  if (!spent.length) return null
+  let byStore: Map<string, MetaSplitCoverage>
+  try {
+    byStore = await getMetaSplitCoverage(spent.map(p => ({ storeId: p.store.id, daily: p.daily, totalSpend: p.totals.metaSpend })), ctx.range)
+  } catch (err) {
+    console.error('[countries] meta coverage', err)
+    return null
+  }
+  return allStoresCoverageText(spent.flatMap(p => {
+    const c = byStore.get(p.store.id)
+    return c ? [{ name: name.get(p.store.id) ?? p.store.name, ...c }] : []
+  }))
+}
+
 async function AllStores({ ctx }: { ctx: PageContext }) {
   const header = <PageHeader ctx={ctx} title="Países e clientes · todas as lojas" halved={false} />
-  const pnls = await computePnL(ctx.storeIds, ctx.range, { countries: true }, ctx.now)
-    .catch(err => { console.error('[countries] all stores', err); return null })
+  const [pnls, firstSales] = await Promise.all([
+    computePnL(ctx.storeIds, ctx.range, { countries: true }, ctx.now)
+      .catch(err => { console.error('[countries] all stores', err); return null }),
+    loadFirstSales(ctx),
+  ])
   if (!pnls) {
     return <AppShell ctx={ctx}>{header}<ErrorState title="Não foi possível carregar os países" /></AppShell>
   }
@@ -209,24 +243,35 @@ async function AllStores({ ctx }: { ctx: PageContext }) {
   const totals = sumTotals(judged.map(p => p.totals))
   const summed = sumCountries(judged.map(p => p.countries ?? []))
   const full = rollUpCountries(summed, totals.revenue, summed.length)
+  // As one store: the Meta table keeps Meta-only countries, the Shopify table
+  // and the verdict list countries with orders.
   const rows = foldCountryRows(full, ROWS, totals.revenue)
+  const shopRows = foldCountryRows(shopifyCountryRows(full), ROWS, totals.revenue)
   const counts = countryCounts(full)
+  // The Meta table sums the judged stores' country rows: say how much of
+  // their Meta spend that is, and whose split is missing.
+  const coverage = await loadAllCoverage(judged, ctx, name)
   // Named as "fora da soma" only when they sold something; a store without
   // costs that only spent on Meta changes no contribution, but its country
   // spend is missing from the Meta block, which says so.
   const excludedNames = configured ? excluded.filter(p => p.totals.revenue > 0).map(p => name.get(p.store.id) ?? p.store.name) : []
   const metaLeftOut = configured ? excluded.map(p => name.get(p.store.id) ?? p.store.name) : []
+  // No store had made its first sale yet: the Overview's reading, not
+  // "Nenhum pedido nas suas lojas".
+  const firstOfAll = firstSaleOfAll(list.map(p => ({ totals: p.totals, firstOrderDate: firstSales.get(p.store.id) ?? null })), ctx.range)
   const verdict = buildCountriesVerdict({
-    subjectOf: 'das suas lojas', subjectIn: 'nas suas lojas', rows, counts, totals, configured, customers: null,
+    subjectOf: 'das suas lojas', subjectIn: 'nas suas lojas', rows: shopRows, counts, totals, configured, customers: null,
     excludedStores: excludedNames, rangeLabel: ctx.rangeLabel, periodPhrase: ctx.periodPhrase,
     partialLabel: ctx.partialLabel, dayLabel: null, split: ctx.split,
+    firstSaleAll: firstOfAll ? { firstOrderDate: firstOfAll, range: ctx.range, today: ctx.today, storeCount: list.length } : null,
   })
+  const why = emptyWhy(verdict, ctx.rangeLabel)
 
   return (
     <AppShell ctx={ctx}>
       {header}
       <PeriodNote ctx={ctx} />
-      <VerdictCard verdict={verdict} roas={false} aside={<CountryAside rows={rows} totals={totals} configured={configured} rangeLabel={ctx.rangeLabel} />} />
+      <VerdictCard verdict={verdict} roas={false} aside={<CountryAside rows={shopRows} totals={totals} configured={configured} rangeLabel={ctx.rangeLabel} />} />
       {excludedNames.length > 0 && (
         <Callout tone="warn" title="Fora da soma por país:">
           {' '}{excluded.filter(p => p.totals.revenue > 0).map(p => `${name.get(p.store.id) ?? p.store.name} (${formatMoney(p.totals.revenue)} em vendas)`).join(', ')} — custos não configurados, então não há contribuição por país para somar.
@@ -237,21 +282,26 @@ async function AllStores({ ctx }: { ctx: PageContext }) {
         howTo={`Pedidos reais de ${configured && excludedNames.length ? 'todas as lojas com custos' : 'todas as lojas'} por país de entrega em ${ctx.rangeLabel}, cada pedido com o custo da própria loja.`}
         info="Os anúncios não são divididos por país: a divisão do Meta não é confiável para isso."
         flush
-        footer={<span>{TERRITORIES_NOTE}</span>}
+        footer={shopRows.some(r => r.country === 'US') ? <span>{TERRITORIES_NOTE}</span> : undefined}
       >
-        <CountryTable rows={rows} totals={totals} configured={configured} rangeLabel={ctx.rangeLabel} storesLabel={excludedNames.length ? 'das lojas com custos' : 'das lojas'} />
+        <CountryTable rows={shopRows} totals={totals} configured={configured} rangeLabel={ctx.rangeLabel} storesLabel={excludedNames.length ? 'das lojas com custos' : 'das lojas'} why={why} />
       </Block>
-      <Block title="Gasto no Meta por país" eyebrow="Atribuído pelo Meta" howTo={`${CAVEAT_LINE}${metaLeftOut.length ? ` Sem ${metaLeftOut.join(', ')} (custos não configurados).` : ''}`} flush>
-        <MetaCountries rows={rows} purchasesKnown={false} rangeLabel={ctx.rangeLabel} metaSpend={totals.metaSpend} />
+      <Block
+        title="Gasto no Meta por país" eyebrow="Atribuído pelo Meta"
+        howTo={`${CAVEAT_LINE}${metaLeftOut.length ? ` Sem ${metaLeftOut.join(', ')} (custos não configurados).` : ''}`}
+        flush
+        footer={coverage ? <span>{coverage}</span> : undefined}
+      >
+        <MetaCountries rows={rows} purchasesKnown={false} rangeLabel={ctx.rangeLabel} metaSpend={totals.metaSpend} many why={why} />
       </Block>
       <Suspense fallback={<SkeletonBlock lines={5} height={160} />}>
-        <AllCustomers stores={ctx.selected} rangeLabel={ctx.rangeLabel} ctx={ctx} />
+        <AllCustomers stores={ctx.selected} rangeLabel={ctx.rangeLabel} ctx={ctx} why={why} />
       </Suspense>
     </AppShell>
   )
 }
 
-async function AllCustomers({ stores, rangeLabel, ctx }: { stores: StoreRef[]; rangeLabel: string; ctx: PageContext }) {
+async function AllCustomers({ stores, rangeLabel, ctx, why }: { stores: StoreRef[]; rangeLabel: string; ctx: PageContext; why: EmptyWindowText | null }) {
   const each = await Promise.all(stores.map(async st => {
     const [split, ltv, funnel] = await Promise.all([
       getCustomerSplit(st, ctx.range).catch(err => { console.error('[countries] split', st.id, err); return null }),
@@ -264,15 +314,15 @@ async function AllCustomers({ stores, rangeLabel, ctx }: { stores: StoreRef[]; r
   const funnels = each.map(e => e.funnel).filter((f): f is FunnelReport => !!f)
   return (
     <>
-      <CustomersByStore stores={customers} rangeLabel={rangeLabel} />
-      {funnels.length > 0 && <SummedFunnel funnels={funnels} ctx={ctx} rangeLabel={rangeLabel} />}
+      <CustomersByStore stores={customers} rangeLabel={rangeLabel} why={why} />
+      {funnels.length > 0 && <SummedFunnel funnels={funnels} ctx={ctx} rangeLabel={rangeLabel} why={why} />}
     </>
   )
 }
 
-function SummedFunnel({ funnels, ctx, rangeLabel }: { funnels: FunnelReport[]; ctx: PageContext; rangeLabel: string }) {
+function SummedFunnel({ funnels, ctx, rangeLabel, why }: { funnels: FunnelReport[]; ctx: PageContext; rangeLabel: string; why: EmptyWindowText | null }) {
   const funnel = sumFunnels(funnels, new Set(ctx.storeIds), ctx.range)
   const nameOf = (id: string) => ctx.stores.find(x => x.id === id)?.name ?? null
   const sharedNote = funnel.sharedLeftOut ? sharedLeftOutText(funnel.sharedLeftOut, nameOf, 'do funil, da captura e do gasto por pedido') : null
-  return <FunnelBlock funnel={funnel} rangeLabel={rangeLabel} sharedNote={sharedNote} />
+  return <FunnelBlock funnel={funnel} rangeLabel={rangeLabel} sharedNote={sharedNote} stores={funnels.length} why={why} />
 }

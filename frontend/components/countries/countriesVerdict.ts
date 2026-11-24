@@ -10,7 +10,9 @@ import { SMALL_SAMPLE } from '@/lib/data/countries'
 import type { PnL } from '@/lib/engine/pnl'
 import type { Verdict, VerdictChip, VerdictLine } from '@/lib/views/verdict'
 import { formatPct, plural } from '@/lib/format'
-import { beforeStartVerdict, isBeforeStart, type BeforeStartInput } from '@/components/campaigns/storeStart'
+import { beforeStartAllVerdict, beforeStartVerdict, isBeforeStart, type AllBeforeStartInput, type BeforeStartInput } from '@/components/campaigns/storeStart'
+import type { ArchivedStoreInput } from '@/components/dashboard/archivedStore'
+import { archivedEmptyVerdict } from '@/components/dashboard/emptyWindow'
 
 const line = (...parts: (string | { text: string; strong?: boolean; tone?: 'pos' | 'neg' | 'warn' })[]): VerdictLine => {
   const ps = parts.map(p => (typeof p === 'string' ? { text: p } : p))
@@ -69,12 +71,29 @@ export function buildCountriesVerdict(input: {
   /** One store with a known first sale: a window that ends before it reads
    *  "Vende desde 7 nov", like the Resumo (components/campaigns/storeStart). */
   firstSale?: BeforeStartInput | null
+  /** One archived store (components/dashboard/archivedStore): a window after
+   *  its archive day reads "sem dados", word for word the Resumo's verdict,
+   *  not "Nenhum pedido". */
+  archived?: ArchivedStoreInput | null
+  /** "Todas" when no store had made its first sale by the end of the window
+   *  (components/campaigns/storeStart firstSaleOfAll): the Overview's
+   *  "Nenhuma das lojas vendia ainda", not "Nenhum pedido nas suas lojas". */
+  firstSaleAll?: AllBeforeStartInput | null
 }): Verdict {
   const { rows, totals, configured, periodPhrase, subjectOf } = input
+  if (input.firstSaleAll && !(totals.orders > 0)) {
+    return beforeStartAllVerdict({ ...input.firstSaleAll, periodPhrase, rangeLabel: input.rangeLabel, totals, split: input.split })
+  }
   const fs = input.firstSale
   if (fs && isBeforeStart(fs.firstOrderDate, fs.range, { orders: totals.orders, revenue: totals.revenue, spend: totals.adSpend })) {
     return beforeStartVerdict({ ...fs, rangeLabel: input.rangeLabel, dayLabel: input.dayLabel, totals, configured, split: input.split })
   }
+  // An archived store's empty window, by the Resumo's rule (see Produtos):
+  // "sem dados" after the archive day, "não teve vendas em 1–10 nov" with the
+  // archive note for a window that runs past it.
+  const ar = input.archived
+  const archivedV = ar ? archivedEmptyVerdict({ ...ar, rangeLabel: input.rangeLabel, dayLabel: input.dayLabel, totals, configured, split: input.split }, { orders: totals.orders, revenue: totals.revenue, spend: totals.adSpend }) : null
+  if (archivedV) return archivedV
   const chips: VerdictChip[] = []
   const details: VerdictLine[] = []
   const excluded = input.excludedStores ?? []

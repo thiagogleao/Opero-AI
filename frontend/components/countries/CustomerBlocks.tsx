@@ -14,6 +14,7 @@ import {
   Block, Callout, Count, DataTable, EmptyState, KpiCard, KpiGrid, Money, Pct, type DataColumn, type DataRow,
 } from '@/components/ui'
 import { formatCount, formatDate, formatMoney, formatPct, plural } from '@/lib/format'
+import { WhyEmpty, type EmptyWindowText } from '@/components/campaigns/emptyWhy'
 import s from './countries.module.css'
 
 const pct = (a: number, b: number) => (b > 0 ? (a / b) * 100 : null)
@@ -24,11 +25,15 @@ export function historyNote(historyStart: string | null, today: string): string 
     : '"Novo" = primeiro pedido do cliente nos pedidos que o Opero guardou.'
 }
 
-export function CustomersSplit({ split, today, rangeLabel }: { split: CustomerSplit; today: string; rangeLabel: string }) {
+export function CustomersSplit({ split, today, rangeLabel, why = null }: {
+  split: CustomerSplit; today: string; rangeLabel: string
+  /** The verdict's reason the window is empty (components/campaigns/emptyWhy). */
+  why?: EmptyWindowText | null
+}) {
   if (split.orders === 0) {
     return (
       <Block title="Clientes novos e recompra" howTo="Quem comprou pela primeira vez e quem voltou.">
-        <EmptyState compact title="Nenhum pedido no período" />
+        {why ? <WhyEmpty why={why} /> : <EmptyState compact title="Nenhum pedido no período" />}
       </Block>
     )
   }
@@ -112,7 +117,12 @@ export interface StoreCustomers {
   ltv: CustomerLtv | null
 }
 
-export function CustomersByStore({ stores, rangeLabel }: { stores: StoreCustomers[]; rangeLabel: string }) {
+export function CustomersByStore({ stores, rangeLabel, why = null }: {
+  stores: StoreCustomers[]; rangeLabel: string
+  /** The verdict's reason the window is empty (no store had started): the
+   *  window's columns are empty for that reason, the history ones are real. */
+  why?: EmptyWindowText | null
+}) {
   const columns: DataColumn[] = [
     { key: 'store', label: 'Loja' },
     { key: 'orders', label: 'Pedidos', numeric: true, sortable: true },
@@ -161,21 +171,32 @@ export function CustomersByStore({ stores, rangeLabel }: { stores: StoreCustomer
           cadastro" folds under Pedidos, so every column shows at 1024px. */}
       <div className={s.custBox}>
         <DataTable caption="Clientes por loja" columns={columns} rows={rows} initialSort={{ key: 'orders', dir: 'desc' }} dense />
-        {noGuests && <p className={s.guestNote}>Nenhum pedido sem cadastro em {rangeLabel}.</p>}
+        {why
+          ? <p className={s.guestNote}>{why.title} em {rangeLabel}: pedidos, novos e recompra ficam vazios; LTV e &quot;Voltaram&quot; são de todo o histórico. {why.text}</p>
+          : noGuests && <p className={s.guestNote}>Nenhum pedido sem cadastro em {rangeLabel}.</p>}
       </div>
     </Block>
   )
 }
 
-export function FunnelBlock({ funnel, rangeLabel, sharedNote }: {
+export function FunnelBlock({ funnel, rangeLabel, sharedNote, stores = 1, why = null }: {
   funnel: FunnelReport; rangeLabel: string
+  /** The verdict's reason the window is empty (components/campaigns/emptyWhy):
+   *  "Sem anúncios no Meta" and "Pedidos reais 0" described days never read. */
+  why?: EmptyWindowText | null
   /** The shared-account campaigns left out of the steps, the capture and the
    *  spend per order, in words (./sharedText), or null. */
   sharedNote?: string | null
+  /** How many stores' funnels are summed in `funnel` ("Todas"): the pixel
+   *  line then speaks of these stores, not "desta loja". */
+  stores?: number
 }) {
   const steps = funnel.meta.steps
   const top = steps.length ? Math.max(...steps.map(x => x.value)) : 0
   const sh = funnel.shopify
+  // Nothing of the window to show: the reason alone, unless checkouts were
+  // still counted (a store open before its first sale).
+  const quiet = !!why && steps.length === 0 && sh.orders === 0 && sh.abandonedCheckouts === 0
   return (
     <Block
       title="Funil"
@@ -183,7 +204,8 @@ export function FunnelBlock({ funnel, rangeLabel, sharedNote }: {
       info="Uma etapa que o pixel não mede (sempre zero enquanto as seguintes têm valor) fica de fora. Quando uma etapa conta mais que a anterior, a taxa não é mostrada: o Meta conta cada etapa separadamente."
     >
       {steps.length === 0 ? (
-        <EmptyState compact title="Sem anúncios no Meta no período">O pixel só mede o funil de quem veio de anúncio.</EmptyState>
+        why ? <WhyEmpty why={why} />
+          : <EmptyState compact title="Sem anúncios no Meta no período">O pixel só mede o funil de quem veio de anúncio.</EmptyState>
       ) : (
         <div className={s.steps}>
           {steps.map(st => (
@@ -203,18 +225,23 @@ export function FunnelBlock({ funnel, rangeLabel, sharedNote }: {
         </div>
       )}
       {funnel.meta.omitted.length > 0 && (
-        <p className={s.omitted}>Não medido pelo pixel desta loja: {funnel.meta.omitted.map(o => o.label.toLowerCase()).join(', ')}.</p>
+        <p className={s.omitted}>Não medido pelo pixel {stores > 1 ? 'destas lojas' : 'desta loja'}: {funnel.meta.omitted.map(o => o.label.toLowerCase()).join(', ')}.</p>
       )}
-      <div className={s.shopRow}>
+      {!quiet && <div className={s.shopRow}>
         <span>Pedidos reais (Shopify) <b>{formatCount(sh.orders)}</b></span>
         <span>Checkouts abandonados <b>{formatCount(sh.abandonedCheckouts)}</b>{sh.abandonmentPct !== null ? ` (${formatPct(sh.abandonmentPct, { digits: 0 })} dos checkouts)` : ''}</span>
         {sh.costPerOrder !== null && <span>Gasto no Meta por pedido real <b>{formatMoney(sh.costPerOrder, { cents: 'always' })}</b></span>}
         {funnel.metaCapturePct !== null && (
-          <span>O Meta diz ter visto <b>{formatPct(funnel.metaCapturePct, { digits: 0 })}</b> dos pedidos reais — captura, não conversão</span>
+          // In a sum, the capture divides only by the orders of stores with
+          // Meta ads (lib/data/funnel sumFunnels): said, so 221 compras ÷ 323
+          // pedidos beside "80%" does not read as a wrong division.
+          funnel.captureOrders != null && funnel.captureOrders !== sh.orders
+            ? <span>O Meta diz ter visto <b>{formatPct(funnel.metaCapturePct, { digits: 0 })}</b> dos <b>{formatCount(funnel.captureOrders)}</b> pedidos reais das lojas com anúncios no Meta — captura, não conversão</span>
+            : <span>O Meta diz ter visto <b>{formatPct(funnel.metaCapturePct, { digits: 0 })}</b> dos pedidos reais — captura, não conversão</span>
         )}
-      </div>
+      </div>}
       {sharedNote && <p className={s.omitted}>{sharedNote}</p>}
-      <p className={s.omitted}>Checkouts abandonados são só contados: os valores gravados neles não são confiáveis.</p>
+      {!quiet && <p className={s.omitted}>Checkouts abandonados são só contados: os valores gravados neles não são confiáveis.</p>}
       {funnel.notes.map((n, i) => <Callout key={i} tone="neu">{n}</Callout>)}
     </Block>
   )

@@ -86,6 +86,10 @@ export interface FunnelReport {
   /** Meta purchases ÷ Shopify orders, in %: how much of the real sales Meta
    *  claims. Not a conversion rate; can be above 100. */
   metaCapturePct: number | null
+  /** The orders the capture divides by: every order for one store; in a sum,
+   *  only the orders of stores whose Meta purchases can count (sumFunnels).
+   *  Null when there is no capture. */
+  captureOrders?: number | null
   /** Portuguese sentences to show under the funnel (shared ad account…). */
   notes: string[]
   /** Shared-account campaigns left out of the steps, the capture and the
@@ -139,21 +143,33 @@ export function buildMetaSteps(values: Record<MetaStepKey, number>, spend: numbe
  * shared-account campaigns come back in when every store their sales landed
  * in is in the sum (EPOCH's old account and CAMP HALLOW in "Todas": those
  * purchases are orders of the sum); otherwise they stay out, and are named.
+ *
+ * The capture divides Meta's purchases only by the orders of stores those
+ * purchases can be about: stores with Meta activity of their own, and the
+ * stores a shared-account campaign put back in the sum sold in. A store with
+ * no ad account (Dumpling Squishy · hzsjyp) adds orders Meta cannot see:
+ * counted, 27 out – 3 nov read "O Meta diz ter visto 68%" where the
+ * like-for-like figure was 80% (221 ÷ 275). The phone's per-country capture
+ * follows the same rule (lib/views/mobileDetail, `captured`).
  */
 export function sumFunnels(list: FunnelReport[], inSum: ReadonlySet<string>, range: DateRange): FunnelReport {
   const values = Object.fromEntries(META_STEPS.map(s => [s.key, 0])) as Record<MetaStepKey, number>
   let spend = 0, orders = 0, abandoned = 0
   const left = { campaigns: 0, spend: 0, purchases: 0, purchaseValue: 0, values: { ...values }, salesStoreIds: new Set<string>() }
+  const captured = new Set<string>()
   for (const f of list) {
     spend += f.spend
     orders += f.shopify.orders
     abandoned += f.shopify.abandonedCheckouts
     for (const st of f.meta.steps) values[st.key] += st.value
+    if (f.spend > 0 || f.meta.steps.some(st => st.key === 'purchases' && st.value > 0)) captured.add(f.storeId)
     const lo = f.sharedLeftOut
     if (!lo) continue
     if (lo.salesStoreIds.length > 0 && lo.salesStoreIds.every(id => inSum.has(id))) {
       spend += lo.spend
       for (const k of META_STEPS) values[k.key] += lo.values[k.key]
+      captured.add(f.storeId)
+      for (const id of lo.salesStoreIds) captured.add(id)
     } else {
       left.campaigns += lo.campaigns; left.spend += lo.spend; left.purchases += lo.purchases; left.purchaseValue += lo.purchaseValue
       for (const k of META_STEPS) left.values[k.key] += lo.values[k.key]
@@ -161,6 +177,7 @@ export function sumFunnels(list: FunnelReport[], inSum: ReadonlySet<string>, ran
     }
   }
   const hasLeft = left.spend > 0 || left.purchases > 0
+  const captureOrders = list.filter(f => captured.has(f.storeId)).reduce((t, f) => t + f.shopify.orders, 0)
   return {
     storeId: 'todas',
     range,
@@ -171,7 +188,8 @@ export function sumFunnels(list: FunnelReport[], inSum: ReadonlySet<string>, ran
       abandonmentPct: orders + abandoned > 0 ? (abandoned / (orders + abandoned)) * 100 : null,
       costPerOrder: orders > 0 && spend > 0 ? spend / orders : null,
     },
-    metaCapturePct: orders > 0 && spend > 0 ? (values.purchases / orders) * 100 : null,
+    metaCapturePct: captureOrders > 0 && spend > 0 ? (values.purchases / captureOrders) * 100 : null,
+    captureOrders: captureOrders > 0 && spend > 0 ? captureOrders : null,
     notes: [...new Set(list.flatMap(f => f.notes))],
     sharedLeftOut: hasLeft ? { ...left, salesStoreIds: [...left.salesStoreIds] } : null,
   }
@@ -229,6 +247,7 @@ export function buildFunnel(
       costPerOrder: orders > 0 && own.spend > 0 ? own.spend / orders : null,
     },
     metaCapturePct: orders > 0 && own.spend > 0 ? (own.values.purchases / orders) * 100 : null,
+    captureOrders: orders > 0 && own.spend > 0 ? orders : null,
     // The left-out campaigns get their own sentence on screen (with the store
     // names); the generic note stays for a store that sells on another's ads.
     notes: !sharedLeftOut && sharedPairs > 0 ? [SHARED_ACCOUNT_NOTE] : [],
