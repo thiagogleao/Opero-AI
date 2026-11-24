@@ -2,9 +2,10 @@ import { query } from './db'
 import { pushDeviceCount, pushKeysConfigured, sendPushToAll, type PushKind, type PushResult } from './push'
 import { listStores, type StoreRef } from './access'
 import { computePnL, type PnL } from './engine/pnl'
-import { REFERENCE_TZ, minutesIntoDay, safeTz, shiftDate, todayInTz } from './engine/dates'
+import { REFERENCE_TZ, minutesIntoDay, safeTz, shiftDate, todayInTz, type Period } from './engine/dates'
 import { getCampaignSignals, DEFAULT_SCALE_CONFIG, type CampaignSignal } from './scaleSignals'
-import { buildPortfolio, type PortfolioStoreRow } from './views/portfolio'
+import { buildPortfolio, type PortfolioStoreRow, type PortfolioView } from './views/portfolio'
+import { buildVerdict, judgedStores, verdictInputFromPortfolio } from './views/verdict'
 import { formatMoney, formatPct, formatRoas, plural, readablePctChange } from './format'
 
 /**
@@ -228,9 +229,19 @@ const thresholdPct = (v: number) =>
   formatPct(v, { digits: Number.isInteger(v) ? 0 : Number.isInteger(v * 10) ? 1 : 2 })
 const orders = (n: number) => plural(n, 'pedido', 'pedidos')
 
-/** The phone, opened on one store. */
-export const storeUrl = (storeId: string, tab?: string) =>
-  `/m?loja=${encodeURIComponent(storeId)}${tab ? `&aba=${encodeURIComponent(tab)}` : ''}`
+/**
+ * The phone, opened on one store and on the period the push talks about.
+ * The period is always explicit: without it the phone restores the last one
+ * used (app/m/_lib/selection resolveView), so a tap on today's "ROAS 0,36×"
+ * could open "30 dias · no lucro". "today" is the store's own day, as the
+ * alerts are.
+ */
+export const storeUrl = (storeId: string, opts: { tab?: string; periodo?: Period } = {}) =>
+  `/m?loja=${encodeURIComponent(storeId)}&periodo=${opts.periodo ?? 'today'}${opts.tab ? `&aba=${encodeURIComponent(opts.tab)}` : ''}`
+
+/** The daily summary is about every store's day: Todas · Hoje, never the
+ *  store last pinned on the phone. */
+export const SUMMARY_URL = '/m?loja=todas&periodo=today'
 
 // ─── Threshold alerts (pure evaluation) ───────────────────────────────────────
 
@@ -501,9 +512,10 @@ export async function runScaleChecks(opts: RunOpts = {}): Promise<FiredAlert[]> 
       const { kind, title, body } = scalePushText(store.name, { ...c, verdict: c.verdict })
 
       // The phone, on this store's campaigns: /campaigns is a Clerk page the
-      // phone cannot open.
+      // phone cannot open. On "7 dias": the push names the last 7 closed days,
+      // the window the action is judged on.
       const delivered = opts.dryRun ? 0 : await deliver(kind, `${store.id}:${c.campaignId}`, day, {
-        title, body, url: storeUrl(store.id, 'campanhas'), kind: 'scale',
+        title, body, url: storeUrl(store.id, { tab: 'campanhas', periodo: '7d' }), kind: 'scale',
         tag: `${kind}-${c.campaignId}-${day}`,
         data: { kind, tenantId: store.id, campaignId: c.campaignId },
       }, opts)
@@ -545,27 +557,57 @@ export function vsYesterday(today: number, yesterday: number, sameTimeOfDay: boo
   return ` (${money(Math.abs(diff))} ${diff > 0 ? 'a mais' : 'a menos'} que ${when})`
 }
 
-/** Title and body of the summary, from the same portfolio view the phone
- *  shows for Todas / Hoje. Pure. */
-export function summaryText(
-  t: PnL, before: PnL, stores: Pick<PortfolioStoreRow, 'name' | 'totals' | 'configured' | 'dayClosed'>[],
-  sameTimeOfDay: boolean,
-): DailySummary {
-  const delta = vsYesterday(t.operatingProfit, before.operatingProfit, sameTimeOfDay)
-  const active = stores.filter(s => s.totals.orders > 0 || s.totals.adSpend > 0)
-  const ranked = [...active].sort((a, b) => b.totals.operatingProfit - a.totals.operatingProfit)
+type SummaryStore = Pick<PortfolioStoreRow, 'name' | 'totals' | 'configured'>
+
+/**
+ * Title and body of the summary. `t` and `before` must be the totals the
+ * phone's verdict judges for the same view (dailySummaryOf passes buildVerdict's
+ * totals and comparisonTotals): with several stores, only those with cost
+ * settings when some have them. Summing every store let Glooty's revenue −
+ * ads into the "lucro", the margin and the "vs ontem" base: on 12 nov the push
+ * read $1.664 while the Todas · Hoje screen it opens read $1.802. A store left
+ * out that way is out of Melhor/Pior and gets its own line, with its revenue −
+ * ads, as the verdict names it. When no store has costs the amount is revenue
+ * − ads and says so. Pure.
+ */
+export function summaryText(t: PnL, before: PnL | null, stores: SummaryStore[], sameTimeOfDay: boolean): DailySummary {
+  const { judged, excluded } = judgedStores(stores)
+  // No store at all (nothing to judge) still reads as profit.
+  const withCosts = judged.every(s => s.configured)
+  const result = (p: PnL) => (withCosts ? p.operatingProfit : p.revenue - p.adSpend)
+  const moved = (s: SummaryStore) => s.totals.orders > 0 || s.totals.adSpend > 0
+  const delta = before ? vsYesterday(result(t), result(before), sameTimeOfDay) : ''
+  const ranked = judged.filter(moved).sort((a, b) => result(b.totals) - result(a.totals))
   const best = ranked[0]
   const worst = ranked[ranked.length - 1]
-  const noSales = stores.filter(s => s.totals.orders === 0 && s.totals.adSpend > 0)
-  const unconfigured = stores.filter(s => !s.configured && (s.totals.orders > 0 || s.totals.adSpend > 0))
+  const noSales = judged.filter(s => s.totals.orders === 0 && s.totals.adSpend > 0)
+  const leftOut = excluded.filter(moved)
+  const unconfigured = withCosts ? [] : judged.filter(s => !s.configured && moved(s))
   const lines = [
-    `${orders(t.orders)} · ${money(t.revenue)} receita · ${money(t.adSpend)} anúncios · margem ${formatPct(t.margin, { digits: 0 })}`,
-    ranked.length > 1 && best ? `Melhor: ${best.name} ${money(best.totals.operatingProfit)}` : null,
-    ranked.length > 1 && worst && worst !== best ? `Pior: ${worst.name} ${money(worst.totals.operatingProfit)}` : null,
+    `${orders(t.orders)} · ${money(t.revenue)} receita · ${money(t.adSpend)} anúncios · margem ${withCosts ? formatPct(t.margin, { digits: 0 }) : '—'}`,
+    ranked.length > 1 && best ? `Melhor: ${best.name} ${money(result(best.totals))}` : null,
+    ranked.length > 1 && worst && worst !== best ? `Pior: ${worst.name} ${money(result(worst.totals))}` : null,
     noSales.length ? `Sem vendas: ${noSales.map(s => `${s.name} (${money(s.totals.adSpend)} em anúncios)`).join(', ')}` : null,
+    leftOut.length
+      ? `Fora do lucro, sem custos configurados: ${leftOut.map(s => `${s.name} (receita − anúncios ${money(s.totals.revenue - s.totals.adSpend)})`).join(', ')}`
+      : null,
     unconfigured.length ? `Sem custos configurados: ${unconfigured.map(s => s.name).join(', ')}` : null,
   ].filter((l): l is string => !!l)
-  return { title: `📊 Hoje: ${money(t.operatingProfit)} de lucro${delta}`, body: lines.join(' · '), profit: t.operatingProfit }
+  const amount = result(t)
+  return {
+    title: withCosts ? `📊 Hoje: ${money(amount)} de lucro${delta}` : `📊 Hoje: ${money(amount)} de receita menos anúncios (sem custos)${delta}`,
+    body: lines.join(' · '),
+    profit: amount,
+  }
+}
+
+/**
+ * The summary of a portfolio view, judged exactly as the verdict of the screen
+ * the push opens (SUMMARY_URL: Todas · Hoje) — buildVerdict on the same view.
+ */
+export function dailySummaryOf(view: PortfolioView): DailySummary {
+  const v = buildVerdict(verdictInputFromPortfolio(view))
+  return summaryText(v.totals, v.comparisonTotals, view.stores, view.comparison.sameTimeOfDay)
 }
 
 export interface SummaryResult {
@@ -601,11 +643,11 @@ export async function sendDailySummary(opts: RunOpts = {}): Promise<SummaryResul
     }
     const view = await buildPortfolio(stores, 'today', null, null, new Date(),
       { liveFeed: false, chargebackHealth: false, freshness: false })
-    summary = summaryText(view.totals, view.comparison.totals, view.stores, view.comparison.sameTimeOfDay)
+    summary = dailySummaryOf(view)
     if (opts.dryRun) return { sent: false, delivered: 0, summary }
 
     res = await sendPushToAll({
-      title: summary.title, body: summary.body, url: '/m', kind: 'summary',
+      title: summary.title, body: summary.body, url: SUMMARY_URL, kind: 'summary',
       tag: `daily-summary-${day}`,
       data: { kind: 'daily_summary', profit: summary.profit },
     })

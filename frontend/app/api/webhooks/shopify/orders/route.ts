@@ -178,7 +178,11 @@ export async function POST(req: Request) {
       kind: 'sale',
       title,
       body,
-      url: `/m?loja=${encodeURIComponent(tenant.id)}`,
+      // The push says "Lucro hoje": open that day. Without a period the phone
+      // restores the last one used (a tap could land on "7 dias"). Same URL as
+      // lib/alerts storeUrl, inlined so the webhook does not load the alerts
+      // module graph.
+      url: `/m?loja=${encodeURIComponent(tenant.id)}&periodo=today`,
       tag: `order-${tenant.id}-${orderId}`,
       data: { tenantId: tenant.id, orderId, total, currency, totalUsd: usdTotal, profitToday: profit },
     })

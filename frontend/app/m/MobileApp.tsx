@@ -16,10 +16,16 @@ import { Button, EmptyState, ErrorState, Skeleton } from '@/components/ui'
 import { buildVerdict, verdictInputFromPortfolio } from '@/lib/views/verdict'
 import type { MobileStoreOption } from '@/lib/views/mobile'
 import type { DetailSection } from '@/lib/views/mobileDetail'
-import { formatTimeInTz } from '@/lib/format'
+import { formatTimeInTz, tzCity } from '@/lib/format'
 import { REFERENCE_TZ, todayInTz } from '@/lib/engine/dates'
-import { ALL, periodLabel, selectionKey, selectionPeriodLabel, selectionTz, type Selection } from './_lib/selection'
-import { applyUrl, configureStores, getServerView, getView, persistCurrent, setView, subscribeView } from './_lib/viewStore'
+import {
+  ALL, chipSelection, clockDiffers, patchSelection, periodLabel, periodShort, selectionKey, selectionPeriodLabel, selectionTz,
+  type Selection,
+} from './_lib/selection'
+import {
+  applyUrl, configureStores, getServerView, getView, persistCurrent, revalidate, setView, subscribeView, takeLinkNotice,
+  takeLinkRangeNotice,
+} from './_lib/viewStore'
 import { useMobileData, useNow, useRefresh } from './_lib/useMobileData'
 import { diffFeed, inScope, type FeedBaseline } from './_lib/feed'
 import { refreshOutcome, refreshProgress } from './_lib/refreshProgress'
@@ -53,13 +59,18 @@ export default function MobileApp({ stores, archived, sharedAds }: {
   const view = useSyncExternalStore(subscribeView, getView, getServerView)
   const sel = view?.sel ?? null
   const selKey = sel ? selectionKey(sel) : null
-  const home = useMobileData(sel)
+  // An archived store is not synced: nothing new can arrive, so it is not
+  // polled (the footer said "atualizam sozinhos a cada 45 s").
+  const archivedSel = !!sel && archived.some(a => a.id === sel.loja)
+  const home = useMobileData(sel, { poll: !archivedSel })
   const now = useNow()
   const push = usePush()
   const soundOn = useSyncExternalStore(subscribeSoundPref, getSoundPref, () => false)
   const [sheet, setSheet] = useState<SheetName>(null)
   const [force, setForce] = useState(0)
   const [notice, setNotice] = useState<string | null>(null)
+  // A link's custom range cut before asking (selection linkRangeNotice).
+  const [rangeNotice, setRangeNotice] = useState<string | null>(null)
   const deviceTz = useMemo(() => (typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : REFERENCE_TZ), [])
 
   const activeIds = useMemo(() => new Set(stores.map(x => x.id)), [stores])
@@ -77,16 +88,47 @@ export default function MobileApp({ stores, archived, sharedAds }: {
     return () => clearTimeout(t)
   }, [])
 
+  // A link (a notification, a saved URL) to a store that is neither active nor
+  // archived opens the stored store instead: say so, as for a store gone 404,
+  // so its numbers are not read as the link's store.
+  const linkNotice = useCallback((shownLoja: string) =>
+    `A loja do link não está disponível. Mostrando ${shownLoja === ALL ? 'Todas' : nameOf(shownLoja)}.`, [nameOf])
+  useEffect(() => {
+    setRangeNotice(takeLinkRangeNotice())
+    if (!takeLinkNotice()) return
+    const v = getView()
+    if (v) setNotice(linkNotice(v.sel.loja))
+  }, [linkNotice])
+
+  // The clock tick: dates a store row opened give way to the owner's preset
+  // once Todas' day is over, so a "Hoje" keeps rolling after midnight.
+  useEffect(() => { if (now) revalidate() }, [now])
+
+  // A period or range the owner picks replaces dates a store row opened
+  // (selection patchSelection).
   const pick = useCallback((patch: Partial<Selection>) => {
     const v = getView()
     if (!v) return
     setNotice(null)
-    setView({ ...v, sel: { ...v.sel, ...patch } })
+    setRangeNotice(null)
+    setView({ ...v, sel: patchSelection(v.sel, patch) })
   }, [])
-  const pickStore = useCallback((loja: string) => {
-    pick({ loja })
+  // A store row of "Todas" may also open the dates it showed, for that store
+  // only (selection storeRowSelection).
+  const pickRow = useCallback((patch: Partial<Selection>) => {
+    pick(patch)
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }, [pick])
+  // A chip keeps the period, except row dates: leaving the store a row opened
+  // brings back the owner's preset (selection chipSelection).
+  const pickStore = useCallback((loja: string) => {
+    const v = getView()
+    if (!v) return
+    setNotice(null)
+    setRangeNotice(null)
+    setView({ ...v, sel: chipSelection(v.sel, loja) })
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }, [])
   const pickTab = useCallback((aba: DetailSection | null) => {
     const v = getView()
     if (v) setView({ ...v, aba })
@@ -114,7 +156,13 @@ export default function MobileApp({ stores, archived, sharedAds }: {
     const onMessage = (e: MessageEvent) => {
       const m = e.data as { type?: string; url?: string; payload?: { tenantId?: string; orderId?: string } } | null
       if (!m?.type) return
-      if (m.type === 'navigate' && m.url) { applyUrl(m.url); return }
+      if (m.type === 'navigate' && m.url) {
+        const missing = applyUrl(m.url)
+        const v = getView()
+        setNotice(missing && v ? linkNotice(v.sel.loja) : null)
+        setRangeNotice(takeLinkRangeNotice())
+        return
+      }
       const v = getView()
       if (m.type === 'sale') {
         const storeId = m.payload?.tenantId
@@ -131,7 +179,7 @@ export default function MobileApp({ stores, archived, sharedAds }: {
     }
     navigator.serviceWorker.addEventListener('message', onMessage)
     return () => navigator.serviceWorker.removeEventListener('message', onMessage)
-  }, [activeIds])
+  }, [activeIds, linkNotice])
 
   // ── Atualizar: only the stores on screen, real progress ─────────────────
   const onRefreshed = useCallback(() => {
@@ -139,7 +187,6 @@ export default function MobileApp({ stores, archived, sharedAds }: {
     setForce(f => f + 1)
   }, [])
   const refresh = useRefresh(onRefreshed)
-  const archivedSel = !!sel && archived.some(a => a.id === sel.loja)
   const onScreen = useCallback(() => {
     const v = getView()
     if (!v) return []
@@ -165,7 +212,7 @@ export default function MobileApp({ stores, archived, sharedAds }: {
     const v = getView()
     if (!v || v.sel.loja === ALL) return
     const gone = nameOf(v.sel.loja)
-    setView({ ...v, sel: { ...v.sel, loja: ALL } })
+    setView({ ...v, sel: chipSelection(v.sel, ALL) })
     setNotice(`${gone} não está mais disponível. Mostrando Todas.`)
   }, [storeGone, nameOf])
 
@@ -191,6 +238,13 @@ export default function MobileApp({ stores, archived, sharedAds }: {
     ? `${data.request.store === 'all' ? 'Todas' : data.stores[0]?.name ?? ''} · ${data.period === 'custom' ? data.rangeLabel : periodLabel(data.period)}`
     : ''
   const singleTz = data && data.request.store !== 'all' && data.stores.length === 1 ? data.stores[0].timezone : null
+  // One store on another clock: every time on screen is the store's (the
+  // banner, "parcial · até", the curve, the feed), so "Números de" is too, and
+  // names the clock — it read 00h01 under a Tokyo screen at 12h01.
+  const screenTz = singleTz && now && clockDiffers(singleTz, deviceTz, new Date(now)) ? singleTz : deviceTz
+  const fetchedClock = home.fetchedAt
+    ? `${formatTimeInTz(new Date(home.fetchedAt), screenTz)}${screenTz !== deviceTz ? `, no horário de ${tzCity(screenTz)}` : ''}`
+    : '—'
   const pushAlert = push.status === 'nao_inscrito' || push.status === 'bloqueado' || push.status === 'sem_chave'
 
   if (error?.kind === 'session') {
@@ -231,6 +285,19 @@ export default function MobileApp({ stores, archived, sharedAds }: {
       {/* The server cut a custom range (more than 366 days, or before 2000):
           the button already names the dates used; this says why. */}
       {fresh && data?.rangeNote && <Strip tone="info" icon="info">{data.rangeNote}</Strip>}
+      {/* The phone cut a link's custom range before asking (the server then
+          has nothing to cut and sends no rangeNote): this says why. */}
+      {rangeNotice && <Strip tone="info" icon="info" onClose={() => setRangeNotice(null)}>{rangeNotice}</Strip>}
+      {/* Dates a store row opened: say whose they are and how to get the
+          owner's preset back on this store's own clock. */}
+      {fresh && data && sel?.rowPreset && (
+        <Strip tone="info" icon="clock">
+          Mesmas datas de Todas · {periodShort(sel.rowPreset)} ({data.rangeLabel}). Ao trocar de loja, volta para “{periodShort(sel.rowPreset)}”.{' '}
+          <button type="button" className={s.linkBtn} onClick={() => pick({ periodo: sel.rowPreset, de: null, ate: null })}>
+            Ver “{periodShort(sel.rowPreset)}” no relógio de {tzCity(selTz)}
+          </button>
+        </Strip>
+      )}
       {notice &&<Strip tone="warn" icon="alert" onClose={() => setNotice(null)}>{notice}</Strip>}
 
       {sel && !fresh && !error && (
@@ -242,7 +309,7 @@ export default function MobileApp({ stores, archived, sharedAds }: {
       {sel && error && (
         fresh ? (
           <Strip tone="warn" icon="alert" spin={loadingThis}>
-            Não atualizou: {error.message}. Números de {home.fetchedAt ? formatTimeInTz(new Date(home.fetchedAt), deviceTz) : '—'}.{' '}
+            Não atualizou: {error.message}. Números de {fetchedClock}.{' '}
             {/* A retry gave no sign of life until it answered (a poll shows no "Carregando"). */}
             {loadingThis
               ? <span>Tentando de novo…</span>
@@ -277,7 +344,7 @@ export default function MobileApp({ stores, archived, sharedAds }: {
               <DayBlock data={data} />
               <DailyBlock data={data} />
               <Attention data={data} />
-              <StoreList data={data} shared={shared} onPick={pickStore} />
+              <StoreList data={data} shared={shared} onPick={pickRow} />
               <LiveFeed data={data} now={now} deviceTz={deviceTz} />
             </>
           )}
@@ -286,7 +353,8 @@ export default function MobileApp({ stores, archived, sharedAds }: {
 
       {sel && (
         <div className={s.content}>
-          <DetailTabs sel={sel} aba={view?.aba ?? null} onTab={pickTab} forceSignal={force} pollSignal={home.fetchedAt ?? 0} homeRange={fresh && data ? `${data.range.from}|${data.range.to}` : null} now={now} scopeName={scopeName} />
+          <DetailTabs sel={sel} aba={view?.aba ?? null} onTab={pickTab} forceSignal={force} pollSignal={home.fetchedAt ?? 0} homeRange={fresh && data ? `${data.range.from}|${data.range.to}` : null} now={now} scopeName={scopeName}
+            shared={shared} onStore={pickStore} frozen={archivedSel} />
           {data && fresh && verdict && (
             <>
               <RefundsBlock data={data} />
@@ -298,7 +366,7 @@ export default function MobileApp({ stores, archived, sharedAds }: {
 
       <footer className={s.footer}>
         {fresh && home.fetchedAt && (
-          <span>Números de {formatTimeInTz(new Date(home.fetchedAt), deviceTz)} · atualizam sozinhos a cada 45 s com o app aberto.</span>
+          <span>Números de {fetchedClock} · {archivedSel ? 'loja arquivada: sem sincronização, não atualizam sozinhos.' : 'atualizam sozinhos a cada 45 s com o app aberto.'}</span>
         )}
         <button type="button" className={s.linkBtn} onClick={() => setSheet('settings')}>Ajustes deste aparelho</button>
       </footer>

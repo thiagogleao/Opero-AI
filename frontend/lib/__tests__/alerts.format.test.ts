@@ -119,6 +119,7 @@ describe('alert push text is pt-BR', () => {
     const rows = [{ name: 'Glooty', configured: false, dayClosed: false, totals: pnl({ metaSpend: 120 }) }]
     const s = summaryText(rows[0].totals, pnl(), rows, false)
     expect(s.body).toContain('margem —')
-    expect(s.title).toBe('📊 Hoje: −$120 de lucro')
+    // No store with costs: the amount is revenue − ads and says so, as the verdict.
+    expect(s.title).toBe('📊 Hoje: −$120 de receita menos anúncios (sem custos)')
   })
 })

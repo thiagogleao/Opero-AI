@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
-  apiQuery, clampSelection, clockDiffers, customRange, echoMatches, rawFromSearch, rawFromStorage, resolveView, selectionKey,
-  selectionPeriodLabel, selectionTz, toSearch, toStorage, tzOffsetMinutes, type Selection,
+  apiQuery, chipSelection, clampSelection, clockDiffers, customRange, echoMatches, expireRowDates, patchSelection, rawFromSearch,
+  linkRangeNotice, rawFromStorage, resolveView, selectionKey, selectionPeriodLabel, selectionTz, storeRowSelection, todasRangeAt, toSearch, toStorage,
+  tzOffsetMinutes, unknownLinkStore, type Selection,
 } from '../selection'
 import { diffFeed, FRESH_SALE_MS, inScope } from '../feed'
 import {
@@ -9,13 +10,14 @@ import {
 } from '../refreshProgress'
 import { fitCustomRange, MAX_WINDOW_DAYS, rangeCutNote, resolvePortfolioWindow } from '@/lib/views/portfolioLimits'
 import {
-  alertDeliveryText, alertRowTitle, campaignChip, creativeChip, dueByLabel, feedLine, ptNumbers, pushBlockedText,
+  alertDeliveryText, alertRowTitle, campaignChip, campaignGapNotes, countriesMetaSide, creativeChip, dueByLabel, feedLine, liveFeedSpeed, ptNumbers,
+  pushBlockedText, shopAdsLine,
 } from '../labels'
 import { adSignalChip, ACTION_CHIP } from '@/components/campaigns/text'
 import { signalLabel } from '@/lib/creativeSignal'
-import { deliveryOf } from '@/lib/alerts'
+import { deliveryOf, storeUrl, SUMMARY_URL } from '@/lib/alerts'
 import { bytesToBase64Url, sameServerKey, urlBase64ToUint8Array } from '../pushKeys'
-import { NO_SHARED_ADS, noSpendLine, pairNotes, pairOrdersKnown, type SharedAds } from '../sharedAds'
+import { adsElsewhere, NO_SHARED_ADS, noSpendLine, pairNotes, pairOrdersKnown, type SharedAds } from '../sharedAds'
 
 const known = (id: string) => ['mokoo', 'epoch', 'squishy'].includes(id)
 
@@ -428,7 +430,7 @@ describe('phone chips match the desktop chips', () => {
 // ─── Alerts sheet: what each fired alert reached ──────────────────────────────
 describe('alert delivery', () => {
   const now = new Date('2026-11-18T18:00:00Z')
-  it('reads the stored count; old rows say the delivery is unknown', () => {
+  it('reads the stored count; rows without one say it was not recorded, whatever their age', () => {
     expect(alertDeliveryText(deliveryOf({ title: 't', delivered: 2, devices: 2, keys: true }))).toBe('entregue a 2 aparelhos')
     expect(alertDeliveryText(deliveryOf({ title: 't', delivered: 1, devices: 3 }))).toBe('entregue a 1 aparelho')
     expect(alertDeliveryText(deliveryOf({ title: 't', delivered: 0, devices: 0, keys: true }))).toBe('não entregue: nenhum aparelho inscrito')
@@ -436,9 +438,9 @@ describe('alert delivery', () => {
     expect(alertDeliveryText(deliveryOf({ title: 't', delivered: 0, devices: 1 }))).toBe('não entregue: o aparelho inscrito recusou')
     expect(alertDeliveryText(deliveryOf({ title: 't', delivered: 0, devices: 0, keys: false }))).toBe('não entregue: sem chave de push neste servidor')
     // Production's rows: { title } or { margin } or { hour }, no count.
-    expect(alertDeliveryText(deliveryOf({ title: '⚠️ Margem 4% — MOKOO' }))).toBe('envio antigo, entrega desconhecida')
-    expect(alertDeliveryText(deliveryOf({ margin: 12 }))).toBe('envio antigo, entrega desconhecida')
-    expect(alertDeliveryText(deliveryOf(null))).toBe('envio antigo, entrega desconhecida')
+    expect(alertDeliveryText(deliveryOf({ title: '⚠️ Margem 4% — MOKOO' }))).toBe('entrega não registrada')
+    expect(alertDeliveryText(deliveryOf({ margin: 12 }))).toBe('entrega não registrada')
+    expect(alertDeliveryText(deliveryOf(null))).toBe('entrega não registrada')
   })
   it('a claim still being sent, and one that never reported back', () => {
     expect(deliveryOf({ title: 't', delivered: null }, '2026-11-18 17:58:00+00', now)).toEqual({ state: 'sending' })
@@ -451,5 +453,218 @@ describe('alert delivery', () => {
     expect(pushBlockedText({ pushKeys: true, devices: 2 })).toBeNull()
     // An answer from an older server (no pushKeys field) keeps the old reading.
     expect(pushBlockedText({ devices: 0 })).toMatch(/^Nenhum aparelho inscrito/)
+  })
+})
+
+// ─── Notification taps open the push's own period ─────────────────────────────
+describe('notification links', () => {
+  const stored = rawFromStorage(JSON.stringify({ loja: 'epoch', periodo: '7d', de: null, ate: null, aba: null }))
+  it('a sale or alert tap opens the store on today, whatever was used last', () => {
+    const v = resolveView(rawFromSearch(storeUrl('mokoo', { tab: 'campanhas' }).split('?')[1]), stored, known)
+    expect(v).toEqual({ sel: { loja: 'mokoo', periodo: 'today', de: null, ate: null }, aba: 'campanhas' })
+  })
+  it('the daily summary opens Todas · Hoje, not the store last pinned', () => {
+    expect(resolveView(rawFromSearch(SUMMARY_URL.split('?')[1]), stored, known).sel).toEqual({ loja: 'todas', periodo: 'today', de: null, ate: null })
+  })
+})
+
+// ─── Store rows of "Todas" open what they showed ──────────────────────────────
+describe('storeRowSelection', () => {
+  const today = { period: 'today' as const, range: { from: '2026-11-18', to: '2026-11-18' }, anchorToday: '2026-11-18' }
+  it('a store already on another date (Hibikura from 12h in Brasília) opens the dates of its row, with the preset', () => {
+    expect(storeRowSelection({ id: 'hib', storeToday: '2026-11-19' }, today))
+      .toEqual({ loja: 'hib', periodo: 'custom', de: '2026-11-18', ate: '2026-11-18', rowPreset: 'today' })
+    const week = { period: '7d' as const, range: { from: '2026-11-11', to: '2026-11-17' }, anchorToday: '2026-11-18' }
+    expect(storeRowSelection({ id: 'hib', storeToday: '2026-11-19' }, week))
+      .toEqual({ loja: 'hib', periodo: 'custom', de: '2026-11-11', ate: '2026-11-17', rowPreset: '7d' })
+  })
+  it('a store on the same date keeps the period; a custom period is already the same dates', () => {
+    expect(storeRowSelection({ id: 'mokoo', storeToday: '2026-11-18' }, today)).toEqual({ loja: 'mokoo' })
+    expect(storeRowSelection({ id: 'hib', storeToday: '2026-11-19' }, { ...today, period: 'custom' })).toEqual({ loja: 'hib' })
+  })
+  it('the custom dates survive the clamp to the store\'s own today', () => {
+    const patch = storeRowSelection({ id: 'hib', storeToday: '2026-11-19' }, today)
+    const sel = { loja: 'todas', periodo: 'today', de: null, ate: null, ...patch } as Selection
+    expect(clampSelection(sel, '2026-11-19')).toBe(sel)
+  })
+})
+
+// ─── Row dates belong to the store a row opened, not to the owner's period ────
+describe('row dates (rowPreset)', () => {
+  const todas: Selection = { loja: 'todas', periodo: 'today', de: null, ate: null }
+  const answer = { period: 'today' as const, range: { from: '2026-11-23', to: '2026-11-23' }, anchorToday: '2026-11-23' }
+  const hib = patchSelection(todas, storeRowSelection({ id: 'hib', storeToday: '2026-11-24' }, answer))
+  // Todas' calendar (Brasília) at 13h on 23 nov, and after midnight.
+  const clocks = [{ id: 'mokoo', timezone: 'America/Belem' }, { id: 'hib', timezone: 'Asia/Tokyo' }]
+  const at13h = todasRangeAt(clocks, new Date('2026-11-23T16:00:00Z'))
+  const at0h30 = todasRangeAt(clocks, new Date('2026-11-24T03:30:00Z'))
+
+  it('Todas · Hoje → Hibikura row → Todas chip lands back on Todas · Hoje (and on MOKOO · Hoje)', () => {
+    expect(hib).toEqual({ loja: 'hib', periodo: 'custom', de: '2026-11-23', ate: '2026-11-23', rowPreset: 'today' })
+    expect(chipSelection(hib, 'todas')).toEqual(todas)
+    expect(chipSelection(hib, 'mokoo')).toEqual({ loja: 'mokoo', periodo: 'today', de: null, ate: null })
+    // The same store's chip too: Hibikura on its own clock.
+    expect(chipSelection(hib, 'hib')).toEqual({ loja: 'hib', periodo: 'today', de: null, ate: null })
+    // From "7 dias" and "Este mês" as well: the preset, not the frozen dates.
+    const week = patchSelection({ ...todas, periodo: '7d' }, storeRowSelection({ id: 'hib', storeToday: '2026-11-24' },
+      { period: '7d', range: { from: '2026-11-16', to: '2026-11-22' }, anchorToday: '2026-11-23' }))
+    expect(chipSelection(week, 'todas')).toEqual({ ...todas, periodo: '7d' })
+  })
+  it('a chip without row dates keeps the period as before, custom dates the owner picked included', () => {
+    const picked: Selection = { loja: 'hib', periodo: 'custom', de: '2026-11-01', ate: '2026-11-05' }
+    expect(chipSelection(picked, 'todas')).toEqual({ ...picked, loja: 'todas' })
+    expect(chipSelection({ ...todas, periodo: '30d' }, 'mokoo')).toEqual({ loja: 'mokoo', periodo: '30d', de: null, ate: null })
+  })
+  it('a period the owner picks replaces row dates; only a row patch brings new ones', () => {
+    expect(patchSelection(hib, { periodo: 'yesterday', de: null, ate: null })).toEqual({ loja: 'hib', periodo: 'yesterday', de: null, ate: null })
+    expect(patchSelection(hib, { periodo: 'custom', de: '2026-11-20', ate: '2026-11-23' }))
+      .toEqual({ loja: 'hib', periodo: 'custom', de: '2026-11-20', ate: '2026-11-23' })
+  })
+  it('storage keeps the preset, never the row dates: a reopen opens "Hoje"', () => {
+    const v = { sel: hib, aba: null }
+    expect(JSON.parse(toStorage(v))).toEqual({ loja: 'hib', periodo: 'today', de: null, ate: null, aba: null })
+    expect(resolveView({}, rawFromStorage(toStorage(v)), id => id === 'hib').sel).toEqual({ loja: 'hib', periodo: 'today', de: null, ate: null })
+  })
+  it('the URL keeps the dates with their preset; a reload the same day keeps them, the next day goes back to the preset', () => {
+    const v = { sel: hib, aba: null }
+    expect(toSearch(v)).toBe('loja=hib&periodo=custom&de=2026-11-23&ate=2026-11-23&volta=today')
+    const known = (id: string) => id === 'hib'
+    expect(resolveView(rawFromSearch(toSearch(v)), {}, known, undefined, at13h).sel).toEqual(hib)
+    expect(resolveView(rawFromSearch(toSearch(v)), {}, known, undefined, at0h30).sel).toEqual({ loja: 'hib', periodo: 'today', de: null, ate: null })
+    // Row dates are one store's: on Todas they are the preset.
+    expect(resolveView(rawFromSearch('loja=todas&periodo=custom&de=2026-11-23&ate=2026-11-23&volta=today'), {}, known).sel).toEqual(todas)
+    // A bogus volta is ignored: plain custom dates.
+    expect(resolveView(rawFromSearch('loja=hib&periodo=custom&de=2026-11-23&ate=2026-11-23&volta=forever'), {}, known).sel)
+      .toEqual({ loja: 'hib', periodo: 'custom', de: '2026-11-23', ate: '2026-11-23' })
+  })
+  it('an open app rolls to the new day: after midnight the row dates give way to "Hoje"', () => {
+    expect(expireRowDates(hib, at13h)).toBe(hib)
+    expect(expireRowDates(hib, at0h30)).toEqual({ loja: 'hib', periodo: 'today', de: null, ate: null })
+    const plain: Selection = { loja: 'hib', periodo: 'custom', de: '2026-11-23', ate: '2026-11-23' }
+    expect(expireRowDates(plain, at0h30)).toBe(plain)
+    // Moved to Todas some other way (a store gone 404 → Todas): the preset.
+    expect(expireRowDates({ ...hib, loja: 'todas' }, at13h)).toEqual(todas)
+  })
+  it('row dates a store cannot read as they are go back to the preset, not to a cut range', () => {
+    expect(clampSelection({ ...hib, de: '2026-11-25', ate: '2026-11-25' }, '2026-11-24')).toEqual({ loja: 'hib', periodo: 'today', de: null, ate: null })
+  })
+})
+
+// ─── A link to a store that does not exist says so ────────────────────────────
+describe('unknownLinkStore', () => {
+  it('names a store the owner cannot open; Todas, empty and known ones are fine', () => {
+    expect(unknownLinkStore(rawFromSearch('?loja=bogus&aba=foo'), known)).toBe('bogus')
+    expect(unknownLinkStore(rawFromSearch('?loja=mokoo'), known)).toBeNull()
+    expect(unknownLinkStore(rawFromSearch('?loja=todas'), known)).toBeNull()
+    expect(unknownLinkStore(rawFromSearch('?loja='), known)).toBeNull()
+    expect(unknownLinkStore(rawFromSearch(''), known)).toBeNull()
+  })
+})
+
+// ─── Países: what Meta's side has ─────────────────────────────────────────────
+describe('countriesMetaSide', () => {
+  const row = (spend: number, purchases: number) => ({ meta: { spend, purchases } })
+  it('"none" when the window has no Meta spend and no attributed purchase', () => {
+    expect(countriesMetaSide({ meta: { totalSpend: 0, coveredSpend: 0 }, countries: [row(0, 0), row(0, 0)] })).toBe('none')
+    expect(countriesMetaSide({ meta: { totalSpend: 0, coveredSpend: 0 }, countries: [] })).toBe('none')
+  })
+  it('"no_split" when Meta spent but split none of it by country (MOKOO, 0% covered)', () => {
+    expect(countriesMetaSide({ meta: { totalSpend: 6597.35, coveredSpend: 0 }, countries: [row(0, 0), row(0, 0)] })).toBe('no_split')
+  })
+  it('"split" as soon as one country carries a Meta line', () => {
+    expect(countriesMetaSide({ meta: { totalSpend: 12.5, coveredSpend: 12.5 }, countries: [row(12.5, 0)] })).toBe('split')
+    expect(countriesMetaSide({ meta: { totalSpend: 0, coveredSpend: 0 }, countries: [row(0, 1)] })).toBe('split')
+  })
+})
+
+// ─── Campanhas / Criativos of a store selling on another store's ads ─────────
+describe('adsElsewhere', () => {
+  const shared: SharedAds = {
+    pairs: [{ adStoreId: 'epoch', adStoreName: 'EPOCH ®️', salesStoreId: 'camp', salesStoreName: 'CAMP HALLOW', orders: 445, revenue: 20000 }],
+    badges: {}, lookbackDays: 90,
+  }
+  it('points CAMP HALLOW at EPOCH, and nobody else anywhere', () => {
+    const e = adsElsewhere(shared, 'camp', 'campanhas')
+    expect(e).toMatchObject({ adStoreId: 'epoch', title: 'Os anúncios da CAMP HALLOW rodam na conta da EPOCH ®️' })
+    expect(e?.body).toMatch(/^As campanhas e o gasto estão na EPOCH ®️\. Nos últimos 90 dias, 445 pedidos da CAMP HALLOW/)
+    expect(adsElsewhere(shared, 'camp', 'anuncios')?.body).toMatch(/^Os anúncios e o gasto/)
+    expect(adsElsewhere(shared, 'epoch', 'campanhas')).toBeNull()
+    expect(adsElsewhere(NO_SHARED_ADS, 'camp', 'campanhas')).toBeNull()
+  })
+})
+
+// ─── A link's custom range cut before asking (regression: cut in silence) ────
+describe('linkRangeNotice', () => {
+  const known2 = (id: string) => id === 'user_3CV'
+  const today = '2026-11-24'
+  const open = (search: string) => {
+    const url = rawFromSearch(search)
+    const v = resolveView(url, {}, known2, () => today)
+    return { sel: v.sel, note: linkRangeNotice(url, v.sel, today) }
+  }
+
+  it('1 jan 2024 – 30 dez 2026: says it shows the last 366 days, up to today', () => {
+    const { sel, note } = open('?loja=user_3CV&periodo=custom&de=2024-01-01&ate=2026-12-30')
+    expect(sel).toMatchObject({ periodo: 'custom', de: '2025-11-24', ate: '2026-11-24' })
+    expect(note).toBe('O link pedia 1 jan 2024 – 30 dez 2026. Mostrando 24 nov 2025 – 24 nov 2026: só os últimos 366 dias (o máximo de uma vez) e até hoje (o resto ainda não aconteceu).')
+  })
+  it('an end in the future alone, a start before 2000, a start after today', () => {
+    expect(open('?loja=user_3CV&periodo=custom&de=2026-11-20&ate=2026-11-30').note)
+      .toBe('O link pedia 20–30 nov. Mostrando 20–24 nov: até hoje (o resto ainda não aconteceu).')
+    expect(open('?loja=user_3CV&periodo=custom&de=1999-12-01&ate=2000-03-01').note)
+      .toBe('O link pedia 1 dez 1999 – 1 mar 2000. Mostrando 1 jan – 1 mar 2000: a partir de 1 jan 2000 (nada antes disso entra).')
+    const later = open('?loja=user_3CV&periodo=custom&de=2026-11-26&ate=2026-11-30')
+    expect(later.sel.periodo).toBe('today')
+    expect(later.note).toBe('As datas do link (26–30 nov) ainda não chegaram: mostrando Hoje.')
+  })
+  it('nothing to say: a range used as asked, a preset, no URL period, row dates', () => {
+    expect(open('?loja=user_3CV&periodo=custom&de=2026-11-10&ate=2026-11-16').note).toBeNull()
+    expect(open('?loja=user_3CV&periodo=7d').note).toBeNull()
+    expect(open('?loja=user_3CV').note).toBeNull()
+    expect(open('?loja=user_3CV&periodo=custom&de=2026-11-20&ate=2026-11-30&volta=today').note).toBeNull()
+  })
+})
+
+// ─── Vendas ao vivo: "em segundos" only where it is true (regression) ────────
+describe('liveFeedSpeed', () => {
+  const noLive = [{ storeId: 'hib', name: 'Hibikura' }, { storeId: 'camp', name: 'CAMP HALLOW' }]
+  it('a store without the live feed alone: sales arrive with the sync, no footer repeating it', () => {
+    expect(liveFeedSpeed([{ id: 'hib' }], noLive)).toEqual({
+      howTo: 'Cada venda nova aparece com a sincronização, até 10 minutos depois: esta loja não avisa vendas na hora.',
+      footer: null,
+    })
+  })
+  it('a store with the feed: "em segundos"', () => {
+    expect(liveFeedSpeed([{ id: 'mokoo' }], noLive)).toEqual({ howTo: 'Cada venda nova aparece em segundos.', footer: null })
+  })
+  it('Todas: the claim leaves out the stores the footer names', () => {
+    expect(liveFeedSpeed([{ id: 'mokoo' }, { id: 'hib' }, { id: 'camp' }], noLive)).toEqual({
+      howTo: 'Cada venda nova aparece em segundos, menos as das lojas citadas abaixo.',
+      footer: 'Hibikura e CAMP HALLOW não avisam vendas na hora: os pedidos aparecem com a sincronização, até 10 minutos depois.',
+    })
+  })
+})
+
+// ─── Campanhas of a store selling through Shop Campaigns (regression) ────────
+describe('Campanhas: Shopify ads beside the Meta list', () => {
+  it('names the Shopify spend the list leaves out, per store with several', () => {
+    expect(shopAdsLine(5301.63, [{ store: 'Dumpling Squishy · 8jcp3a', shopSpend: 5301.63 }], false))
+      .toBe('Mais $5.302 em Anúncios Shopify (Shop Campaigns), fora desta lista. Entram no lucro da loja; a lista é só das campanhas do Meta.')
+    expect(shopAdsLine(5527.93, [{ store: 'MOKOO', shopSpend: 226.3 }, { store: 'Dumpling Squishy · 8jcp3a', shopSpend: 5301.63 }, { store: 'EPOCH', shopSpend: 0 }], true))
+      .toBe('Mais $5.528 em Anúncios Shopify (Shop Campaigns), fora desta lista: Dumpling Squishy · 8jcp3a $5.302, MOKOO $226. Entram no lucro da loja; a lista é só das campanhas do Meta.')
+    expect(shopAdsLine(0, [], true)).toBeNull()
+  })
+  it('the Meta-vs-store gap only for stores whose ads run on Meta', () => {
+    const notes = [
+      { store: 'Dumpling Squishy · 8jcp3a', metaVsStoreRevenueGap: -92.7, shopSpend: 5301.63, adChannel: 'shop' as const },
+      { store: 'Misto', metaVsStoreRevenueGap: -60, shopSpend: 800, adChannel: 'both' as const },
+      { store: 'MOKOO', metaVsStoreRevenueGap: -38.6, shopSpend: 226.3, adChannel: 'meta' as const },
+      { store: 'EPOCH', metaVsStoreRevenueGap: -22.8, shopSpend: 0, adChannel: 'meta' as const },
+      { store: 'Hibikura', metaVsStoreRevenueGap: -4.4, shopSpend: 0, adChannel: 'meta' as const },
+    ]
+    expect(campaignGapNotes(notes)).toEqual([
+      'MOKOO: o Meta credita 39% menos vendas do que a loja registrou (o resto: Anúncios Shopify, com $226 de gasto no período; orgânico, e-mail, recompra ou venda que o pixel não viu).',
+      'EPOCH: o Meta credita 23% menos vendas do que a loja registrou.',
+    ])
   })
 })

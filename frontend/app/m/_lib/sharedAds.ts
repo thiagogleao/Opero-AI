@@ -102,6 +102,25 @@ export function pairNotes(
   return out
 }
 
+/**
+ * The empty Campanhas / Criativos tab of a store whose ads run on another
+ * store's account (CAMP HALLOW on EPOCH's): where its campaigns are, instead
+ * of a bare "Nenhuma campanha com gasto", which read as "this store runs no
+ * ads". Null when the store sells on no other store's ads.
+ */
+export function adsElsewhere(
+  shared: SharedAds, storeId: string, what: 'campanhas' | 'anuncios',
+): { adStoreId: string; adStoreName: string; title: string; body: string } | null {
+  const p = shared.pairs.find(x => x.salesStoreId === storeId && x.adStoreId !== storeId)
+  if (!p) return null
+  return {
+    adStoreId: p.adStoreId,
+    adStoreName: p.adStoreName,
+    title: `Os anúncios da ${p.salesStoreName} rodam na conta da ${p.adStoreName}`,
+    body: `${what === 'campanhas' ? 'As campanhas' : 'Os anúncios'} e o gasto estão na ${p.adStoreName}. ${history(p, shared.lookbackDays)}`,
+  }
+}
+
 /** The ads line of a store row with no ad spend of its own (as the desktop's
  *  ROAS cell): who paid for the ads it sells on, or plain "sem anúncios". */
 export function noSpendLine(shared: SharedAds, storeId: string, orders: number): string {

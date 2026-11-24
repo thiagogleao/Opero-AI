@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { sumPnL, type PnL, type PnLLines } from '../../engine/pnl'
 import {
-  alertPatchProblems, DEFAULT_CONFIG, evaluateStoreAlerts, mergeAlertConfig, summaryText,
+  alertPatchProblems, dailySummaryOf, DEFAULT_CONFIG, evaluateStoreAlerts, mergeAlertConfig, storeUrl, summaryText, SUMMARY_URL,
   type StoreAlertInput,
 } from '../../alerts'
+import { buildVerdict, verdictInputFromPortfolio } from '../verdict'
+import type { PortfolioView } from '../portfolio'
 
 const pnl = (over: Partial<PnLLines> = {}): PnL => sumPnL([{ ...sumPnL([]), ...over }])
 
@@ -22,7 +24,8 @@ describe('evaluateStoreAlerts', () => {
   it('fires "gasto sem vendas" on a day with spend and no sale', () => {
     const fired = evaluateStoreAlerts(input({ orders: 0, metaSpend: 400 }, WEEK), DEFAULT_CONFIG)
     expect(fired.map(a => a.kind)).toEqual(['spend_no_sales'])
-    expect(fired[0].url).toBe('/m?loja=s1')
+    // The period is explicit: the phone would otherwise restore the last one used.
+    expect(fired[0].url).toBe('/m?loja=s1&periodo=today')
     expect(fired[0].title).toContain('nenhuma venda')
   })
   it('counts Shopify ads toward spend without sales', () => {
@@ -76,16 +79,62 @@ describe('alert config', () => {
 })
 
 describe('summaryText', () => {
-  it('names the stores that spent without selling and those without costs', () => {
+  it('names the stores that spent without selling; a store without costs gets its own line, out of the ranks', () => {
     const rows = [
       { name: 'MOKOO', configured: true, dayClosed: false, totals: pnl({ revenue: 1000, orders: 10, cogs: 400, metaSpend: 300 }) },
+      { name: 'EPOCH', configured: true, dayClosed: false, totals: pnl({ orders: 0, metaSpend: 80 }) },
       { name: 'Glooty', configured: false, dayClosed: false, totals: pnl({ metaSpend: 120 }) },
     ]
-    const s = summaryText(sumPnL(rows.map(r => r.totals)), pnl({ revenue: 500, orders: 5, cogs: 200, metaSpend: 200 }), rows, true)
-    expect(s.title).toBe('📊 Hoje: $180 de lucro (+80% vs ontem nesta hora)')
-    expect(s.body).toContain('Sem vendas: Glooty ($120 em anúncios)')
-    expect(s.body).toContain('Sem custos configurados: Glooty')
+    // The judged totals (the stores with costs), as dailySummaryOf passes them.
+    const judged = sumPnL([rows[0].totals, rows[1].totals])
+    const s = summaryText(judged, pnl({ revenue: 500, orders: 5, cogs: 200, metaSpend: 200 }), rows, true)
+    expect(s.title).toBe('📊 Hoje: $220 de lucro (+120% vs ontem nesta hora)')
+    expect(s.body.startsWith('10 pedidos · $1.000 receita · $380 anúncios · margem 22% · ')).toBe(true)
     expect(s.body).toContain('Melhor: MOKOO $300')
+    expect(s.body).toContain('Pior: EPOCH −$80,00')
+    expect(s.body).toContain('Sem vendas: EPOCH ($80,00 em anúncios)')
+    expect(s.body).toContain('Fora do lucro, sem custos configurados: Glooty (receita − anúncios −$120)')
+    expect(s.body).not.toContain('Pior: Glooty')
+    expect(s.body).not.toContain('Sem vendas: Glooty')
+  })
+})
+
+// 12 nov: the push read "$1.664 de lucro" (every store summed, Glooty's −$138
+// of ads with no sale inside) while the Todas · Hoje screen it opens read
+// "$1.802 de lucro real somando 6 lojas" with Glooty left out.
+describe('dailySummaryOf', () => {
+  const row = (id: string, name: string, configured: boolean, today: Partial<PnLLines>, before: Partial<PnLLines>) => ({
+    id, name, timezone: 'America/Sao_Paulo', configured, totals: pnl(today),
+    comparison: { included: true, totals: pnl(before) }, partial: true, minutesCovered: 17 * 60, dayState: 'running', dayClosed: false,
+  })
+  const stores = [
+    row('m', 'MOKOO', true, { revenue: 3000, orders: 40, cogs: 1200, metaSpend: 1500 }, { revenue: 3500, orders: 45, cogs: 1400, metaSpend: 1400 }),
+    row('d', 'Dumpling', true, { revenue: 4960, orders: 69, cogs: 1500, metaSpend: 100, shopSpend: 2235 }, { revenue: 5000, orders: 70, cogs: 1500, shopSpend: 2000 }),
+    row('g', 'Glooty', false, { metaSpend: 137.78 }, { metaSpend: 60 }),
+  ]
+  const all = sumPnL(stores.map(s => s.totals))
+  const view = {
+    generatedAt: '2026-11-12T20:00:00.000Z', period: 'today', range: { from: '2026-11-12', to: '2026-11-12' },
+    anchorToday: '2026-11-12', anchorTimezone: 'America/Sao_Paulo', totals: all, stores,
+    comparison: {
+      from: '2026-11-11', to: '2026-11-11', label: 'ontem até esta hora', sameTimeOfDay: true, cutoffMinutes: 17 * 60,
+      totals: sumPnL(stores.map(s => s.comparison.totals)),
+    },
+  } as unknown as PortfolioView
+  const verdict = buildVerdict(verdictInputFromPortfolio(view))
+  const s = dailySummaryOf(view)
+
+  it('says the profit the verdict of the screen it opens says, not the sum of every store', () => {
+    expect(s.profit).toBeCloseTo(verdict.amount!, 6)
+    expect(s.profit).toBeCloseTo(stores[0].totals.operatingProfit + stores[1].totals.operatingProfit, 6)
+    expect(s.profit).not.toBeCloseTo(all.operatingProfit, 2)
+    expect(s.title.startsWith('📊 Hoje: $')).toBe(true)
+  })
+  it('compares with the judged stores of yesterday and keeps Glooty out of the margin and the ranks', () => {
+    expect(s.title.endsWith('vs ontem nesta hora)')).toBe(true)
+    expect(s.body).toContain('Fora do lucro, sem custos configurados: Glooty (receita − anúncios −$138)')
+    expect(s.body).not.toMatch(/Melhor: Glooty|Pior: Glooty/)
+    expect(s.body).toContain(`margem ${Math.round(verdict.totals.margin!)}%`)
   })
 })
 
@@ -96,5 +145,19 @@ describe('quiet hours', () => {
     expect(inQuietHours(new Date('2026-11-17T10:59:00Z'))).toBe(true)  // 07:59 BRT
     expect(inQuietHours(new Date('2026-11-17T11:00:00Z'))).toBe(false) // 08:00 BRT
     expect(inQuietHours(new Date('2026-11-17T16:30:00Z'))).toBe(false) // 13:30 BRT
+  })
+})
+
+// A notification tap opens the day the push talks about, never the period
+// last used on the phone (a tap on today's ROAS alert opened "30 dias").
+describe('push links carry their period', () => {
+  it('store alerts open the store on its own today; a tab keeps the period too', () => {
+    expect(storeUrl('user_3CV')).toBe('/m?loja=user_3CV&periodo=today')
+    expect(storeUrl('a b', { tab: 'campanhas', periodo: '7d' })).toBe('/m?loja=a%20b&periodo=7d&aba=campanhas')
+  })
+  it('the daily summary opens Todas · Hoje, not the store last pinned', () => {
+    expect(SUMMARY_URL).toBe('/m?loja=todas&periodo=today')
+    const q = new URLSearchParams(SUMMARY_URL.split('?')[1])
+    expect([q.get('loja'), q.get('periodo')]).toEqual(['todas', 'today'])
   })
 })

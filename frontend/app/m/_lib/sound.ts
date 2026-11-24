@@ -155,9 +155,32 @@ export function getSoundPref(): boolean {
   try { return window.localStorage.getItem(SOUND_KEY) === '1' } catch { return false }
 }
 
+/**
+ * The preference changed in another window sharing this storage (the
+ * installed app and a browser tab): apply it to the chime too, not only to
+ * the icon. Re-rendering alone left `enabled` as it was, so a window showed
+ * "Som de venda desligado" and still rang, or "ligado" and stayed silent.
+ * No gesture here: turning on arms the chime and resumes a context that
+ * already exists (a new one waits for the next tap); turning off silences it
+ * at once.
+ */
+export function applySoundPrefFromStorage(on: boolean) {
+  if (on) {
+    restoreSound(true)
+    wake(false)
+  } else {
+    setSoundEnabled(false)
+  }
+}
+
 export function subscribeSoundPref(cb: () => void): () => void {
   prefListeners.add(cb)
-  const onStorage = (e: StorageEvent) => { if (e.key === SOUND_KEY) cb() }
+  const onStorage = (e: StorageEvent) => {
+    // key null: the other window cleared the whole storage.
+    if (e.key !== SOUND_KEY && e.key !== null) return
+    applySoundPrefFromStorage(getSoundPref())
+    cb()
+  }
   window.addEventListener('storage', onStorage)
   return () => { prefListeners.delete(cb); window.removeEventListener('storage', onStorage) }
 }

@@ -337,7 +337,9 @@ export function AlertsSheet({ onClose }: { onClose: () => void }) {
     }
   }
 
-  const numField = (spec: NumSpec, label: string, help?: string, toggle?: { on: boolean; onChange: (v: boolean) => void; key: string }) => {
+  // The switch's name is what it turns on; aria-checked says whether it is on.
+  // A name ending in "ligado" was read "…: ligado, interruptor, desmarcado".
+  const numField = (spec: NumSpec, label: string, help?: string, toggle?: { on: boolean; onChange: (v: boolean) => void; key: string; name: string }) => {
     const value = drafts[spec.key] ?? (data ? showNum(spec.get(data.config)) : '')
     const msg = fieldMsg[spec.key] ?? (toggle ? fieldMsg[toggle.key] : undefined)
     return (
@@ -353,7 +355,7 @@ export function AlertsSheet({ onClose }: { onClose: () => void }) {
             onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
           />
           {spec.unit !== '$' && <span className={s.unit}>{spec.unit}</span>}
-          {toggle && <Switch on={toggle.on} onChange={toggle.onChange} label={`${label}: ligado`} />}
+          {toggle && <Switch on={toggle.on} onChange={toggle.onChange} label={toggle.name} />}
         </span>
         {help && <span className={s.fieldHelp}>{help}</span>}
         {msg && <span className={msg.ok ? `${s.fieldHelp} ${s.fieldOk}` : s.fieldErr} role={msg.ok ? 'status' : 'alert'}>{msg.text}</span>}
@@ -376,7 +378,7 @@ export function AlertsSheet({ onClose }: { onClose: () => void }) {
           )}
           <div className={s.box}>
             {RULES.map(r => numField(r.num, r.title, r.help, {
-              key: r.rule,
+              key: r.rule, name: `Alerta: ${r.title}`,
               on: data.config[r.rule].enabled,
               onChange: on => save({ [r.rule]: { enabled: on } }, r.rule),
             }))}
@@ -385,7 +387,7 @@ export function AlertsSheet({ onClose }: { onClose: () => void }) {
             <div className={s.groupTitle}>Quando</div>
             <div className={s.box}>
               {numField(SUMMARY_HOUR, 'Resumo do dia às', 'Horário de Brasília. Um push com o resultado de todas as lojas.', {
-                key: 'dailySummary', on: data.config.dailySummary.enabled,
+                key: 'dailySummary', name: 'Enviar o resumo do dia', on: data.config.dailySummary.enabled,
                 onChange: on => save({ dailySummary: { enabled: on } }, 'dailySummary'),
               })}
               {numField(FROM_HOUR, 'Não alertar antes das', 'No relógio de cada loja: de manhã o gasto já entrou e as vendas ainda não.')}

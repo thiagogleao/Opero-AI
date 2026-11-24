@@ -18,13 +18,15 @@ import {
   formatTimeInTz, formatWeekdayDate, partialLabel, plural, tzCity,
 } from '@/lib/format'
 import { minutesIntoDay, todayInTz } from '@/lib/engine/dates'
-import { judgedStores, periodPhrase, storeRoas, storeStatus, storeStatusChips, type RoasSummary, type Verdict } from '@/lib/views/verdict'
+import {
+  comparisonCut, judgedStores, noSalesCashHit, periodPhrase, storeRoas, storeStatus, storeStatusChips, type RoasSummary, type Verdict,
+} from '@/lib/views/verdict'
 import type { MobileResponse } from '@/lib/views/mobile'
 import type { IntradayAside, LiveOrderItem, PortfolioStoreRow } from '@/lib/views/portfolio'
 import { LIVE_FEED_SIZE } from '@/lib/views/portfolioLimits'
-import { clockDiffers, tzOffsetMinutes } from '../_lib/selection'
+import { clockDiffers, storeRowSelection, tzOffsetMinutes, type Selection } from '../_lib/selection'
 import { noSpendLine, pairNotes, type SharedAds } from '../_lib/sharedAds'
-import { dueByLabel, feedLine } from '../_lib/labels'
+import { dueByLabel, feedLine, liveFeedSpeed } from '../_lib/labels'
 import { NetBars, NetBarsLegend } from './NetBars'
 import s from '../m.module.css'
 
@@ -73,7 +75,12 @@ export function ClockBanner({ tz, deviceTz, now }: { tz: string; deviceTz: strin
 export function VerdictBlock({ data, v }: { data: Data; v: Verdict }) {
   const t = v.totals
   const cmp = v.comparisonTotals
-  const cmpLabel = data.comparison.label === 'ontem até esta hora' ? 'Ontem até esta hora' : data.comparison.label.replace(/^./, c => c.toUpperCase())
+  // A window of several days ending today is compared with the earlier days
+  // whole and the last one cut at this hour: the cell says where it stops
+  // ("10 dias anteriores · até 04h16 de 9 nov"), as the verdict does.
+  const cut = comparisonCut(data.comparison, data.anchorToday)
+  const cmpLabel = (data.comparison.label === 'ontem até esta hora' ? 'Ontem até esta hora' : data.comparison.label.replace(/^./, c => c.toUpperCase()))
+    + (cut ? ` · ${cut}` : '')
   return (
     <VerdictCard
       verdict={v}
@@ -153,6 +160,10 @@ export function DayBlock({ data }: { data: Data }) {
   if (!day) return null
   const plotted = new Set(day.stores.map(st => st.storeId))
   const rows = data.stores.filter(r => plotted.has(r.id))
+  // An archived store is not synced: its current day never fills in, so there
+  // is no day to follow (Squishy World read "Nenhuma venda e nenhum gasto até
+  // agora" under a live title). The verdict above says why.
+  if (rows.length > 0 && rows.every(r => r.archived && r.partial)) return null
   const runningRows = rows.filter(r => r.partial)
   const running = runningRows.length > 0
   const one = rows.length === 1 ? rows[0] : null
@@ -253,7 +264,7 @@ export function DayBlock({ data }: { data: Data }) {
       {day.closedStores.map(c => (
         <Callout key={c.storeId} tone="info" icon="clock" title={`${c.name}: dia de ${tzCity(c.timezone)} já fechado`}>
           Fora da curva. {formatDate(day.day, data.anchorToday)} inteiro em {tzCity(c.timezone)}: {plural(c.orders, 'pedido', 'pedidos')},{' '}
-          {formatMoney(c.revenue)} em vendas e <Money value={c.operatingProfit} /> de {data.stores.find(r => r.id === c.storeId)?.configured === false ? 'vendas − anúncios' : 'lucro'}.
+          {formatMoney(c.revenue)} em vendas e <ClosedDayResult value={c.operatingProfit} configured={data.stores.find(r => r.id === c.storeId)?.configured !== false} />.
           {' '}Lá já é {formatDate(c.storeToday, data.anchorToday)}.
         </Callout>
       ))}
@@ -267,6 +278,14 @@ export function DayBlock({ data }: { data: Data }) {
 }
 
 const asideActive = (a: IntradayAside) => a.orders > 0 || a.revenue > 0 || a.adSpend > 0
+
+/** "$120 de lucro" / "$251 de prejuízo" for a closed store day, as the
+ *  verdict's pair cell words it ("−$251 de lucro" read as a contradiction);
+ *  a store without costs keeps the signed "vendas − anúncios". */
+function ClosedDayResult({ value, configured }: { value: number; configured: boolean }) {
+  if (!configured) return <><Money value={value} /> de vendas − anúncios</>
+  return value < 0 ? <><Money value={-value} tone="neg" /> de prejuízo</> : <><Money value={value} /> de lucro</>
+}
 
 /** "Glooty fica fora da curva…": a store without costs, beside the summed
  *  curve with its revenue − ads in words, never inside it as profit. */
@@ -418,16 +437,23 @@ export function Attention({ data }: { data: Data }) {
 
 // ─── Store list ───────────────────────────────────────────────────────────────
 
-export function StoreList({ data, shared, onPick }: { data: Data; shared: SharedAds; onPick: (id: string) => void }) {
+export function StoreList({ data, shared, onPick }: { data: Data; shared: SharedAds; onPick: (patch: Partial<Selection>) => void }) {
   if (data.stores.length < 2) return null
   const singleDay = data.range.from === data.range.to
   const running = singleDay && data.range.to === data.anchorToday
-  const rows = [...data.stores].sort((a, b) =>
-    Number(active(b)) - Number(active(a)) || b.totals.operatingProfit - a.totals.operatingProfit)
+  // A store with no sale whose refunds or chargebacks took money out is news,
+  // not an idle store: it ranks above the ones where nothing happened.
+  const rank = (r: PortfolioStoreRow) => (active(r) ? 2 : noSalesCashHit(r.totals) ? 1 : 0)
+  const rows = [...data.stores].sort((a, b) => rank(b) - rank(a) || b.totals.operatingProfit - a.totals.operatingProfit)
+  // Stores already on another date (Hibikura from 12h in Brasília) open the
+  // dates their row shows (storeRowSelection), and the line says so.
+  const shifted = data.period === 'custom' ? [] : rows.filter(r => r.storeToday !== data.anchorToday)
   return (
     <Block
       title={running ? 'Lojas hoje' : `Lojas · ${data.rangeLabel}`}
-      howTo="Cada loja no seu dia e no seu fuso. Toque numa loja para fixá-la."
+      howTo={`Cada loja no seu dia e no seu fuso. Toque numa loja para fixá-la${shifted.length
+        ? ` (${joinNames(shifted.map(r => r.name))} ${shifted.length > 1 ? 'abrem' : 'abre'} nas mesmas datas, ${data.rangeLabel})`
+        : ''}.`}
       flush
     >
       <ul className={s.list}>
@@ -439,10 +465,15 @@ export function StoreList({ data, shared, onPick }: { data: Data; shared: Shared
           const on = active(r)
           const dayLabel = dayOfLabel(r.timezone)
           const sr = t.orders > 0 ? storeRoas(t, r.configured) : null
+          // No sale, but chargebacks or refunds arrived (CAMP HALLOW, 17–23
+          // nov: 2 chargebacks, −$186): said on the row, as the desktop table
+          // and the verdict say it, so the row does not read idle.
+          const hit = noSalesCashHit(t)
           const pairBadges = shared.badges[r.id] ?? []
           return (
             <li key={r.id}>
-              <button type="button" className={`${s.row} ${s.rowBtn}`} onClick={() => onPick(r.id)} aria-label={`Abrir ${r.name}`}>
+              <button type="button" className={`${s.row} ${s.rowBtn}`} onClick={() => onPick(storeRowSelection(r, data))}
+                aria-label={`Abrir ${r.name}${shifted.includes(r) ? ` em ${data.rangeLabel}` : ''}`}>
                 <Avatar name={r.name} size="sm" />
                 <span>
                   <span className={s.rowName}><StoreName name={r.name} /></span>
@@ -453,6 +484,7 @@ export function StoreList({ data, shared, onPick }: { data: Data; shared: Shared
                     {/* No sale: "ROAS 0,00× · empate desconhecido" said nothing; the money
                         already spent does. */}
                     {t.orders === 0 && t.adSpend > 0 && <> · <b>{formatMoney(t.adSpend)}</b> em anúncios</>}
+                    {hit && <><br />{hit.what ?? 'reembolsos e chargebacks'}: <b className="neg">{formatMoney(hit.amount)}</b> no caixa</>}
                     {/* ROAS on the store's ad channel (lib/views/adChannel), as the Resumo and
                         the verdict: Dumpling sells through Shop Campaigns and read "109×" on
                         its $56 of Meta. */}
@@ -660,9 +692,11 @@ function orderTotal(o: LiveOrderItem): string {
 
 export function LiveFeed({ data, now, deviceTz }: { data: Data; now: number; deviceTz: string }) {
   const [all, setAll] = useState(false)
+  // An archived store is not synced and has no feed: no promise of new sales.
+  if (data.stores.length > 0 && data.stores.every(r => r.archived)) return null
   const several = data.stores.length > 1
   const items = all ? data.liveFeed : data.liveFeed.slice(0, 12)
-  const noLive = data.freshness.storesWithoutLiveFeed
+  const speed = liveFeedSpeed(data.stores, data.freshness.storesWithoutLiveFeed)
   // One store on another clock: the whole screen (banner, "parcial · até",
   // the curve) is on the store's clock, so the sale times are too, and the
   // line above the list says which clock that is.
@@ -672,12 +706,10 @@ export function LiveFeed({ data, now, deviceTz }: { data: Data; now: number; dev
     <Block
       title={<span className={s.live}>Vendas ao vivo</span>}
       howTo={clockTz !== deviceTz
-        ? `As mais recentes primeiro, no horário de ${tzCity(clockTz)}, como o resto da tela. Cada venda nova aparece em segundos.`
-        : 'As mais recentes primeiro. Cada venda nova aparece em segundos.'}
+        ? `As mais recentes primeiro, no horário de ${tzCity(clockTz)}, como o resto da tela. ${speed.howTo}`
+        : `As mais recentes primeiro. ${speed.howTo}`}
       flush={items.length > 0}
-      footer={noLive.length > 0
-        ? `${noLive.map(n => n.name).join(', ')} ${noLive.length > 1 ? 'não avisam' : 'não avisa'} vendas na hora: os pedidos aparecem com a sincronização, até 10 minutos depois.`
-        : undefined}
+      footer={speed.footer ?? undefined}
     >
       {items.length === 0 ? (
         <EmptyState compact icon="clock" title={several ? 'Nenhuma venda recente' : 'Nenhuma venda recente nesta loja'} />

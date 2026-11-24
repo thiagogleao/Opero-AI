@@ -23,7 +23,7 @@ import {
   anchorTz, formatRange, isIsoDate, isPeriod, safeTz, todayInTz,
   type DateRange, type Period,
 } from '../engine/dates'
-import { getCampaignReport, type CampaignReport } from '../data/campaigns'
+import { getCampaignReport, spentAds, type CampaignReport } from '../data/campaigns'
 import { getCreativesReport, type CreativesReport } from '../data/creatives'
 import { getProductReport, type ProductReport } from '../data/products'
 import {
@@ -36,7 +36,9 @@ import {
   type CampaignAction, type ScaleThresholds, type TrendArrow,
 } from '../campaignSignal'
 import { SIGNAL_LABEL, signalRank, type Signal } from '../creativeSignal'
+import { computePnL } from '../engine/pnl'
 import { resolvePortfolioWindow, tooEarlyRangeError } from './portfolioLimits'
+import { adChannelOf, type AdChannel } from './adChannel'
 
 // ─── Request ──────────────────────────────────────────────────────────────────
 
@@ -157,11 +159,28 @@ export interface CampaignStoreNote {
   storeId: string
   store: string
   configured: boolean
+  /** The store's revenue in the money window (engine). Zero means no sales:
+   *  the campaign gauges then say "sem empate → loja sem vendas"
+   *  (components/ui/roasReason no_sales), which outranks the cost settings —
+   *  without it every row read "nada sobra antes dos anúncios" or
+   *  "custos não configurados" under a verdict of "nenhuma venda". */
+  revenue: number
   breakEvenRoas: number | null
   decisionBreakEvenRoas: number | null
   /** (Meta purchase value − store revenue) ÷ store revenue, %: how optimistic
-   *  Meta's attribution is for this store. */
+   *  Meta's attribution is for this store. Only meaningful when Meta carries
+   *  the store's ads (adChannel 'meta'): a store selling through Shop
+   *  Campaigns read "o Meta credita 93% menos vendas" when Meta simply was
+   *  not the channel that sold. */
   metaVsStoreRevenueGap: number | null
+  /** The store's Anúncios Shopify (Shop Campaigns) spend in the money window
+   *  (engine): outside this list, which is Meta's campaigns only. 0 when the
+   *  engine could not be read. */
+  shopSpend: number
+  /** The channel the store's ads run on, by the engine's spends
+   *  (lib/views/adChannel adChannelOf, the Resumo's rule); null without spend
+   *  or when the engine could not be read. */
+  adChannel: AdChannel | null
   /** Σ campaign spend − the engine's Meta spend; 0 unless something is off. */
   spendGap: number
   /** Campaigns whose orders land here but whose spend is in another store's books. */
@@ -196,6 +215,10 @@ export interface CampaignsDetail extends DetailBase {
     estimatedProfit: number | null
     /** Spend of rows not priced (shared accounts, stores without costs). */
     unpricedSpend: number
+    /** Σ storeNotes shopSpend: Anúncios Shopify spend, NOT in `spend` (the
+     *  list is Meta's). The tab names it so the Meta spend is not read as
+     *  every ad dollar (Dumpling 8jcp3a: $474 of Meta beside $5.302). */
+    shopSpend: number
     actions: Record<CampaignAction, number>
   }
   /** Each action's rule in plain words, for the legend. */
@@ -300,7 +323,20 @@ export interface MobileCountry {
   contributionPerOrder: number | null
   /** Fewer than SMALL_SAMPLE orders: too few to judge the country. */
   smallSample: boolean
-  meta: { spend: number; purchases: number; purchaseValue: number; capturePct: number | null }
+  meta: {
+    spend: number; purchases: number; purchaseValue: number
+    /** Meta purchases ÷ captureOrders, %; null without such orders. */
+    capturePct: number | null
+    /** The orders the capture divides by: only those of stores whose Meta
+     *  spend Meta split by country in the window (plus the stores a
+     *  shared-account campaign's sales landed in, when it is back in the
+     *  columns). Below `orders` when the row also holds orders of stores Meta
+     *  could not credit by country: Todas read US "1 compra atribuída (3% dos
+     *  pedidos reais)" — EPOCH's one purchase against 38 orders, 31 of them
+     *  MOKOO's and Dumpling's, whose Meta spend had no country split (EPOCH
+     *  alone: 1 of 5, 20%). */
+    captureOrders: number
+  }
   mergedCountries?: number
 }
 
@@ -365,7 +401,14 @@ const emptyActions = (): Record<CampaignAction, number> => ({ escalar: 0, manter
 // lib/format, so they are shown as they are.
 export interface Loaded<T> { store: StoreRef; value: T }
 
-export function mergeCampaigns(loaded: Loaded<CampaignReport>[], limit = DETAIL_LIMIT.campanhas): Omit<CampaignsDetail, keyof DetailBase | 'section'> {
+/** A store's two ad spends as the engine counts them (PnL metaSpend, shopSpend). */
+export interface StoreSpends { metaSpend: number; shopSpend: number }
+
+export function mergeCampaigns(
+  loaded: Loaded<CampaignReport>[], limit = DETAIL_LIMIT.campanhas,
+  /** The engine's spends per store (null: unknown, as if no Shopify ads). */
+  spendsOf: (storeId: string) => StoreSpends | null = () => null,
+): Omit<CampaignsDetail, keyof DetailBase | 'section'> {
   const rows: MobileCampaign[] = []
   const buckets = new Map<string, { storeId: string; store: string; spend: number; ads: number }>()
   const totals = { spend: 0, purchaseValue: 0, purchases: 0, estimatedProfit: 0, priced: 0, unpricedSpend: 0, actions: emptyActions() }
@@ -381,12 +424,16 @@ export function mergeCampaigns(loaded: Loaded<CampaignReport>[], limit = DETAIL_
     const w = windows.get(wk) ?? { range: r.decisionWindow, stores: [] }
     w.stores.push(store.name)
     windows.set(wk, w)
+    const spends = spendsOf(store.id)
     storeNotes.push({
       storeId: store.id, store: store.name, configured: r.configured,
+      revenue: round2(r.storeRevenue),
       breakEvenRoas: r.breakEvenRoas, decisionBreakEvenRoas: r.decisionBreakEvenRoas,
       metaVsStoreRevenueGap: r.metaVsStoreRevenueGap,
       spendGap: round2(r.reconciliation.gap),
       billedElsewhere: r.billedElsewhere.map(b => ({ name: b.name, billedStoreName: b.billedStoreName, spend: b.spend })),
+      shopSpend: round2(spends?.shopSpend ?? 0),
+      adChannel: spends ? adChannelOf(spends) : null,
     })
     for (const c of r.campaigns) {
       totals.spend += c.spend
@@ -401,7 +448,7 @@ export function mergeCampaigns(loaded: Loaded<CampaignReport>[], limit = DETAIL_
         // store (a store with two ad accounts has two buckets).
         const b = buckets.get(store.id) ?? { storeId: store.id, store: store.name, spend: 0, ads: 0 }
         b.spend += c.spend
-        b.ads += c.unsyncedAds.filter(a => a.spend >= 0.005).length
+        b.ads += spentAds(c.unsyncedAds).length
         buckets.set(store.id, b)
         continue
       }
@@ -442,6 +489,7 @@ export function mergeCampaigns(loaded: Loaded<CampaignReport>[], limit = DETAIL_
       roas: ratio(totals.purchaseValue, totals.spend),
       estimatedProfit: totals.priced > 0 ? round2(totals.estimatedProfit) : null,
       unpricedSpend: round2(totals.unpricedSpend),
+      shopSpend: round2(storeNotes.reduce((sum, n) => sum + n.shopSpend, 0)),
       actions: totals.actions,
     },
     rules: describeThresholds(thresholds),
@@ -558,7 +606,12 @@ export const unconfiguredCountriesNote = (stores: string[]) =>
 export function mergeCountries(
   loaded: Loaded<CountryReport>[], limit = DETAIL_LIMIT.paises, nameOf: (storeId: string) => string | null = () => null,
 ): Omit<CountriesDetail, keyof DetailBase | 'section'> {
-  type Acc = { country: string; orders: number; revenue: number; variableCosts: number; contribution: number; metaSpend: number; metaPurchaseValue: number; purchases: number }
+  type Acc = {
+    country: string; orders: number; revenue: number; variableCosts: number; contribution: number
+    metaSpend: number; metaPurchaseValue: number; purchases: number
+    /** Orders of the stores in `captured` (the capture's denominator). */
+    captureOrders: number
+  }
   const by = new Map<string, Acc>()
   const unconfiguredCountries = new Set<string>()
   let revenue = 0, orders = 0, contribution = 0
@@ -569,23 +622,41 @@ export function mergeCountries(
   const accOf = (code: string): Acc => {
     let cur = by.get(code)
     if (!cur) {
-      cur = { country: code, orders: 0, revenue: 0, variableCosts: 0, contribution: 0, metaSpend: 0, metaPurchaseValue: 0, purchases: 0 }
+      cur = { country: code, orders: 0, revenue: 0, variableCosts: 0, contribution: 0, metaSpend: 0, metaPurchaseValue: 0, purchases: 0, captureOrders: 0 }
       by.set(code, cur)
     }
     return cur
   }
   // Stores whose orders are in this sum (a store that failed to load is not).
   const inSum = new Set(loaded.map(l => l.store.id))
-  for (const { store, value: r } of loaded) {
-    // A store's shared-account campaigns (CAMP HALLOW's on EPOCH's account)
-    // go back into the Meta columns when every store their sales landed in
-    // is part of this sum: those purchases are then orders of the sum, as
-    // in the desktop "Todas" (raw computePnL countries) and the summed
-    // funnel (lib/data/funnel sumFunnels). Otherwise they stay out, named.
+  // A store's shared-account campaigns (CAMP HALLOW's on EPOCH's account)
+  // go back into the Meta columns when every store their sales landed in
+  // is part of this sum: those purchases are then orders of the sum, as
+  // in the desktop "Todas" (raw computePnL countries) and the summed
+  // funnel (lib/data/funnel sumFunnels). Otherwise they stay out, named.
+  const backOf = (r: CountryReport) => {
     const lo = r.sharedLeftOut
-    const back = lo && r.sharedMeta && lo.salesStoreIds.length > 0 && lo.salesStoreIds.every(id => inSum.has(id))
-      ? { spend: lo.spend, countries: r.sharedMeta }
+    return lo && r.sharedMeta && lo.salesStoreIds.length > 0 && lo.salesStoreIds.every(id => inSum.has(id))
+      ? { spend: lo.spend, countries: r.sharedMeta, salesStoreIds: lo.salesStoreIds }
       : null
+  }
+  // The stores whose orders Meta's country purchases can be compared with:
+  // those whose Meta spend has a country split in the window, and the stores
+  // a shared-account campaign put back in the columns sold in. A store whose
+  // Meta spend has no split (MOKOO, 0% covered) adds orders and no purchase:
+  // counted, it sank US capture to 3% in Todas while EPOCH's own was 20%.
+  const captured = new Set<string>()
+  for (const { store, value: r } of loaded) {
+    if (r.meta.coveredSpend >= 0.005 || r.rows.some(c => c.meta.purchases > 0)) captured.add(store.id)
+    const back = backOf(r)
+    if (back) {
+      captured.add(store.id)
+      for (const id of back.salesStoreIds) captured.add(id)
+    }
+  }
+  for (const { store, value: r } of loaded) {
+    const lo = r.sharedLeftOut
+    const back = backOf(r)
     if (lo && !back) {
       sharedLeftOut.push({
         ...lo, storeId: store.id, store: store.name,
@@ -621,6 +692,7 @@ export function mergeCountries(
     for (const c of r.rows) {
       const cur = accOf(c.country)
       cur.orders += c.orders
+      if (captured.has(store.id)) cur.captureOrders += c.orders
       cur.revenue += c.revenue
       cur.variableCosts += c.variableCosts
       cur.contribution += c.contribution
@@ -635,14 +707,24 @@ export function mergeCountries(
   const head = [...by.values()].sort((a, b) => b.revenue - a.revenue || b.metaSpend - a.metaSpend).slice(0, Math.max(0, limit))
   const headCodes = new Set(head.map(c => c.country))
   const tailUnconfigured = [...unconfiguredCountries].some(c => !headCodes.has(c))
-  const rows = rollUpCountries([...by.values()], revenue, limit).map((row): MobileCountry => {
+  const rolled = rollUpCountries([...by.values()], revenue, limit)
+  // rollUpCountries recomputes capture over every order of the row: it is
+  // recomputed here over the orders of `captured` stores only. "outros"
+  // takes the countries the head rows do not show.
+  const shown = new Set(rolled.filter(r => r.country !== 'outros').map(r => r.country))
+  const captureOrdersOf = (code: string) => code === 'outros'
+    ? [...by.values()].filter(c => !shown.has(c.country)).reduce((sum, c) => sum + c.captureOrders, 0)
+    : by.get(code)?.captureOrders ?? 0
+  const rows = rolled.map((row): MobileCountry => {
     const blind = row.country === 'outros' ? tailUnconfigured : unconfiguredCountries.has(row.country)
+    const captureOrders = captureOrdersOf(row.country)
     return {
       country: row.country, name: row.name, orders: row.orders, revenue: row.revenue, revenueShare: row.revenueShare,
       contribution: blind ? null : row.contribution,
       contributionMargin: blind ? null : row.contributionMargin,
       contributionPerOrder: blind ? null : row.contributionPerOrder,
-      smallSample: row.smallSample, meta: row.meta,
+      smallSample: row.smallSample,
+      meta: { ...row.meta, capturePct: pct(row.meta.purchases, captureOrders), captureOrders },
       ...(row.mergedCountries ? { mergedCountries: row.mergedCountries } : {}),
     }
   })
@@ -789,10 +871,23 @@ export async function buildMobileDetail(
 
   switch (q.section) {
     case 'campanhas': {
-      const r = await perStore(stores, s => getCampaignReport(s, range, { thresholds: ctx.thresholds, storeNames: ctx.storeNames, now }))
+      // The engine's spends beside the reports: the campaign list is Meta's,
+      // and a store that sells through Shop Campaigns must say so (one query
+      // set for every store; a failure only loses that line).
+      const [r, pnl] = await Promise.all([
+        perStore(stores, s => getCampaignReport(s, range, { thresholds: ctx.thresholds, storeNames: ctx.storeNames, now })),
+        computePnL(stores.map(s => s.id), range, {}, now).catch(err => {
+          console.error('[mobile/detail] spends', err)
+          return null
+        }),
+      ])
       guard(r.ok.length)
       const cfg = new Map(r.ok.map(l => [l.store.id, l.value.configured]))
-      return { section: 'campanhas', ...base(s => cfg.get(s.id) ?? null, r.ok.map(l => l.store), r.failed), ...mergeCampaigns(r.ok) }
+      const spendsOf = (id: string): StoreSpends | null => {
+        const t = pnl?.get(id)?.totals
+        return t ? { metaSpend: t.metaSpend, shopSpend: t.shopSpend } : null
+      }
+      return { section: 'campanhas', ...base(s => cfg.get(s.id) ?? null, r.ok.map(l => l.store), r.failed), ...mergeCampaigns(r.ok, DETAIL_LIMIT.campanhas, spendsOf) }
     }
     case 'criativos': {
       const r = await perStore(stores, s => getCreativesReport(s, range, { storeNames: ctx.storeNames, now }))

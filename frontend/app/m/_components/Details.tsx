@@ -22,11 +22,19 @@ import type {
 } from '@/lib/views/mobileDetail'
 import { TABS, type Selection } from '../_lib/selection'
 import { useDetail } from '../_lib/useMobileData'
-import { campaignChip, creativeChip } from '../_lib/labels'
+import { campaignChip, campaignGapNotes, countriesMetaSide, creativeChip, shopAdsLine } from '../_lib/labels'
+import { adsElsewhere, type SharedAds } from '../_lib/sharedAds'
 import { StoreName } from './Home'
 import s from '../m.module.css'
 
-export function DetailTabs({ sel, aba, onTab, forceSignal, pollSignal, homeRange, now, scopeName }: {
+const PANEL_ID = 'm-detail-panel'
+const tabButtonId = (k: DetailSection) => `m-detail-btn-${k}`
+
+/** What a section needs beyond its own answer: the shared ad-account pairs
+ *  (CAMP HALLOW on EPOCH's account) and a way to open another store. */
+interface SectionCtx { shared: SharedAds; onStore: (loja: string) => void }
+
+export function DetailTabs({ sel, aba, onTab, forceSignal, pollSignal, homeRange, now, scopeName, shared, onStore, frozen = false }: {
   sel: Selection
   aba: DetailSection | null
   onTab: (t: DetailSection | null) => void
@@ -36,7 +44,13 @@ export function DetailTabs({ sel, aba, onTab, forceSignal, pollSignal, homeRange
   homeRange: string | null
   now: number
   scopeName: string
+  shared: SharedAds
+  onStore: (loja: string) => void
+  /** An archived store: not synced, so a window ending today is not "parcial"
+   *  (nothing more will arrive), as the verdict above says. */
+  frozen?: boolean
 }) {
+  const ctx: SectionCtx = { shared, onStore }
   const d = useDetail(aba, sel, forceSignal, pollSignal, homeRange)
   const current = d.data && d.dataKey === d.key ? d.data : null
   // Only this tab's list for the previous store or period is "da seleção
@@ -50,15 +64,19 @@ export function DetailTabs({ sel, aba, onTab, forceSignal, pollSignal, homeRange
     <section aria-label="Detalhes" className={s.stack}>
       <div className={s.secLabel}>Detalhes<span>{aba ? `${label} · ${scopeName}` : 'toque numa aba para abrir'}</span></div>
       <TabRow aba={aba}>
+        {/* Toggle buttons, not ARIA tabs: tapping the open one closes it (no
+            section selected), which the tabs pattern cannot express, and each
+            stays its own Tab stop as a plain button should. */}
         {TABS.map(t => (
-          <button key={t.key} type="button" role="tab" className={s.tab} aria-selected={aba === t.key} aria-controls="m-detail-panel"
+          <button key={t.key} id={tabButtonId(t.key)} type="button" className={s.tab} aria-expanded={aba === t.key}
+            aria-controls={aba === t.key ? PANEL_ID : undefined}
             onClick={() => onTab(aba === t.key ? null : t.key)}>
             {t.label}
           </button>
         ))}
       </TabRow>
       {aba && (
-        <div id="m-detail-panel" role="tabpanel" aria-busy={loading || undefined} className={s.stack}>
+        <div id={PANEL_ID} role="region" aria-labelledby={tabButtonId(aba)} aria-busy={loading || undefined} className={s.stack}>
           {error && !current ? (
             <Block title={label ?? ''}>
               <ErrorState
@@ -72,11 +90,11 @@ export function DetailTabs({ sel, aba, onTab, forceSignal, pollSignal, homeRange
           ) : current ? (
             <>
               <div className={s.tabMeta}>
-                <span>{current.rangeLabel}{current.partial ? ' · parcial' : ''}</span>
+                <span>{current.rangeLabel}{current.partial && !frozen ? ' · parcial' : ''}</span>
                 <span>{loading ? 'atualizando…' : d.fetchedAt && now ? `atualizado ${formatRelativeTime(new Date(d.fetchedAt), new Date(now))}` : ''}</span>
               </div>
               {error && <Callout tone="warn" title="Não atualizou">{error.message}. Mostrando a lista anterior. <button type="button" className={s.linkBtn} onClick={d.reload}>Tentar de novo</button></Callout>}
-              <Section data={current} />
+              <Section data={current} ctx={ctx} />
             </>
           ) : (
             <div className={s.stack}>
@@ -85,7 +103,7 @@ export function DetailTabs({ sel, aba, onTab, forceSignal, pollSignal, homeRange
                 <span>Carregando {label?.toLowerCase()} de {scopeName}…{stale && <small>A lista abaixo ainda é da seleção anterior.</small>}</span>
                 <span />
               </div>
-              {stale ? <div className={s.dim} aria-hidden="true" inert><Section data={stale} /></div> : <TabSkeleton />}
+              {stale ? <div className={s.dim} aria-hidden="true" inert><Section data={stale} ctx={ctx} /></div> : <TabSkeleton />}
             </div>
           )}
         </div>
@@ -117,12 +135,12 @@ function TabRow({ aba, children }: { aba: DetailSection | null; children: React.
   }, [])
   useEffect(() => {
     const el = ref.current
-    const on = el?.querySelector<HTMLElement>('[aria-selected="true"]')
+    const on = el?.querySelector<HTMLElement>('[aria-expanded="true"]')
     if (!el || !on || el.scrollWidth <= el.clientWidth) return
     const l = on.offsetLeft - el.offsetLeft
     if (l < el.scrollLeft || l + on.offsetWidth > el.scrollLeft + el.clientWidth) el.scrollTo({ left: l - 24, behavior: 'smooth' })
   }, [aba])
-  return <div ref={ref} className={s.tabs} role="tablist" aria-label="Detalhes" data-more="none">{children}</div>
+  return <div ref={ref} className={s.tabs} role="group" aria-label="Seções de detalhes" data-more="none">{children}</div>
 }
 
 /** "Mostrar todos (25)" only when the list is the whole thing; a list the
@@ -162,12 +180,12 @@ function FailedStores({ data }: { data: MobileDetailResponse }) {
   )
 }
 
-function Section({ data }: { data: MobileDetailResponse }) {
+function Section({ data, ctx }: { data: MobileDetailResponse; ctx: SectionCtx }) {
   return (
     <>
       <FailedStores data={data} />
-      {data.section === 'campanhas' && <Campaigns d={data} />}
-      {data.section === 'criativos' && <Creatives d={data} />}
+      {data.section === 'campanhas' && <Campaigns d={data} ctx={ctx} />}
+      {data.section === 'criativos' && <Creatives d={data} ctx={ctx} />}
       {data.section === 'produtos' && <Products d={data} />}
       {data.section === 'paises' && <Countries d={data} />}
       {data.section === 'clientes' && <Customers d={data} />}
@@ -196,15 +214,54 @@ function useMore(total: number, first = 10) {
   return { limit: all ? total : first, all, toggle: () => setAll(v => !v), needed: total > first }
 }
 
+/**
+ * The empty Campanhas / Criativos of one store. A store whose ads run on
+ * another store's account (CAMP HALLOW on EPOCH's) says where they are, with
+ * a way there: a bare "Nenhuma campanha com gasto no período" read as "this
+ * store runs no ads" while its sales came from EPOCH's campaigns.
+ */
+function NoAds({ d, ctx, what }: { d: CampaignsDetail | CreativesDetail; ctx: SectionCtx; what: 'campanhas' | 'anuncios' }) {
+  const one = d.request.store !== 'all' && d.stores.length === 1 ? d.stores[0].id : null
+  const elsewhere = one ? adsElsewhere(ctx.shared, one, what) : null
+  if (!elsewhere) {
+    return <EmptyState compact icon="camp" title={what === 'campanhas' ? 'Nenhuma campanha com gasto no período' : 'Nenhum anúncio com gasto no período'} />
+  }
+  return (
+    <EmptyState compact icon="swap" title={elsewhere.title}
+      action={<Button size="sm" variant="ghost" icon="arrowRight" onClick={() => ctx.onStore(elsewhere.adStoreId)}>Abrir {elsewhere.adStoreName}</Button>}>
+      {elsewhere.body}
+    </EmptyState>
+  )
+}
+
 // ─── Campanhas ────────────────────────────────────────────────────────────────
 
-function Campaigns({ d }: { d: CampaignsDetail }) {
+/** A paused campaign can still be credited purchases from clicks made before
+ *  the window: "Gasto $0 · 2 compras" read like sales it bought for free.
+ *  Say where they came from (its CPA is already null: lib/data/campaigns). */
+function lateConversionsNote(c: { spend: number; purchases: number }): string {
+  if (c.spend > 0 || c.purchases <= 0) return ''
+  return c.purchases === 1 ? ' atribuída (de cliques anteriores)' : ' atribuídas (de cliques anteriores)'
+}
+
+function Campaigns({ d, ctx }: { d: CampaignsDetail; ctx: SectionCtx }) {
   const more = useMore(d.campaigns.length)
   const several = d.stores.length > 1
   const t = d.totals
   const windows = d.decisionWindows.map(w => `${w.label}${d.decisionWindows.length > 1 ? ` (${w.stores.join(', ')})` : ''}`).join('; ')
-  const gaps = d.storeNotes.filter(n => n.metaVsStoreRevenueGap !== null && Math.abs(n.metaVsStoreRevenueGap) >= 10)
-  const bucket = <UnsyncedLine u={d.unsynced} several={several} total={t.spend} />
+  // Only stores whose ads run on Meta: a store selling through Shop
+  // Campaigns is not Meta's to credit (labels campaignGapNotes).
+  const gaps = campaignGapNotes(d.storeNotes)
+  // The list and its "Gasto" are Meta's: Shopify ad spend is named beside it.
+  // An older answer (cached on the phone) has no shopSpend.
+  const shopSpend = t.shopSpend ?? 0
+  const shopLine = shopAdsLine(shopSpend, d.storeNotes.map(n => ({ store: n.store, shopSpend: n.shopSpend ?? 0 })), several)
+  const bucket = (
+    <>
+      <UnsyncedLine u={d.unsynced} several={several} total={t.spend} />
+      {shopLine && <p className={s.note} style={{ padding: '0 16px 12px' }}>{shopLine}</p>}
+    </>
+  )
   return (
     <Block
       title={`Campanhas · ${formatCount(d.totalCampaigns)}`}
@@ -212,17 +269,17 @@ function Campaigns({ d }: { d: CampaignsDetail }) {
       info={<><p>{d.formula}</p>{(['cortar', 'escalar', 'manter', 'observar'] as CampaignAction[]).map(a => <p key={a} style={{ marginTop: 6 }}><b>{a[0].toUpperCase() + a.slice(1)}:</b> {d.rules[a]}</p>)}</>}
       infoLabel="Como cada ação é decidida"
       flush={d.campaigns.length > 0}
-      footer={gaps.length ? gaps.map(g => `${g.store}: o Meta credita ${formatPct(Math.abs(g.metaVsStoreRevenueGap!), { digits: 0 })} ${g.metaVsStoreRevenueGap! > 0 ? 'mais' : 'menos'} vendas do que a loja registrou.`).join(' ') : undefined}
+      footer={gaps.length ? gaps.join(' ') : undefined}
     >
       {d.campaigns.length === 0 ? (
         <>
-          <EmptyState compact icon="camp" title="Nenhuma campanha com gasto no período" />
+          <NoAds d={d} ctx={ctx} what="campanhas" />
           {bucket}
         </>
       ) : (
         <>
           <div style={{ padding: '0 16px 12px' }} className={s.metrics}>
-            <span>Gasto <b>{formatMoney(t.spend)}</b></span>
+            <span>Gasto{shopSpend > 0 ? ' no Meta' : ''} <b>{formatMoney(t.spend)}</b></span>
             <span>Receita pelo Meta <b>{formatMoney(t.purchaseValue)}</b></span>
             <span>Lucro estimado <b><Money value={t.estimatedProfit} tone="auto" /></b></span>
             {t.unpricedSpend > 0 && <span>Sem margem para estimar <b>{formatMoney(t.unpricedSpend)}</b></span>}
@@ -238,10 +295,21 @@ function Campaigns({ d }: { d: CampaignsDetail }) {
                     {c.trendLabel && c.trend !== 'estavel' ? ` · ${c.trendLabel.toLowerCase()}${c.trendChange !== null ? ` (${formatPct(c.trendChange, { digits: 0, sign: true })} no ROAS)` : ''}` : ''}
                   </span>
                   <p className={s.reason}>{c.shared ?? c.reason}</p>
-                  {c.spend > 0 && c.roas !== null && <div style={{ marginTop: 6 }}><RoasGauge roas={c.roas} breakEven={c.breakEvenRoas} configured={d.storeNotes.find(n => n.storeId === c.storeId)?.configured} reason={c.shared ? 'other_store' : null} size="mini" paused={!c.running} /></div>}
+                  {c.spend > 0 && c.roas !== null && (() => {
+                    // The store's revenue too: a store that sold nothing reads "sem empate → loja
+                    // sem vendas" on every row, as the verdict above says, not "nada sobra antes
+                    // dos anúncios" (costs set) or "custos não configurados" (Glooty).
+                    const note = d.storeNotes.find(n => n.storeId === c.storeId)
+                    return (
+                      <div style={{ marginTop: 6 }}>
+                        <RoasGauge roas={c.roas} breakEven={c.breakEvenRoas} configured={note?.configured} revenue={note?.revenue}
+                          reason={c.shared ? 'other_store' : null} size="mini" paused={!c.running} />
+                      </div>
+                    )
+                  })()}
                   <span className={s.metrics}>
                     <span>Gasto <b>{formatMoney(c.spend)}</b></span>
-                    <span>{plural(c.purchases, 'compra', 'compras')}</span>
+                    <span>{plural(c.purchases, 'compra', 'compras')}{lateConversionsNote(c)}</span>
                     {c.cpa !== null && <span>CPA <b>{formatMoney(c.cpa)}</b></span>}
                   </span>
                 </span>
@@ -251,7 +319,7 @@ function Campaigns({ d }: { d: CampaignsDetail }) {
                     : <Chip tone="mut" size="sm">sem ação</Chip>}
                   {c.estimatedProfit !== null
                     ? <><b><Money value={c.estimatedProfit} sign /></b><small>lucro estimado</small></>
-                    : <small>{c.shared ? 'conta compartilhada' : 'sem margem'}</small>}
+                    : <small>{c.shared ? 'conta compartilhada' : d.storeNotes.find(n => n.storeId === c.storeId)?.configured === false ? 'custos não configurados' : 'sem margem'}</small>}
                   {c.days.length > 1 && c.days.some(x => x.estimatedProfit !== null) && (
                     <MiniBars values={c.days.map(x => x.estimatedProfit)} width={84} height={22} ariaLabel={`Lucro estimado por dia de ${c.name}`} />
                   )}
@@ -287,18 +355,20 @@ function UnsyncedLine({ u, several, total }: { u: CampaignsDetail['unsynced']; s
 
 // ─── Criativos ────────────────────────────────────────────────────────────────
 
-function Creatives({ d }: { d: CreativesDetail }) {
+function Creatives({ d, ctx }: { d: CreativesDetail; ctx: SectionCtx }) {
   const more = useMore(d.creatives.length)
   const several = d.stores.length > 1
   return (
     <Block
       title={`Criativos · ${formatCount(d.totalCreatives)}`}
-      howTo="Primeiro o que queima dinheiro (Desligar), depois o que pode crescer. Cada anúncio contra o empate da sua loja."
+      // Two break-evens can sit on one row: the reason's is the 7 closed days',
+      // the line under it the period's. Each says which it is.
+      howTo="Primeiro o que queima dinheiro (Desligar), depois o que pode crescer. O veredito de cada anúncio (e o empate citado nele) olha os últimos 7 dias fechados, como o das campanhas; gasto, ROAS e o empate da linha de baixo são do período escolhido."
       info={<><p>{d.formula}</p><p style={{ marginTop: 6 }}>{d.notes.hookRate}</p>{d.notes.frequency && <p style={{ marginTop: 6 }}>{d.notes.frequency}</p>}</>}
       flush={d.creatives.length > 0}
     >
       {d.creatives.length === 0 ? (
-        <EmptyState compact icon="camp" title="Nenhum anúncio com gasto no período" />
+        <NoAds d={d} ctx={ctx} what="anuncios" />
       ) : (
         <>
           <ul className={s.list}>
@@ -313,7 +383,7 @@ function Creatives({ d }: { d: CreativesDetail }) {
                   <p className={s.reason}>{c.shared ?? c.reason}</p>
                   <span className={s.metrics}>
                     <span>Gasto <b>{formatMoney(c.spend)}</b></span>
-                    <span>ROAS <b>{formatRoas(c.roas)}</b>{c.breakEvenRoas !== null && <> · empate <b>{formatRoas(c.breakEvenRoas)}</b></>}</span>
+                    <span>ROAS <b>{formatRoas(c.roas)}</b>{c.breakEvenRoas !== null && <> · empate do período <b>{formatRoas(c.breakEvenRoas)}</b></>}</span>
                     {c.ctr !== null && <span>CTR <b>{formatPct(c.ctr)}</b></span>}
                     {c.video?.retention25 != null && <span>Viram 25% <b>{formatPct(c.video.retention25, { digits: 0 })}</b></span>}
                   </span>
@@ -386,16 +456,35 @@ function Products({ d }: { d: ProductsDetail }) {
 
 // ─── Países ───────────────────────────────────────────────────────────────────
 
+/** "20% dos pedidos reais", or, when the row also holds orders of stores
+ *  whose Meta spend has no country split (they cannot be credited by
+ *  country), the orders it was measured on: "20% de 5 pedidos das lojas com
+ *  divisão do Meta" — never one store's purchases over another's orders. */
+function captureText(c: CountriesDetail['countries'][number]): string {
+  const pct = formatPct(c.meta.capturePct, { digits: 0 })
+  // An older answer (cached on the phone) has no captureOrders.
+  const n = c.meta.captureOrders ?? c.orders
+  return n < c.orders ? `${pct} de ${plural(n, 'pedido', 'pedidos')} das lojas com divisão do Meta` : `${pct} dos pedidos reais`
+}
+
 function Countries({ d }: { d: CountriesDetail }) {
+  // No Meta line on any row — no Meta money in the window (Squishy World), or
+  // spend Meta sent without a country split (MOKOO: 0% covered): the caveat
+  // about Meta's own split would point at a column that is not there.
+  const side = countriesMetaSide(d)
   return (
     <Block
       title="Países"
-      howTo="Pedidos reais da Shopify por país. A coluna do Meta é a atribuição dele, só para comparar."
+      howTo={side === 'split' ? 'Pedidos reais da Shopify por país. A linha do Meta é a atribuição dele, só para comparar.' : 'Pedidos reais da Shopify por país.'}
       info={<>{d.notes.map((n, i) => <p key={i} style={{ marginTop: i ? 6 : 0 }}>{n}</p>)}</>}
       flush={d.countries.length > 0}
       // The Meta caveat is about comparing columns: noise under "Nenhum pedido".
       footer={d.countries.length === 0 ? undefined : <>
-        <span>{d.meta.caveat}{d.meta.coveragePct !== null && d.meta.coveragePct < 95 ? ` A divisão do Meta cobre ${formatPct(d.meta.coveragePct, { digits: 0 })} do gasto.` : ''}</span>
+        {side === 'none'
+          ? <span>Sem gasto no Meta no período: não há atribuição do Meta para comparar.</span>
+          : side === 'no_split'
+            ? <span>O Meta não mandou a divisão por país deste período ({formatMoney(d.meta.totalSpend)} de gasto sem país): não há atribuição para comparar.</span>
+            : <span>{d.meta.caveat}{d.meta.coveragePct !== null && d.meta.coveragePct < 95 ? ` A divisão do Meta cobre ${formatPct(d.meta.coveragePct, { digits: 0 })} do gasto.` : ''}</span>}
         {/* CAMP HALLOW's campaigns on EPOCH's account are out of EPOCH's Meta
             columns (lib/data/countries): said with the amounts, as the
             desktop says it, so a lower "dos pedidos reais" is not a mystery. */}
@@ -422,7 +511,7 @@ function Countries({ d }: { d: CountriesDetail }) {
                 {(c.meta.spend > 0 || c.meta.purchases > 0) && (
                   <span className={s.rowSub} style={{ display: 'block' }}>
                     Meta: {formatMoney(c.meta.spend)} · {plural(c.meta.purchases, 'compra atribuída', 'compras atribuídas')}
-                    {c.meta.capturePct !== null && ` (${formatPct(c.meta.capturePct, { digits: 0 })} dos pedidos reais)`}
+                    {c.meta.capturePct !== null && ` (${captureText(c)})`}
                   </span>
                 )}
                 {c.smallSample && c.country !== 'outros' && <span className={s.rowTags}><Chip tone="neu" icon="ring" size="sm">poucos pedidos para julgar</Chip></span>}

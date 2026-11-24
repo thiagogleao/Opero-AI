@@ -48,7 +48,9 @@ export function NetBars({ days, partialDate, partialNote, today, width = 340, he
   const hi = Math.max(0, ...values)
   const pad = (hi - lo) * 0.12
   const ticks = niceTicks(lo < 0 ? lo - pad : 0, hi > 0 ? hi + pad : 0, 5)
-  const tickText = (t: number) => (t === 0 ? '$0' : formatMoneyAxis(t))
+  // One format for the whole axis: cents on every tick when the step is
+  // under a dollar, whole dollars otherwise (formatMoneyAxis says "$0" itself).
+  const tickText = (t: number) => formatMoneyAxis(t, ticks)
   const m = { l: Math.max(44, Math.ceil(Math.max(...ticks.map(t => textWidth(tickText(t), 11))) + 14)), r: 8, t: 14, b: 36 }
   const iw = W - m.l - m.r
   const ih = H - m.t - m.b

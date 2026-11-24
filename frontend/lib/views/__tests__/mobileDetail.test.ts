@@ -6,9 +6,10 @@ import type { ProductReport, ProductRow } from '../../data/products'
 import type { CountryReport, CountryRow } from '../../data/countries'
 import type { CustomerLtv, CustomerSplit } from '../../data/customers'
 import type { PnL } from '../../engine/pnl'
-import { decideCampaign, DEFAULT_THRESHOLDS, type CampaignDecision } from '../../campaignSignal'
+import { decideCampaign, DEFAULT_THRESHOLDS, describeThresholds, type CampaignDecision } from '../../campaignSignal'
 import { creativeVerdict } from '../../creativeSignal'
 import { eachDay } from '../../engine/dates'
+import { breakEvenReason } from '../../../components/ui/roasReason'
 import {
   DetailQueryError, mergeCampaigns, mergeCountries, mergeCreatives, mergeCustomers, mergeProducts, parseDetailQuery, perStore,
 } from '../mobileDetail'
@@ -156,6 +157,50 @@ describe('mergeCampaigns', () => {
     // The money still covers every ad: the bucket's spend is in the totals.
     expect(m.totals.spend).toBeCloseTo(438.04 + 53.87 + 37.98 + 15.3 + 100 + 4.47, 2)
   })
+  // Hibikura at 04h in Tokyo (0 orders, $58,78 of ads) and Glooty's 7 days:
+  // every gauge read "nada sobra antes dos anúncios" / "custos não
+  // configurados" while the verdict above said "nenhuma venda".
+  it('each store note carries the window revenue, so a store without sales reads "loja sem vendas" on every gauge', () => {
+    const m = mergeCampaigns([
+      { store: HIB, value: campaignReport(HIB, [campaign('aquecedor', 58.78, 0, null, 'manter')], { breakEvenRoas: null, storeRevenue: 0 }) },
+      { store: GLOOTY, value: campaignReport(GLOOTY, [campaign('g', 80, 0, null, null)], { configured: false, breakEvenRoas: null, storeRevenue: 0 }) },
+      { store: MOKOO, value: campaignReport(MOKOO, [campaign('a', 100, 300, 20, 'manter')], { storeRevenue: 1234.567 }) },
+    ])
+    const note = (id: string) => m.storeNotes.find(n => n.storeId === id)!
+    expect(note('hibikura')).toMatchObject({ configured: true, revenue: 0 })
+    expect(note('mokoo').revenue).toBe(1234.57)
+    // What Details.tsx hands the RoasGauge for each row.
+    const reason = (id: string) => {
+      const n = note(id)
+      const row = m.campaigns.find(c => c.storeId === id)!
+      return breakEvenReason({ breakEven: row.breakEvenRoas, configured: n.configured, revenue: n.revenue })
+    }
+    expect(reason('hibikura')).toBe('no_sales')
+    expect(reason('glooty')).toBe('no_sales')
+    expect(reason('mokoo')).toBeNull()
+  })
+  // Dumpling 8jcp3a, 17–23 nov: $474 of Meta beside $5.302 of Shop Campaigns.
+  // The tab read "Gasto $474" and "o Meta credita 93% menos vendas".
+  it('each store note carries its Shopify ad spend and ad channel from the engine; the totals sum the Shopify spend apart', () => {
+    const D8 = ref('dumpling8')
+    const spends: Record<string, { metaSpend: number; shopSpend: number }> = {
+      dumpling8: { metaSpend: 474.24, shopSpend: 5301.63 },
+      mokoo: { metaSpend: 6775.39, shopSpend: 226.3 },
+    }
+    const m = mergeCampaigns([
+      { store: D8, value: campaignReport(D8, [campaign('dz', 474.24, 1120.85, 292.87, 'manter')], { metaVsStoreRevenueGap: -92.7 }) },
+      { store: MOKOO, value: campaignReport(MOKOO, [campaign('a', 6775.39, 9000, 20, 'manter')], { metaVsStoreRevenueGap: -38.6 }) },
+      { store: GLOOTY, value: campaignReport(GLOOTY, [campaign('g', 80, 0, null, null)], { configured: false }) },
+    ], 40, id => spends[id] ?? null)
+    const note = (id: string) => m.storeNotes.find(n => n.storeId === id)!
+    expect(note('dumpling8')).toMatchObject({ shopSpend: 5301.63, adChannel: 'shop' })
+    expect(note('mokoo')).toMatchObject({ shopSpend: 226.3, adChannel: 'meta' })
+    // Unknown spends (the engine failed): no Shopify line, no channel.
+    expect(note('glooty')).toMatchObject({ shopSpend: 0, adChannel: null })
+    expect(m.totals.shopSpend).toBe(5527.93)
+    // The list's spend stays Meta's.
+    expect(m.totals.spend).toBeCloseTo(474.24 + 6775.39 + 80, 2)
+  })
 })
 
 const creative = (adId: string, spend: number, signal: 'kill' | 'scale' | 'refresh' | 'ok' | null, profit: number | null): CreativeRow => ({
@@ -166,7 +211,8 @@ const creative = (adId: string, spend: number, signal: 'kill' | 'scale' | 'refre
 })
 const creativesReport = (store: StoreRef, rows: CreativeRow[], be: number | null): CreativesReport => ({
   storeId: store.id, timezone: store.timezone, range: { from: '2026-11-10', to: '2026-11-16' }, partial: false, configured: be !== null,
-  contributionRate: null, breakEvenRoas: be, formula: 'f', creatives: rows,
+  contributionRate: null, breakEvenRoas: be, verdictWindow: { from: '2026-11-10', to: '2026-11-16' }, verdictBreakEvenRoas: be,
+  formula: 'f', creatives: rows,
   totals: { ads: rows.length, spend: 0, purchaseValue: 0, purchases: 0, estimatedProfit: null, verdicts: { kill: 0, scale: 0, refresh: 0, ok: 0, none: 0 } },
   reconciliation: null, notes: { hookRate: 'h', frequency: null },
 })
@@ -343,6 +389,49 @@ describe('mergeCountries', () => {
       expect(m.meta.totalSpend).toBe(250)
     })
   })
+  // Todas · 23 nov: US "1 compra atribuída (3% dos pedidos reais)" — EPOCH's
+  // one purchase over 38 orders, 31 of them from MOKOO and Dumpling 8jcp3a,
+  // whose Meta spend ($773 and $73) had no country split. EPOCH alone: 1 of 5.
+  describe('capture over the orders of stores Meta split by country (regression: US 3% instead of 20%)', () => {
+    const EPOCH = ref('epoch', 'America/Sao_Paulo')
+    const D8 = ref('dumpling8', 'America/Belem')
+    const noSplit = (store: StoreRef, rows: CountryRow[], spend: number): CountryReport => ({
+      ...countryReport(store, rows),
+      meta: { label: 'l', caveat: 'c', coveredSpend: 0, totalSpend: spend, coveragePct: 0, missingDays: ['2026-11-23'] },
+    })
+    const epoch = { ...countryReport(EPOCH, [country('US', 5, 500, 200, { spend: 138.43, purchases: 1, purchaseValue: 142.45 }), country('JP', 3, 300, 120, { spend: 50, purchases: 2, purchaseValue: 200 })]) }
+    const loaded = [
+      { store: EPOCH, value: epoch },
+      { store: MOKOO, value: noSplit(MOKOO, [country('US', 14, 1400, 560), country('DE', 2, 200, 80)], 773.38) },
+      { store: D8, value: noSplit(D8, [country('US', 17, 1700, 680)], 73.22) },
+    ]
+
+    it('divides purchases by the orders of those stores only, and says how many', () => {
+      const us = mergeCountries(loaded).countries.find(c => c.country === 'US')!
+      expect(us.orders).toBe(36)
+      expect(us.meta.purchases).toBe(1)
+      expect(us.meta.captureOrders).toBe(5)
+      expect(us.meta.capturePct).toBeCloseTo(20)
+    })
+
+    it('a country only stores without a split sold in has no capture at all (not 0%)', () => {
+      const de = mergeCountries(loaded).countries.find(c => c.country === 'DE')!
+      expect(de.meta).toMatchObject({ purchases: 0, captureOrders: 0, capturePct: null })
+    })
+
+    it('one store, or stores that all have the split: every order counts, as before', () => {
+      const one = mergeCountries([{ store: EPOCH, value: epoch }]).countries.find(c => c.country === 'US')!
+      expect(one.meta).toMatchObject({ captureOrders: 5, capturePct: 20 })
+    })
+
+    it('"outros" sums the capture orders of the countries it holds', () => {
+      const m = mergeCountries(loaded, 1)
+      expect(m.countries.map(c => c.country)).toEqual(['US', 'outros'])
+      // JP (EPOCH, split: 3 orders, 2 purchases) and DE (MOKOO, no split).
+      expect(m.countries[1].meta).toMatchObject({ purchases: 2, captureOrders: 3 })
+      expect(m.countries[1].meta.capturePct).toBeCloseTo((2 / 3) * 100)
+    })
+  })
   it("drops one store's 'contribuição é a própria receita' note: wrong once merged, and noise when that store sold nothing", () => {
     const glooty = { ...countryReport(GLOOTY, [], false), notes: ['Custos não configurados: a contribuição de cada país é a própria receita.'] }
     const m = mergeCountries([{ store: MOKOO, value: countryReport(MOKOO, [country('US', 10, 1000, 400)]) }, { store: GLOOTY, value: glooty }])
@@ -363,7 +452,9 @@ describe('decision texts reach the phone in pt-BR', () => {
     const row = { ...campaign('cut', 10500, 0, -10500, 'cortar'), decision: real }
     const m = mergeCampaigns([{ store: MOKOO, value: campaignReport(MOKOO, [row]) }])
     expect(m.campaigns[0].reason).toBe('$10.500 em 7 dias sem nenhuma venda atribuída pelo Meta')
-    expect(m.rules.observar).toBe('Entre −10% e 0% de margem, ou pouco volume para julgar (menos de 10 pedidos ou $150).')
+    // The rules pass through as lib/campaignSignal words them (its wording is its own), in pt-BR.
+    expect(m.rules).toEqual(describeThresholds())
+    expect(m.rules.observar).toMatch(/^Entre −10% e 0% de margem, ou pouco volume para julgar \(menos de 10 .+ ou \$150/)
     const verdict = creativeVerdict({ spend: 419, roas: 0.96, purchases: 2, breakEven: 1.29, frequency: null, running: true })
     const c = mergeCreatives([{ store: MOKOO, value: creativesReport(MOKOO, [{ ...creative('k', 419, 'kill', -100), verdict }], 1.29) }])
     expect(c.creatives[0].reason).toBe('ROAS 0,96× com $419 gastos — abaixo de 80% do empate (1,29×)')

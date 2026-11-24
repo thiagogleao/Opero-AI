@@ -9,9 +9,13 @@
  * nothing — a slow answer, a poll, an "Atualizar" — may move it back.
  */
 
-import { anchorTz, formatRange, isIsoDate, isPeriod, PERIODS, REFERENCE_TZ, type Period } from '@/lib/engine/dates'
+import {
+  anchorTz, formatRange, isIsoDate, isPeriod, PERIODS, REFERENCE_TZ, resolveRange, type DateRange, type Period,
+} from '@/lib/engine/dates'
 import type { DetailSection } from '@/lib/views/mobileDetail'
-import { fitCustomRange, MIN_WINDOW_DATE, tooEarlyRangeError, type RangeCut } from '@/lib/views/portfolioLimits'
+import {
+  fitCustomRange, MAX_WINDOW_DAYS, MIN_WINDOW_DATE, MIN_WINDOW_LABEL, tooEarlyRangeError, type RangeCut,
+} from '@/lib/views/portfolioLimits'
 
 export const ALL = 'todas'
 export const DEFAULT_PERIOD: Period = 'today'
@@ -31,6 +35,16 @@ export interface Selection {
   /** Only with periodo 'custom' (both set), else null. */
   de: string | null
   ate: string | null
+  /**
+   * Only on custom dates a store row of "Todas" opened (storeRowSelection),
+   * never on dates the owner picked: the preset the owner had chosen ("Hoje",
+   * "7 dias"…). The dates belong to that one store and that one day — any chip
+   * goes back to the preset (chipSelection), storage keeps the preset instead
+   * of the dates (toStorage), and once Todas' calendar moves on (midnight, a
+   * reopen days later) the preset comes back by itself (expireRowDates).
+   * Absent otherwise (never null).
+   */
+  rowPreset?: Period
 }
 
 export interface ViewState {
@@ -40,10 +54,13 @@ export interface ViewState {
 
 export const isTab = (v: unknown): v is DetailSection => typeof v === 'string' && TABS.some(t => t.key === v)
 
-/** Raw, unvalidated values from one source (URL or storage). */
-interface Raw { loja?: unknown; periodo?: unknown; de?: unknown; ate?: unknown; aba?: unknown }
+/** Raw, unvalidated values from one source (URL or storage). `volta` is the
+ *  URL's name for Selection.rowPreset. */
+interface Raw { loja?: unknown; periodo?: unknown; de?: unknown; ate?: unknown; aba?: unknown; volta?: unknown }
 
-function periodOf(r: Raw): Pick<Selection, 'periodo' | 'de' | 'ate'> | null {
+type PeriodPart = Pick<Selection, 'periodo' | 'de' | 'ate' | 'rowPreset'>
+
+function periodOf(r: Raw): PeriodPart | null {
   if (!isPeriod(r.periodo)) return null
   if (r.periodo !== 'custom') return { periodo: r.periodo, de: null, ate: null }
   // "Escolher datas" counts only with both dates: a half-chosen range would
@@ -53,13 +70,15 @@ function periodOf(r: Raw): Pick<Selection, 'periodo' | 'de' | 'ate'> | null {
   // Wholly before the first date anything is priced from (portfolioLimits):
   // malformed, as on the desktop (lib/views/page parsePageParams).
   if (ate < MIN_WINDOW_DATE) return null
-  return { periodo: 'custom', de, ate }
+  return isPeriod(r.volta) && r.volta !== 'custom'
+    ? { periodo: 'custom', de, ate, rowPreset: r.volta }
+    : { periodo: 'custom', de, ate }
 }
 
 export function rawFromSearch(search: string | URLSearchParams): Raw {
   const sp = typeof search === 'string' ? new URLSearchParams(search) : search
   const get = (k: string) => sp.get(k) ?? undefined
-  return { loja: get('loja'), periodo: get('periodo'), de: get('de'), ate: get('ate'), aba: get('aba') }
+  return { loja: get('loja'), periodo: get('periodo'), de: get('de'), ate: get('ate'), aba: get('aba'), volta: get('volta') }
 }
 
 export function rawFromStorage(json: string | null): Raw {
@@ -78,17 +97,64 @@ export function rawFromStorage(json: string | null): Raw {
  * one the owner may open (active or archived). With `todayOf` (the selected
  * store's today, selectionTz) a custom range is read the way the server will
  * read it (clampSelection), so the period button never names dates the
- * numbers do not use.
+ * numbers do not use. With `todasRange` (a preset read on Todas' calendar)
+ * dates a store row opened are dropped for the owner's preset once they are
+ * no longer that row's (expireRowDates): a reload the next morning opens
+ * "Hoje", not yesterday frozen.
  */
 export function resolveView(
   url: Raw, stored: Raw, knownStore: (id: string) => boolean, todayOf?: (loja: string) => string,
+  todasRange?: (p: Period) => DateRange,
 ): ViewState {
   const lojaOk = (v: unknown): v is string => typeof v === 'string' && (v === ALL || knownStore(v))
   const loja = lojaOk(url.loja) ? url.loja : lojaOk(stored.loja) ? stored.loja : ALL
   const period = periodOf(url) ?? periodOf(stored) ?? { periodo: DEFAULT_PERIOD, de: null, ate: null }
   const aba = isTab(url.aba) ? url.aba : url.aba === undefined && isTab(stored.aba) ? stored.aba : null
-  const sel: Selection = { loja, ...period }
+  let sel: Selection = { loja, ...period }
+  // Row dates belong to one store: on Todas they are just the preset.
+  if (sel.rowPreset) sel = loja === ALL ? presetOf(sel) : todasRange ? expireRowDates(sel, todasRange) : sel
   return { sel: todayOf ? clampSelection(sel, todayOf(loja)) : sel, aba }
+}
+
+/**
+ * What happened to a link's custom range on its way to the screen, in words,
+ * or null when it is shown as asked. resolveView cuts it the way the server
+ * will (clampSelection), so the server never needs to cut it and never sends
+ * its rangeNote: a link for 1 jan 2024 – 30 dez 2026 opened "24 nov 2025 – 24
+ * nov 2026" with no word of why. Said with the period sheet's reasons. `sel`
+ * is what resolveView chose; nothing is said when it did not take the link's
+ * dates (another period, or dates a store row opened, which go back to their
+ * preset by design).
+ */
+export function linkRangeNotice(url: Raw, sel: Selection, today: string): string | null {
+  const asked = periodOf(url)
+  if (!asked || asked.periodo !== 'custom' || asked.rowPreset || !asked.de || !asked.ate) return null
+  const r = customRange(asked.de, asked.ate, today)
+  if (!r) return null
+  const askedText = formatRange({ from: asked.de, to: asked.ate }, today)
+  if (!r.ok) {
+    // A start after today: clampSelection opened "Hoje" instead.
+    return sel.periodo === 'today' ? `As datas do link (${askedText}) ainda não chegaram: mostrando Hoje.` : null
+  }
+  if (!r.clamped && !r.cut) return null
+  if (sel.periodo !== 'custom' || sel.de !== r.from || sel.ate !== r.to) return null
+  const why = [
+    r.cut === 'long' ? `só os últimos ${MAX_WINDOW_DAYS} dias (o máximo de uma vez)` : null,
+    r.cut === 'floor' ? `a partir de ${MIN_WINDOW_LABEL} (nada antes disso entra)` : null,
+    r.clamped ? 'até hoje (o resto ainda não aconteceu)' : null,
+  ].filter((x): x is string => x !== null)
+  return `O link pedia ${askedText}. Mostrando ${formatRange({ from: r.from, to: r.to }, today)}: ${why.join(' e ')}.`
+}
+
+/**
+ * The store a link names that the owner cannot open (neither active nor
+ * archived), or null. resolveView falls back to the stored store for it; the
+ * screen must then say the numbers are not the link's store
+ * (viewStore takeLinkNotice), as it does for a store that answers 404.
+ */
+export function unknownLinkStore(url: Raw, knownStore: (id: string) => boolean): string | null {
+  const v = url.loja
+  return typeof v === 'string' && v !== '' && v !== ALL && !knownStore(v) ? v : null
 }
 
 /** A store as the phone's selection needs it. */
@@ -102,6 +168,13 @@ export interface StoreClock { id: string; timezone: string }
 export function selectionTz(loja: string, active: readonly StoreClock[], archived: readonly StoreClock[] = []): string {
   if (loja === ALL) return anchorTz(active.map(s => s.timezone))
   return [...active, ...archived].find(s => s.id === loja)?.timezone || REFERENCE_TZ
+}
+
+/** A preset as Todas reads it at `now` (the server's buildPortfolio window:
+ *  resolveRange on the anchor calendar) — what a store row opens. */
+export function todasRangeAt(active: readonly StoreClock[], now: Date): (p: Period) => DateRange {
+  const tz = selectionTz(ALL, active)
+  return p => resolveRange(p, tz, null, null, now)
 }
 
 /**
@@ -118,9 +191,74 @@ export function selectionTz(loja: string, active: readonly StoreClock[], archive
 export function clampSelection(sel: Selection, today: string): Selection {
   if (sel.periodo !== 'custom' || !sel.de || !sel.ate) return sel
   const [de, ate] = sel.de <= sel.ate ? [sel.de, sel.ate] : [sel.ate, sel.de]
-  if (de > today) return { ...sel, periodo: 'today', de: null, ate: null }
+  // Row dates the store cannot read as they are are no longer the row's: the
+  // owner's preset, not a "Hoje" or a cut range nobody picked.
+  if (de > today) return sel.rowPreset ? presetOf(sel) : { ...sel, periodo: 'today', de: null, ate: null }
   const r = fitCustomRange(de, ate, today)
-  return r.from === sel.de && r.to === sel.ate ? sel : { ...sel, de: r.from, ate: r.to }
+  if (r.from === sel.de && r.to === sel.ate) return sel
+  return sel.rowPreset ? presetOf(sel) : { ...sel, de: r.from, ate: r.to }
+}
+
+/**
+ * The selection a store row of "Todas" opens. "Todas" reads every store on
+ * the same calendar dates (its own timezone); a store alone reads its own
+ * clock. So a store whose today is not the answer's (Hibikura from 12h in
+ * Brasília) opens the dates its row showed, as custom dates — keeping the
+ * preset opened Tokyo's next day (a "+$267" row landed on "−$58,78"). The
+ * desktop store rows do the same (components/portfolio/model
+ * resumoLinkOverrides). Every other store keeps the period as it is.
+ *
+ * The dates carry the owner's preset with them (rowPreset): they are that
+ * store's view of that day, not a period the owner chose. Without it the
+ * next chip carried "23 nov" to Todas and MOKOO, and a reopen the next
+ * morning restored yesterday frozen instead of "Hoje".
+ */
+export function storeRowSelection(
+  row: { id: string; storeToday: string },
+  answer: { period: Period; range: { from: string; to: string }; anchorToday: string },
+): Partial<Selection> {
+  if (row.storeToday === answer.anchorToday || answer.period === 'custom') return { loja: row.id }
+  return { loja: row.id, periodo: 'custom', de: answer.range.from, ate: answer.range.to, rowPreset: answer.period }
+}
+
+/** The owner's own preset in place of dates a store row opened. */
+function presetOf(sel: Selection): Selection {
+  return sel.rowPreset ? { loja: sel.loja, periodo: sel.rowPreset, de: null, ate: null } : sel
+}
+
+/**
+ * A tap that changes part of the selection (a period, a range, a store row).
+ * Row dates (rowPreset) never outlive the tap that follows them: a period the
+ * owner picks replaces them, and only a store row's own patch brings new ones.
+ */
+export function patchSelection(sel: Selection, patch: Partial<Selection>): Selection {
+  return { loja: sel.loja, periodo: sel.periodo, de: sel.de, ate: sel.ate, ...patch }
+}
+
+/**
+ * The selection a store chip (Todas or a store) opens. The period stays —
+ * except dates a store row opened, which were that store's only: leaving it
+ * (any chip, the same store's included) brings back the owner's preset, so
+ * "Todas · Hoje" → Hibikura row → "Todas" is "Todas · Hoje" again.
+ */
+export function chipSelection(sel: Selection, loja: string): Selection {
+  return sel.rowPreset ? { ...presetOf(sel), loja } : { ...sel, loja }
+}
+
+/**
+ * Row dates hold while they are what the row would open now: the preset read
+ * on Todas' calendar (`todasRange`, lib/engine/dates resolveRange on
+ * selectionTz(ALL)). Once that calendar moves on — midnight in Brasília, or a
+ * reopen days later — the owner's preset comes back, so a "Hoje" keeps rolling
+ * to the new day. Returns `sel` itself when nothing changes.
+ */
+export function expireRowDates(sel: Selection, todasRange: (p: Period) => DateRange): Selection {
+  if (!sel.rowPreset) return sel
+  if (sel.periodo !== 'custom') return patchSelection(sel, {})
+  // Row dates are one store's: on Todas they are just the preset.
+  if (sel.loja === ALL) return presetOf(sel)
+  const r = todasRange(sel.rowPreset)
+  return r.from === sel.de && r.to === sel.ate ? sel : presetOf(sel)
 }
 
 /** "MOKOO · 3–12 nov", "Todas · Hoje": a selection in words. A custom period
@@ -154,17 +292,24 @@ export function echoMatches(echo: Echo | null | undefined, s: Selection): boolea
     && (echo.from ?? null) === (custom ? s.de : null) && (echo.to ?? null) === (custom ? s.ate : null)
 }
 
-/** ?loja=&periodo=[&de=&ate=][&aba=] — always explicit, so a copied or
- *  restored URL means the same thing whatever the defaults become. */
+/** ?loja=&periodo=[&de=&ate=[&volta=]][&aba=] — always explicit, so a copied
+ *  or restored URL means the same thing whatever the defaults become. Row
+ *  dates carry their preset (`volta`), so a reload knows they were not picked. */
 export function toSearch(v: ViewState): string {
   const q = new URLSearchParams({ loja: v.sel.loja, periodo: v.sel.periodo })
-  if (v.sel.periodo === 'custom' && v.sel.de && v.sel.ate) { q.set('de', v.sel.de); q.set('ate', v.sel.ate) }
+  if (v.sel.periodo === 'custom' && v.sel.de && v.sel.ate) {
+    q.set('de', v.sel.de); q.set('ate', v.sel.ate)
+    if (v.sel.rowPreset) q.set('volta', v.sel.rowPreset)
+  }
   if (v.aba) q.set('aba', v.aba)
   return q.toString()
 }
 
+/** What the next launch restores: the owner's choices only — row dates are
+ *  stored as the preset they came from. */
 export function toStorage(v: ViewState): string {
-  return JSON.stringify({ loja: v.sel.loja, periodo: v.sel.periodo, de: v.sel.de, ate: v.sel.ate, aba: v.aba })
+  const sel = v.sel.rowPreset ? presetOf(v.sel) : v.sel
+  return JSON.stringify({ loja: sel.loja, periodo: sel.periodo, de: sel.de, ate: sel.ate, aba: v.aba })
 }
 
 export type CustomRange =

@@ -5,7 +5,8 @@
 
 import type { LiveOrderItem } from '@/lib/views/portfolio'
 import { shiftDate, todayInTz } from '@/lib/engine/dates'
-import { formatDate, formatTimeInTz } from '@/lib/format'
+import { formatDate, formatMoney, formatPct, formatTimeInTz } from '@/lib/format'
+import { uncreditedSources } from '@/components/campaigns/adsVerdict'
 import type { CampaignAction } from '@/lib/campaignSignal'
 import { BELOW_BREAK_EVEN_LABEL, type Signal } from '@/lib/creativeSignal'
 import type { AlertDelivery } from '@/lib/alerts'
@@ -92,7 +93,8 @@ const devicesWord = (n: number) => `${n} ${n === 1 ? 'aparelho' : 'aparelhos'}`
  * What one fired alert reached, for its row in the alerts sheet: a row is a
  * once-a-day claim, not a receipt (production kept 10 claims with no device
  * subscribed, and the sheet called them "Enviados"). Rows written before the
- * count was stored say so instead of guessing.
+ * count was stored (or written by code that did not store it) say so
+ * instead of guessing.
  */
 export function alertDeliveryText(d: AlertDelivery): string {
   switch (d.state) {
@@ -103,7 +105,10 @@ export function alertDeliveryText(d: AlertDelivery): string {
       return `não entregue: ${d.subscribed === 1 ? 'o aparelho inscrito recusou' : `os ${devicesWord(d.subscribed)} inscritos recusaram`}`
     case 'sending': return 'enviando…'
     case 'interrupted': return 'envio interrompido, entrega desconhecida'
-    case 'unknown': return 'envio antigo, entrega desconhecida'
+    // No count stored with the claim: the code that wrote it did not record
+    // deliveries (production's rows from today included), so this says what
+    // is missing, not how old the row is ("envio antigo" on an alert of 13h29).
+    case 'unknown': return 'entrega não registrada'
   }
 }
 
@@ -154,4 +159,91 @@ export function dueByLabel(dueBy: string, tz: string, now: Date = new Date()): s
   const today = todayInTz(tz, now)
   const when = day === today ? 'hoje' : day === shiftDate(today, 1) ? `amanhã (${formatDate(day, today)})` : formatDate(day, today)
   return `até ${when}, ${formatTimeInTz(at, tz)}`
+}
+
+/**
+ * What the Países tab has on Meta's side:
+ *  'split'     some country carries a Meta line: the caveat about Meta's own
+ *              split applies (and how much of the spend it covers);
+ *  'no_split'  Meta spend in the window but not one dollar split by country
+ *              (MOKOO: $6.597 in 7 days, 0% covered): nothing to compare;
+ *  'none'      no Meta money at all (Squishy World).
+ * Only 'split' may tell the owner to compare a Meta column: the other two
+ * said "compare" over rows with no Meta line.
+ */
+export type CountriesMetaSide = 'split' | 'no_split' | 'none'
+
+export function countriesMetaSide(d: {
+  meta: { totalSpend: number; coveredSpend: number }
+  countries: { meta: { spend: number; purchases: number } }[]
+}): CountriesMetaSide {
+  if (d.countries.some(c => c.meta.spend >= 0.005 || c.meta.purchases > 0)) return 'split'
+  if (!(d.meta.totalSpend >= 0.005)) return 'none'
+  return d.meta.coveredSpend >= 0.005 ? 'split' : 'no_split'
+}
+
+/** "MOKOO e Glooty", "MOKOO, EPOCH e Glooty". */
+function joinNames(names: readonly string[]): string {
+  return names.length <= 1 ? names.join('') : `${names.slice(0, -1).join(', ')} e ${names[names.length - 1]}`
+}
+
+/**
+ * How fast a sale reaches "Vendas ao vivo", for the stores on screen: "em
+ * segundos" only for the ones with the live feed (Shopify's order webhook). A
+ * store without it alone (Hibikura, CAMP HALLOW) read "Cada venda nova aparece
+ * em segundos" over a footer saying its orders come with the sync, up to 10
+ * minutes later; in Todas the claim leaves out the stores the footer names.
+ */
+export function liveFeedSpeed(
+  stores: readonly { id: string }[], noLive: readonly { storeId: string; name: string }[],
+): { howTo: string; footer: string | null } {
+  const without = noLive.filter(n => stores.some(r => r.id === n.storeId))
+  if (!without.length) return { howTo: 'Cada venda nova aparece em segundos.', footer: null }
+  if (without.length >= stores.length) {
+    return {
+      howTo: `Cada venda nova aparece com a sincronização, até 10 minutos depois: ${stores.length > 1 ? 'estas lojas não avisam' : 'esta loja não avisa'} vendas na hora.`,
+      footer: null,
+    }
+  }
+  const names = without.map(n => n.name)
+  return {
+    howTo: `Cada venda nova aparece em segundos, menos as ${names.length > 1 ? 'das lojas' : 'da loja'} citadas abaixo.`,
+    footer: `${joinNames(names)} ${names.length > 1 ? 'não avisam' : 'não avisa'} vendas na hora: os pedidos aparecem com a sincronização, até 10 minutos depois.`,
+  }
+}
+
+/**
+ * The Anúncios Shopify spend beside the Campanhas tab, whose list and "Gasto"
+ * are Meta's only: Dumpling 8jcp3a read "Gasto $474" in a week it spent
+ * $5.302 on Shop Campaigns. Null without Shopify ad spend.
+ */
+export function shopAdsLine(
+  shopSpend: number, notes: readonly { store: string; shopSpend: number }[], several: boolean,
+): string | null {
+  if (!(shopSpend >= 0.005)) return null
+  const by = notes.filter(n => n.shopSpend >= 0.005).sort((a, b) => b.shopSpend - a.shopSpend)
+  const who = several && by.length > 0 ? `: ${by.map(n => `${n.store} ${formatMoney(n.shopSpend)}`).join(', ')}` : ''
+  return `Mais ${formatMoney(shopSpend)} em Anúncios Shopify (Shop Campaigns), fora desta lista${who}. Entram no lucro da loja; a lista é só das campanhas do Meta.`
+}
+
+/**
+ * "MOKOO: o Meta credita 39% menos vendas do que a loja registrou." for each
+ * store whose ads run on Meta (adChannel 'meta') and whose gap is 10% or more.
+ * A store that sells through Shop Campaigns ('shop', or 'both' channels) is
+ * left out: its sales are not Meta's to credit, and "o Meta credita 93% menos
+ * vendas" (Dumpling 8jcp3a, $474 of Meta beside $5.302 of Shopify ads; "100%
+ * menos" on $4,17 in Todas) read as Meta under-crediting. A Meta store with a
+ * minor Shopify spend says where the rest of its sales may come from, in the
+ * desktop verdict's words (components/campaigns/adsVerdict uncreditedSources).
+ */
+export function campaignGapNotes(notes: readonly {
+  store: string; metaVsStoreRevenueGap: number | null; shopSpend: number; adChannel: 'meta' | 'shop' | 'both' | null
+}[]): string[] {
+  return notes
+    .filter(n => n.metaVsStoreRevenueGap !== null && Math.abs(n.metaVsStoreRevenueGap) >= 10 && (n.adChannel === 'meta' || n.adChannel === null))
+    .map(n => {
+      const gap = n.metaVsStoreRevenueGap!
+      const base = `${n.store}: o Meta credita ${formatPct(Math.abs(gap), { digits: 0 })} ${gap > 0 ? 'mais' : 'menos'} vendas do que a loja registrou`
+      return gap < 0 && n.shopSpend >= 0.005 ? `${base} (o resto: ${uncreditedSources(n.shopSpend)}).` : `${base}.`
+    })
 }

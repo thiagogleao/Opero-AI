@@ -201,7 +201,7 @@
   flex: 1 0 auto; height: 34px; padding: 0 6px; border-radius: var(--r-pill);
   border: 1px solid var(--line-2); background: var(--card); color: var(--tx-2); font-size: 12.5px; font-weight: 500;
 }
-.tab[aria-selected='true'] { background: var(--tx); color: var(--bg); border-color: var(--tx); font-weight: 600; }
+.tab[aria-expanded='true'] { background: var(--tx); color: var(--bg); border-color: var(--tx); font-weight: 600; }
 .tabMeta { display: flex; justify-content: space-between; gap: 8px; font-size: 11.5px; color: var(--tx-3); padding: 0 2px; }
 .kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .split { display: flex; height: 10px; border-radius: 3px; overflow: hidden; gap: 2px; margin-top: 8px; }

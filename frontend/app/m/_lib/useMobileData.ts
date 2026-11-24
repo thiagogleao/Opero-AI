@@ -9,7 +9,8 @@
  *  - an answer is applied only if the selection it was asked for is still the
  *    one on screen AND its echoed `request` matches it;
  *  - one request in flight at a time: a poll never stacks on a slow answer;
- *  - polling every 45 s only while the page is visible;
+ *  - polling every 45 s only while the page is visible (never for an archived
+ *    store, which is not synced);
  *  - callbacks read the selection from a ref, never from a stale closure (the
  *    old "Atualizar" re-applied the store of the moment it was tapped for 70 s).
  */
@@ -55,7 +56,12 @@ export interface HomeState {
 
 export type LoadReason = 'select' | 'poll' | 'manual'
 
-export function useMobileData(sel: Selection | null) {
+export function useMobileData(sel: Selection | null, opts: {
+  /** False: fetch on a new selection or on demand only, never on a timer (an
+   *  archived store is not synced: nothing new can arrive). */
+  poll?: boolean
+} = {}) {
+  const poll = opts.poll ?? true
   const [state, setState] = useState<HomeState>({ data: null, dataKey: null, fetchedAt: null, error: null, errorKey: null })
   const [loadingKey, setLoadingKey] = useState<string | null>(null)
   const selRef = useRef<Selection | null>(sel)
@@ -112,6 +118,7 @@ export function useMobileData(sel: Selection | null) {
 
   // Poll every 45 s while visible; catch up when the app comes back.
   useEffect(() => {
+    if (!poll) return
     let timer: ReturnType<typeof setInterval> | null = null
     const start = () => {
       if (timer === null) timer = setInterval(() => { if (document.visibilityState === 'visible') load('poll') }, POLL_MS)
@@ -132,7 +139,7 @@ export function useMobileData(sel: Selection | null) {
       document.removeEventListener('visibilitychange', onVisibility)
       window.removeEventListener('online', onOnline)
     }
-  }, [load])
+  }, [load, poll])
 
   useEffect(() => () => inflight.current?.ctrl.abort(), [])
 
