@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { sumPnL, type PnL, type PnLLines } from '../../engine/pnl'
 import {
-  buildVerdict, comparisonCut, comparisonPhrase, comparisonText, dayLeftMinutes, dayLeftVerb, isIdle, judgedStores, noSalesCashHit, perDollarLine, periodPhrase, roasSummary, storeStatus, storeStatusChips, sumTotals,
+  buildVerdict, comparisonCut, comparisonPhrase, comparisonText, dayLeftMinutes, dayLeftVerb, disputeReasonText, isIdle, judgedStores, noSalesCashHit, perDollarLine, periodPhrase, roasSummary, storeStatus, storeStatusChips, sumTotals,
   type ComparisonWindow, type VerdictInput, type VerdictStore,
 } from '../verdict'
 import { formatRoas } from '../../format'
@@ -120,7 +120,7 @@ describe('Todas, hoje às 13h38', () => {
       .reduce((a, b) => a + b, 0)
     expect(v.amount).toBeCloseTo(expected, 6)
     expect(v.excluded).toEqual([{ id: 'glooty', name: 'Glooty', revenue: 0, adSpend: 41.2, revenueMinusAds: -41.2 }])
-    expect(v.details[0].text).toBe('Glooty fica fora da soma: sem custos configurados (receita − anúncios: −$41,20).')
+    expect(v.details[0].text).toBe('Glooty fica fora da soma: sem custos configurados (receita − anúncios: −\u2060$41,20).')
   })
 
   it('is present tense, partial, and compared with yesterday at this hour', () => {
@@ -321,7 +321,8 @@ describe('details wording', () => {
       anchorTimezone: 'America/Sao_Paulo', comparison: null,
     })
     expect(v.details[0].text).toBe('Glooty fica fora da soma: sem custos configurados (sem vendas nem anúncios no período).')
-    expect(v.headline).toBe('As lojas lucraram juntas nos últimos 7 dias.')
+    // One store in the sum: named, never "juntas" (see 'several stores, one in the sum').
+    expect(v.headline).toBe('A MOKOO, a única loja na soma, lucrou nos últimos 7 dias.')
     expect(v.amountCaption).toBe('de lucro real somando 1 loja')
   })
 
@@ -561,23 +562,23 @@ describe('no sales, but money left (regression: CAMP HALLOW −$343 hidden)', ()
     expect(v.headline).toBe('A CAMP HALLOW não teve vendas nos últimos 7 dias.')
     expect(v.amount).toBeNull()
     expect(v.totals.cashResult).toBeCloseTo(-342.63, 2)
-    expect(v.details.map(d => d.text)).toEqual(['Mas chegaram 2 chargebacks: −$343 no caixa.'])
-    expect(v.details[0].parts.find(p => p.strong)).toEqual({ text: '−$343 no caixa', strong: true, tone: 'neg' })
+    expect(v.details.map(d => d.text)).toEqual(['Mas chegaram 2 chargebacks: −\u2060$343 no caixa.'])
+    expect(v.details[0].parts.find(p => p.strong)).toEqual({ text: '−\u2060$343 no caixa', strong: true, tone: 'neg' })
   })
 
   it('names refunds and chargebacks together, in the singular when it is one', () => {
-    expect(camp(pnl({ refunds: 20, refundCount: 1 })).details[0].text).toBe('Mas chegou 1 reembolso: −$20,00 no caixa.')
+    expect(camp(pnl({ refunds: 20, refundCount: 1 })).details[0].text).toBe('Mas chegou 1 reembolso: −\u2060$20,00 no caixa.')
     expect(camp(pnl({ refunds: 20, refundCount: 1, chargebacks: 40, chargebackCount: 1 })).details[0].text)
-      .toBe('Mas chegaram 1 reembolso e 1 chargeback: −$60,00 no caixa.')
+      .toBe('Mas chegaram 1 reembolso e 1 chargeback: −\u2060$60,00 no caixa.')
   })
 
   it('halves the cash in the partner view', () => {
-    expect(camp(pnl({ chargebacks: 312.63, chargebackFees: 30, chargebackCount: 2 }), true).details[0].text).toBe('Mas chegaram 2 chargebacks: −$171 no caixa.')
+    expect(camp(pnl({ chargebacks: 312.63, chargebackFees: 30, chargebackCount: 2 }), true).details[0].text).toBe('Mas chegaram 2 chargebacks: −\u2060$171 no caixa.')
   })
 
   it('after ads with no sales it reads "E chegaram…"', () => {
     const v = camp(pnl({ metaSpend: 50, chargebacks: 30, chargebackCount: 1 }))
-    expect(v.details.map(d => d.text)).toContain('E chegou 1 chargeback: −$30,00 no caixa.')
+    expect(v.details.map(d => d.text)).toContain('E chegou 1 chargeback: −\u2060$30,00 no caixa.')
   })
 })
 
@@ -913,24 +914,24 @@ describe('refunds and chargebacks with sales (regression: "No lucro" over a nega
     const v = camp(CAMP_30D)
     expect(v.totals.cashResult).toBeCloseTo(-764.02, 2)
     expect(v.chips.map(c => c.code)).toEqual(['lucro'])
-    expect(v.details[0].text).toBe('Mas chegaram 12 chargebacks: −$1.346 no caixa — o resultado de caixa ficou em −$764.')
-    expect(v.details[0].parts.filter(p => p.tone === 'neg').map(p => p.text)).toEqual(['−$1.346 no caixa', '−$764'])
+    expect(v.details[0].text).toBe('Mas chegaram 12 chargebacks: −\u2060$1.346 no caixa — o resultado de caixa ficou em −\u2060$764.')
+    expect(v.details[0].parts.filter(p => p.tone === 'neg').map(p => p.text)).toEqual(['−\u2060$1.346 no caixa', '−\u2060$764'])
   })
 
   it('halves both amounts in the partner view', () => {
-    expect(camp(CAMP_30D, true).details[0].text).toBe('Mas chegaram 12 chargebacks: −$673 no caixa — o resultado de caixa ficou em −$382.')
+    expect(camp(CAMP_30D, true).details[0].text).toBe('Mas chegaram 12 chargebacks: −\u2060$673 no caixa — o resultado de caixa ficou em −\u2060$382.')
   })
 
   it('a loss made worse reads "E chegaram…"; a small refund beside a real result says nothing', () => {
     const loss = camp(pnl({ revenue: 1000, orders: 10, cogs: 600, metaSpend: 700, refunds: 120, refundCount: 2 }))
-    expect(loss.details[0].text).toBe('E chegaram 2 reembolsos: −$120 no caixa — o resultado de caixa ficou em −$420.')
+    expect(loss.details[0].text).toBe('E chegaram 2 reembolsos: −\u2060$120 no caixa — o resultado de caixa ficou em −\u2060$420.')
     const small = camp(pnl({ revenue: 10000, orders: 100, cogs: 4000, metaSpend: 3000, refunds: 150, refundCount: 3 }))
     expect(small.details.map(d => d.text).join(' ')).not.toMatch(/no caixa/)
   })
 
   it('a big share of a positive cash result is said too', () => {
     const v = camp(pnl({ revenue: 10000, orders: 100, cogs: 4000, metaSpend: 3000, chargebacks: 1500, chargebackCount: 10 }))
-    expect(v.details[0].text).toBe('Mas chegaram 10 chargebacks: −$1.500 no caixa — o resultado de caixa ficou em $1.500.')
+    expect(v.details[0].text).toBe('Mas chegaram 10 chargebacks: −\u2060$1.500 no caixa — o resultado de caixa ficou em $1.500.')
   })
 })
 
@@ -994,5 +995,262 @@ describe('noSalesCashHit (shared with the store rows)', () => {
     expect(noSalesCashHit(pnl({ refunds: 20, refundCount: 1, chargebacks: 40, chargebackCount: 1 }))?.what).toBe('1 reembolso e 1 chargeback')
     expect(noSalesCashHit(pnl({ revenue: 50, orders: 1, chargebacks: 40, chargebackCount: 1 }))).toBeNull()
     expect(noSalesCashHit(pnl({}))).toBeNull()
+  })
+})
+
+// Todas · Hoje at 06h12: hzsjyp idle today, +$29,27 (1 order) yesterday until
+// this hour. The comparison counted it while the note called it "fora da
+// contagem" with no more, so the reader's sum of the stores (−$102) missed $29.
+describe('an idle store that moved in the comparison window is named in it', () => {
+  const day = { period: 'today' as const, range: { from: '2026-11-24', to: '2026-11-24' }, today: '2026-11-24', anchorTimezone: 'America/Sao_Paulo', comparison: TODAY_CMP }
+  const running = { partial: true, minutesCovered: 372, dayState: 'running' as const }
+  const mokoo = store({ id: 'm', name: 'MOKOO', ...running, totals: pnl({ revenue: 600, orders: 6, cogs: 200, metaSpend: 250 }),
+    comparison: { included: true, totals: pnl({ revenue: 300, orders: 3, cogs: 100, metaSpend: 300 }) } })
+  const hzs = store({ id: 'h', name: 'Dumpling Squishy · hzsjyp', ...running, totals: pnl({}),
+    comparison: { included: true, totals: pnl({ revenue: 39.27, orders: 1, cogs: 10 }) } })
+  const camp = store({ id: 'c', name: 'CAMP HALLOW', ...running, totals: pnl({}), comparison: { included: true, totals: pnl({}) } })
+
+  it('the comparison keeps it, and the note says so instead of "fora da contagem" alone', () => {
+    const v = buildVerdict({ ...day, stores: [mokoo, hzs, camp] })
+    expect(v.comparisonTotals?.operatingProfit).toBeCloseTo(-100 + 29.27, 2)
+    expect(v.notes.map(n => n.text)).toContain(
+      'Dumpling Squishy · hzsjyp ainda não teve vendas, anúncios nem reembolsos hoje, mas ontem até esta hora teve $29,27 de lucro (1 pedido): fica fora da contagem de lojas e entra na comparação.')
+    expect(v.notes.map(n => n.text)).toContain('CAMP HALLOW ainda não teve vendas, anúncios nem reembolsos hoje: fica fora da contagem de lojas.')
+  })
+  it('halved in the partner view, and said to be the share', () => {
+    const v = buildVerdict({ ...day, split: true, stores: [mokoo, hzs] })
+    expect(v.notes.map(n => n.text).join(' ')).toContain('teve $14,64 de lucro (sua parte, 1 pedido)')
+  })
+  it('without a comparison window it is just an idle store', () => {
+    const v = buildVerdict({ ...day, comparison: null, stores: [mokoo, hzs] })
+    expect(v.notes.map(n => n.text)).toContain('Dumpling Squishy · hzsjyp ainda não teve vendas, anúncios nem reembolsos hoje: fica fora da contagem de lojas.')
+  })
+  // Regression: CAMP HALLOW's 22 nov held one chargeback ($108,25 + $15 fee)
+  // and nothing else; Todas · Ontem read "em 22 nov teve $0 de lucro … entra
+  // na comparação" for a store that added $0 to it.
+  it('a comparison that held only refunds or chargebacks keeps the plain note', () => {
+    const ontem = { period: 'yesterday' as const, range: { from: '2026-11-23', to: '2026-11-23' }, today: '2026-11-24', anchorTimezone: 'America/Sao_Paulo',
+      comparison: { from: '2026-11-22', to: '2026-11-22', label: 'dia anterior', sameTimeOfDay: false } }
+    const m = store({ id: 'm', name: 'MOKOO', totals: pnl({ revenue: 600, orders: 6, cogs: 200, metaSpend: 250 }),
+      comparison: { included: true, totals: pnl({ revenue: 300, orders: 3, cogs: 100, metaSpend: 300 }) } })
+    const cbOnly = pnl({ chargebacks: 108.25, chargebackFees: 15, chargebackCount: 1 })
+    expect(isIdle(cbOnly)).toBe(false)
+    expect(cbOnly.operatingProfit).toBe(0)
+    const c = store({ id: 'c', name: 'CAMP HALLOW', totals: pnl({}), comparison: { included: true, totals: cbOnly } })
+    const v = buildVerdict({ ...ontem, stores: [m, c] })
+    const notes = v.notes.map(n => n.text)
+    expect(notes).toContain('CAMP HALLOW não teve vendas, anúncios nem reembolsos ontem: fica fora da contagem de lojas.')
+    expect(notes.join(' ')).not.toContain('entra na comparação')
+    expect(notes.join(' ')).not.toContain('$0 de lucro')
+  })
+})
+
+// Todas, 1 dez 2025 – 30 abr 2026: only MOKOO had started. It read "Suas
+// lojas tiveram prejuízo juntas … somando 1 loja".
+describe('several stores, one in the sum', () => {
+  const win = { period: 'custom' as const, range: { from: '2025-12-01', to: '2026-04-30' }, today: '2026-11-24', anchorTimezone: 'America/Sao_Paulo', comparison: null, subject: 'Suas lojas' }
+  const mokoo = store({ id: 'm', name: 'MOKOO', totals: pnl({ revenue: 5600, orders: 70, cogs: 3000, metaSpend: 12000 }), firstOrderDate: '2026-04-11' })
+  const pre = (id: string, first: string) => store({ id, name: id, totals: pnl({}), firstOrderDate: first })
+
+  it('names the store instead of "juntas"', () => {
+    const v = buildVerdict({ ...win, stores: [mokoo, pre('EPOCH', '2026-05-25'), pre('Hibikura', '2026-11-07')] })
+    expect(v.headline).toBe('A MOKOO, a única loja na soma, teve prejuízo em 1 dez 2025 – 30 abr 2026.')
+    expect(v.headline).not.toContain('juntas')
+    expect(v.amountCaption).toBe('de prejuízo real somando 1 loja')
+  })
+  it('two stores in the sum keep "juntas"', () => {
+    const epoch = store({ id: 'e', name: 'EPOCH', totals: pnl({ revenue: 900, orders: 9, cogs: 300, metaSpend: 1000 }) })
+    expect(buildVerdict({ ...win, stores: [mokoo, epoch] }).headline).toBe('Suas lojas tiveram prejuízo juntas em 1 dez 2025 – 30 abr 2026.')
+  })
+  // Todas · 1–31 mar 2026: only MOKOO spent ($1.130) and nothing sold. It read
+  // "Suas lojas gastaram $1.130 em anúncios e não venderam nada" over "1 loja na soma".
+  it('no sales with spend: the one store is named, in the singular', () => {
+    const march = { ...win, range: { from: '2026-03-01', to: '2026-03-31' } }
+    const spentOnly = store({ id: 'm', name: 'MOKOO', totals: pnl({ metaSpend: 1129.98 }), firstOrderDate: '2026-04-11' })
+    const v = buildVerdict({ ...march, stores: [spentOnly, pre('EPOCH', '2026-05-25'), pre('Hibikura', '2026-11-07')] })
+    expect(v.headline).toBe('A MOKOO, a única loja na soma, gastou $1.130 em anúncios e não vendeu nada em 1–31 mar.')
+    expect(v.when).toMatch(/^1 loja na soma/)
+    // The running-day form too.
+    const today = { ...win, period: 'today' as const, range: { from: '2026-11-24', to: '2026-11-24' }, comparison: null }
+    const running = store({ id: 'm', name: 'MOKOO', partial: true, minutesCovered: 600, dayState: 'running', totals: pnl({ metaSpend: 80 }) })
+    const idle = store({ id: 'e', name: 'EPOCH', partial: true, minutesCovered: 600, dayState: 'running', totals: pnl({}) })
+    expect(buildVerdict({ ...today, stores: [running, idle] }).headline).toBe('A MOKOO, a única loja na soma, ainda não vendeu hoje, e já gastou $80,00 em anúncios.')
+    // Two stores that spent keep the plural.
+    const both = buildVerdict({ ...march, stores: [spentOnly, store({ id: 'e', name: 'EPOCH', totals: pnl({ metaSpend: 50 }) })] })
+    expect(both.headline).toBe('Suas lojas gastaram $1.180 em anúncios e não venderam nada em 1–31 mar.')
+  })
+})
+
+// Todas · Este mês (1–24 nov vs 1–24 out): Hibikura's $2.000 (first sale 7 nov)
+// were in the current sum only. It read "29% a mais"; like for like, 18,5%.
+describe('a store of the sum that did not sell yet in the comparison window', () => {
+  const mtd = {
+    period: 'mtd' as const, range: { from: '2026-11-01', to: '2026-11-24' }, today: '2026-11-24', anchorTimezone: 'America/Sao_Paulo', subject: 'Suas lojas',
+    comparison: { from: '2026-10-01', to: '2026-10-24', label: 'mesmos dias do mês passado', sameTimeOfDay: false },
+  }
+  // Profits built so that the rest grew 18,5% and the sum 29%.
+  const rest = pnl({ revenue: 40000, orders: 400, cogs: 17752, metaSpend: 0 })
+  const restPrev = pnl({ revenue: 35000, orders: 350, cogs: 16230.07, metaSpend: 0 })
+  const hibNow = pnl({ revenue: 4000, orders: 40, cogs: 2000, metaSpend: 0 })
+  const others = store({ id: 'o', name: 'MOKOO', totals: rest, comparison: { included: true, totals: restPrev }, firstOrderDate: '2026-04-11' })
+  const hib = store({ id: 'h', name: 'Hibikura', timezone: 'Asia/Tokyo', totals: hibNow, comparison: { included: true, totals: pnl({}) }, firstOrderDate: '2026-11-07' })
+
+  it('says the change like for like and names the store', () => {
+    expect(rest.operatingProfit).toBeCloseTo(22248, 0)
+    expect(restPrev.operatingProfit).toBeCloseTo(18769.93, 1)
+    const v = buildVerdict({ ...mtd, stores: [others, hib] })
+    const cmpLine = v.details.map(d => d.text).find(t => t.startsWith('O lucro era'))
+    expect(cmpLine).toBe('O lucro era $18.770 em 1–24 out. A Hibikura só começou a vender em 7 nov: sem os $2.000 dela, 19% a mais.')
+    expect(v.headline).toBe('Suas lojas lucraram juntas neste mês — e mais do que nos mesmos dias do mês passado.')
+  })
+  it('the sales line is like for like too, and says so', () => {
+    const v = buildVerdict({ ...mtd, stores: [others, hib] })
+    expect(v.details.map(d => d.text)).toContain('As vendas, sem a Hibikura, subiram 14%.')
+  })
+  it('without such a store nothing changes', () => {
+    const v = buildVerdict({ ...mtd, stores: [others, { ...hib, firstOrderDate: '2026-09-01', comparison: { included: true, totals: pnl({ revenue: 10, orders: 1 }) } }] })
+    expect(v.details.map(d => d.text).join(' ')).not.toContain('só começou')
+  })
+  it('one store whose comparison straddles its first sale gets a note', () => {
+    const week = { period: 'custom' as const, range: { from: '2026-11-10', to: '2026-11-16' }, today: '2026-11-24', anchorTimezone: 'Asia/Tokyo',
+      comparison: { from: '2026-11-03', to: '2026-11-09', label: '7 dias anteriores', sameTimeOfDay: false } }
+    const one = store({ id: 'h', name: 'Hibikura', timezone: 'Asia/Tokyo', firstOrderDate: '2026-11-07',
+      totals: pnl({ revenue: 2000, orders: 25, cogs: 900, metaSpend: 900 }),
+      comparison: { included: true, totals: pnl({ revenue: 300, orders: 4, cogs: 150, metaSpend: 278 }) } })
+    const v = buildVerdict({ ...week, stores: [one] })
+    expect(v.notes.map(n => n.text)).toContain('A Hibikura só começou a vender em 7 nov: a comparação (3–9 nov) tem dias antes disso.')
+  })
+})
+
+// After 12h Brasília, Hibikura · Hoje with ?parte=50: "1 pedido e $23,78 de
+// lucro" read as the store's whole profit ($47,55).
+describe('the early-day headline in the partner view', () => {
+  it('names the halved amount as the partner\'s share', () => {
+    const v = buildVerdict({
+      stores: [store({ id: 'h', name: 'Hibikura', timezone: 'Asia/Tokyo', partial: true, minutesCovered: 30, dayState: 'running',
+        totals: pnl({ revenue: 120, orders: 1, cogs: 72.45 }) })],
+      period: 'today', range: { from: '2026-11-25', to: '2026-11-25' }, today: '2026-11-25', anchorTimezone: 'Asia/Tokyo', comparison: null, split: true,
+    })
+    expect(v.headline).toBe('Em Tóquio o dia acabou de começar. Por enquanto, 1 pedido e $23,78 de lucro (sua parte).')
+  })
+})
+
+// Todas, 15 dez 2025 – 15 jan 2026: no store had started. It read "Suas lojas
+// não tiveram vendas" over rows that each said "ainda não vendia".
+describe('several stores, none had started yet', () => {
+  const win = { period: 'custom' as const, range: { from: '2025-12-15', to: '2026-01-15' }, today: '2026-11-24', anchorTimezone: 'America/Sao_Paulo', comparison: null, subject: 'Suas lojas' }
+  const pre = (id: string, first: string, configured = true) => store({ id, name: id, configured, totals: pnl({}), firstOrderDate: first })
+
+  it('says no store sold yet and when the first sale came, with no fake $0', () => {
+    const v = buildVerdict({ ...win, stores: [pre('MOKOO', '2026-04-11'), pre('EPOCH', '2026-05-25'), pre('Glooty', '2026-11-06', false)] })
+    expect(v.headline).toBe('Nenhuma das lojas vendia ainda em 15 dez 2025 – 15 jan 2026: a primeira venda foi em 11 abr 2026.')
+    expect(v.chips.map(c => c.label)).toEqual(['1ª venda em 11 abr 2026'])
+    expect(v.amount).toBeNull()
+    expect(v.amountCaption).toBe('nenhuma das lojas vendia ainda nesse período')
+    expect(v.details.map(d => d.text)).toEqual(['Escolha um período a partir de 11 abr 2026 para ver o resultado.'])
+    expect(v.beforeStart).toEqual({ date: '2026-04-11', text: '11 abr 2026' })
+  })
+  it('one store that never sold (no first sale) keeps the plain "não tiveram vendas"', () => {
+    const v = buildVerdict({ ...win, stores: [pre('MOKOO', '2026-04-11'), store({ id: 'x', name: 'X', totals: pnl({}) })] })
+    expect(v.headline).toBe('Suas lojas não tiveram vendas em 15 dez 2025 – 15 jan 2026.')
+    expect(v.beforeStart).toBeNull()
+  })
+  it('one store alone before its start sets beforeStart for the cells beside the verdict', () => {
+    const v = buildVerdict({ ...win, period: 'lastmonth', range: { from: '2026-10-01', to: '2026-10-31' }, stores: [pre('Hibikura', '2026-11-07')] })
+    expect(v.beforeStart).toEqual({ date: '2026-11-07', text: '7 nov' })
+  })
+})
+
+// Squishy World, archived on 10 nov: its "7 dias" (17–23 nov) read "não teve
+// vendas nos últimos 7 dias", though nothing has been read since 10 nov.
+describe('an archived store after its archive date has no data, not "no sales"', () => {
+  const sq = (range: { from: string; to: string }, totals = pnl({})) => buildVerdict({
+    period: '7d', range, today: '2026-11-24', anchorTimezone: 'America/Sao_Paulo', comparison: null,
+    stores: [store({ id: 's', name: 'Squishy World', archived: true, archivedOn: '2026-11-10', totals })],
+  })
+  it('a window after the date says the store is archived since then', () => {
+    const v = sq({ from: '2026-11-17', to: '2026-11-23' })
+    expect(v.headline).toBe('A Squishy World está arquivada desde 10 nov e não sincroniza mais: não há dados nos últimos 7 dias.')
+    expect(v.chips.map(c => c.label)).toEqual(['Sem sincronização'])
+    expect(v.amountCaption).toBe('loja arquivada: nada é lido depois disso')
+    expect(v.details.map(d => d.text)).toEqual(['Para ver o histórico, escolha um período até 10 nov, quando a loja ainda sincronizava.'])
+    expect(v.frozen).toEqual({ date: '2026-11-10', text: '10 nov' })
+  })
+  it('a window across the date says where the data stops', () => {
+    const v = sq({ from: '2026-11-07', to: '2026-11-13' })
+    expect(v.headline).toBe('A Squishy World não teve vendas em 7–10 nov.')
+    expect(v.notes.map(n => n.text)).toContain('A Squishy World foi arquivada em 10 nov e não sincroniza mais: não há dados dos dias seguintes.')
+    expect(v.frozen).toBeNull()
+  })
+  // Regression: "Este mês" (1–24 nov, partial because it holds today) read
+  // "não há dados neste mês" although 1–10 nov were synced.
+  it('"Este mês" from before the date: no sales on the days read, and where the data stops', () => {
+    const v = buildVerdict({
+      period: 'mtd', range: { from: '2026-11-01', to: '2026-11-24' }, today: '2026-11-24', anchorTimezone: 'America/Sao_Paulo', comparison: null,
+      stores: [store({ id: 's', name: 'Squishy World', archived: true, archivedOn: '2026-11-10', partial: true, minutesCovered: 600, dayState: 'running', totals: pnl({}) })],
+    })
+    expect(v.headline).toBe('A Squishy World não teve vendas em 1–10 nov.')
+    expect(v.frozen).toBeNull()
+    expect(v.chips.map(c => c.label)).toEqual(['Sem vendas no período'])
+    expect(v.notes.map(n => n.text)).toEqual(['A Squishy World foi arquivada em 10 nov e não sincroniza mais: não há dados dos dias seguintes.'])
+  })
+  it('its "Hoje", after the date, is still unread', () => {
+    const v = buildVerdict({
+      period: 'today', range: { from: '2026-11-24', to: '2026-11-24' }, today: '2026-11-24', anchorTimezone: 'America/Sao_Paulo', comparison: null,
+      stores: [store({ id: 's', name: 'Squishy World', archived: true, archivedOn: '2026-11-10', partial: true, minutesCovered: 600, dayState: 'running', totals: pnl({}) })],
+    })
+    expect(v.frozen).toEqual({ date: '2026-11-10', text: '10 nov' })
+    expect(v.headline).toBe('A Squishy World está arquivada desde 10 nov e não sincroniza mais: não há dados hoje.')
+  })
+  it('a window before the date reads as before', () => {
+    const v = sq({ from: '2026-10-25', to: '2026-10-31' }, pnl({ revenue: 500, orders: 6, cogs: 150, metaSpend: 200 }))
+    expect(v.notes).toEqual([])
+    expect(v.chips.map(c => c.code)).toContain('lucro')
+  })
+})
+
+// parte=50 on a store without costs: "Vendas − anúncios foi −$115 em 1–5 nov"
+// was halved under a name for whole sales minus whole ads.
+describe('revenue − ads in the partner view says it is the share', () => {
+  const glooty = (totals: PnL, comparison: PnL) => store({ id: 'g', name: 'Glooty', configured: false, totals, comparison: { included: true, totals: comparison } })
+  const win = {
+    period: 'custom' as const, range: { from: '2026-11-06', to: '2026-11-10' }, today: '2026-11-24', anchorTimezone: 'America/Belem',
+    comparison: { from: '2026-11-01', to: '2026-11-05', label: '5 dias anteriores', sameTimeOfDay: false },
+  }
+  const now = pnl({ revenue: 1118, orders: 14, metaSpend: 2149 })
+  const before = pnl({ revenue: 100, orders: 1, metaSpend: 330.47 })
+  it('the comparison line', () => {
+    const v = buildVerdict({ ...win, split: true, stores: [glooty(now, before)] })
+    expect(v.details.map(d => d.text)).toContain('Sua parte de vendas − anúncios foi −⁠$115 em 1–5 nov.')
+    const whole = buildVerdict({ ...win, stores: [glooty(now, before)] })
+    expect(whole.details.map(d => d.text)).toContain('Vendas − anúncios foi −⁠$230 em 1–5 nov.')
+  })
+  it('the note on a store left out of the sum', () => {
+    const mokoo = store({ id: 'm', name: 'MOKOO', totals: pnl({ revenue: 3000, orders: 30, cogs: 900, metaSpend: 1200 }) })
+    const v = buildVerdict({ ...win, comparison: null, split: true, stores: [mokoo, glooty(pnl({ revenue: 1118, orders: 14, metaSpend: 2925 }), pnl({}))] })
+    expect(v.details.map(d => d.text)).toContain('Glooty fica fora da soma: sem custos configurados (sua parte da receita − anúncios: −⁠$904).')
+  })
+})
+
+describe('store rows before the first sale (storeStatus with the window)', () => {
+  const oct = { from: '2026-10-01', to: '2026-10-31' }
+  const glooty = { configured: false, totals: pnl({}), partial: false, minutesCovered: 1440, firstOrderDate: '2026-11-06' }
+  it('"ainda não vendia", with no "custos não configurados" beside it', () => {
+    expect(storeStatusChips(glooty, { singleDay: false, range: oct }).map(c => c.label)).toEqual(['ainda não vendia'])
+    expect(storeStatusChips({ ...glooty, configured: true }, { singleDay: false, range: oct }).map(c => c.label)).toEqual(['ainda não vendia'])
+  })
+  it('without the window, or once it started, the old chips', () => {
+    expect(storeStatusChips(glooty, { singleDay: false }).map(c => c.label)).toEqual(['sem vendas', 'custos não configurados'])
+    expect(storeStatus({ ...glooty, configured: true }, { singleDay: false, range: { from: '2026-11-01', to: '2026-11-23' } }).label).toBe('sem vendas')
+  })
+})
+
+describe('dispute reasons (one map for phone and desktop)', () => {
+  it('names every Shopify code in Portuguese; an unknown one as it comes', () => {
+    expect(disputeReasonText('product_unacceptable')).toBe('produto não aceitável')
+    expect(disputeReasonText('customer_initiated')).toBe('iniciada pelo cliente')
+    expect(disputeReasonText('debit_not_authorized')).toBe('débito não autorizado')
+    expect(disputeReasonText('something_new')).toBe('something_new')
+    expect(disputeReasonText('toString')).toBe('toString')
   })
 })

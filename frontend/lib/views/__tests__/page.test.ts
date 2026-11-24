@@ -3,13 +3,20 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 // lib/access (cookies, database) is never reached: it is answered here.
 vi.mock('../../access', () => ({ getViewer: vi.fn(), listStores: vi.fn(), resolveStore: vi.fn() }))
 vi.mock('next/navigation', () => ({ notFound: vi.fn(), redirect: vi.fn() }))
+// The archive day of an archived store (getPageContext loads it on demand).
+vi.mock('../portfolio', async importOriginal => ({
+  ...(await importOriginal<typeof import('../portfolio')>()),
+  loadArchiveDates: vi.fn(async () => new Map()),
+}))
 
 import { getViewer, listStores, resolveStore, type StoreRef } from '../../access'
 import { notFound } from 'next/navigation'
+import { loadArchiveDates } from '../portfolio'
 import {
-  ALL_STORES, buildHref, carriedLoja, clockLabel, getPageContext, MAX_WINDOW_DAYS, MIN_PAGE_DATE, pageMetadata, parsePageParams,
-  resolvePeriodWindow, toStoreOption, type PageParams, type SearchParams,
+  ALL_STORES, archivedWindow, buildHref, carriedLoja, clockLabel, COMPARE_AS_PRESETS, getPageContext, MAX_WINDOW_DAYS, MIN_PAGE_DATE, pageMetadata,
+  parsePageParams, resolvePeriodWindow, rowDateClocks, rowDatesOf, settleRowDates, toStoreOption, type PageParams, type SearchParams,
 } from '../page'
+import { mergeQuery } from '../../../components/shell/url'
 
 // 2026-11-17 13:38 in Brasília = 16:38 UTC = 2026-11-18 01:38 in Tokyo.
 const NOW = new Date('2026-11-17T16:38:00Z')
@@ -335,5 +342,355 @@ describe('the store on screen as the shell shows it (regression: an archived sto
     const all = await getPageContext({ loja: ALL_STORES }, { now: NOW })
     expect(all.storeOption).toBeNull()
     expect(clockLabel(all)).toBe('Brasília · cada loja no seu fuso')
+  })
+})
+
+// Squishy World, archived on 10 nov: its "Este mês" (1–24 nov) read "vs
+// mesmos dias do mês passado (1–24 out, até 14h07 de 24 out)" — the hour
+// following the clock on every reload, under "estes números não mudam" — and
+// set 24 days of October against the 10 days of November that were read
+// ("caiu 100%").
+describe('an archived store compares whole days it read (regression: Este mês cut at the live hour, 1–24 out vs 1–10 nov)', () => {
+  const SP = 'America/Sao_Paulo'
+  // 24 nov 14h47 and 17h07 in São Paulo.
+  const AT_1447 = new Date('2026-11-24T17:47:00Z')
+  const AT_1707 = new Date('2026-11-24T20:07:00Z')
+  const ON = '2026-11-10'
+  const win = (period: Parameters<typeof resolvePeriodWindow>[0], now: Date, de: string | null = null, ate: string | null = null) =>
+    archivedWindow(resolvePeriodWindow(period, de, ate, SP, now), ON, now)
+
+  it('Este mês: 1–10 nov against 1–10 out, no hour cut, the same at any hour', () => {
+    const live = resolvePeriodWindow('mtd', null, null, SP, AT_1447)
+    expect(live.comparisonText).toBe('vs mesmos dias do mês passado (1–24 out, até esta hora de 24 out)')
+    const w = win('mtd', AT_1447)
+    expect(w.range).toEqual({ from: '2026-11-01', to: '2026-11-24' })
+    expect(w.readRange).toEqual({ from: '2026-11-01', to: ON })
+    expect(w.archivedOn).toBe(ON)
+    expect(w.comparison).toEqual({ from: '2026-10-01', to: '2026-10-10', label: 'mesmos dias do mês passado', sameTimeOfDay: false })
+    expect(w.comparisonRangeLabel).toBe('1–10 out')
+    expect(w.comparisonText).toBe('vs mesmos dias do mês passado (1–10 out)')
+    expect(w.partial).toBe(false)
+    expect(w.partialLabel).toBeNull()
+    const later = win('mtd', AT_1707)
+    expect(later.comparison).toEqual(w.comparison)
+    expect(later.comparisonText).toBe(w.comparisonText)
+  })
+
+  it('a rolling window past the archive day: its read days against the same number just before', () => {
+    const w = win('30d', AT_1447)
+    expect(w.range).toEqual({ from: '2026-10-25', to: '2026-11-23' })
+    expect(w.readRange).toEqual({ from: '2026-10-25', to: ON })
+    expect(w.comparison).toMatchObject({ from: '2026-10-08', to: '2026-10-24', label: '17 dias anteriores', sameTimeOfDay: false })
+  })
+
+  it('a custom range ending today: no "até esta hora", the read days only', () => {
+    const w = win('custom', AT_1447, '2026-11-05', '2026-11-24')
+    expect(w.comparisonText).toBe('vs 6 dias anteriores (30 out – 4 nov)')
+    expect(w.comparisonText).not.toContain('até')
+  })
+
+  it('Mês passado cut short by the archive: the same days of the month before, not the whole month', () => {
+    const w = archivedWindow(resolvePeriodWindow('lastmonth', null, null, SP, AT_1447), '2026-10-10', AT_1447)
+    expect(w.readRange).toEqual({ from: '2026-10-01', to: '2026-10-10' })
+    expect(w.comparison).toMatchObject({ from: '2026-09-01', to: '2026-09-10', sameTimeOfDay: false })
+  })
+
+  it('Hoje after the archive: the whole day before, not "ontem até esta hora"', () => {
+    const w = win('today', AT_1447)
+    expect(w.readRange).toBeNull()
+    expect(w.comparison).toEqual({ from: '2026-11-23', to: '2026-11-23', label: 'dia anterior', sameTimeOfDay: false })
+    expect(w.comparisonText).toBe('vs dia anterior (23 nov)')
+    expect(w.partialLabel).toBeNull()
+  })
+
+  it('a window wholly before the archive day keeps its comparison', () => {
+    const base = resolvePeriodWindow('custom', '2026-06-02', '2026-10-31', SP, AT_1447)
+    const w = archivedWindow(base, ON, AT_1447)
+    expect(w.readRange).toBeNull()
+    expect(w.comparison).toEqual(base.comparison)
+    expect(w.comparisonText).toBe(base.comparisonText)
+  })
+
+  it('without the archive day (the read failed) only the cut and the running day go', () => {
+    const w = archivedWindow(resolvePeriodWindow('mtd', null, null, SP, AT_1447), null, AT_1447)
+    expect(w.readRange).toBeNull()
+    expect(w.comparison).toMatchObject({ from: '2026-10-01', to: '2026-10-24', sameTimeOfDay: false })
+    expect(w.comparisonText).toBe('vs mesmos dias do mês passado (1–24 out)')
+    expect(w.partial).toBe(false)
+  })
+
+  describe('getPageContext', () => {
+    const store = (id: string, name: string, archived: boolean): StoreRef =>
+      ({ id, name, shopName: name, domain: null, timezone: SP, archived, userId: null })
+    const EPOCH = store('73a1', 'EPOCH', false)
+    const SQUISHY = store('75cb', 'Squishy World', true)
+
+    beforeEach(() => {
+      vi.mocked(loadArchiveDates).mockReset()
+      vi.mocked(loadArchiveDates).mockImplementation(async ids => new Map(ids.includes(SQUISHY.id) ? [[SQUISHY.id, ON]] : []))
+      vi.mocked(getViewer).mockResolvedValue({ kind: 'owner' })
+      vi.mocked(listStores).mockResolvedValue([EPOCH])
+      vi.mocked(resolveStore).mockImplementation(async (_v, urlId) => ({
+        store: (urlId ? [EPOCH, SQUISHY].find(s => s.id === urlId) : EPOCH) ?? null, stores: [EPOCH],
+      }))
+    })
+
+    it('an archived store gets its archive day, its read days and a whole-day comparison', async () => {
+      const ctx = await getPageContext({ loja: SQUISHY.id, periodo: 'mtd' }, { now: AT_1447 })
+      expect(loadArchiveDates).toHaveBeenCalledWith([SQUISHY.id])
+      expect(ctx.archivedOn).toBe(ON)
+      expect(ctx.readRange).toEqual({ from: '2026-11-01', to: ON })
+      expect(ctx.comparisonText).toBe('vs mesmos dias do mês passado (1–10 out)')
+      expect(ctx.partial).toBe(false)
+      expect(ctx.partialLabel).toBeNull()
+      // The window itself is still the one the URL asked for.
+      expect(ctx.range).toEqual({ from: '2026-11-01', to: '2026-11-24' })
+      expect(ctx.params).toMatchObject({ periodo: 'mtd', de: null, ate: null })
+    })
+
+    it('an archived store whose archive day cannot be read still loses the live cut', async () => {
+      vi.mocked(loadArchiveDates).mockRejectedValue(new Error('db down'))
+      const err = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const ctx = await getPageContext({ loja: SQUISHY.id, periodo: 'mtd' }, { now: AT_1447 })
+      err.mockRestore()
+      expect(ctx.archivedOn).toBeNull()
+      expect(ctx.comparisonText).toBe('vs mesmos dias do mês passado (1–24 out)')
+    })
+
+    it('an active store asks nothing and keeps its live comparison', async () => {
+      const ctx = await getPageContext({ loja: EPOCH.id, periodo: 'mtd' }, { now: AT_1447 })
+      expect(loadArchiveDates).not.toHaveBeenCalled()
+      expect(ctx.archivedOn).toBeNull()
+      expect(ctx.readRange).toBeNull()
+      expect(ctx.partial).toBe(true)
+      expect(ctx.comparisonText).toBe('vs mesmos dias do mês passado (1–24 out, até esta hora de 24 out)')
+    })
+  })
+})
+
+describe('dates a store row opened (?volta) stay with that store (regression: Todas · Hoje → Hibikura row froze "24 nov" on every page and store)', () => {
+  const store = (id: string, name: string, timezone: string): StoreRef =>
+    ({ id, name, shopName: name, domain: null, timezone, archived: false, userId: null })
+  const MOKOO = store('user_3CV', 'MOKOO', 'America/Belem')
+  const EPOCH = store('73a1', 'EPOCH', 'America/Sao_Paulo')
+  const HIB = store('0344', 'Hibikura', 'Asia/Tokyo')
+  const STORES = [MOKOO, EPOCH, HIB]
+  const CLOCKS = ['America/Sao_Paulo', ...STORES.map(s => s.timezone)]
+  // 24 nov 17:00 UTC: 14h00 in Brasília, 02h00 of 25 nov in Tokyo.
+  const AFTERNOON = new Date('2026-11-24T17:00:00Z')
+  // 25 nov 03:30 UTC: 00h30 in Brasília (the next day), 12h30 in Tokyo.
+  const NEXT_NIGHT = new Date('2026-11-25T03:30:00Z')
+  const rowToday: SearchParams = { loja: HIB.id, periodo: 'custom', de: '2026-11-24', ate: '2026-11-24', volta: 'today' }
+  const rowWeek: SearchParams = { loja: HIB.id, periodo: 'custom', de: '2026-11-17', ate: '2026-11-23', volta: '7d' }
+  const query = (href: string): SearchParams => Object.fromEntries(new URL(href, 'http://x').searchParams)
+
+  beforeEach(() => {
+    vi.mocked(getViewer).mockResolvedValue({ kind: 'owner' })
+    vi.mocked(listStores).mockResolvedValue(STORES)
+    vi.mocked(resolveStore).mockImplementation(async (_v, urlId) => ({
+      store: (urlId ? STORES.find(s => s.id === urlId) : STORES[0]) ?? null, stores: STORES,
+    }))
+  })
+
+  it('parsePageParams reads volta only next to custom dates', () => {
+    expect(parsePageParams(rowToday).volta).toBe('today')
+    expect(parsePageParams({ ...rowToday, periodo: 'today' }).volta).toBeUndefined()
+    expect(parsePageParams({ ...rowToday, volta: 'custom' }).volta).toBeUndefined()
+    expect(parsePageParams({ ...rowToday, volta: 'amanha' }).volta).toBeUndefined()
+    expect(parsePageParams({ loja: HIB.id, periodo: 'custom', volta: 'today' }).volta).toBeUndefined()
+    // Without it the state is exactly what it always was.
+    expect(parsePageParams({ periodo: 'today' })).toEqual({ loja: null, periodo: 'today', de: null, ate: null, parte: false })
+  })
+
+  it('buildHref: the row link carries the preset, and the dates never leave that store', () => {
+    const todas = parsePageParams({ loja: ALL_STORES, periodo: 'today' })
+    expect(buildHref('/', todas, { loja: HIB.id, periodo: 'custom', de: '2026-11-24', ate: '2026-11-24', volta: 'today' }))
+      .toBe(`/?loja=${HIB.id}&periodo=custom&de=2026-11-24&ate=2026-11-24&volta=today`)
+    const hib = parsePageParams(rowToday)
+    // Same store: the sidebar and the split toggle keep the row's dates.
+    expect(buildHref('/campaigns', hib)).toBe(`/campaigns?loja=${HIB.id}&periodo=custom&de=2026-11-24&ate=2026-11-24&volta=today`)
+    expect(buildHref('', hib, { parte: true })).toBe(`?loja=${HIB.id}&periodo=custom&de=2026-11-24&ate=2026-11-24&volta=today&parte=50`)
+    // Another store, or Todas, from the picker: the owner's preset.
+    expect(buildHref('', hib, { loja: MOKOO.id })).toBe(`?loja=${MOKOO.id}&periodo=today`)
+    expect(buildHref('', hib, { loja: ALL_STORES })).toBe('?loja=todas&periodo=today')
+    expect(buildHref('/overview', hib, { loja: null })).toBe('/overview?periodo=today')
+    // 7 dias is the default: it is left out, as always.
+    expect(buildHref('', parsePageParams(rowWeek), { loja: MOKOO.id })).toBe(`?loja=${MOKOO.id}`)
+    // A period the owner picks replaces them (the period picker, "Escolher datas").
+    expect(buildHref('', hib, { periodo: '30d' })).toBe(`?loja=${HIB.id}&periodo=30d`)
+    expect(buildHref('', hib, { periodo: null })).toBe(`?loja=${HIB.id}`)
+    expect(buildHref('', hib, { periodo: 'custom', de: '2026-11-01', ate: '2026-11-10' }))
+      .toBe(`?loja=${HIB.id}&periodo=custom&de=2026-11-01&ate=2026-11-10`)
+    // Dates the owner picked (no volta) still travel to another store, as before.
+    const picked = parsePageParams({ loja: HIB.id, periodo: 'custom', de: '2026-11-01', ate: '2026-11-10' })
+    expect(buildHref('', picked, { loja: MOKOO.id })).toBe(`?loja=${MOKOO.id}&periodo=custom&de=2026-11-01&ate=2026-11-10`)
+  })
+
+  it('settleRowDates: held while a clock still reads the preset as those dates, the preset otherwise', () => {
+    const hib = parsePageParams(rowToday)
+    // Hibikura at 14h: Tokyo is on 25 nov, Todas' (Brasília's) "Hoje" is still 24 nov.
+    expect(settleRowDates(hib, 'Asia/Tokyo', CLOCKS, AFTERNOON)).toBe(hib)
+    // After midnight in Brasília no clock calls 24 nov "Hoje": the preset rolls on.
+    expect(settleRowDates(hib, 'Asia/Tokyo', CLOCKS, NEXT_NIGHT)).toEqual({ loja: HIB.id, periodo: 'today', de: null, ate: null, parte: false })
+    // On Todas (Brasília) those dates ARE "Hoje": the preset, by name.
+    expect(settleRowDates({ ...hib, loja: ALL_STORES }, 'America/Sao_Paulo', CLOCKS, AFTERNOON).periodo).toBe('today')
+    // 7 dias: 17–23 nov is Todas' week today, not tomorrow.
+    const week = parsePageParams(rowWeek)
+    expect(settleRowDates(week, 'Asia/Tokyo', CLOCKS, AFTERNOON)).toBe(week)
+    expect(settleRowDates(week, 'Asia/Tokyo', CLOCKS, new Date('2026-11-25T17:00:00Z')).periodo).toBe('7d')
+    // Todas opened on Tokyo's "Ontem" (Atribuição's link): held while it is Tokyo's.
+    const fromTokyo = parsePageParams({ loja: ALL_STORES, periodo: 'custom', de: '2026-11-24', ate: '2026-11-24', volta: 'yesterday' })
+    expect(settleRowDates(fromTokyo, 'America/Sao_Paulo', CLOCKS, AFTERNOON)).toBe(fromTokyo)
+    // Nothing to settle without volta.
+    const plain = parsePageParams({ loja: HIB.id, periodo: 'custom', de: '2026-11-24', ate: '2026-11-24' })
+    expect(settleRowDates(plain, 'Asia/Tokyo', CLOCKS, NEXT_NIGHT)).toBe(plain)
+  })
+
+  it('the whole walk: row → picker / sidebar → Todas, and a reload the next day', async () => {
+    const hib = await getPageContext(rowToday, { now: AFTERNOON })
+    expect(hib.store?.id).toBe(HIB.id)
+    expect(hib.period).toBe('custom')
+    expect(hib.range).toEqual({ from: '2026-11-24', to: '2026-11-24' })
+    expect(hib.params.volta).toBe('today')
+    // Store picker (AppShell: ctx.hrefWith('', { loja })) → the preset.
+    expect(hib.hrefWith('', { loja: MOKOO.id })).toBe(`?loja=${MOKOO.id}&periodo=today`)
+    expect(hib.hrefWith('', { loja: ALL_STORES })).toBe('?loja=todas&periodo=today')
+    // Sidebar → Campanhas of the same store keeps the row's day.
+    expect(hib.navHref('/campaigns')).toBe(`/campaigns?loja=${HIB.id}&periodo=custom&de=2026-11-24&ate=2026-11-24&volta=today`)
+    // Sidebar → Todas as lojas: the URL still names the dates, the page reads them as "Hoje".
+    const todas = await getPageContext(query(hib.navHref('/overview')), { scope: 'all', now: AFTERNOON })
+    expect(todas.period).toBe('today')
+    expect(todas.params.volta).toBeUndefined()
+    expect(todas.navHref('/campaigns')).toBe('/campaigns?loja=todas&periodo=today')
+    // MOKOO opened from the picker is MOKOO · Hoje.
+    const mokoo = await getPageContext(query(hib.hrefWith('', { loja: MOKOO.id })), { now: AFTERNOON })
+    expect(mokoo.period).toBe('today')
+    expect(mokoo.range).toEqual({ from: '2026-11-24', to: '2026-11-24' })
+    // The same row link reloaded after midnight: Hibikura · Hoje on its own clock.
+    const later = await getPageContext(rowToday, { now: NEXT_NIGHT })
+    expect(later.period).toBe('today')
+    expect(later.params.volta).toBeUndefined()
+    expect(later.range).toEqual({ from: '2026-11-25', to: '2026-11-25' })
+    expect(later.navHref('/campaigns')).toBe(`/campaigns?loja=${HIB.id}&periodo=today`)
+  })
+})
+
+// Repair round 5 (shared). Three things the row dates (?volta) still did wrong:
+//  - dates picked in the period picker after a row link opened the preset
+//    (the shell copied the stale volta into the picker's URL);
+//  - a store row of Todas · Este mês opened compared with "24 dias
+//    anteriores" while Todas, the row and the phone said "mesmos dias do mês
+//    passado";
+//  - Hibikura's "Ontem" carried through Todas to the MOKOO opened MOKOO's
+//    running day as "Ontem de Todas as lojas".
+describe('row dates after the row (regressions of ?volta)', () => {
+  const store = (id: string, name: string, timezone: string): StoreRef =>
+    ({ id, name, shopName: name, domain: null, timezone, archived: false, userId: null })
+  const MOKOO = store('user_3CV', 'MOKOO', 'America/Belem')
+  const EPOCH = store('73a1', 'EPOCH', 'America/Sao_Paulo')
+  const HIB = store('0344', 'Hibikura', 'Asia/Tokyo')
+  const STORES = [MOKOO, EPOCH, HIB]
+  // 24 nov 18:00 UTC: 15h00 in Brasília, 03h00 of 25 nov in Tokyo.
+  const AFTERNOON = new Date('2026-11-24T18:00:00Z')
+  // 30 nov 17:00 UTC: 14h00 of 30 nov in Brasília, 02h00 of 1 dez in Tokyo.
+  const LAST_DAY = new Date('2026-11-30T17:00:00Z')
+  const query = (href: string): SearchParams => Object.fromEntries(new URL(href, 'http://x').searchParams)
+
+  beforeEach(() => {
+    vi.mocked(getViewer).mockResolvedValue({ kind: 'owner' })
+    vi.mocked(listStores).mockResolvedValue(STORES)
+    vi.mocked(resolveStore).mockImplementation(async (_v, urlId) => ({
+      store: (urlId ? STORES.find(s => s.id === urlId) : STORES[0]) ?? null, stores: STORES,
+    }))
+  })
+
+  it('dates picked in the period picker open as picked, on any page a row link opened', async () => {
+    for (const [volta, de, ate] of [['today', '2026-11-24', '2026-11-24'], ['yesterday', '2026-11-23', '2026-11-23'], ['7d', '2026-11-17', '2026-11-23']] as const) {
+      const rowSearch = `?loja=${HIB.id}&periodo=custom&de=${de}&ate=${ate}&volta=${volta}`
+      const row = await getPageContext(query(rowSearch), { now: AFTERNOON })
+      expect(row.params.volta).toBe(volta)
+      // PeriodPicker.applyCustom: customBase (navHref('', { periodo: null })) +
+      // the picked dates, merged with the URL on screen as hrefFor does.
+      const base = new URLSearchParams(row.navHref('', { periodo: null }).slice(1))
+      base.set('periodo', 'custom'); base.set('de', '2026-11-01'); base.set('ate', '2026-11-10')
+      const pushed = mergeQuery(mergeQuery(`?${base}`, ''), rowSearch)
+      expect(pushed).not.toContain('volta')
+      const opened = await getPageContext(query(pushed), { now: AFTERNOON })
+      expect(opened.period).toBe('custom')
+      expect(opened.range).toEqual({ from: '2026-11-01', to: '2026-11-10' })
+      // A preset clicked there leaves no volta behind either.
+      expect(mergeQuery(row.navHref('', { periodo: '30d' }), rowSearch)).toBe(`?loja=${HIB.id}&periodo=30d`)
+    }
+  })
+
+  it('a row of Todas · Este mês is compared by "Este mês"\'s rule, as the row and the phone', async () => {
+    const todas = await getPageContext({ loja: ALL_STORES, periodo: 'mtd' }, { now: AFTERNOON })
+    expect(todas.comparison).toMatchObject({ from: '2026-10-01', to: '2026-10-24', label: 'mesmos dias do mês passado' })
+    // The Hibikura row (components/portfolio/model resumoLinkOverrides).
+    const hib = await getPageContext({ loja: HIB.id, periodo: 'custom', de: '2026-11-01', ate: '2026-11-24', volta: 'mtd' }, { now: AFTERNOON })
+    expect(hib.period).toBe('custom')
+    expect(hib.range).toEqual({ from: '2026-11-01', to: '2026-11-24' })
+    expect(hib.comparePeriod).toBe('mtd')
+    expect(hib.comparison).toMatchObject({ from: '2026-10-01', to: '2026-10-24', label: 'mesmos dias do mês passado', sameTimeOfDay: false })
+    expect(hib.comparisonText).toBe('vs mesmos dias do mês passado (1–24 out)')
+  })
+
+  it('a row of Todas · Mês passado on the month\'s last afternoon is compared with the month before', async () => {
+    const hib = await getPageContext({ loja: HIB.id, periodo: 'custom', de: '2026-10-01', ate: '2026-10-31', volta: 'lastmonth' }, { now: LAST_DAY })
+    expect(hib.range).toEqual({ from: '2026-10-01', to: '2026-10-31' })
+    expect(hib.comparison).toMatchObject({ from: '2026-09-01', to: '2026-09-30', label: 'mês anterior' })
+  })
+
+  it('only "Este mês" and "Mês passado" lend their rule; other dates compare as dates', () => {
+    const week = resolvePeriodWindow('custom', '2026-11-17', '2026-11-23', 'Asia/Tokyo', AFTERNOON, '7d')
+    expect(week.comparePeriod).toBe('custom')
+    expect(week.comparisonText).toBe('vs 7 dias anteriores (10–16 nov)')
+    const picked = resolvePeriodWindow('custom', '2026-11-01', '2026-11-24', 'Asia/Tokyo', AFTERNOON)
+    expect(picked.comparison.label).toBe('24 dias anteriores')
+    // A preset is its own rule whatever compareAs says.
+    expect(resolvePeriodWindow('7d', null, null, 'Asia/Tokyo', AFTERNOON, 'mtd').comparePeriod).toBe('7d')
+  })
+
+  it('the presets that lend their rule are the phone\'s and the portfolio\'s', async () => {
+    const { COMPARE_AS } = await import('../portfolio')
+    const { COMPARE_AS_PRESET } = await import('../../../app/m/_lib/selection')
+    expect([...COMPARE_AS_PRESETS]).toEqual([...COMPARE_AS])
+    expect([...COMPARE_AS_PRESETS]).toEqual([...COMPARE_AS_PRESET])
+  })
+
+  it('rowDateClocks: a store keeps row dates on Todas\' clock only; Todas on every store\'s', () => {
+    const tzs = STORES.map(s => s.timezone)
+    expect(rowDateClocks('store', tzs)).toEqual(['America/Sao_Paulo'])
+    expect(rowDateClocks('all', tzs)).toEqual(tzs)
+    // A partner with one store: that store's own clock, so no foreign dates hold.
+    expect(rowDateClocks('store', ['Asia/Tokyo'])).toEqual(['Asia/Tokyo'])
+  })
+
+  it('Hibikura\'s "Ontem" carried through Todas never becomes another store\'s running day', async () => {
+    // Atribuição on Hibikura · Ontem → Todas (components/attribution/allStoresLink).
+    const todas = await getPageContext({ loja: ALL_STORES, periodo: 'custom', de: '2026-11-24', ate: '2026-11-24', volta: 'yesterday' }, { scope: 'all', now: AFTERNOON })
+    expect(todas.period).toBe('custom')
+    expect(todas.rowDatesOf).toBe('Hibikura')
+    // An old link that still carries volta to the MOKOO (resumoLinkOverrides now gives that row plain dates) and the sidebar's
+    // Resumo (carries loja=todas; shows the remembered store, the MOKOO).
+    for (const href of [`/?loja=${MOKOO.id}&periodo=custom&de=2026-11-24&ate=2026-11-24&volta=yesterday`, todas.navHref('/')]) {
+      const mokoo = await getPageContext(query(href), { scope: 'store', now: AFTERNOON })
+      expect(mokoo.store?.id).toBe(MOKOO.id)
+      expect(mokoo.period).toBe('yesterday')
+      expect(mokoo.range).toEqual({ from: '2026-11-23', to: '2026-11-23' })
+      expect(mokoo.params.volta).toBeUndefined()
+      expect(mokoo.rowDatesOf).toBeNull()
+    }
+    // The Hibikura row: its own "Ontem", by name.
+    const hib = await getPageContext({ loja: HIB.id, periodo: 'custom', de: '2026-11-24', ate: '2026-11-24', volta: 'yesterday' }, { now: AFTERNOON })
+    expect(hib.period).toBe('yesterday')
+    expect(hib.range).toEqual({ from: '2026-11-24', to: '2026-11-24' })
+  })
+
+  it('a store page on Todas\' row dates says they are Todas\'', async () => {
+    const hib = await getPageContext({ loja: HIB.id, periodo: 'custom', de: '2026-11-24', ate: '2026-11-24', volta: 'today' }, { now: AFTERNOON })
+    expect(hib.period).toBe('custom')
+    expect(hib.rowDatesOf).toBe('Todas as lojas')
+    expect(rowDatesOf({ periodo: 'custom', de: '2026-11-24', ate: '2026-11-24' }, 'all', STORES, AFTERNOON)).toBeNull()
   })
 })

@@ -8,6 +8,13 @@ describe('keepPeriodHref', () => {
     expect(keepPeriodHref('/', sp)).toBe('/?periodo=custom&de=2026-11-01&ate=2026-11-10&parte=50')
   })
 
+  // Without volta the page opened read a Todas row's dates as dates the owner
+  // picked ("Período escolhido"), and kept them frozen the next day.
+  it('keeps the preset row dates stand for (volta)', () => {
+    const sp = new URLSearchParams('loja=0344&periodo=custom&de=2026-11-24&ate=2026-11-24&volta=today')
+    expect(keepPeriodHref('/', sp)).toBe('/?periodo=custom&de=2026-11-24&ate=2026-11-24&volta=today')
+  })
+
   it('is a bare path when there is no period in the URL', () => {
     expect(keepPeriodHref('/', new URLSearchParams('loja=bogus'))).toBe('/')
     expect(keepPeriodHref('/', new URLSearchParams(''))).toBe('/')

@@ -24,7 +24,8 @@
  * Everything here is the window the page context resolved (lib/views/page),
  * passed in, never re-derived.
  *
- * Pure helpers (comparisonPlan, trailRanges, chartSeries, windowDaysSinceStart, kpiDays, storeKpis,
+ * Pure helpers (comparisonPlan, archivedComparison, trailRanges, chartSeries, windowDaysSinceStart,
+ * kpiDays, readUntil, daysRead, storeKpis,
  * topProducts, topCountries, campaignHighlights, chargebackLevel) are tested in
  * __tests__/store.test.ts.
  */
@@ -41,7 +42,7 @@ import { getCampaignReport, spentAds, type CampaignReport, type CampaignRow } fr
 import type { CampaignAction } from '../campaignSignal'
 import { adChannelOf, channelRoas, type AdChannel } from './adChannel'
 import {
-  assemblePortfolio, loadFirstOrderDates,
+  archivedComparison, assemblePortfolio, loadArchiveDates, loadFirstOrderDates,
   type PortfolioStoreInput, type PortfolioStoreRow, type PortfolioView, type StoreComparison,
 } from './portfolio'
 
@@ -57,14 +58,18 @@ import {
  *                earlier days whole plus the last one cut at this minute.
  * With one store the anchor clock is the store's own, so its window has always
  * started and the comparison is always included.
+ *
+ * An archived store (`archived`) is always compared on whole days: it is not
+ * synced, so its day is not running and "até esta hora" means nothing for it
+ * (Squishy World's Este mês read "caiu 100% vs 1–24 out até 14h23").
  */
 export type ComparisonPlan =
   | { kind: 'whole'; range: DateRange }
   | { kind: 'same_time'; day: string }
   | { kind: 'cut_last'; lastDay: string; runUp: DateRange | null; cutMinutes: number | null }
 
-export function comparisonPlan(range: DateRange, cmp: Comparison, storeToday: string, minutesNow: number): ComparisonPlan {
-  const cutLast = cmp.sameTimeOfDay || range.to >= storeToday
+export function comparisonPlan(range: DateRange, cmp: Comparison, storeToday: string, minutesNow: number, archived = false): ComparisonPlan {
+  const cutLast = !archived && (cmp.sameTimeOfDay || range.to >= storeToday)
   if (!cutLast) return { kind: 'whole', range: { from: cmp.from, to: cmp.to } }
   if (range.from === range.to && cmp.from === cmp.to && cmp.to === shiftDate(range.to, -1)) {
     return { kind: 'same_time', day: range.to }
@@ -77,11 +82,21 @@ export function comparisonPlan(range: DateRange, cmp: Comparison, storeToday: st
   }
 }
 
+/**
+ * What an archived store's window is compared with (the read days, whole) —
+ * defined in lib/views/portfolio, which buildPortfolio shares with the phone;
+ * re-exported here for the Resumo's callers. The page context
+ * (lib/views/page archivedWindow) already applies the same rule to
+ * ctx.comparison; applying it again is a no-op. The hour cut itself is left
+ * out by comparisonPlan(…, archived).
+ */
+export { archivedComparison }
+
 async function loadStoreComparison(
   store: PortfolioStoreInput, range: DateRange, cmp: Comparison, now: Date,
 ): Promise<StoreComparison> {
   const tz = safeTz(store.timezone)
-  const plan = comparisonPlan(range, cmp, todayInTz(tz, now), minutesIntoDay(tz, now))
+  const plan = comparisonPlan(range, cmp, todayInTz(tz, now), minutesIntoDay(tz, now), !!store.archived)
   const whole: DateRange = { from: cmp.from, to: cmp.to }
   const id = store.id
   if (plan.kind === 'whole') {
@@ -141,23 +156,35 @@ export async function loadStoreSummary(store: PortfolioStoreInput, win: StoreWin
   // Optional: a failed read leaves the row's firstOrderDate null, as before.
   const firstOrders = loadFirstOrderDates([store.id])
     .catch(err => { console.error('[resumo] first order', err); return new Map<string, string>() })
-  const [current, compared, sellsIn, firstOrderDates, daysBefore] = await Promise.all([
+  // An archived store's archive day, so the verdict says "arquivada desde
+  // 10 nov … não há dados" instead of "não teve vendas nos últimos 7 dias"
+  // (Squishy World), as buildPortfolio's rows already do. Optional too. The
+  // comparison waits for it (archivedComparison); any other store resolves it
+  // at once.
+  const archives = store.archived
+    ? loadArchiveDates([store.id]).catch(err => { console.error('[resumo] archive date', err); return new Map<string, string>() })
+    : Promise.resolve(new Map<string, string>())
+  const comparisonOf = (m: Map<string, string>) =>
+    archivedComparison(store, m.get(store.id) ?? null, win.range, win.comparison, safeTz(store.timezone), now)
+  const [current, compared, sellsIn, firstOrderDates, daysBefore, archiveDates] = await Promise.all([
     computePnL([store.id], win.range, { products: true, countries: true }, now),
-    loadStoreComparison(store, win.range, win.comparison, now),
+    archives.then(m => loadStoreComparison(store, win.range, comparisonOf(m), now)),
     loadSaleCurrency(store.id).catch(() => null),
     firstOrders,
     // Alongside the window's pass, not after it: only a store that started
     // inside the window pays for it.
     firstOrders.then(m => loadDaysBeforeIfNeeded(store.id, win.range, m.get(store.id) ?? null, now)),
+    archives,
   ])
   const pnl = current.get(store.id)
   if (!pnl) throw new Error(`Loja ${store.id} não encontrada no motor`)
+  const archivedOn = store.archived ? archiveDates.get(store.id) ?? null : null
   const view = assemblePortfolio({
-    stores: [store], period: win.period, range: win.range, comparison: win.comparison,
+    stores: [store], period: win.period, range: win.range, comparison: comparisonOf(archiveDates),
     anchorTimezone: safeTz(store.timezone), now,
     current, compared: new Map([[store.id, compared]]),
     chargebackHealth: null, liveFeed: [], liveCovered: new Set([store.id]), syncRows: null,
-    firstOrderDates,
+    firstOrderDates, archiveDates,
   })
   const row = view.stores[0]
   const prev = compared.totals
@@ -166,6 +193,7 @@ export async function loadStoreSummary(store: PortfolioStoreInput, win: StoreWin
     firstOrderDate: firstOrderDates.get(store.id) ?? null,
     before: daysBefore,
     runningDay: pnl.partial ? todayInTz(safeTz(store.timezone), now) : null,
+    archivedOn,
   })
   return {
     store, view, row, pnl, previous,
@@ -372,16 +400,22 @@ export interface KpiDays {
  *    chart leaves it out of "8 de 11 dias no lucro" for the same reason). At
  *    01h on the 2nd, "Este mês" halved the first day's average.
  * spanDays keeps the running day: it counts days, it averages nothing.
+ *
+ * An archived store's days end on its archive day (`archivedOn`): nothing
+ * after it was read, as the verdict says ("não há dados dos dias seguintes").
+ * Squishy World's 30 dias (25 out – 23 nov, archived on 10 nov) read "$11,36
+ * por dia em média" — $340,71 ÷ 30 — for $340,71 ÷ 17 read days, $20,04.
  */
 export function kpiDays(
   range: DateRange, daily: readonly DayPnL[],
-  opts: { firstOrderDate: string | null; before?: readonly DayPnL[]; runningDay: string | null },
+  opts: { firstOrderDate: string | null; before?: readonly DayPnL[]; runningDay: string | null; archivedOn?: string | null },
 ): KpiDays {
   const since = windowDaysSinceStart(chartSeries([...(opts.before ?? [])], [...daily], []), opts.firstOrderDate)
   const start = since.startedOn ?? range.from
   const salesStart = opts.firstOrderDate && opts.firstOrderDate > start ? opts.firstOrderDate : start
-  const running = opts.runningDay && opts.runningDay >= range.from && opts.runningDay <= range.to ? opts.runningDay : null
-  const lastClosed = running ? shiftDate(running, -1) : range.to
+  const end = readUntil(range, opts.archivedOn)
+  const running = opts.runningDay && opts.runningDay >= range.from && opts.runningDay <= end ? opts.runningDay : null
+  const lastClosed = running ? shiftDate(running, -1) : end
   const closedFrom = (from: string) => (from <= lastClosed ? daysBetween(from, lastClosed) : 0)
   const avgDays = closedFrom(start)
   const salesAvgDays = closedFrom(salesStart)
@@ -391,8 +425,24 @@ export function kpiDays(
     avgDays,
     salesAvg: salesAvgDays > 0 ? { from: salesStart, to: lastClosed } : null,
     salesAvgDays,
-    spanDays: start <= range.to ? daysBetween(start, range.to) : 0,
+    spanDays: start <= end ? daysBetween(start, end) : 0,
   }
+}
+
+/**
+ * The window's last day that was read: its end, or an archived store's
+ * archive day when the window runs past it (nothing after it is read). Below
+ * range.from for a window wholly after the archive day.
+ */
+export function readUntil(range: DateRange, archivedOn: string | null | undefined): string {
+  return archivedOn && archivedOn < range.to ? archivedOn : range.to
+}
+
+/** Days up to an archived store's archive day (all of them without one): the
+ *  days after it were never read, and drawn as $0 bars they read as days
+ *  without sales. */
+export function daysRead<T extends { date: string }>(days: readonly T[], archivedOn: string | null | undefined): T[] {
+  return archivedOn ? days.filter(d => d.date <= archivedOn) : [...days]
 }
 
 type AvgKey = 'revenue' | 'orders' | 'metaSpend'
@@ -594,11 +644,20 @@ export function seriesIdle(series: ChartDay[], configured: boolean): boolean {
 
 /**
  * Before + window + after, oldest first, each date once. Context days before
- * the store had any activity (Hibikura opened on 07/11) are dropped: a row of
- * empty days reads as "sold nothing", which is not what happened. Days inside
- * the window are always kept, empty or not.
+ * the store started (Hibikura opened on 07/11) are dropped: a row of empty
+ * days reads as "sold nothing", which is not what happened. Days inside the
+ * window are always kept, empty or not.
+ *
+ * The store starts on its first kept order or its first day with any
+ * activity, whichever is earlier (the rule of windowDaysSinceStart and of the
+ * Todas sparkline, components/portfolio/model trailSinceStart). With
+ * `firstOrderDate` known, only idle days BEFORE it are dropped: Squishy
+ * World, selling since 2 jun, had two quiet days at the head of its 30-day
+ * context, and the chart dropped them and said "28 dias antes, desde que a
+ * loja começou". Without it (unknown, or a store that never sold), the
+ * leading idle days are dropped as before.
  */
-export function chartSeries(before: DayPnL[], window: DayPnL[], after: DayPnL[]): ChartDay[] {
+export function chartSeries(before: DayPnL[], window: DayPnL[], after: DayPnL[], firstOrderDate?: string | null): ChartDay[] {
   const seen = new Set<string>()
   const out: ChartDay[] = []
   for (const [list, inWindow] of [[before, false], [window, true], [after, false]] as const) {
@@ -609,7 +668,7 @@ export function chartSeries(before: DayPnL[], window: DayPnL[], after: DayPnL[])
     }
   }
   out.sort((a, b) => a.date.localeCompare(b.date))
-  const firstActive = out.findIndex(d => d.inWindow || !idle(d))
+  const firstActive = out.findIndex(d => d.inWindow || !idle(d) || (!!firstOrderDate && d.date >= firstOrderDate))
   return firstActive > 0 ? out.slice(firstActive) : out
 }
 

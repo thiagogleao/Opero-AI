@@ -242,3 +242,44 @@ describe('isStoreOnlyPath', () => {
     expect(checked).toBeGreaterThanOrEqual(10)
   })
 })
+
+// ─── Row dates (?volta) are page state (regression) ──────────────────────────
+// volta was not a state key, so the shell copied it from the URL on screen into
+// every URL its pickers built: dates picked after a Todas row link opened as
+// "?…&periodo=custom&de=2026-11-01&ate=2026-11-10&volta=today", and the server
+// read them as stale row dates and showed "Hoje". It followed preset clicks
+// and the store picker too. Only the server-built query may carry it now.
+describe('volta is page state: only the server-built query carries it', () => {
+  const row = `?loja=${HIBIKURA}&periodo=custom&de=2026-11-24&ate=2026-11-24&volta=today`
+
+  it('dates picked, a preset or a store never pick up the volta on screen', () => {
+    expect(mergeQuery(`?loja=${HIBIKURA}&periodo=custom&de=2026-11-01&ate=2026-11-10`, `${row}&aba=criativos`))
+      .toBe(`?loja=${HIBIKURA}&periodo=custom&de=2026-11-01&ate=2026-11-10&aba=criativos`)
+    expect(mergeQuery(`?loja=${HIBIKURA}&periodo=30d`, row)).toBe(`?loja=${HIBIKURA}&periodo=30d`)
+    // A stale one left by an older build is dropped as well.
+    expect(mergeQuery(`?loja=${MOKOO}&periodo=custom&de=2026-11-01&ate=2026-11-10`, `?loja=${MOKOO}&periodo=7d&volta=today`))
+      .toBe(`?loja=${MOKOO}&periodo=custom&de=2026-11-01&ate=2026-11-10`)
+    expect(storeSwitchHref('/products', `?loja=${MOKOO}&periodo=today`, row)).toBe(`/products?loja=${MOKOO}&periodo=today`)
+  })
+
+  it('keeps the volta the server put in the query (the split toggle on row dates)', () => {
+    expect(mergeQuery(`${row}&parte=50`, row)).toBe(`${row}&parte=50`)
+  })
+
+  it('a period chosen while a row link loads replaces its dates and its volta', () => {
+    const opening = `/${row}`
+    expect(layerHref(opening, `/?loja=${HIBIKURA}&periodo=custom&de=2026-11-01&ate=2026-11-10`, NAV_LAYER.period))
+      .toBe(`/?loja=${HIBIKURA}&periodo=custom&de=2026-11-01&ate=2026-11-10`)
+    expect(layerHref(opening, `/overview?loja=todas&periodo=30d`, NAV_LAYER.period)).toBe(`/?loja=${HIBIKURA}&periodo=30d`)
+  })
+
+  it('a store chosen while a row link loads gets the preset back, as buildHref does', () => {
+    const opening = `/products${row}`
+    expect(layerHref(opening, `/products?loja=${MOKOO}&periodo=today`, NAV_LAYER.store)).toBe(`/products?loja=${MOKOO}&periodo=today`)
+    expect(layerHref(`/${row.replace('volta=today', 'volta=7d')}`, `/overview?loja=todas`, NAV_LAYER.store)).toBe('/overview?loja=todas&periodo=7d')
+    // The same store keeps its row dates; so do the split toggle and a sidebar link.
+    expect(layerHref(opening, `/products?loja=${HIBIKURA}`, NAV_LAYER.store)).toBe(`/products${row}`)
+    expect(layerHref(opening, `/products?loja=${HIBIKURA}&parte=50`, NAV_LAYER.split)).toBe(`/products${row}&parte=50`)
+    expect(layerHref(opening, `/campaigns?loja=${EPOCH}`, NAV_LAYER.link)).toBe(`/campaigns${row}`)
+  })
+})

@@ -32,8 +32,12 @@ const MONO_EM = 0.6
 const SANS_EM = 0.56
 const MONTHS = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez']
 
+/** Zero-width characters (lib/format glues a sign to its "$" with a word
+ *  joiner): they draw nothing, so they take no room in a label's box. */
+const ZERO_WIDTH = /[\u200B-\u200D\u2060\uFEFF]/g
+
 export function textWidth(text: string, fontSize: number, font: 'mono' | 'sans' = 'mono'): number {
-  return text.length * fontSize * (font === 'mono' ? MONO_EM : SANS_EM)
+  return text.replace(ZERO_WIDTH, '').length * fontSize * (font === 'mono' ? MONO_EM : SANS_EM)
 }
 
 export interface PlacedLabel {

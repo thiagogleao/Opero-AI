@@ -5,7 +5,7 @@ import { buildVerdict, storeStatus, verdictInputFromPortfolio } from '@/lib/view
 import { computeStorePnL } from '@/lib/engine/pnl'
 import { shiftDate, todayInTz } from '@/lib/engine/dates'
 import type { StoreRef } from '@/lib/access'
-import { formatCount, formatMoney, formatPct, formatRangeLabel, plural } from '@/lib/format'
+import { formatCount, formatMoney, formatPct, formatRangeLabel, formatRoas, formatShare, plural } from '@/lib/format'
 import {
   Avatar, Badge, Block, BreakdownBar, BreakdownLedger, Button, ButtonLink, Callout, Card, Chip, ClientTabs,
   CodePill, Count, DataTable, Delta, EmptyState, ErrorState, InfoTip, KpiCard, KpiGrid, Money, Pct, Roas,
@@ -45,7 +45,7 @@ export default async function StyleguidePage({ searchParams }: { searchParams: P
   const storeToday = todayInTz(store.timezone, ctx.now)
 
   const [main, todas, hibToday, glootyMonth, month, today, yesterday, prodPnl, quarter] = await Promise.all([
-    buildPortfolio([store], ctx.period, ctx.params.de, ctx.params.ate, ctx.now, NO_EXTRAS),
+    buildPortfolio([store], ctx.period, ctx.params.de, ctx.params.ate, ctx.now, { ...NO_EXTRAS, compareAs: ctx.comparePeriod }),
     buildPortfolio(ctx.stores, 'today', null, null, ctx.now, NO_EXTRAS),
     hib ? buildPortfolio([hib], 'today', null, null, ctx.now, NO_EXTRAS) : Promise.resolve(null),
     // 30 days: Glooty has no cost settings and its ads passed its sales.
@@ -87,7 +87,7 @@ export default async function StyleguidePage({ searchParams }: { searchParams: P
           </div>
           <div className={s.type} style={{ marginTop: 18 }}>
             <div className={s.typeRow}><span className={s.serif}>A MOKOO lucrou nos últimos 7 dias.</span><span>Fraunces 500 · só o veredito</span></div>
-            <div className={s.typeRow}><span className={s.bigNum}>$1.313 · −$201 · 1,95×</span><span>IBM Plex Mono · todo número</span></div>
+            <div className={s.typeRow}><span className={s.bigNum}>{formatMoney(1313)} · {formatMoney(-201)} · {formatRoas(1.95)}</span><span>IBM Plex Mono · todo número</span></div>
             <div className={s.typeRow}><span>Texto de interface em IBM Plex Sans, 14px.</span><span>IBM Plex Sans</span></div>
             <div className={s.typeRow}><span className="lbl">Lucro real · 10–16 nov</span><span>.lbl · rótulo</span></div>
           </div>
@@ -273,7 +273,7 @@ export default async function StyleguidePage({ searchParams }: { searchParams: P
           <Block title="O que mais vendeu" howTo="Receita das linhas de produto no período (o total do pedido rateado pelos itens).">
             <HorizontalBars ariaLabel="Produtos por receita" items={(prodPnl?.products ?? []).slice(0, 6).map(p => ({
               key: p.key, label: p.title, sub: `${plural(p.units, 'unidade', 'unidades')} · ${plural(p.orders, 'pedido', 'pedidos')}`,
-              value: p.revenue, note: prodPnl && prodPnl.totals.revenue ? formatPct((p.revenue / prodPnl.totals.revenue) * 100) : undefined,
+              value: p.revenue, note: prodPnl && prodPnl.totals.revenue ? formatShare((p.revenue / prodPnl.totals.revenue) * 100, { digits: 1 }) : undefined,
             }))} />
           </Block>
         </div>

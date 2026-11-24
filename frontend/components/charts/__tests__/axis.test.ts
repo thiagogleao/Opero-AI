@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { clampLabel, dailyAxis, textWidth } from '../axis'
+import { formatMoney } from '@/lib/format'
 
 /** Every date from `from`, n days. */
 function dates(from: string, n: number): string[] {
@@ -159,3 +160,12 @@ function shift(iso: string, n: number): string {
   d.setUTCDate(d.getUTCDate() + n)
   return d.toISOString().slice(0, 10)
 }
+
+describe('textWidth', () => {
+  it('gives no room to the word joiner lib/format puts between a sign and "$"', () => {
+    const neg = formatMoney(-1200)
+    expect(neg).not.toBe('−$1.200')
+    expect(textWidth(neg, 11)).toBe(textWidth('−$1.200', 11))
+    expect(textWidth(formatMoney(-9.8), 11.5, 'sans')).toBe(textWidth('−$9,80', 11.5, 'sans'))
+  })
+})

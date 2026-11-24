@@ -65,6 +65,23 @@ export interface PageParams {
   de: string | null
   ate: string | null
   parte: boolean
+  /**
+   * Only with periodo=custom, and only on dates a link read on another clock
+   * (?volta=<preset>): a store row of "Todas" for a store whose day is not
+   * Brasília's (Hibikura after noon, components/portfolio/model
+   * resumoLinkOverrides), Atribuição's link from such a store to Todas. It is
+   * the preset the owner had chosen ("Hoje", "7 dias"…); the phone keeps the
+   * same thing as rowPreset (app/m/_lib/selection). Absent otherwise.
+   * The dates belong to the store (or Todas) they were opened on: buildHref
+   * brings the preset back on a link to another store or scope and drops them
+   * for a period the owner picks, and getPageContext (settleRowDates) brings it
+   * back once they are no longer that preset on the clock they were read on —
+   * the next day (rowDateClocks). Without it "Hoje" became "24 nov" on every
+   * page and store visited next, and a reload the next morning still opened
+   * 24 nov. Row dates of "Este mês" and "Mês passado" are compared by that
+   * preset's rule (resolvePeriodWindow compareAs), as the phone does.
+   */
+  volta?: Period
 }
 
 const first = (v: string | string[] | undefined): string | null => {
@@ -80,25 +97,98 @@ const first = (v: string | string[] | undefined): string | null => {
  *  - periodo=custom without both dates → the default (never a silent "today");
  *  - a range wholly before MIN_PAGE_DATE counts as no dates (→ the default);
  *    the length cap needs today, so resolvePeriodWindow applies it;
- *  - parte=50 → the partner split; anything else → off.
+ *  - parte=50 → the partner split; anything else → off;
+ *  - volta=<preset> (not custom) only next to custom dates; anything else is
+ *    ignored.
  */
 export function parsePageParams(sp: SearchParams, defaultPeriod: Period = DEFAULT_PERIOD): PageParams {
   const loja = first(sp.loja)
   const rawPeriod = first(sp.periodo)
   const de = first(sp.de)
   const ate = first(sp.ate)
+  const rawVolta = first(sp.volta)
   const dates = isIsoDate(de) && isIsoDate(ate) && (de >= MIN_PAGE_DATE || ate >= MIN_PAGE_DATE)
   let periodo: Period = isPeriod(rawPeriod) ? rawPeriod : defaultPeriod
   if (!rawPeriod && dates) periodo = 'custom'
   if (periodo === 'custom' && !dates) periodo = defaultPeriod
+  const volta = periodo === 'custom' && isPeriod(rawVolta) && rawVolta !== 'custom' ? rawVolta : null
   return {
     loja,
     periodo,
     de: periodo === 'custom' ? de : null,
     ate: periodo === 'custom' ? ate : null,
     parte: first(sp.parte) === '50',
+    ...(volta ? { volta } : {}),
   }
 }
+
+/**
+ * Dates a link read on another clock (PageParams.volta), checked against now:
+ *  - still that preset on one of the clocks they may come from (`clocks`,
+ *    rowDateClocks), and not on this page's own (`ownTz`) → kept;
+ *  - the same as the preset on this page's own clock (Todas reading a
+ *    Hibikura row's dates: they ARE Todas' "Hoje") → the preset, by name;
+ *  - no clock reads the preset as those dates any more (midnight passed, a
+ *    link reopened days later) → the preset, which rolls on with the clock.
+ * Returns `p` itself when nothing changes.
+ */
+export function settleRowDates(p: PageParams, ownTz: string, clocks: readonly string[], now: Date): PageParams {
+  if (!p.volta) return p
+  const volta = p.volta
+  const preset: PageParams = { loja: p.loja, periodo: volta, de: null, ate: null, parte: p.parte }
+  if (p.periodo !== 'custom' || !p.de || !p.ate) return preset
+  const names = (tz: string) => {
+    const r = resolveRange(volta, tz, null, null, now)
+    return r.from === p.de && r.to === p.ate
+  }
+  return names(ownTz) || !clocks.some(names) ? preset : p
+}
+
+/**
+ * The clocks a page keeps row dates for (settleRowDates `clocks`): the clocks
+ * those dates can have been read on.
+ *  - One store: Todas' clock only (anchorTz of the viewer's stores), the
+ *    phone's rule (app/m/_lib/selection expireRowDates). Row dates reach a
+ *    store from Todas' rows (components/portfolio/model resumoLinkOverrides)
+ *    and Campanhas' links between stores; dates read on another store's clock
+ *    are not this store's and give way to the preset. Kept, Hibikura's "Ontem"
+ *    (24 nov in Tokyo), carried from Atribuição through Todas to the MOKOO,
+ *    opened MOKOO's running 24 nov as "Ontem de Todas as lojas", while Todas'
+ *    own Ontem was 23 nov.
+ *  - Todas: every store's clock (Atribuição's link from one store to Todas
+ *    carries that store's days, components/attribution/allStoresLink).
+ */
+export function rowDateClocks(scope: 'store' | 'all', storeTimezones: readonly string[]): string[] {
+  return scope === 'all' ? [...storeTimezones] : [anchorTz([...storeTimezones])]
+}
+
+/**
+ * Whose dates a page on row dates shows (PageContext.rowDatesOf): 'Todas as
+ * lojas' on a store page (rowDateClocks keeps none other there); on Todas, the
+ * one store whose clock reads the preset as those dates ("Hibikura"), or null
+ * when none or several do. Null without row dates.
+ */
+export function rowDatesOf(
+  p: Pick<PageParams, 'periodo' | 'de' | 'ate' | 'volta'>, scope: 'store' | 'all',
+  stores: readonly { name: string; timezone: string }[], now: Date,
+): string | null {
+  const volta = p.volta
+  if (!volta || p.periodo !== 'custom' || !p.de || !p.ate) return null
+  if (scope === 'store') return 'Todas as lojas'
+  const readers = stores.filter(st => {
+    const r = resolveRange(volta, st.timezone, null, null, now)
+    return r.from === p.de && r.to === p.ate
+  })
+  return readers.length === 1 ? readers[0].name : null
+}
+
+/**
+ * Presets whose comparison rule row dates keep (resolvePeriodWindow
+ * compareAs): the same list as lib/views/portfolio COMPARE_AS and the phone's
+ * COMPARE_AS_PRESET (app/m/_lib/selection), which a test checks. Not imported:
+ * lib/views/portfolio loads the database pool.
+ */
+export const COMPARE_AS_PRESETS: readonly Period[] = ['mtd', 'lastmonth']
 
 /** Everything a page says about its window. */
 export interface PeriodWindow {
@@ -111,6 +201,10 @@ export interface PeriodWindow {
   /** For sentences: "nos últimos 7 dias", "hoje". */
   periodPhrase: string
   comparison: Comparison
+  /** The period whose rule `comparison` follows: `period`, or for row dates
+   *  of "Este mês" or "Mês passado" that preset (COMPARE_AS_PRESETS). Pass it to
+   *  buildPortfolio as compareAs so its numbers are compared the same way. */
+  comparePeriod: Period
   /** "3–9 nov". */
   comparisonRangeLabel: string
   /** "vs 7 dias anteriores (3–9 nov)" / "vs ontem até esta hora". */
@@ -135,9 +229,17 @@ export interface PeriodWindow {
  * before MIN_PAGE_DATE nor ends after today (resolveRange), and it keeps its
  * last MAX_WINDOW_DAYS days — so a page never prices decades, and never sends
  * SQL a date it cannot read. `rangeNote` says when that happened.
+ *
+ * `compareAs` (PageParams.volta): custom dates that stand for "Este mês" or
+ * "Mês passado" are compared by that preset's rule, as the phone compares
+ * them (buildPortfolio compareAs). Hibikura's row of Todas · Este mês after
+ * noon (1–24 nov, Tokyo already on the 25th) opened compared with "24 dias
+ * anteriores" (8–31 out), while the row, Todas and the phone said "mesmos dias
+ * do mês passado" (1–24 out). Any other preset compares custom dates as
+ * custom: "7 dias" and "Ontem" use the same rule either way.
  */
 export function resolvePeriodWindow(
-  period: Period, de: string | null, ate: string | null, tz: string, now: Date = new Date(),
+  period: Period, de: string | null, ate: string | null, tz: string, now: Date = new Date(), compareAs?: Period | null,
 ): PeriodWindow {
   const floor = (d: string | null) => (d !== null && d < MIN_PAGE_DATE ? MIN_PAGE_DATE : d)
   const floored = period === 'custom' && ((de !== null && de < MIN_PAGE_DATE) || (ate !== null && ate < MIN_PAGE_DATE))
@@ -150,7 +252,8 @@ export function resolvePeriodWindow(
   } else if (floored) {
     rangeNote = `Datas antes de ${formatDate(MIN_PAGE_DATE, today)} não entram: o período começa em ${formatDate(range.from, today)}.`
   }
-  const comparison = comparisonRange(period, range, tz, now)
+  const comparePeriod = period === 'custom' && compareAs && COMPARE_AS_PRESETS.includes(compareAs) ? compareAs : period
+  const comparison = comparisonRange(comparePeriod, range, tz, now)
   const partial = range.to >= today && range.from <= today
   const minutes = minutesIntoDay(tz, now)
   const rangeLabel = formatRangeLabel(range, today)
@@ -160,6 +263,7 @@ export function resolvePeriodWindow(
     periodLabel: period === 'custom' || !preset ? rangeLabel : preset.label,
     periodPhrase: periodPhrase(period, range, today),
     comparison,
+    comparePeriod,
     comparisonRangeLabel: formatRangeLabel({ from: comparison.from, to: comparison.to }, today),
     // A window ending today is compared with its last day cut at this hour
     // (lib/views/store comparisonPlan, portfolio loadComparison: cutLast =
@@ -172,6 +276,81 @@ export function resolvePeriodWindow(
   }
 }
 
+/** What an archived store's window adds (archivedWindow); both null for any
+ *  other window. */
+export interface ArchiveFacts {
+  /** The archive day on the store's own calendar (lib/views/portfolio
+   *  loadArchiveDates); null when the store is not archived or the read failed. */
+  archivedOn: string | null
+  /** The days of a window that runs past the archive day that were read
+   *  (window start → archive day), the days its comparison mirrors; null
+   *  otherwise. */
+  readRange: DateRange | null
+}
+
+/**
+ * The window of an ARCHIVED store, on top of resolvePeriodWindow. Nothing is
+ * read after its archive day, so:
+ *  - it has no running day: not partial, no "parcial · até 09h41";
+ *  - its comparison is whole days, never cut at this hour — its numbers do not
+ *    move, and neither may the figure they are compared with. Squishy World ·
+ *    Este mês read "vs mesmos dias do mês passado (1–24 out, até 14h07 de 24
+ *    out)", the hour following the clock on every reload, under a note saying
+ *    "estes números não mudam". "Ontem até esta hora" becomes "dia anterior";
+ *  - a window that runs past the archive day is compared on the days that were
+ *    read (`readRange`): that Este mês holds 1–10 nov and is compared with
+ *    1–10 out, not 1–24 out ("caiu 100%" against 14 days it never read). Mês
+ *    passado cut short that way takes the same-days rule (the whole month
+ *    before would set 30 days against 10); any other period, the days just
+ *    before (30 dias, 25 out – 23 nov, read up to 10 nov: 17 days against
+ *    8–24 out).
+ * A window wholly after the archive day keeps its comparison, whole: the page
+ * reads that window as "sem dados" anyway. Without the archive day (the read
+ * failed) only the hour cut and the running day go.
+ *
+ * lib/views/store comparisonPlan prices this comparison: it must not cut the
+ * last day of an archived store's window either (it cuts any window ending
+ * today).
+ */
+export function archivedWindow(win: PeriodWindow, archivedOn: string | null, now: Date): PeriodWindow & ArchiveFacts {
+  const { range, today } = win
+  const readRange = archivedOn && range.from <= archivedOn && archivedOn < range.to
+    ? { from: range.from, to: archivedOn } : null
+  let comparison: Comparison
+  if (readRange) {
+    const rule: Period = win.comparePeriod === 'lastmonth' ? 'mtd' : win.comparePeriod
+    comparison = { ...comparisonRange(rule, readRange, win.timezone, now), sameTimeOfDay: false }
+  } else if (win.comparison.label === 'ontem até esta hora') {
+    comparison = { ...win.comparison, label: 'dia anterior', sameTimeOfDay: false }
+  } else {
+    comparison = { ...win.comparison, sameTimeOfDay: false }
+  }
+  return {
+    ...win,
+    partial: false,
+    partialLabel: null,
+    comparison,
+    comparisonRangeLabel: formatRangeLabel({ from: comparison.from, to: comparison.to }, today),
+    comparisonText: comparisonText(comparison, today),
+    archivedOn,
+    readRange,
+  }
+}
+
+/** The archive day of one store, or null (also when the read fails: the page
+ *  still opens, without the days it can name). */
+async function archiveDayOf(storeId: string): Promise<string | null> {
+  try {
+    // Loaded on demand: lib/views/portfolio pulls the engine and the pool,
+    // which no other page context needs, and only an archived store asks.
+    const { loadArchiveDates } = await import('./portfolio')
+    return (await loadArchiveDates([storeId])).get(storeId) ?? null
+  } catch (err) {
+    console.error('[page] archive day', storeId, err)
+    return null
+  }
+}
+
 /** Keys hrefWith can override; null removes a key. */
 export interface HrefOverrides {
   loja?: string | null
@@ -179,6 +358,8 @@ export interface HrefOverrides {
   de?: string | null
   ate?: string | null
   parte?: boolean
+  /** With periodo/de/ate: the preset those dates stand for (PageParams.volta). */
+  volta?: Period | null
 }
 
 /**
@@ -186,22 +367,32 @@ export interface HrefOverrides {
  * The default period is left out of the URL; de/ate only travel with
  * periodo=custom. Query keys already in `path` win over the kept state, and a
  * #hash is preserved.
+ *
+ * Dates a link read on another clock (state.volta) travel only with the store
+ * (or Todas) they were opened on: a link to another one brings back the
+ * owner's preset (the store picker, "Todas as lojas", a link to another
+ * store's page), and a period or dates given here replace them (the period
+ * picker; `volta` is then only what the overrides say).
  */
 export function buildHref(path: string, state: PageParams, overrides: HrefOverrides = {}, defaultPeriod: Period = DEFAULT_PERIOD): string {
   const [beforeHash, hash] = path.split('#', 2) as [string, string | undefined]
   const [pathname, query] = beforeHash.split('?', 2) as [string, string | undefined]
   const loja = 'loja' in overrides ? overrides.loja ?? null : state.loja
+  const datesGiven = 'periodo' in overrides || 'de' in overrides || 'ate' in overrides
   let periodo = 'periodo' in overrides ? overrides.periodo ?? defaultPeriod : state.periodo
   let de = 'de' in overrides ? overrides.de ?? null : state.de
   let ate = 'ate' in overrides ? overrides.ate ?? null : state.ate
+  let volta = datesGiven ? overrides.volta ?? null : state.volta ?? null
   const parte = 'parte' in overrides ? !!overrides.parte : state.parte
+  if (volta && !datesGiven && loja !== state.loja) { periodo = volta; de = null; ate = null; volta = null }
   if (periodo === 'custom' && !(isIsoDate(de) && isIsoDate(ate))) periodo = defaultPeriod
-  if (periodo !== 'custom') { de = null; ate = null }
+  if (periodo !== 'custom') { de = null; ate = null; volta = null }
 
   const out = new URLSearchParams()
   if (loja) out.set('loja', loja)
   if (periodo !== defaultPeriod) out.set('periodo', periodo)
   if (de && ate) { out.set('de', de); out.set('ate', ate) }
+  if (de && ate && volta && volta !== 'custom') out.set('volta', volta)
   if (parte) out.set('parte', '50')
   // The path's own query keys (e.g. ?aba=x) are kept and win.
   if (query) for (const [k, v] of new URLSearchParams(query)) out.set(k, v)
@@ -253,7 +444,7 @@ export function toStoreOption(s: StoreRef): StoreOption {
 
 // ─── The server helper ───────────────────────────────────────────────────────
 
-export interface PageContext extends PeriodWindow {
+export interface PageContext extends PeriodWindow, ArchiveFacts {
   viewer: Viewer
   isOwner: boolean
   /** Active stores the viewer may see, oldest first (the picker). */
@@ -287,6 +478,10 @@ export interface PageContext extends PeriodWindow {
   /** The URL asked for Todas and this one-store page shows the remembered
    *  store instead: the page says which (and its navigation keeps Todas). */
   fromAll: boolean
+  /** On row dates (params.volta), whose preset they are, for the header:
+   *  'Todas as lojas' on a store page, the store they came from on Todas
+   *  ("Hibikura"), null when that is not one store. Null without row dates. */
+  rowDatesOf: string | null
   /** Partner view (?parte=50): money results are halved. */
   split: boolean
   splitFactor: number
@@ -349,13 +544,21 @@ export async function getPageContext(
   }
   const selected = scope === 'all' ? stores : store ? [store] : []
   const tz = anchorTz(selected.map(s => s.timezone))
-  const win = resolvePeriodWindow(raw.periodo, raw.de, raw.ate, tz, now)
+  // Dates a link read on another clock hold while the clock they came from
+  // still reads the preset as them (settleRowDates, rowDateClocks).
+  const asked = settleRowDates(raw, tz, rowDateClocks(scope, stores.map(s => s.timezone)), now)
+  const resolved = resolvePeriodWindow(asked.periodo, asked.de, asked.ate, tz, now, asked.volta)
+  // An archived store reads nothing after its archive day: no running day,
+  // and a comparison of whole days over the days that were read.
+  const win: PeriodWindow & ArchiveFacts = scope === 'store' && store?.archived
+    ? archivedWindow(resolved, await archiveDayOf(store.id), now)
+    : { ...resolved, archivedOn: null, readRange: null }
 
   const params: PageParams = {
-    ...raw,
+    ...asked,
     loja: scope === 'all' ? ALL_STORES : store?.id ?? null,
-    de: raw.periodo === 'custom' ? win.range.from : null,
-    ate: raw.periodo === 'custom' ? win.range.to : null,
+    de: asked.periodo === 'custom' ? win.range.from : null,
+    ate: asked.periodo === 'custom' ? win.range.to : null,
   }
   const navParams: PageParams = { ...params, loja: carriedLoja(raw.loja, scope, allowAll, store?.id ?? null) }
   const splitFactor = raw.parte ? SPLIT_SHARE : 1
@@ -373,6 +576,7 @@ export async function getPageContext(
     params,
     navParams,
     fromAll: scope === 'store' && navParams.loja === ALL_STORES,
+    rowDatesOf: rowDatesOf(params, scope, stores, now),
     split: raw.parte,
     splitFactor,
     part: (v: number) => v * splitFactor,

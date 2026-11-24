@@ -1,6 +1,6 @@
 /**
  * Client-side URL glue for the shell's pickers. The state keys (loja, periodo,
- * de, ate, parte) are always computed on the SERVER by lib/views/page.ts
+ * de, ate, volta, parte) are always computed on the SERVER by lib/views/page.ts
  * (ctx.hrefWith('', …) returns "?loja=…&periodo=…"), so the URL rules live in
  * one place; the client only merges that query with the page's own keys
  * (e.g. ?aba=criativos) and navigates. While a navigation is still loading,
@@ -8,7 +8,16 @@
  * so two quick choices add up instead of the second undoing the first.
  */
 
-export const STATE_KEYS = ['loja', 'periodo', 'de', 'ate', 'parte'] as const
+/**
+ * The page state: lib/views/page PageParams. `volta` (the preset that row
+ * dates stand for) is one of them although only links set it, so that only the
+ * server-built query decides whether it travels (buildHref drops it for a
+ * period picked or another store). Copied from the current URL as a page key,
+ * it stuck to the dates picked next: ?…&periodo=custom&de=…&ate=…&volta=today
+ * opened "Hoje" instead of the dates (settleRowDates read them as stale row
+ * dates), and it followed preset clicks and the store picker.
+ */
+export const STATE_KEYS = ['loja', 'periodo', 'de', 'ate', 'volta', 'parte'] as const
 export type StateKey = (typeof STATE_KEYS)[number]
 
 const isStateKey = (k: string) => (STATE_KEYS as readonly string[]).includes(k)
@@ -155,7 +164,7 @@ export interface NavLayer {
 
 export const NAV_LAYER = {
   store: { keys: ['loja'], page: 'target' },
-  period: { keys: ['periodo', 'de', 'ate'], page: 'base' },
+  period: { keys: ['periodo', 'de', 'ate', 'volta'], page: 'base' },
   split: { keys: ['parte'], page: 'base' },
   link: { keys: [], page: 'target' },
 } as const satisfies Record<string, NavLayer>
@@ -166,6 +175,12 @@ export const NAV_LAYER = {
  * base, and the path, the page's own keys and the #hash from whichever owns
  * the page. A state key absent from its source stays absent (an absent
  * periodo is the default period). One-shot keys never survive.
+ *
+ * Row dates (volta, lib/views/page PageParams.volta) belong to the store they
+ * were opened on: when the layer changes the store, the URL being opened gets
+ * back the preset they stand for, as buildHref does on the server, so a store
+ * picked while a Todas row's Hibikura page still loads opens on the owner's
+ * preset and its URL never names Hibikura's dates.
  */
 export function layerHref(base: string, target: string, layer: NavLayer): string {
   const b = new URL(base, 'http://x')
@@ -175,6 +190,11 @@ export function layerHref(base: string, target: string, layer: NavLayer): string
   for (const k of STATE_KEYS) {
     const v = ((layer.keys as readonly string[]).includes(k) ? t : b).searchParams.get(k)
     if (v !== null) out.set(k, v)
+  }
+  const volta = out.get('volta')
+  if (volta && out.get('loja') !== b.searchParams.get('loja')) {
+    out.set('periodo', volta)
+    out.delete('de'); out.delete('ate'); out.delete('volta')
   }
   for (const [k, v] of page.searchParams) {
     if (isStateKey(k) || (ONE_SHOT_KEYS as readonly string[]).includes(k) || out.has(k)) continue

@@ -5,8 +5,10 @@
  * components and tests alike. Rules (from the UI brief):
  *   money     $1.313 without cents from $100 up; $9,80 below; negatives with a
  *             true minus sign (−$201); exactly zero is "$0". Chart axes in whole
- *             dollars unless their ticks have cents (formatMoneyAxis).
+ *             dollars unless their ticks have cents (formatMoneyAxis). A sign
+ *             is glued to its "$" by an invisible word joiner (see SIGN_JOIN).
  *   percent   12,0%        ROAS   1,95×        count  1.174
+ *   share     51% · <1% for a share that rounds to nothing (formatShare)
  *   dates     17 nov · ter, 17 nov · ranges 10–16 nov (engine formatRange)
  *   time      13h38 · relative "há 4 min"
  * Every label is Portuguese. There is no currency selector any more: values
@@ -18,6 +20,17 @@ import { formatRange as engineFormatRange, type DateRange } from './engine/dates
 /** True minus sign (U+2212): the hyphen is too short next to a number. */
 export const MINUS = '−'
 export const EMPTY = '—'
+
+/**
+ * Word joiner (U+2060), set between a sign and "$": invisible, zero-width, and
+ * no line break may fall on it. "−" (and "+") and "$" are both numeric-prefix
+ * characters for line breaking (UAX #14 class PR) and no rule keeps two of them
+ * together, so a verdict line at 390 px wrapped "…10 chargebacks: −" with
+ * "$2.134 no caixa" on the next line. A sign before a digit ("−12,0%") needs
+ * nothing: PR × NU already holds. Text compared against a formatted amount
+ * must include it: `${MINUS}${SIGN_JOIN}$201`.
+ */
+export const SIGN_JOIN = '\u2060'
 
 type Num = number | null | undefined
 
@@ -64,8 +77,8 @@ export function formatMoney(v: Num, opts: MoneyOptions = {}): string {
   // Anything that rounds to nothing is zero, without a sign.
   if (shown === 0) return mode === 'always' ? '$0,00' : '$0'
   const digits = withCents ? 2 : 0
-  const prefix = v < 0 ? MINUS : opts.sign ? '+' : ''
-  return `${prefix}$${nf(digits, digits).format(shown)}`
+  const sign = v < 0 ? MINUS : opts.sign ? '+' : ''
+  return `${sign && sign + SIGN_JOIN}$${nf(digits, digits).format(shown)}`
 }
 
 /** "+$1.313" / "−$201" / "$0": money that is a result, signed both ways. */
@@ -100,6 +113,20 @@ export function formatPct(v: Num, opts: PctOptions = {}): string {
   const s = nf(d, d).format(Math.abs(v))
   const zero = roundsToZero(v, d)
   return `${zero ? '' : v < 0 ? MINUS : opts.sign ? '+' : ''}${s}%`
+}
+
+/**
+ * A share of a whole, "51%" (`v` is already a percentage, as in formatPct;
+ * digits default to 0). A share that is not zero but rounds to nothing reads
+ * "<1%" ("<0,1%" with digits 1), never "0%": in Atribuição's "De onde vieram
+ * as vendas", account.mokoo.co's 2 orders and $245 of $53.509 (0,46%) said
+ * "0%" — as if nothing came from there. An exact 0 is "0%".
+ */
+export function formatShare(v: Num, opts: PctOptions = {}): string {
+  if (!isNum(v)) return opts.empty ?? EMPTY
+  const d = opts.digits ?? 0
+  if (v !== 0 && roundsToZero(v, d)) return `${v < 0 ? MINUS : ''}<${nf(d, d).format(10 ** -d)}%`
+  return formatPct(v, { ...opts, digits: d })
 }
 
 /** Change in percentage points: "2,3 p.p." (margins are compared this way). */

@@ -18,18 +18,18 @@ const allDistinct = (xs: string[]) => new Set(xs).size === xs.length
 describe('formatMoneyAxis', () => {
   it('keeps whole dollars when every tick is a whole dollar', () => {
     const t = [-800, -400, 0, 400, 800, 1200]
-    expect(t.map(v => formatMoneyAxis(v, t))).toEqual(['−$800', '−$400', '$0', '$400', '$800', '$1.200'])
+    expect(t.map(v => formatMoneyAxis(v, t))).toEqual(['−\u2060$800', '−\u2060$400', '$0', '$400', '$800', '$1.200'])
   })
 
   it('shows cents on every tick once one tick has cents', () => {
     const t = [-2, -1.5, -1, -0.5, 0]
-    expect(t.map(v => formatMoneyAxis(v, t))).toEqual(['−$2,00', '−$1,50', '−$1,00', '−$0,50', '$0'])
+    expect(t.map(v => formatMoneyAxis(v, t))).toEqual(['−\u2060$2,00', '−\u2060$1,50', '−\u2060$1,00', '−\u2060$0,50', '$0'])
   })
 
   it('without the ticks, the value decides alone and never reads as its neighbour', () => {
-    expect(formatMoneyAxis(-1.5)).toBe('−$1,50')
-    expect(formatMoneyAxis(-2)).toBe('−$2')
-    expect(formatMoneyAxis(-0.2)).toBe('−$0,20')
+    expect(formatMoneyAxis(-1.5)).toBe('−\u2060$1,50')
+    expect(formatMoneyAxis(-2)).toBe('−\u2060$2')
+    expect(formatMoneyAxis(-0.2)).toBe('−\u2060$0,20')
     expect(formatMoneyAxis(1200)).toBe('$1.200')
   })
 
@@ -42,10 +42,10 @@ describe('formatMoneyAxis', () => {
 
 describe('niceTicks + formatMoneyAxis: each tick reads its own value', () => {
   it.each([
-    [-1.77, 0, 5, ['−$2,00', '−$1,50', '−$1,00', '−$0,50', '$0']],
-    [-0.89, 0, 5, ['−$1,00', '−$0,80', '−$0,60', '−$0,40', '−$0,20', '$0']],
-    [-2.73, 0, 4, ['−$3', '−$2', '−$1', '$0']],
-    [-3.5, 1.2, 5, ['−$4', '−$3', '−$2', '−$1', '$0', '$1', '$2']],
+    [-1.77, 0, 5, ['−\u2060$2,00', '−\u2060$1,50', '−\u2060$1,00', '−\u2060$0,50', '$0']],
+    [-0.89, 0, 5, ['−\u2060$1,00', '−\u2060$0,80', '−\u2060$0,60', '−\u2060$0,40', '−\u2060$0,20', '$0']],
+    [-2.73, 0, 4, ['−\u2060$3', '−\u2060$2', '−\u2060$1', '$0']],
+    [-3.5, 1.2, 5, ['−\u2060$4', '−\u2060$3', '−\u2060$2', '−\u2060$1', '$0', '$1', '$2']],
   ] as const)('range %d..%d (%d ticks)', (lo, hi, n, want) => {
     expect(labels(lo, hi, n)).toEqual(want)
   })
@@ -95,10 +95,10 @@ describe('the charts label their axes with one format', () => {
       { date: '2026-11-18', profit: -0.9, revenue: 0, metaSpend: 0.9, orders: 0 },
     ]
     const whole = axisText(renderToStaticMarkup(createElement(DailyProfitBars, { days, ariaLabel: 'x' })))
-    expect(whole).toEqual(['−$2,00', '−$1,50', '−$1,00', '−$0,50', '$0'])
+    expect(whole).toEqual(['−\u2060$2,00', '−\u2060$1,50', '−\u2060$1,00', '−\u2060$0,50', '$0'])
     const half = axisText(renderToStaticMarkup(createElement(DailyProfitBars, { days, share: 0.5, ariaLabel: 'x' })))
     expect(allDistinct(half)).toBe(true)
-    expect(half).toContain('−$0,20')
+    expect(half).toContain('−\u2060$0,20')
   })
 
   it('DailyProfitBars: a normal store keeps whole dollars', () => {

@@ -39,7 +39,7 @@ describe('DailyProfitBars labels', () => {
     const { tips, aria } = render({ labels: CREATIVE })
     expect(names(tips[0])).toEqual(['lucro estimado', 'vendas atribuídas', 'Anúncios Meta', 'compras (Meta)', 'margem'])
     expect(row(tips[0], 'compras (Meta)')).toBe('4')
-    expect(row(tips[1], 'lucro estimado')).toBe('−$25,00')
+    expect(row(tips[1], 'lucro estimado')).toBe('−\u2060$25,00')
     expect(tips.flatMap(names)).not.toContain('pedidos')
     expect(tips.flatMap(names)).not.toContain('receita')
     expect(aria[0]).toContain(': lucro estimado $40,00')

@@ -12,7 +12,8 @@ describe('formatPerDollar', () => {
   it('reads dollars from a dollar on (Glooty: ads above sales)', () => {
     expect(formatPerDollar(99.6)).toBe('$1,00')
     expect(formatPerDollar(262)).toBe('$2,62')
-    expect(formatPerDollar(-162)).toBe('−$1,62')
+    // The sign is glued to the "$" by a word joiner (lib/format SIGN_JOIN).
+    expect(formatPerDollar(-162)).toBe('−\u2060$1,62')
     expect(formatPerDollar(524)).toBe('$5,24')
   })
 

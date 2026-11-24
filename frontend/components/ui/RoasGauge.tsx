@@ -32,7 +32,7 @@
  * the store's break-even too, and the store's configured/revenue.
  */
 
-import { formatRoas } from '@/lib/format'
+import { formatPct, formatRoas } from '@/lib/format'
 import { clampLabel, textWidth } from '@/components/charts/axis'
 import { breakEvenReason, reasonText, REASON_WORDS, usableBreakEven, type BreakEvenReason } from './roasReason'
 import s from './Kpi.module.css'
@@ -97,7 +97,7 @@ export function RoasGauge({
               <span className={s.arrow}>→</span>
               <span className={paused ? s.vOff : state === 'pos' ? s.vPos : s.vNeg}>{paused ? 'pausada' : state === 'pos' ? 'no lucro' : 'no prejuízo'}</span>
               {!mini && pctOff !== null && !paused && (
-                <span className={s.arrow}>· {Math.abs(pctOff)}% {pctOff >= 0 ? 'acima' : 'abaixo'}</span>
+                <span className={s.arrow}>· {formatPct(Math.abs(pctOff), { digits: 0 })} {pctOff >= 0 ? 'acima' : 'abaixo'}</span>
               )}
             </>
           ) : paused ? (

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { sumPnL, type CountryPnL, type DayPnL, type PnL, type PnLLines, type ProductPnL } from '../../engine/pnl'
-import { comparisonRange } from '../../engine/dates'
+import { comparisonRange, shiftDate } from '../../engine/dates'
 import {
-  adChannelOf, campaignHighlights, channelRoas, chargebackLevel, chartSeries, chartValue, comparisonPlan, dueInTz, empateGap, kpiDays, ledgerAdCents, seriesIdle, storeKpis, topCountries, topProducts, trailRanges, windowDaysSinceStart,
+  adChannelOf, archivedComparison, campaignHighlights, channelRoas, chargebackLevel, chartSeries, chartValue, comparisonPlan, daysRead, dueInTz, empateGap, kpiDays, ledgerAdCents, readUntil, seriesIdle, storeKpis, topCountries, topProducts, trailRanges, windowDaysSinceStart,
   CHARGEBACK_LIMIT_PCT, TRAIL_DAYS,
 } from '../store'
 import type { CampaignRow } from '../../data/campaigns'
@@ -231,6 +231,71 @@ describe('kpiDays', () => {
     expect(r.avgDays).toBe(0)
     expect(r.spanDays).toBe(0)
   })
+
+  it('REGRESSION: an archived store\'s days end on its archive day (Squishy World, 30 dias)', () => {
+    // 25 out – 23 nov, archived on 10 nov: "$11,36 por dia em média" was
+    // $340,71 ÷ 30; 13 of those days were never read. $340,71 ÷ 17 = $20,04.
+    const range = { from: '2026-10-25', to: '2026-11-23' }
+    const days: DayPnL[] = []
+    for (let d = range.from; d <= range.to; d = shiftDate(d, 1)) days.push(day(d))
+    days[0] = day('2026-10-25', { revenue: 120.71, orders: 1 })
+    days[5] = day('2026-10-30', { revenue: 220, orders: 3 })
+    const r = kpiDays(range, days, { firstOrderDate: '2026-06-02', runningDay: null, archivedOn: '2026-11-10' })
+    expect(r).toEqual({
+      startedOn: null, avg: { from: '2026-10-25', to: '2026-11-10' }, avgDays: 17,
+      salesAvg: { from: '2026-10-25', to: '2026-11-10' }, salesAvgDays: 17, spanDays: 17,
+    })
+    const k = storeKpis(sumPnL(days), null, true, range, days, r)
+    expect(k.revenuePerDay).toBeCloseTo(340.71 / 17, 6)
+    expect(k.revenuePerDay).toBeCloseTo(20.04, 2)
+    expect(k.ordersPerDay).toBeCloseTo(4 / 17, 6)
+    expect(k.salesAvgRange).toEqual({ from: '2026-10-25', to: '2026-11-10' })
+    // A window that ends before the archive day is untouched.
+    expect(kpiDays({ from: '2026-10-01', to: '2026-10-31' }, [], { firstOrderDate: '2026-06-02', runningDay: null, archivedOn: '2026-11-10' }).avgDays).toBe(31)
+  })
+})
+
+describe('readUntil / daysRead', () => {
+  it('stops at an archived store\'s archive day, and only then', () => {
+    const range = { from: '2026-11-01', to: '2026-11-24' }
+    expect(readUntil(range, '2026-11-10')).toBe('2026-11-10')
+    expect(readUntil(range, null)).toBe('2026-11-24')
+    expect(readUntil({ from: '2026-10-01', to: '2026-10-31' }, '2026-11-10')).toBe('2026-10-31')
+    const days = [{ date: '2026-11-09' }, { date: '2026-11-10' }, { date: '2026-11-11' }]
+    expect(daysRead(days, '2026-11-10').map(d => d.date)).toEqual(['2026-11-09', '2026-11-10'])
+    expect(daysRead(days, null)).toHaveLength(3)
+  })
+})
+
+describe('archivedComparison (an archived store has no running day)', () => {
+  const SP = 'America/Sao_Paulo'
+  // 24 nov 2026, 14h23 in São Paulo.
+  const AT = new Date('2026-11-24T17:23:00Z')
+  const sw = { archived: true }
+  it('REGRESSION: Este mês, read up to 10 nov, is compared with 1–10 out, whole days', () => {
+    // It read "caiu 100% vs 1–24 out até 14h23 ($953)" for 10 read days.
+    const range = { from: '2026-11-01', to: '2026-11-24' }
+    const c = archivedComparison(sw, '2026-11-10', range, comparisonRange('mtd', range, SP, AT), SP, AT)
+    expect(c).toMatchObject({ from: '2026-10-01', to: '2026-10-10', label: 'mesmos dias do mês passado', sameTimeOfDay: false })
+    expect(comparisonPlan(range, c, '2026-11-24', 863, true)).toEqual({ kind: 'whole', range: { from: '2026-10-01', to: '2026-10-10' } })
+  })
+  it('30 dias read up to 10 nov: the 17 days right before those read', () => {
+    const range = { from: '2026-10-25', to: '2026-11-23' }
+    const c = archivedComparison(sw, '2026-11-10', range, comparisonRange('30d', range, SP, AT), SP, AT)
+    expect(c).toMatchObject({ from: '2026-10-08', to: '2026-10-24', label: '17 dias anteriores', sameTimeOfDay: false })
+  })
+  it('Hoje is compared with the whole day before, never "até esta hora"', () => {
+    const range = { from: '2026-11-24', to: '2026-11-24' }
+    const c = archivedComparison(sw, '2026-11-10', range, comparisonRange('today', range, SP, AT), SP, AT)
+    expect(c).toMatchObject({ from: '2026-11-23', to: '2026-11-23', label: 'dia anterior', sameTimeOfDay: false })
+    expect(comparisonPlan(range, c, '2026-11-24', 863, true)).toEqual({ kind: 'whole', range: { from: '2026-11-23', to: '2026-11-23' } })
+  })
+  it('a store that is not archived keeps its comparison, cut as before', () => {
+    const range = { from: '2026-11-01', to: '2026-11-24' }
+    const cmp = comparisonRange('mtd', range, SP, AT)
+    expect(archivedComparison({ archived: false }, null, range, cmp, SP, AT)).toBe(cmp)
+    expect(comparisonPlan(range, cmp, '2026-11-24', 863).kind).toBe('cut_last')
+  })
 })
 
 describe('adChannelOf / channelRoas', () => {
@@ -341,6 +406,31 @@ describe('trailRanges / chartSeries', () => {
     expect(s.map(d => d.date)).toEqual(['2026-11-07', '2026-11-08', '2026-11-09', '2026-11-10'])
     const empty = chartSeries([day('2026-11-01')], [day('2026-11-02'), day('2026-11-03')], [])
     expect(empty.map(d => d.date)).toEqual(['2026-11-02', '2026-11-03'])
+  })
+
+  it('keeps the quiet context days of a store that already sold before them', () => {
+    // Squishy World, 7 dias (17–23 nov): selling since 2 jun, two quiet days
+    // at the head of its 30 days of context. They were dropped and the chart
+    // said "28 dias antes, desde que a loja começou".
+    const before = [day('2026-10-18'), day('2026-10-19'), day('2026-10-20', { revenue: 25.33, orders: 1 }), day('2026-10-21')]
+    const window = [day('2026-11-17'), day('2026-11-18')]
+    expect(chartSeries(before, window, [], '2026-06-02').map(d => d.date))
+      .toEqual(['2026-10-18', '2026-10-19', '2026-10-20', '2026-10-21', '2026-11-17', '2026-11-18'])
+    // Unknown first sale: the old rule, leading idle days dropped.
+    expect(chartSeries(before, window, [], null)[0].date).toBe('2026-10-20')
+    expect(chartSeries(before, window, [])[0].date).toBe('2026-10-20')
+  })
+
+  it('still drops the days before a first sale inside the context, keeping earlier ads', () => {
+    // Hibikura (first sale 7 nov) and Glooty (ads from 4 nov, first order 6 nov).
+    const before = [day('2026-11-02'), day('2026-11-03'), day('2026-11-04', { metaSpend: 40 }), day('2026-11-05'), day('2026-11-06', { revenue: 30, orders: 1 })]
+    expect(chartSeries(before, [day('2026-11-10')], [], '2026-11-06')[0].date).toBe('2026-11-04')
+    const hib = [day('2026-11-05'), day('2026-11-06'), day('2026-11-07', { revenue: 95, orders: 2 })]
+    expect(chartSeries(hib, [day('2026-11-10')], [], '2026-11-07')[0].date).toBe('2026-11-07')
+    // A first sale with idle days before it, but no activity in the context
+    // until the window: the days from the first sale on stay.
+    const quiet = [day('2026-11-05'), day('2026-11-06'), day('2026-11-07'), day('2026-11-08')]
+    expect(chartSeries(quiet, [day('2026-11-10')], [], '2026-11-07').map(d => d.date)).toEqual(['2026-11-07', '2026-11-08', '2026-11-10'])
   })
 })
 
