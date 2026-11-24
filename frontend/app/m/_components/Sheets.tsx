@@ -218,13 +218,13 @@ const ruleNum = (rule: RuleKey, unit: string, extra: Partial<NumSpec> = {}): Num
 
 const RULES: { rule: RuleKey; title: string; help: string; num: NumSpec }[] = [
   { rule: 'roasDrop', title: 'ROAS abaixo do empate', num: ruleNum('roasDrop', '×', { nonZero: true }),
-    help: 'Cada loja é comparada com o próprio empate dos últimos 7 dias. O número ao lado vale só para lojas sem custos configurados.' },
+    help: 'O ROAS do canal de anúncios da loja (Meta, Anúncios Shopify ou os dois), como nas telas, contra o próprio empate dos últimos 7 dias. O número ao lado vale só para lojas sem custos configurados.' },
   { rule: 'spendNoSales', title: 'Gasto sem nenhuma venda', num: ruleNum('spendNoSales', '$'),
     help: 'Avisa quando a loja gastou pelo menos este valor em anúncios hoje e não vendeu nada.' },
   { rule: 'marginDrop', title: 'Margem do dia abaixo de', num: ruleNum('marginDrop', '%'),
     help: 'Só lojas com custos configurados: sem custos a margem não diz nada.' },
   { rule: 'spendSpike', title: 'Gasto acima da média', num: ruleNum('spendSpike', '%'),
-    help: 'Gasto no Meta do dia acima desta porcentagem da média dos últimos 7 dias.' },
+    help: 'Gasto em anúncios do dia (Meta e Anúncios Shopify) acima desta porcentagem da média dos últimos 7 dias.' },
   { rule: 'scaleAlerts', title: 'Campanhas para escalar ou cortar', num: ruleNum('scaleAlerts', '%'),
     help: 'Margem mínima para uma campanha merecer mais verba (a mesma régua da aba Campanhas).' },
 ]
@@ -391,7 +391,7 @@ export function AlertsSheet({ onClose }: { onClose: () => void }) {
                 onChange: on => save({ dailySummary: { enabled: on } }, 'dailySummary'),
               })}
               {numField(FROM_HOUR, 'Não alertar antes das', 'No relógio de cada loja: de manhã o gasto já entrou e as vendas ainda não.')}
-              {numField(MIN_SPEND, 'Gasto mínimo para avaliar', 'Loja que gastou menos que isso hoje não dispara alerta de ROAS ou margem.')}
+              {numField(MIN_SPEND, 'Gasto mínimo para avaliar', 'Loja que gastou menos que isso hoje em anúncios (Meta + Shopify) não dispara alerta de ROAS ou margem.')}
             </div>
           </div>
           <div className={s.group}>

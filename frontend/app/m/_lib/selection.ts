@@ -10,7 +10,7 @@
  */
 
 import {
-  anchorTz, formatRange, isIsoDate, isPeriod, PERIODS, REFERENCE_TZ, resolveRange, type DateRange, type Period,
+  anchorTz, formatRange, isIsoDate, isPeriod, PERIODS, REFERENCE_TZ, resolveRange, shiftDate, type DateRange, type Period,
 } from '@/lib/engine/dates'
 import type { DetailSection } from '@/lib/views/mobileDetail'
 import {
@@ -45,18 +45,59 @@ export interface Selection {
    * Absent otherwise (never null).
    */
   rowPreset?: Period
+  /**
+   * Only on a period a notification link opened (linkDayOf), never on one the
+   * owner picked: the owner's own period it stands in for. Like row dates, the
+   * notification's day belongs to that link — any chip goes back to `own`
+   * (chipSelection), storage keeps `own` (toStorage), and once the calendar the
+   * link was opened on moves on, `own` comes back by itself (expireLinkDay). A
+   * sale push from last night tapped in the morning saved "Ontem" for good,
+   * and one two days old a fixed date that never rolled. Absent otherwise.
+   */
+  linkDay?: LinkDay
+}
+
+/** A period as the owner chose it (no marker): what `linkDay.own` holds. */
+export type OwnPeriod = Pick<Selection, 'periodo' | 'de' | 'ate'>
+
+/** Selection.linkDay. */
+export interface LinkDay {
+  /** The day the notification was about (its link's `dia`): for a "Hoje"
+   *  link the day it names, for another preset the day it was sent on. */
+  dia: string
+  /** The owner's own period, as storage held it when the link was opened. */
+  own: OwnPeriod
+  /** The calendar the link was opened on (ALL or a store id, read with
+   *  selectionTz) and its today then: the marker lasts while that today does. */
+  on: { loja: string; today: string }
+  /** The link's own preset when it is not "Hoje" (the scale push's "7 dias",
+   *  lib/alerts runScaleChecks): shown as it is, never read as a day.
+   *  Absent for "Hoje" links. */
+  asked?: Period
 }
 
 export interface ViewState {
   sel: Selection
   aba: DetailSection | null
+  /**
+   * Only when a notification link opened a tab other than the one the owner
+   * had (the scale push opens Campanhas): the owner's own tab, which storage
+   * keeps (toStorage) and a store chip brings back (chipView). The owner
+   * touching a tab makes the open one theirs (drop this). Absent otherwise.
+   * The scale push's Campanhas was stored as the owner's tab and every later
+   * launch opened with it expanded.
+   */
+  ownAba?: DetailSection | null
 }
 
 export const isTab = (v: unknown): v is DetailSection => typeof v === 'string' && TABS.some(t => t.key === v)
 
 /** Raw, unvalidated values from one source (URL or storage). `volta` is the
- *  URL's name for Selection.rowPreset. */
-interface Raw { loja?: unknown; periodo?: unknown; de?: unknown; ate?: unknown; aba?: unknown; volta?: unknown }
+ *  URL's name for Selection.rowPreset; `dia` is the date a notification's
+ *  "Hoje" is about, or the day a notification with another preset was sent
+ *  (lib/alerts storeUrl), and marks the period — and a tab it opens — as the
+ *  link's (Selection.linkDay, ViewState.ownAba; URL only, never stored). */
+interface Raw { loja?: unknown; periodo?: unknown; de?: unknown; ate?: unknown; aba?: unknown; volta?: unknown; dia?: unknown }
 
 type PeriodPart = Pick<Selection, 'periodo' | 'de' | 'ate' | 'rowPreset'>
 
@@ -78,7 +119,9 @@ function periodOf(r: Raw): PeriodPart | null {
 export function rawFromSearch(search: string | URLSearchParams): Raw {
   const sp = typeof search === 'string' ? new URLSearchParams(search) : search
   const get = (k: string) => sp.get(k) ?? undefined
-  return { loja: get('loja'), periodo: get('periodo'), de: get('de'), ate: get('ate'), aba: get('aba'), volta: get('volta') }
+  return {
+    loja: get('loja'), periodo: get('periodo'), de: get('de'), ate: get('ate'), aba: get('aba'), volta: get('volta'), dia: get('dia'),
+  }
 }
 
 export function rawFromStorage(json: string | null): Raw {
@@ -108,12 +151,31 @@ export function resolveView(
 ): ViewState {
   const lojaOk = (v: unknown): v is string => typeof v === 'string' && (v === ALL || knownStore(v))
   const loja = lojaOk(url.loja) ? url.loja : lojaOk(stored.loja) ? stored.loja : ALL
-  const period = periodOf(url) ?? periodOf(stored) ?? { periodo: DEFAULT_PERIOD, de: null, ate: null }
-  const aba = isTab(url.aba) ? url.aba : url.aba === undefined && isTab(stored.aba) ? stored.aba : null
+  const own = periodOf(stored) ?? { periodo: DEFAULT_PERIOD, de: null, ate: null }
+  const linkPeriod = periodOf(url)
+  let period: PeriodPart & { linkDay?: LinkDay } = own
+  if (linkPeriod && todayOf) {
+    // A notification's "Hoje" is the day it was about (notificationDay), read
+    // on the calendar of the store it opens — and it stays the link's: the
+    // owner's own period comes back on the next chip, launch or day.
+    period = notificationDay(linkPeriod, url.dia, todayOf(loja))
+    const onLoja = period.rowPreset ? ALL : loja
+    const linkDay = linkDayOf(url, period, own, { loja: onLoja, today: todayOf(onLoja) })
+    if (linkDay) period = { ...period, linkDay }
+  } else if (linkPeriod) {
+    period = linkPeriod
+  }
+  const storedAba = isTab(stored.aba) ? stored.aba : null
+  const aba = isTab(url.aba) ? url.aba : url.aba === undefined ? storedAba : null
   let sel: Selection = { loja, ...period }
   // Row dates belong to one store: on Todas they are just the preset.
   if (sel.rowPreset) sel = loja === ALL ? presetOf(sel) : todasRange ? expireRowDates(sel, todasRange) : sel
-  return { sel: todayOf ? clampSelection(sel, todayOf(loja)) : sel, aba }
+  // Row dates gone back to the notification's own preset may now be what the
+  // owner had anyway: no marker for nothing.
+  if (sel.linkDay && !sel.rowPreset && samePeriod(sel, sel.linkDay.own)) sel = { loja: sel.loja, ...sel.linkDay.own }
+  const view: ViewState = { sel: todayOf ? clampSelection(sel, todayOf(loja)) : sel, aba }
+  // A notification's tab is the link's too: storage keeps the owner's.
+  return isNotificationLink(url) && isTab(url.aba) && url.aba !== storedAba ? { ...view, ownAba: storedAba } : view
 }
 
 /**
@@ -144,6 +206,115 @@ export function linkRangeNotice(url: Raw, sel: Selection, today: string): string
     r.clamped ? 'até hoje (o resto ainda não aconteceu)' : null,
   ].filter((x): x is string => x !== null)
   return `O link pedia ${askedText}. Mostrando ${formatRange({ from: r.from, to: r.to }, today)}: ${why.join(' e ')}.`
+}
+
+/**
+ * The period a notification link opens. A push says "hoje" about the day it
+ * was sent on (lib/alerts storeUrl `dia`, on the calendar of the store it
+ * opens; Todas' for the daily summary): "Hoje" while it is still that day
+ * there, else that day itself — "Ontem" the day after, the single date later.
+ * A Hibikura alert about Tokyo's 23 nov tapped at 12h05 in Brasília opened
+ * Tokyo's 24 nov at 00h05 ("cedo demais", about $0), and the 21h summary
+ * tapped the next morning a nearly empty Todas · Hoje. A date that is not one
+ * (or not before today: a phone clock behind the server's) changes nothing.
+ */
+export function notificationDay(p: PeriodPart, dia: unknown, today: string): PeriodPart {
+  if (p.periodo !== 'today' || !isIsoDate(dia) || dia >= today || dia < MIN_WINDOW_DATE) return p
+  if (dia === shiftDate(today, -1)) return { periodo: 'yesterday', de: null, ate: null }
+  return { periodo: 'custom', de: dia, ate: dia }
+}
+
+/**
+ * Whether a link is a notification's: it names its day (`dia`) on a preset —
+ * "Hoje" (lib/alerts storeUrl, summaryUrl, the sale webhook) or another one
+ * (the scale push's "7 dias") — or on the row dates a store row opened from
+ * such a period, as toSearch writes them back (custom + volta). Nothing else
+ * writes `dia`.
+ */
+function isNotificationLink(url: Raw): boolean {
+  if (!isIsoDate(url.dia) || url.dia < MIN_WINDOW_DATE || !isPeriod(url.periodo)) return false
+  return url.periodo !== 'custom' || isPeriod(url.volta)
+}
+
+/**
+ * The marker of a period a notification link opened (Selection.linkDay), or
+ * null when the link is not a notification's (isNotificationLink) or opened
+ * the owner's own period anyway. `shown` is the period the link opened
+ * (notificationDay), `own` the stored one, `on` the calendar it was opened on.
+ * The scale push's "7 dias" (no "Hoje") was taken for the owner's choice:
+ * saved, kept by every chip and reopened on every launch.
+ */
+export function linkDayOf(url: Raw, shown: PeriodPart, own: PeriodPart, on: LinkDay['on']): LinkDay | null {
+  if (!isNotificationLink(url) || !isIsoDate(url.dia)) return null
+  if (url.periodo === 'custom' && !shown.rowPreset) return null
+  const mine: OwnPeriod = { periodo: own.periodo, de: own.de, ate: own.ate }
+  if (!shown.rowPreset && samePeriod(shown, mine)) return null
+  const asked = url.periodo !== 'today' && url.periodo !== 'custom' && isPeriod(url.periodo) ? url.periodo : null
+  return asked ? { dia: url.dia, own: mine, on, asked } : { dia: url.dia, own: mine, on }
+}
+
+const samePeriod = (a: OwnPeriod, b: OwnPeriod) => a.periodo === b.periodo && a.de === b.de && a.ate === b.ate
+
+/**
+ * Whether a "Hoje" notification's period still shows the day it was about
+ * (notificationDay on `today`): "Hoje" that day, "Ontem" the day after, the
+ * single date later. A selection that no longer resolves to it (its calendar
+ * rolled before the marker expired) must not be called "esse dia".
+ */
+function showsLinkDay(sel: Selection, dia: string, today: string): boolean {
+  if (sel.periodo === 'today') return dia >= today
+  if (sel.periodo === 'yesterday') return dia === shiftDate(today, -1)
+  return sel.periodo === 'custom' && sel.de === dia && sel.ate === dia
+}
+
+/**
+ * The strip for a period a notification opened (Selection.linkDay), or null:
+ * which day the notification was about when that day is over (or which
+ * preset it opened), and what brings the owner's own period back — the store
+ * buttons at the top. On Todas the store rows below keep the notification's
+ * period (rowTapSelection): "Ao trocar de loja" promised the owner's period
+ * there and a MOKOO row opened "Ontem". `today` is the selected store's (or
+ * Todas') today. Row dates opened from it have their own strip.
+ */
+export function linkDayNotice(sel: Selection, today: string): string | null {
+  const l = sel.linkDay
+  if (!l || sel.rowPreset) return null
+  const back = `Os botões de loja no alto voltam para “${selectionPeriodLabel(l.own, today)}”.`
+  if (l.asked) return sel.periodo === l.asked ? `A notificação abriu “${periodLabel(l.asked)}”. ${back}` : null
+  if (!showsLinkDay(sel, l.dia, today)) return null
+  if (l.dia >= today) return `A notificação abriu Hoje. ${back}`
+  const day = formatRange({ from: l.dia, to: l.dia }, today)
+  return `A notificação era sobre ${day}: mostrando esse dia${sel.periodo === 'yesterday' ? ' (Ontem)' : ''}, não o de hoje. ${back}`
+}
+
+/**
+ * One key per notification for the strip the owner closed: its day, its
+ * preset and the owner's period behind it — not the store, so a store row
+ * (which keeps the period, and re-anchors the marker on the store's clock)
+ * does not bring back a strip the owner closed. Null without a marker.
+ */
+export function linkDayKey(sel: Selection): string | null {
+  const l = sel.linkDay
+  return l ? `${l.dia}|${l.asked ?? 'today'}|${l.own.periodo}|${l.own.de ?? ''}|${l.own.ate ?? ''}` : null
+}
+
+/**
+ * A period a notification opened holds while the calendar it was opened on is
+ * still on that day; then the owner's own period comes back (an open app on
+ * the clock tick, a page restored days later). Returns `sel` itself when
+ * nothing changes.
+ */
+export function expireLinkDay(sel: Selection, todayOf: (loja: string) => string): Selection {
+  const l = sel.linkDay
+  if (!l || todayOf(l.on.loja) === l.on.today) return sel
+  return { loja: sel.loja, ...l.own }
+}
+
+/** The period a store chip goes back to, in words, when the one on screen is
+ *  not the owner's (row dates, a notification's day); null otherwise. */
+export function chipReturnLabel(sel: Selection, today?: string): string | null {
+  if (sel.linkDay) return selectionPeriodLabel(sel.linkDay.own, today)
+  return sel.rowPreset ? periodShort(sel.rowPreset) : null
 }
 
 /**
@@ -212,37 +383,112 @@ export function clampSelection(sel: Selection, today: string): Selection {
  * store's view of that day, not a period the owner chose. Without it the
  * next chip carried "23 nov" to Todas and MOKOO, and a reopen the next
  * morning restored yesterday frozen instead of "Hoje".
+ *
+ * A preset that names the same dates on the store's own clock stays the
+ * preset (rowOpensDates): "Mês passado" is 1–31 out in Tokyo too, and turning
+ * it into fixed dates compared it with "31 dias anteriores" instead of the
+ * month before, under a strip about dates nobody changed.
  */
-export function storeRowSelection(
-  row: { id: string; storeToday: string },
-  answer: { period: Period; range: { from: string; to: string }; anchorToday: string },
-): Partial<Selection> {
-  if (row.storeToday === answer.anchorToday || answer.period === 'custom') return { loja: row.id }
+export function storeRowSelection(row: RowClock, answer: RowAnswer): Partial<Selection> {
+  if (!rowOpensDates(row, answer)) return { loja: row.id }
   return { loja: row.id, periodo: 'custom', de: answer.range.from, ate: answer.range.to, rowPreset: answer.period }
+}
+
+/** A store row as storeRowSelection needs it (PortfolioStoreRow satisfies it). */
+export interface RowClock { id: string; storeToday: string; timezone: string }
+/** The answer a store row is part of (MobileResponse satisfies it). */
+export interface RowAnswer { period: Period; range: DateRange; anchorToday: string; generatedAt: string }
+
+/**
+ * Whether a store row opens the dates it shows rather than the preset: only
+ * when the store's day is not the answer's (Hibikura from 12h in Brasília)
+ * and the preset, read on the store's own clock at the answer's time, names
+ * other dates than the row.
+ */
+export function rowOpensDates(row: RowClock, answer: RowAnswer): boolean {
+  if (row.storeToday === answer.anchorToday || answer.period === 'custom') return false
+  const own = resolveRange(answer.period, row.timezone, null, null, new Date(answer.generatedAt))
+  return own.from !== answer.range.from || own.to !== answer.range.to
+}
+
+/**
+ * Presets whose comparison is not "the N days before" (lib/engine/dates
+ * comparisonRange): row dates opened from them are compared by the preset's
+ * own rule (apiQuery sends `compare`), so Hibikura's 1–23 nov from "Este mês"
+ * reads "vs mesmos dias do mês passado", as Todas does, not "vs 23 dias
+ * anteriores". For the others the custom rule already is the preset's (a
+ * closed "Hoje" is compared with the whole day before).
+ */
+export const COMPARE_AS_PRESET: readonly Period[] = ['mtd', 'lastmonth']
+
+/** The preset a custom selection is compared as, or null (COMPARE_AS_PRESET). */
+export function compareAsOf(s: Pick<Selection, 'periodo' | 'rowPreset'>): Period | null {
+  return s.periodo === 'custom' && s.rowPreset && COMPARE_AS_PRESET.includes(s.rowPreset) ? s.rowPreset : null
 }
 
 /** The owner's own preset in place of dates a store row opened. */
 function presetOf(sel: Selection): Selection {
-  return sel.rowPreset ? { loja: sel.loja, periodo: sel.rowPreset, de: null, ate: null } : sel
+  if (!sel.rowPreset) return sel
+  const back: Selection = { loja: sel.loja, periodo: sel.rowPreset, de: null, ate: null }
+  // Row dates opened from a notification's day: the preset is that day's,
+  // still not the owner's.
+  return sel.linkDay ? { ...back, linkDay: sel.linkDay } : back
 }
 
 /**
  * A tap that changes part of the selection (a period, a range, a store row).
- * Row dates (rowPreset) never outlive the tap that follows them: a period the
- * owner picks replaces them, and only a store row's own patch brings new ones.
+ * Row dates (rowPreset) and a notification's period (linkDay) never outlive
+ * the tap that follows them: a period the owner picks replaces them, and only
+ * a store row's own patch brings new row dates.
  */
 export function patchSelection(sel: Selection, patch: Partial<Selection>): Selection {
   return { loja: sel.loja, periodo: sel.periodo, de: sel.de, ate: sel.ate, ...patch }
 }
 
 /**
+ * A store row of "Todas" tapped (its patch: storeRowSelection). A row picks a
+ * store, not a period: on a period a notification opened, the row keeps it as
+ * the link's (linkDay), so the next chip or launch still brings back the
+ * owner's own — tapping MOKOO under the summary's "Ontem" saved "Ontem".
+ *
+ * A row that keeps the preset ("Ontem") hands it to the store's own clock, so
+ * the marker is re-anchored there (`todayOf`, the store's today): it lasts
+ * while that clock is on the same day, as a reload of the same URL reads it
+ * (resolveView anchors a link without row dates on its store). Kept on Todas'
+ * calendar, Hibikura · Ontem rolled to Tokyo's next day at 12h in Brasília
+ * under a strip that still named the notification's day, and a reload jumped
+ * back to it. Row dates (rowPreset) stay on Todas' calendar, as resolveView
+ * reads them.
+ */
+export function rowTapSelection(sel: Selection, patch: Partial<Selection>, todayOf?: (loja: string) => string): Selection {
+  const next = patchSelection(sel, patch)
+  const l = sel.linkDay
+  if (!l) return next
+  const reanchor = !!todayOf && !next.rowPreset && next.loja !== l.on.loja
+  return { ...next, linkDay: reanchor ? { ...l, on: { loja: next.loja, today: todayOf(next.loja) } } : l }
+}
+
+/**
  * The selection a store chip (Todas or a store) opens. The period stays —
  * except dates a store row opened, which were that store's only: leaving it
  * (any chip, the same store's included) brings back the owner's preset, so
- * "Todas · Hoje" → Hibikura row → "Todas" is "Todas · Hoje" again.
+ * "Todas · Hoje" → Hibikura row → "Todas" is "Todas · Hoje" again. A period a
+ * notification opened goes back the same way, to the owner's own (linkDay).
  */
 export function chipSelection(sel: Selection, loja: string): Selection {
+  if (sel.linkDay) return { loja, ...sel.linkDay.own }
   return sel.rowPreset ? { ...presetOf(sel), loja } : { ...sel, loja }
+}
+
+/**
+ * The view a store button at the top opens: chipSelection, and the owner's
+ * own tab back when a notification opened another (ViewState.ownAba). Links
+ * inside the screen that open a store ("Abrir EPOCH" in Campanhas) keep the
+ * open tab instead: they use chipSelection alone.
+ */
+export function chipView(v: ViewState, loja: string): ViewState {
+  const sel = chipSelection(v.sel, loja)
+  return v.ownAba !== undefined ? { sel, aba: v.ownAba } : { sel, aba: v.aba }
 }
 
 /**
@@ -254,7 +500,7 @@ export function chipSelection(sel: Selection, loja: string): Selection {
  */
 export function expireRowDates(sel: Selection, todasRange: (p: Period) => DateRange): Selection {
   if (!sel.rowPreset) return sel
-  if (sel.periodo !== 'custom') return patchSelection(sel, {})
+  if (sel.periodo !== 'custom') return rowTapSelection(sel, {})
   // Row dates are one store's: on Todas they are just the preset.
   if (sel.loja === ALL) return presetOf(sel)
   const r = todasRange(sel.rowPreset)
@@ -268,7 +514,12 @@ export function selectionPeriodLabel(sel: Pick<Selection, 'periodo' | 'de' | 'at
   return periodLabel(sel.periodo)
 }
 
-export const selectionKey = (s: Selection) => `${s.loja}|${s.periodo}|${s.de ?? ''}|${s.ate ?? ''}`
+/** One key per distinct answer: the same dates compared as a preset
+ *  (compareAsOf) are another answer. */
+export const selectionKey = (s: Selection) => {
+  const cmp = compareAsOf(s)
+  return `${s.loja}|${s.periodo}|${s.de ?? ''}|${s.ate ?? ''}${cmp ? `|${cmp}` : ''}`
+}
 
 export const sameSelection = (a: Selection | null, b: Selection | null) =>
   !!a && !!b && selectionKey(a) === selectionKey(b)
@@ -277,6 +528,8 @@ export const sameSelection = (a: Selection | null, b: Selection | null) =>
 export function apiQuery(s: Selection): string {
   const q = new URLSearchParams({ period: s.periodo, store: s.loja === ALL ? 'all' : s.loja })
   if (s.periodo === 'custom' && s.de && s.ate) { q.set('from', s.de); q.set('to', s.ate) }
+  const cmp = compareAsOf(s)
+  if (cmp) q.set('compare', cmp)
   return q.toString()
 }
 
@@ -292,24 +545,33 @@ export function echoMatches(echo: Echo | null | undefined, s: Selection): boolea
     && (echo.from ?? null) === (custom ? s.de : null) && (echo.to ?? null) === (custom ? s.ate : null)
 }
 
-/** ?loja=&periodo=[&de=&ate=[&volta=]][&aba=] — always explicit, so a copied
- *  or restored URL means the same thing whatever the defaults become. Row
- *  dates carry their preset (`volta`), so a reload knows they were not picked. */
+/** ?loja=&periodo=[&de=&ate=[&volta=]][&dia=][&aba=] — always explicit, so a
+ *  copied or restored URL means the same thing whatever the defaults become.
+ *  Row dates carry their preset (`volta`), so a reload knows they were not
+ *  picked. A period a notification opened is written as the notification's
+ *  link ("Hoje" of `dia`, which notificationDay reads again on a reload, or
+ *  its own preset with `dia`), so a reload neither takes it for the owner's
+ *  choice nor freezes it. */
 export function toSearch(v: ViewState): string {
-  const q = new URLSearchParams({ loja: v.sel.loja, periodo: v.sel.periodo })
-  if (v.sel.periodo === 'custom' && v.sel.de && v.sel.ate) {
+  const linkOwn = v.sel.linkDay && !v.sel.rowPreset ? v.sel.linkDay.asked ?? 'today' : null
+  const q = new URLSearchParams({ loja: v.sel.loja, periodo: linkOwn ?? v.sel.periodo })
+  if (v.sel.periodo === 'custom' && v.sel.de && v.sel.ate && !(v.sel.linkDay && !v.sel.rowPreset)) {
     q.set('de', v.sel.de); q.set('ate', v.sel.ate)
     if (v.sel.rowPreset) q.set('volta', v.sel.rowPreset)
   }
+  if (v.sel.linkDay) q.set('dia', v.sel.linkDay.dia)
   if (v.aba) q.set('aba', v.aba)
   return q.toString()
 }
 
 /** What the next launch restores: the owner's choices only — row dates are
- *  stored as the preset they came from. */
+ *  stored as the preset they came from, a notification's period as the
+ *  owner's own period it stood in for, and its tab as the owner's (ownAba). */
 export function toStorage(v: ViewState): string {
-  const sel = v.sel.rowPreset ? presetOf(v.sel) : v.sel
-  return JSON.stringify({ loja: sel.loja, periodo: sel.periodo, de: sel.de, ate: sel.ate, aba: v.aba })
+  const sel: OwnPeriod & { loja: string } = v.sel.linkDay ? { loja: v.sel.loja, ...v.sel.linkDay.own }
+    : v.sel.rowPreset ? presetOf(v.sel) : v.sel
+  const aba = v.ownAba !== undefined ? v.ownAba : v.aba
+  return JSON.stringify({ loja: sel.loja, periodo: sel.periodo, de: sel.de, ate: sel.ate, aba })
 }
 
 export type CustomRange =
@@ -340,6 +602,46 @@ export function customRange(de: string, ate: string, today: string): CustomRange
   if (early) return { ok: false, error: early }
   const r = fitCustomRange(from, to, today)
   return { ok: true, from: r.from, to: r.to, clamped: to > today, cut: r.cut }
+}
+
+/**
+ * The name the period bar's last button shows for a period outside the main
+ * four: the preset's short name, or for dates their compact form, never with
+ * a year — "23 nov", "3–12 nov", and across months "25/10–23/11" or
+ * "25/12–3/1". "25 out – 23 nov" did not fit the button on a 390 px phone,
+ * and "25/12/25–3/1/26" (108 px in an 85 px label) lost its end date to the
+ * ellipsis. The year goes on a second line (periodButtonYear); the full range
+ * stays in the button's title (periodButtonFull).
+ */
+export function periodButtonLabel(sel: Pick<Selection, 'periodo' | 'de' | 'ate'>, shown?: DateRange | null): string {
+  if (sel.periodo !== 'custom' || !sel.de || !sel.ate) return periodShort(sel.periodo)
+  const r = shown ?? { from: sel.de, to: sel.ate }
+  const [y1, m1, d1] = r.from.split('-').map(Number)
+  const [y2, m2, d2] = r.to.split('-').map(Number)
+  // Read against its own year, formatRange prints none.
+  if (y1 === y2 && m1 === m2) return formatRange(r, r.to)
+  return `${d1}/${m1}–${d2}/${m2}`
+}
+
+/**
+ * The year(s) under the last button's dates when either end is not in
+ * today's year — "2025", "2025–26" — or null. Without it "3–12 nov" of 2025
+ * read as this November.
+ */
+export function periodButtonYear(sel: Pick<Selection, 'periodo' | 'de' | 'ate'>, shown?: DateRange | null, today?: string): string | null {
+  if (sel.periodo !== 'custom' || !sel.de || !sel.ate || !today) return null
+  const r = shown ?? { from: sel.de, to: sel.ate }
+  const y1 = r.from.slice(0, 4)
+  const y2 = r.to.slice(0, 4)
+  const thisYear = today.slice(0, 4)
+  if (y1 === thisYear && y2 === thisYear) return null
+  return y1 === y2 ? y1 : `${y1}–${y2.slice(2)}`
+}
+
+/** The period of the last button in full words, for its title. */
+export function periodButtonFull(sel: Pick<Selection, 'periodo' | 'de' | 'ate'>, shown?: DateRange | null, today?: string): string {
+  if (sel.periodo !== 'custom' || !sel.de || !sel.ate) return periodLabel(sel.periodo)
+  return formatRange(shown ?? { from: sel.de, to: sel.ate }, today)
 }
 
 export const PERIOD_MAIN: Period[] = ['today', 'yesterday', '7d', '30d']

@@ -128,13 +128,40 @@ describe('mergeCampaigns', () => {
     expect(m.totals.estimatedProfit).toBeNull()
     expect(m.totals.unpricedSpend).toBe(80)
   })
+  // Todas: "17–23 nov (MOKOO, …, CAMP HALLOW, Glooty)": CAMP HALLOW has no ad
+  // account of its own and Glooty had no campaign in the window.
+  it('the judged windows name only stores with campaigns of their own', () => {
+    const m = mergeCampaigns([
+      { store: MOKOO, value: campaignReport(MOKOO, [campaign('a', 100, 300, 20, 'manter')]) },
+      { store: GLOOTY, value: campaignReport(GLOOTY, [], { configured: false }) },
+      { store: HIB, value: campaignReport(HIB, [campaign('c', 200, 600, 100, 'escalar')], { decisionWindow: { from: '2026-11-11', to: '2026-11-17' } }) },
+    ])
+    expect(m.decisionWindows.map(w => w.stores)).toEqual([['MOKOO'], ['HIBIKURA']])
+    // No store with a campaign: the dates are still named.
+    expect(mergeCampaigns([{ store: GLOOTY, value: campaignReport(GLOOTY, []) }]).decisionWindows).toEqual([
+      { range: { from: '2026-11-10', to: '2026-11-16' }, label: '10–16 nov', stores: ['GLOOTY'] },
+    ])
+  })
+  // MOKOO · 7 dias: the header held the bucket's $138 of Meta revenue and +$42
+  // of estimated profit; the rows did not, and the note named only its spend.
+  it('the unsynced bucket carries its Meta revenue, purchases and estimated profit (they are in the totals)', () => {
+    const bucket: CampaignRow = {
+      ...campaign('x', 52.89, 138.03, 42.01, null), campaignId: null, name: 'Anúncios ainda não sincronizados',
+      unsynced: true, unsyncedAds: [{ adId: '1', name: 'a', spend: 52.89 }],
+    }
+    const m = mergeCampaigns([{ store: MOKOO, value: campaignReport(MOKOO, [campaign('a', 100, 300, 20, 'manter'), bucket]) }])
+    expect(m.unsynced).toMatchObject({ spend: 52.89, purchaseValue: 138.03, purchases: 1, estimatedProfit: 42.01 })
+    const rows = m.campaigns.reduce((a, c) => ({ pv: a.pv + c.purchaseValue, ep: a.ep + (c.estimatedProfit ?? 0) }), { pv: 0, ep: 0 })
+    expect(rows.pv + m.unsynced.purchaseValue).toBeCloseTo(m.totals.purchaseValue, 2)
+    expect(rows.ep + m.unsynced.estimatedProfit!).toBeCloseTo(m.totals.estimatedProfit!, 2)
+  })
   it('cuts the list but not the totals', () => {
     const rows = Array.from({ length: 5 }, (_, i) => campaign(`c${i}`, 10 * (i + 1), 0, -1, 'observar'))
     const m = mergeCampaigns([{ store: MOKOO, value: campaignReport(MOKOO, rows) }], 2)
     expect(m.campaigns.map(c => c.name)).toEqual(['c4', 'c3'])
     expect(m.totalCampaigns).toBe(5)
     expect(m.totals.spend).toBe(150)
-    expect(m.unsynced).toEqual({ spend: 0, ads: 0, stores: [] })
+    expect(m.unsynced).toEqual({ spend: 0, ads: 0, purchaseValue: 0, purchases: 0, estimatedProfit: null, stores: [] })
   })
   it('the unsynced-ads bucket is not a campaign: out of the list and the count, kept in the money (Glooty, $438 of $545)', () => {
     const bucket = (spend: number, ads: { adId: string; spend: number }[], running: boolean): CampaignRow => ({
@@ -151,7 +178,7 @@ describe('mergeCampaigns', () => {
     expect(m.campaigns.map(c => c.name)).not.toContain('Anúncios ainda não sincronizados')
     expect(m.totalCampaigns).toBe(4)
     expect(m.unsynced).toEqual({
-      spend: 442.51, ads: 3,
+      spend: 442.51, ads: 3, purchaseValue: 0, purchases: 2, estimatedProfit: null,
       stores: [{ storeId: 'glooty', store: 'GLOOTY', spend: 438.04, ads: 2 }, { storeId: 'mokoo', store: 'MOKOO', spend: 4.47, ads: 1 }],
     })
     // The money still covers every ad: the bucket's spend is in the totals.
@@ -308,16 +335,46 @@ describe('mergeCountries', () => {
     expect(m.notes[0]).toMatch(/Porto Rico/)
     expect(m.notes).toContain('nota da loja')
   })
-  it('countries sold by a store without costs show no contribution', () => {
+  // Todas · 4–23 nov: Glooty's 6 US orders blanked the contribution of the
+  // 951 others ("Estados Unidos · sem custos"), the reason only in the ⓘ.
+  it('in a sum with priced stores, a store without costs is left out of the rows and named (the desktop rule)', () => {
     const m = mergeCountries([
       { store: MOKOO, value: countryReport(MOKOO, [country('US', 10, 1000, 400), country('BR', 3, 90, 30)]) },
-      { store: GLOOTY, value: countryReport(GLOOTY, [country('US', 2, 156, 156)], false) },
+      { store: GLOOTY, value: countryReport(GLOOTY, [country('US', 2, 156, 156), country('MX', 1, 40, 40)], false) },
     ])
+    expect(m.countries.find(c => c.country === 'US')).toMatchObject({ orders: 10, revenue: 1000, contribution: 400 })
+    expect(m.countries.find(c => c.country === 'US')!.contributionMargin).toBeCloseTo(40)
+    expect(m.countries.find(c => c.country === 'MX')).toBeUndefined()
+    expect(m.totals).toEqual({ orders: 13, revenue: 1090, contribution: 430 })
+    expect(m.unconfiguredStores).toEqual([])
+    expect(m.leftOut).toEqual([{ storeId: 'glooty', store: 'GLOOTY', orders: 3, revenue: 196, metaSpend: 100 }])
+    expect(m.notes.some(n => n.includes('sem custos'))).toBe(false)
+  })
+  it('a store without costs alone (or every store without them): no country shows a contribution', () => {
+    const m = mergeCountries([{ store: GLOOTY, value: countryReport(GLOOTY, [country('US', 2, 156, 156)], false) }])
     expect(m.countries.find(c => c.country === 'US')!.contribution).toBeNull()
-    expect(m.countries.find(c => c.country === 'BR')!.contribution).toBe(30)
     expect(m.totals.contribution).toBeNull()
     expect(m.unconfiguredStores).toEqual(['GLOOTY'])
+    expect(m.leftOut).toEqual([])
     expect(m.notes.at(-1)).toBe('GLOOTY sem custos configurados: nos países onde ela vendeu, a contribuição não aparece.')
+  })
+  // EPOCH · Hoje: Índia, Egito, Vietnã… read "0 pedidos · 0,0% das vendas ·
+  // contribuição $0 (—)" with "poucos pedidos para julgar".
+  it('countries where only Meta spent never get a row of their own: they go into "outros"', () => {
+    const meta = (spend: number) => ({ spend, purchases: 0, purchaseValue: 0 })
+    const m = mergeCountries([{ store: MOKOO, value: countryReport(MOKOO, [
+      country('US', 3, 324, 256, meta(71)), country('AU', 1, 173, 123, meta(12)),
+      country('IN', 0, 0, 0, meta(131)), country('EG', 0, 0, 0, meta(19)),
+    ]) }])
+    expect(m.countries.map(c => c.country)).toEqual(['US', 'AU', 'outros'])
+    expect(m.countries[2]).toMatchObject({ name: '2 países só com gasto do Meta', orders: 0, revenue: 0, meta: { spend: 150 } })
+    // Past the limit, the tail still holds both kinds.
+    const cut = mergeCountries([{ store: MOKOO, value: countryReport(MOKOO, [
+      country('US', 3, 324, 256, meta(71)), country('AU', 1, 173, 123, meta(12)), country('IN', 0, 0, 0, meta(131)),
+    ]) }], 1)
+    expect(cut.countries.map(c => c.country)).toEqual(['US', 'outros'])
+    expect(cut.countries[1]).toMatchObject({ name: 'Outros 1 país · +1 só com gasto do Meta', orders: 1 })
+    expect(cut.totals).toEqual({ orders: 4, revenue: 497, contribution: 379 })
   })
   // CAMP HALLOW's campaigns on EPOCH's account are out of EPOCH's Meta
   // columns (lib/data/countries): the phone names them, with the store their
@@ -363,8 +420,10 @@ describe('mergeCountries', () => {
       expect(us).toMatchObject({ orders: 22, revenue: 1600 })
       expect(us.meta).toMatchObject({ spend: 450, purchases: 19, purchaseValue: 1550 })
       expect(us.meta.capturePct).toBeCloseTo((19 / 22) * 100)
-      // A country with only shared spend comes back as its own row.
-      expect(m.countries.find(c => c.country === 'CA')).toMatchObject({ orders: 0, revenue: 0, meta: { spend: 40, purchases: 1, purchaseValue: 50 } })
+      // A country with only shared spend comes back, in the row of the
+      // countries where only Meta spent (never a row of its own).
+      expect(m.countries.find(c => c.country === 'CA')).toBeUndefined()
+      expect(m.countries.find(c => c.country === 'outros')).toMatchObject({ name: '1 país só com gasto do Meta', orders: 0, revenue: 0, meta: { spend: 40, purchases: 1, purchaseValue: 50 } })
       expect(m.meta).toMatchObject({ coveredSpend: 490, totalSpend: 550 })
       expect(m.meta.coveragePct).toBeCloseTo((490 / 550) * 100)
       expect(m.sharedLeftOut).toEqual([])
@@ -430,6 +489,40 @@ describe('mergeCountries', () => {
       // JP (EPOCH, split: 3 orders, 2 purchases) and DE (MOKOO, no split).
       expect(m.countries[1].meta).toMatchObject({ purchases: 2, captureOrders: 3 })
       expect(m.countries[1].meta.capturePct).toBeCloseTo((2 / 3) * 100)
+    })
+  })
+  // MOKOO · Mês passado: the phone read US at 48% (every purchase over every
+  // order of the window) while the desktop and the Funil said 87% / 86%,
+  // because getCountryReport's capture counts only the days Meta's country
+  // split covers whole. The phone now sums the report's own capture figures.
+  describe("capture uses the report's own figures (days Meta's split covers whole)", () => {
+    const withCapture = (row: CountryRow, captureOrders: number, capturePurchases: number): CountryRow =>
+      ({ ...row, meta: { ...row.meta, captureOrders, capturePurchases } })
+    const us = withCapture(country('US', 373, 37300, 14920, { spend: 3000, purchases: 179, purchaseValue: 9000 }), 190, 165)
+    const de = withCapture(country('DE', 20, 2000, 800, { spend: 200, purchases: 6, purchaseValue: 300 }), 10, 5)
+    const fr = withCapture(country('FR', 8, 800, 320, { spend: 100, purchases: 3, purchaseValue: 150 }), 4, 2)
+
+    it('divides capturePurchases by captureOrders, not purchases by every order', () => {
+      const m = mergeCountries([{ store: MOKOO, value: countryReport(MOKOO, [us, de]) }])
+      const row = m.countries.find(c => c.country === 'US')!
+      expect(row.orders).toBe(373)
+      expect(row.meta.purchases).toBe(179)
+      expect(row.meta.captureOrders).toBe(190)
+      expect(row.meta.capturePurchases).toBe(165)
+      expect(row.meta.capturePct).toBeCloseTo((165 / 190) * 100)
+    })
+
+    it('sums them across stores and into "outros"', () => {
+      const m = mergeCountries([
+        { store: MOKOO, value: countryReport(MOKOO, [us, de]) },
+        { store: HIB, value: countryReport(HIB, [withCapture(country('US', 10, 1000, 400, { spend: 50, purchases: 9, purchaseValue: 400 }), 10, 9), fr]) },
+      ], 1)
+      expect(m.countries.map(c => c.country)).toEqual(['US', 'outros'])
+      expect(m.countries[0].meta).toMatchObject({ purchases: 188, captureOrders: 200 })
+      expect(m.countries[0].meta.capturePct).toBeCloseTo((174 / 200) * 100)
+      // DE (10 orders, 5 purchases) and FR (4 orders, 2 purchases).
+      expect(m.countries[1].meta).toMatchObject({ purchases: 9, captureOrders: 14, capturePurchases: 7 })
+      expect(m.countries[1].meta.capturePct).toBeCloseTo((7 / 14) * 100)
     })
   })
   it("drops one store's 'contribuição é a própria receita' note: wrong once merged, and noise when that store sold nothing", () => {

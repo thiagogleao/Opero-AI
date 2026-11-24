@@ -14,17 +14,19 @@ import {
 } from '@/components/ui'
 import { DailyProfitBars, DailyProfitLegend, IntradayCurve, IntradayLegend } from '@/components/charts'
 import {
-  dayOfLabel, formatClock, formatCount, formatDate, formatMoney, formatPct, formatRelativeTime,
+  dayOfLabel, formatClock, formatCount, formatDate, formatMoney, formatPct, formatRangeLabel, formatRelativeTime,
   formatTimeInTz, formatWeekdayDate, partialLabel, plural, tzCity,
 } from '@/lib/format'
 import { minutesIntoDay, todayInTz } from '@/lib/engine/dates'
 import {
-  comparisonCut, judgedStores, noSalesCashHit, periodPhrase, storeRoas, storeStatus, storeStatusChips, type RoasSummary, type Verdict,
+  comparisonCut, disputeReasonText, judgedStores, noSalesCashHit, notSellingYet, periodPhrase, storeRoas, storeStatus, storeStatusChips,
+  type RoasSummary, type Verdict,
 } from '@/lib/views/verdict'
 import type { MobileResponse } from '@/lib/views/mobile'
 import type { IntradayAside, LiveOrderItem, PortfolioStoreRow } from '@/lib/views/portfolio'
 import { LIVE_FEED_SIZE } from '@/lib/views/portfolioLimits'
-import { clockDiffers, storeRowSelection, tzOffsetMinutes, type Selection } from '../_lib/selection'
+import { dateBeside } from '@/components/campaigns/storeStart'
+import { clockDiffers, rowOpensDates, storeRowSelection, tzOffsetMinutes, type Selection } from '../_lib/selection'
 import { noSpendLine, pairNotes, type SharedAds } from '../_lib/sharedAds'
 import { dueByLabel, feedLine, liveFeedSpeed } from '../_lib/labels'
 import { NetBars, NetBarsLegend } from './NetBars'
@@ -81,6 +83,12 @@ export function VerdictBlock({ data, v }: { data: Data; v: Verdict }) {
   const cut = comparisonCut(data.comparison, data.anchorToday)
   const cmpLabel = (data.comparison.label === 'ontem até esta hora' ? 'Ontem até esta hora' : data.comparison.label.replace(/^./, c => c.toUpperCase()))
     + (cut ? ` · ${cut}` : '')
+  // The whole window is before the first sale: no "$0 · 0 pedidos" beside a
+  // verdict that says the store (or every store) was not selling yet.
+  const notYet = v.beforeStart ?? null
+  // An archived store's window after its archive day has no data: no "$0".
+  const frozen = v.frozen ?? null
+  const several = data.stores.length > 1
   return (
     <VerdictCard
       verdict={v}
@@ -90,8 +98,16 @@ export function VerdictBlock({ data, v }: { data: Data; v: Verdict }) {
         <div className={s.pair}>
           <div className={s.pairCell}>
             <small>Vendas</small>
-            <b>{formatMoney(t.revenue)}</b>
-            <em>{plural(t.orders, 'pedido', 'pedidos')}</em>
+            {notYet ? (
+              <><b className="mut">—</b><em>{several ? 'ainda não vendiam' : 'ainda não vendia'}</em></>
+            ) : frozen ? (
+              <><b className="mut">—</b><em>sem dados: loja arquivada</em></>
+            ) : (
+              <>
+                <b>{formatMoney(t.revenue)}</b>
+                <em>{plural(t.orders, 'pedido', 'pedidos')}</em>
+              </>
+            )}
           </div>
           <div className={s.pairCell}>
             <small>{cmpLabel}</small>
@@ -118,6 +134,12 @@ export function VerdictBlock({ data, v }: { data: Data; v: Verdict }) {
             ? `De cada $1,00 vendido em ${data.rangeLabel}${v.excluded.length ? `, sem ${v.excluded.map(e => e.name).join(' e ')} (sem custos)` : ''}`
             // Nothing sold and nothing spent: the ledger's own empty state says it.
             : t.adSpend > 0 ? `Nenhuma venda em ${data.rangeLabel}${v.excluded.length ? ` (sem ${v.excluded.map(e => e.name).join(' e ')}, sem custos)` : ''}` : undefined}
+          // Before the first sale the generic "Sem vendas no período" would read
+          // as a dead window; say why it is empty, as the desktop Resumo does.
+          emptyTitle={notYet ? (several ? 'As lojas ainda não vendiam' : 'A loja ainda não vendia') : frozen ? 'Sem dados neste período' : undefined}
+          emptyText={notYet
+            ? `${several ? 'A primeira venda foi' : `A ${data.stores[0]?.name ?? 'loja'} começou a vender`} em ${notYet.text}: escolha um período a partir dessa data.`
+            : frozen ? `A loja está arquivada${frozen.text ? ` desde ${frozen.text}` : ''} e não sincroniza mais: nada é lido depois disso.` : undefined}
         />
       }
     />
@@ -132,7 +154,8 @@ export function SharedAdsNotes({ data, shared, onAll }: { data: Data; shared: Sh
   if (!shared.pairs.length || !data.stores.length) return null
   const all = isAllAnswer(data)
   const ordersOf = (id: string) => data.stores.find(r => r.id === id)?.totals.orders ?? null
-  const notes = pairNotes(shared, { all, storeId: all ? null : data.stores[0].id }, data.rangeLabel, ordersOf)
+  const notes = pairNotes(shared, { all, storeId: all ? null : data.stores[0].id }, data.rangeLabel, ordersOf,
+    { range: data.range, today: data.anchorToday, alsoShown: [data.comparison.from, data.comparison.to] })
   if (!notes.length) return null
   return (
     <div className={s.stack} role="region" aria-label="Contas de anúncio compartilhadas">
@@ -307,12 +330,17 @@ function LeftOutNote({ stores, running }: { stores: IntradayAside[]; running: bo
 
 export function DailyBlock({ data }: { data: Data }) {
   if (data.range.from === data.range.to) return null
-  const partialDay = data.range.to >= data.anchorToday ? data.anchorToday : undefined
+  // A lone archived store's days after its archive day were never read
+  // (frozenTailOf, the verdict's frozenTail): no $0 bars for them, as on the
+  // desktop Resumo — Squishy World's 30 dias drew 11–23 nov at $0 under "não
+  // há dados dos dias seguintes". Nor a hatched "today": nothing arrives.
+  const readTo = frozenTailOf(data)
+  const partialDay = !readTo && data.range.to >= data.anchorToday ? data.anchorToday : undefined
   const minutes = minutesIntoDay(data.anchorTimezone, new Date(data.generatedAt))
   // The bars follow the verdict above them: in a sum, a store without costs
   // is left out (its revenue − ads is not profit), so the bars add up to the
   // big number. A store judged alone without costs is drawn as revenue − ads.
-  const days = data.dailyJudged
+  const days = readTo ? data.dailyJudged.filter(d => d.date <= readTo) : data.dailyJudged
   const { judged, excluded } = judgedStores(data.stores)
   const leftOut = excluded.filter(active)
   // Every store the bars are made of lacks cost settings (Glooty alone): the
@@ -324,9 +352,12 @@ export function DailyBlock({ data }: { data: Data }) {
   // that had not opened yet) drew a flat chart on a "$0 $0 $1 $1" axis.
   const empty = days.every(d => d.orders === 0 && d.revenue === 0 && d.metaSpend === 0 && d.shopSpend === 0 && d.operatingProfit === 0)
   if (empty) {
+    // An archived store's window after its archive day was never read, and a
+    // window before the first sale had nothing to read: no sales is not what
+    // happened (as the verdict says).
     return (
       <Block title={title}>
-        <EmptyState compact icon="clock" title={`Nenhuma venda e nenhum gasto em ${data.rangeLabel}`} />
+        <EmptyState compact icon="clock" title={notYetTitle(data) ?? frozenTitle(data) ?? `Nenhuma venda e nenhum gasto em ${readSpan(data)}`} />
       </Block>
     )
   }
@@ -371,6 +402,53 @@ export function DailyBlock({ data }: { data: Data }) {
       )}
     </Block>
   )
+}
+
+/** The archive day of a lone archived store when the whole window is after
+ *  it (nothing was read in it), else null: the verdict's `frozen` rule
+ *  (lib/views/verdict) for the blocks that do not get the verdict. */
+export function frozenSince(data: Data): string | null {
+  const lone = data.stores.length === 1 ? data.stores[0] : null
+  return lone?.archived && lone.archivedOn && data.range.from > lone.archivedOn ? lone.archivedOn : null
+}
+
+/** "Sem dados de 17–23 nov: a loja está arquivada desde 10 nov" for a window
+ *  frozenSince finds, else null: one wording for every empty block of such a
+ *  window (the daily chart, refunds, the detail tabs). */
+export function frozenTitle(data: Data): string | null {
+  const on = frozenSince(data)
+  return on ? `Sem dados de ${data.rangeLabel}: a loja está arquivada desde ${dateBeside(on, [data.range.from, data.range.to], data.anchorToday)}` : null
+}
+
+/**
+ * "A loja ainda não vendia em 1–6 nov (1ª venda em 7 nov)" when the whole
+ * window is before the first sale of the store (or of every store), else
+ * null: the verdict's beforeStart rule (lib/views/verdict notSellingYet) for
+ * the blocks that do not get the verdict. Under "A Hibikura começou a vender
+ * em 7 nov" the daily chart read "Nenhuma venda e nenhum gasto em 1–6 nov"
+ * and the refunds "Nenhum reembolso ou chargeback chegou no período", as for
+ * a dead window; the desktop Resumo says the store was not selling yet.
+ */
+export function notYetTitle(data: Data): string | null {
+  if (!data.stores.length || !data.stores.every(r => notSellingYet(r, data.range))) return null
+  const first = data.stores.map(r => r.firstOrderDate!).reduce((a, b) => (b < a ? b : a))
+  const who = data.stores.length > 1 ? 'As lojas ainda não vendiam' : 'A loja ainda não vendia'
+  return `${who} em ${data.rangeLabel} (1ª venda em ${dateBeside(first, [data.range.from, data.range.to], data.anchorToday)})`
+}
+
+/** The archive day of a lone archived store when the window runs past it
+ *  (read up to that day, nothing after), else null — the verdict's frozenTail. */
+function frozenTailOf(data: Data): string | null {
+  const lone = data.stores.length === 1 ? data.stores[0] : null
+  const on = lone?.archived ? lone.archivedOn : null
+  return on && data.range.from <= on && on < data.range.to ? on : null
+}
+
+/** "1–10 nov, até a loja ser arquivada" for a window that runs past the
+ *  archive day, else the window's own label: only the days read had nothing. */
+function readSpan(data: Data): string {
+  const tail = frozenTailOf(data)
+  return tail ? `${formatRangeLabel({ from: data.range.from, to: tail }, data.anchorToday)}, até a loja ser arquivada` : data.rangeLabel
 }
 
 /** "MOKOO e Glooty", "MOKOO, EPOCH e Glooty". */
@@ -446,8 +524,9 @@ export function StoreList({ data, shared, onPick }: { data: Data; shared: Shared
   const rank = (r: PortfolioStoreRow) => (active(r) ? 2 : noSalesCashHit(r.totals) ? 1 : 0)
   const rows = [...data.stores].sort((a, b) => rank(b) - rank(a) || b.totals.operatingProfit - a.totals.operatingProfit)
   // Stores already on another date (Hibikura from 12h in Brasília) open the
-  // dates their row shows (storeRowSelection), and the line says so.
-  const shifted = data.period === 'custom' ? [] : rows.filter(r => r.storeToday !== data.anchorToday)
+  // dates their row shows when their own clock would read the preset as other
+  // dates (storeRowSelection), and the line says so.
+  const shifted = rows.filter(r => rowOpensDates(r, data))
   return (
     <Block
       title={running ? 'Lojas hoje' : `Lojas · ${data.rangeLabel}`}
@@ -461,7 +540,10 @@ export function StoreList({ data, shared, onPick }: { data: Data; shared: Shared
           const t = r.totals
           // "no prejuízo" + "custos não configurados" for a store without costs
           // whose ads passed its sales, as the desktop table shows it.
-          const chips = storeStatusChips(r, { singleDay })
+          // A store whose first sale came after the window "ainda não vendia",
+          // as the verdict above and the desktop table say — not "sem vendas".
+          const chips = storeStatusChips(r, { singleDay, range: data.range })
+          const notYet = !!r.firstOrderDate && notSellingYet(r, data.range)
           const on = active(r)
           const dayLabel = dayOfLabel(r.timezone)
           const sr = t.orders > 0 ? storeRoas(t, r.configured) : null
@@ -480,7 +562,10 @@ export function StoreList({ data, shared, onPick }: { data: Data; shared: Shared
                   <span className={s.rowSub} style={{ display: 'block' }}>
                     {t.orders > 0
                       ? <><b>{plural(t.orders, 'pedido', 'pedidos')}</b> · vendas <b>{formatMoney(t.revenue)}</b></>
-                      : r.partial ? 'nenhuma venda ainda' : 'nenhuma venda no período'}
+                      // With the year whenever the window or its comparison is in another
+                      // year, as the verdict above prints it ("1ª venda em 11 abr 2026").
+                      : notYet ? `ainda não vendia · 1ª venda em ${dateBeside(r.firstOrderDate!, [data.range.from, data.range.to, data.comparison.from, data.comparison.to], data.anchorToday)}`
+                        : r.partial ? 'nenhuma venda ainda' : 'nenhuma venda no período'}
                     {/* No sale: "ROAS 0,00× · empate desconhecido" said nothing; the money
                         already spent does. */}
                     {t.orders === 0 && t.adSpend > 0 && <> · <b>{formatMoney(t.adSpend)}</b> em anúncios</>}
@@ -491,7 +576,7 @@ export function StoreList({ data, shared, onPick }: { data: Data; shared: Shared
                     {sr && <><br />{rowRoas(sr)}</>}
                     {t.orders > 0 && t.shopSpend > 0 && <><br />Anúncios Shopify {formatMoney(t.shopSpend)}{t.metaSpend > 0 && t.metaSpend < t.shopSpend ? ` · Meta ${formatMoney(t.metaSpend)}` : ''}</>}
                     {/* CAMP HALLOW read "sem anúncios" while its ads ran on EPOCH's account. */}
-                    {t.adSpend === 0 && on && <><br />{noSpendLine(shared, r.id, t.orders)}</>}
+                    {t.adSpend === 0 && on && <><br />{noSpendLine(shared, r.id, t.orders, data.range)}</>}
                   </span>
                   {(dayLabel || pairBadges.length > 0 || r.badges.some(b => b.tone === 'warn' && b.code !== 'sem_custos')) && (
                     <span className={s.rowTags}>
@@ -525,6 +610,9 @@ export function RefundsBlock({ data }: { data: Data }) {
   const list = data.adjustmentsByStore
   const total = list.reduce((sum, a) => sum + a.adjustments, 0)
   const several = data.stores.length > 1
+  const frozen = frozenTitle(data)
+  // Before the first sale no order existed to refund or dispute.
+  const notYet = notYetTitle(data)
   return (
     <Block
       title="Reembolsos e chargebacks"
@@ -533,7 +621,13 @@ export function RefundsBlock({ data }: { data: Data }) {
       flush={list.length > 0}
     >
       {list.length === 0 ? (
-        <EmptyState compact icon="check" title="Nenhum reembolso ou chargeback chegou no período" />
+        notYet || frozen
+          // Nothing was read after the archive day, and nothing could arrive
+          // before the first sale: not "none arrived".
+          ? <EmptyState compact icon="clock" title={notYet ?? frozen ?? ''} />
+          : <EmptyState compact icon="check" title={frozenTailOf(data)
+            ? `Nenhum reembolso ou chargeback chegou em ${readSpan(data)}`
+            : 'Nenhum reembolso ou chargeback chegou no período'} />
       ) : (
         <ul className={s.list}>
           {list.map(a => (
@@ -567,18 +661,19 @@ export function RefundsBlock({ data }: { data: Data }) {
 const CB_WARN = 1
 const CB_LIMIT = 1.5
 
-const REASON: Record<string, string> = {
-  fraudulent: 'fraude', product_not_received: 'produto não recebido', product_unacceptable: 'produto diferente do anunciado',
-  subscription_canceled: 'assinatura cancelada', duplicate: 'cobrança duplicada', credit_not_processed: 'reembolso não processado',
-  unrecognized: 'cobrança não reconhecida', general: 'outro motivo', noncompliant: 'fora das regras',
-}
-
 function rateTone(rate: number): 'neg' | 'warn' | 'pos' {
   return rate >= CB_LIMIT ? 'neg' : rate >= CB_WARN ? 'warn' : 'pos'
 }
 
 /** Disputes listed before "Mostrar as outras N". */
 const DUE_SHOWN = 4
+
+/** ", sem Glooty e Hibikura, cujas disputas nunca foram lidas" after the
+ *  summed rate, or nothing. */
+function leftOutText(list: { name: string }[]): string {
+  if (!list.length) return ''
+  return `, sem ${joinNames(list.map(x => x.name))}, cujas disputas nunca foram lidas`
+}
 
 /** "5 da EPOCH ®️, 3 da CAMP HALLOW e 1 da MOKOO". */
 function awaitingSplit(list: { name: string; count: number }[]): string {
@@ -609,7 +704,7 @@ export function ChargebackBlock({ data, deviceTz, now }: { data: Data; deviceTz:
             const dueAt = d.dueBy ? dueByLabel(d.dueBy, deviceTz, at) : null
             return (
               <span key={`${d.storeId}|${d.externalId}`} style={{ display: 'block' }}>
-                {d.currency === 'USD' ? formatMoney(d.amount) : `${d.currency} ${Math.round(d.amount)}`} · {Object.hasOwn(REASON, d.reason) ? REASON[d.reason] : d.reason}
+                {d.currency === 'USD' ? formatMoney(d.amount) : `${d.currency} ${Math.round(d.amount)}`} · {disputeReasonText(d.reason)}
                 {several ? ` · ${d.store}` : ''}{dueAt ? ` · ${dueAt}` : ''}
               </span>
             )
@@ -628,6 +723,20 @@ export function ChargebackBlock({ data, deviceTz, now }: { data: Data; deviceTz:
       )}
     </>
   ) : null
+  // An archived store is not synced: its disputes are the ones read up to
+  // the day it was archived, and new ones (it sold until shortly before) are
+  // never read — nothing here is "agora".
+  // Stores whose token cannot read Shopify Payments disputes (lib/adjustments
+  // disputesReadable): said plainly, instead of only hedging a zero.
+  const unreadable = h?.unreadable ?? []
+  const unreadableNote = unreadable.length ? (
+    <>O app não tem permissão para ler as disputas {several ? `de ${joinNames(unreadable.map(u => u.name))}` : 'desta loja'} no Shopify Payments: zero aqui não quer dizer que não houve nenhuma. Reconecte a loja em Ajustes, no computador, para dar a permissão.</>
+  ) : null
+  const allArchived = data.stores.length > 0 && data.stores.every(r => r.archived)
+  const frozenOn = allArchived ? data.stores.map(r => r.archivedOn).filter((d): d is string => !!d).sort().pop() ?? null : null
+  const frozenNote = allArchived ? (
+    <>Loja arquivada{frozenOn ? ` em ${formatDate(frozenOn, data.anchorToday)}` : ''}: estas são as disputas lidas até lá. Disputas novas não são lidas, e o estado das abertas pode ter mudado.</>
+  ) : null
   return (
     <Block
       title="Chargebacks · últimos 90 dias"
@@ -639,9 +748,24 @@ export function ChargebackBlock({ data, deviceTz, now }: { data: Data; deviceTz:
         <EmptyState compact icon="alert" title="Não foi possível ler os chargebacks agora">Os outros números não dependem disso.</EmptyState>
       ) : h.byStore.length === 0 ? (
         <>
-          <EmptyState compact icon="check" title="Nenhuma disputa nos últimos 90 dias" />
+          {/* A dispute read at some point (any date) says the token reads them:
+              the empty 90 days is a clean record. hasData is the 90 days' own
+              count, empty here by definition (an older cached answer has no
+              everRead and keeps the hedge). */}
+          {h.everRead ? (
+            <EmptyState compact icon={unreadable.length ? 'alert' : 'check'} title="Nenhuma disputa nos últimos 90 dias">{unreadableNote}</EmptyState>
+          ) : (
+            // Not one dispute was ever read for these stores (Glooty, Hibikura):
+            // that is also what a token without the disputes permission gives,
+            // so the zero is not proof — no check icon, and say where to look.
+            <EmptyState compact icon={unreadable.length ? 'alert' : 'info'}
+              title={unreadable.length && !several ? 'Sem permissão para ler as disputas desta loja' : several ? 'Nenhuma disputa lida destas lojas' : 'Nenhuma disputa lida desta loja'}>
+              {unreadableNote ?? 'O Opero só vê as disputas que o app da Shopify tem permissão para ler. Se em Ajustes (no computador) faltar a permissão de chargebacks, zero aqui não quer dizer que não houve nenhuma.'}
+            </EmptyState>
+          )}
           {/* A dispute opened before the 90 days can still be waiting. */}
           {dueBlock && <p className={s.note} style={{ marginTop: 8 }}>{dueBlock}</p>}
+          {frozenNote && <p className={s.note} style={{ marginTop: 8 }}>{frozenNote}</p>}
         </>
       ) : (
         <>
@@ -672,9 +796,18 @@ export function ChargebackBlock({ data, deviceTz, now }: { data: Data; deviceTz:
             })}
           </ul>
           <div style={{ padding: '10px 16px 14px', borderTop: '1px solid var(--line)' }} className={s.note}>
-            {h.byStore.length > 1 && <>Somando as lojas: {formatPct(h.rate, { digits: 2 })} ({formatCount(h.count)} de {formatCount(h.orders)}), mas o limite vale por loja. </>}
-            {formatCount(h.lost)} perdidas · {formatCount(h.won)} ganhas{h.lost + h.won > 0 && ` (${formatPct((h.won / (h.lost + h.won)) * 100, { digits: 0 })} de vitória)`} · {formatMoney(h.fees)} em taxas.
+            {/* The orders of stores whose disputes were never read are out of
+                the sum (portfolio combineHealth rateLeftOut): their zero is
+                unknown, not "no dispute". */}
+            {h.byStore.length > 1 && <>Somando as lojas: {formatPct(h.rate, { digits: 2 })} ({formatCount(h.count)} de {formatCount(h.orders)})
+              {leftOutText(h.rateLeftOut ?? [])}, mas o limite vale por loja. </>}
+            {formatCount(h.lost)} perdidas · {formatCount(h.won)} ganhas{h.lost + h.won > 0 && ` (${formatPct((h.won / (h.lost + h.won)) * 100, { digits: 0 })} de vitória)`}
+            {/* Prevented disputes are in the count (and the rate) too; an older
+                cached answer has no field. */}
+            {(h.prevented ?? 0) > 0 && ` · ${plural(h.prevented ?? 0, 'evitada', 'evitadas')}`} · {formatMoney(h.fees)} em taxas.
             {dueBlock && <><br />{dueBlock}</>}
+            {unreadableNote && <><br />{unreadableNote}</>}
+            {frozenNote && <><br />{frozenNote}</>}
           </div>
         </>
       )}

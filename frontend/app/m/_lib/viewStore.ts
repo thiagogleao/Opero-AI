@@ -8,12 +8,13 @@
  * (`setView`) or a notification tap changes it; a poll or a late answer never
  * does, because nothing else writes here. The one exception is the calendar:
  * dates a store row opened give way to the owner's preset once Todas' day
- * moves on (`revalidate`, on the clock tick).
+ * moves on, and a period a notification opened to the owner's own once its
+ * day does (`revalidate`, on the clock tick).
  */
 
 import { todayInTz } from '@/lib/engine/dates'
 import {
-  clampSelection, expireRowDates, linkRangeNotice, rawFromSearch, rawFromStorage, resolveView, selectionTz, STORAGE_KEY, todasRangeAt,
+  clampSelection, expireLinkDay, expireRowDates, linkRangeNotice, rawFromSearch, rawFromStorage, resolveView, selectionTz, STORAGE_KEY, todasRangeAt,
   toSearch, toStorage, unknownLinkStore, type StoreClock, type ViewState,
 } from './selection'
 
@@ -43,12 +44,21 @@ const todasRange = () => todasRangeAt(activeClocks, new Date())
 /** Every view that is stored goes through here: a custom range is clamped to
  *  the selected store's today, so switching from Hibikura (whose "today" is
  *  Brazil's tomorrow from noon on) to MOKOO or Todas cannot carry Tokyo's
- *  date into a Brazilian calendar — on screen, in the URL or in storage; and
- *  dates a store row opened last only while Todas is still on that day. */
+ *  date into a Brazilian calendar — on screen, in the URL or in storage;
+ *  dates a store row opened last only while Todas is still on that day, and a
+ *  period a notification opened only while its calendar is. */
 function normalise(v: ViewState): ViewState {
   if (!todayOf) return v
-  const sel = clampSelection(expireRowDates(v.sel, todasRange()), todayOf(v.sel.loja))
+  const sel = clampSelection(expireRowDates(expireLinkDay(v.sel, todayOf), todasRange()), todayOf(v.sel.loja))
   return sel === v.sel ? v : { ...v, sel }
+}
+
+/** Why a link's custom range is not the one it asked for (linkRangeNotice).
+ *  A notification's day has its own strip, drawn from the selection
+ *  (selection linkDayNotice) for as long as it is on screen. */
+function linkNote(url: ReturnType<typeof rawFromSearch>, v: ViewState): string | null {
+  if (!todayOf) return null
+  return linkRangeNotice(url, v.sel, todayOf(v.sel.loja))
 }
 
 function storedRaw() {
@@ -71,7 +81,7 @@ export function getView(): ViewState | null {
     const url = rawFromSearch(window.location.search)
     linkStoreMissing = unknownLinkStore(url, knownStore) !== null
     current = resolveView(url, storedRaw(), knownStore, todayOf, todasRange())
-    linkRangeNote = todayOf ? linkRangeNotice(url, current.sel, todayOf(current.sel.loja)) : null
+    linkRangeNote = linkNote(url, current)
   }
   return current
 }
@@ -95,8 +105,9 @@ export function persistCurrent() {
   if (v) persist(v)
 }
 
-/** On the clock tick: row dates whose day is over give way to the preset
- *  (a "Hoje" keeps rolling to the new day). Nothing else ever changes here. */
+/** On the clock tick: row dates whose day is over give way to the preset (a
+ *  "Hoje" keeps rolling to the new day), and a notification's period to the
+ *  owner's own. Nothing else ever changes here. */
 export function revalidate() {
   const v = getView()
   if (v && normalise(v) !== v) setView(v)
@@ -132,7 +143,7 @@ export function applyUrl(url: string): boolean {
   const base = getView()
   const raw = rawFromSearch(u.search)
   const next = resolveView(raw, base ? JSON.parse(toStorage(base)) : storedRaw(), knownStore, todayOf, todasRange())
-  linkRangeNote = todayOf ? linkRangeNotice(raw, next.sel, todayOf(next.sel.loja)) : null
+  linkRangeNote = linkNote(raw, next)
   setView(next)
   return unknownLinkStore(raw, knownStore) !== null
 }

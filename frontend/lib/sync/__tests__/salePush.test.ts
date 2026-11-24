@@ -21,7 +21,7 @@ describe('sale push text', () => {
   it('large amounts use a thousands dot, never "K"; a loss has a true minus', () => {
     const t = salePushText({ ...base, total: 1234.5, profitToday: -12900.4 })
     expect(t.title).toBe('💰 $1.235 · #4521 — MOKOO')
-    expect(t.body).toBe('Lucro hoje: −$12.900 · Happy Capy · US')
+    expect(t.body).toBe('Lucro hoje: −\u2060$12.900 · Happy Capy · US')
     expect(`${t.title} ${t.body}`).not.toMatch(/\d\.\d{1,2}(?!\d)|-\$|K\b/)
   })
 

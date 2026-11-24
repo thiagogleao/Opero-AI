@@ -33,7 +33,7 @@ describe('alert push text is pt-BR', () => {
     expect(a.title).toBe('⚠️ ROAS 0,62× abaixo do empate — EPOCH ®️')
     expect(a.body).toContain('Empate desta loja: 2,50×')
     expect(a.body).toContain('$1.000 na Meta')
-    expect(a.body).toContain('lucro −$752')
+    expect(a.body).toContain('lucro −\u2060$752')
     expectPtBr(a.title); expectPtBr(a.body)
   })
 
@@ -41,7 +41,7 @@ describe('alert push text is pt-BR', () => {
     const [a] = fire({ revenue: 1500, orders: 15, cogs: 900, metaSpend: 500, fixedCosts: 1300 })
     expect(a.kind).toBe('margin_drop')
     expect(a.title).toBe('⚠️ Margem −80% — EPOCH ®️')
-    expect(a.body).toBe('Abaixo de 10%. Hoje: $1.500 de receita e −$1.200 de lucro em 15 pedidos.')
+    expect(a.body).toBe('Abaixo de 10%. Hoje: $1.500 de receita e −\u2060$1.200 de lucro em 15 pedidos.')
     expectPtBr(a.title); expectPtBr(a.body)
   })
 
@@ -61,12 +61,13 @@ describe('alert push text is pt-BR', () => {
     expectPtBr(a.title); expectPtBr(a.body)
   })
 
-  it('spend spike: "Gasto 220% da média", "$1.100", "ROAS 3,64×"', () => {
+  it('spend spike: "Gasto em anúncios 220% da média", "$1.100 na Meta", "ROAS 3,64×"', () => {
     const cfg = { ...DEFAULT_CONFIG, spendSpike: { enabled: true, threshold: 200 } }
     const [a] = fire({ revenue: 4000, orders: 40, cogs: 2400, metaSpend: 1100 }, cfg)
     expect(a.kind).toBe('spend_spike')
-    expect(a.title).toBe('📣 Gasto 220% da média — EPOCH ®️')
-    expect(a.body).toBe('$1.100 hoje contra $500 de média nos últimos 7 dias. ROAS 3,64×.')
+    expect(a.title).toBe('📣 Gasto em anúncios 220% da média — EPOCH ®️')
+    expect(a.body).toBe('$1.100 na Meta hoje contra $500 de média por dia nos últimos 7 dias. ROAS 3,64×.')
+    expectPtBr(a.title); expectPtBr(a.body)
   })
 
   it('scale push: "$1.969 gastos, 22 pedidos"', () => {
@@ -90,7 +91,7 @@ describe('alert push text is pt-BR', () => {
     // Today $1,753.60 against $4,000 yesterday: −56%.
     expect(s.title).toBe('📊 Hoje: $1.754 de lucro (−56% vs ontem nesta hora)')
     expect(s.body).toMatch(/^1\.175 pedidos · \$20\.100 receita · \$6\.286 anúncios · margem 9% · /)
-    expect(s.body).toContain('Pior: EPOCH ®️ −$246')
+    expect(s.body).toContain('Pior: EPOCH ®️ −\u2060$246')
     expectPtBr(s.title); expectPtBr(s.body)
   })
 
@@ -100,9 +101,9 @@ describe('alert push text is pt-BR', () => {
       summaryText(pnl({ revenue: today }), pnl({ revenue: yesterday }), [], same).title
     expect(title(310, 1.89)).toBe('📊 Hoje: $310 de lucro ($308 a mais que ontem nesta hora)')
     expect(title(250, -2.5)).toBe('📊 Hoje: $250 de lucro ($253 a mais que ontem nesta hora)')
-    expect(title(-40, 0.8)).toBe('📊 Hoje: −$40,00 de lucro ($40,80 a menos que ontem nesta hora)')
+    expect(title(-40, 0.8)).toBe('📊 Hoje: −\u2060$40,00 de lucro ($40,80 a menos que ontem nesta hora)')
     // A loss turning into a smaller loss reads as a gain.
-    expect(title(-40, -100, false)).toBe('📊 Hoje: −$40,00 de lucro ($60,00 a mais que ontem)')
+    expect(title(-40, -100, false)).toBe('📊 Hoje: −\u2060$40,00 de lucro ($60,00 a mais que ontem)')
     // A jump past ±300% over a real base, in dollars too.
     expect(title(1000, 200)).toBe('📊 Hoje: $1.000 de lucro ($800 a mais que ontem nesta hora)')
     // A readable change between two profits keeps its percentage.
@@ -120,6 +121,6 @@ describe('alert push text is pt-BR', () => {
     const s = summaryText(rows[0].totals, pnl(), rows, false)
     expect(s.body).toContain('margem —')
     // No store with costs: the amount is revenue − ads and says so, as the verdict.
-    expect(s.title).toBe('📊 Hoje: −$120 de receita menos anúncios (sem custos)')
+    expect(s.title).toBe('📊 Hoje: −\u2060$120 de receita menos anúncios (sem custos)')
   })
 })

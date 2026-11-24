@@ -5,7 +5,7 @@
 
 import type { LiveOrderItem } from '@/lib/views/portfolio'
 import { shiftDate, todayInTz } from '@/lib/engine/dates'
-import { formatDate, formatMoney, formatPct, formatTimeInTz } from '@/lib/format'
+import { formatDate, formatMoney, formatPct, formatTimeInTz, MINUS, SIGN_JOIN } from '@/lib/format'
 import { uncreditedSources } from '@/components/campaigns/adsVerdict'
 import type { CampaignAction } from '@/lib/campaignSignal'
 import { BELOW_BREAK_EVEN_LABEL, type Signal } from '@/lib/creativeSignal'
@@ -141,6 +141,11 @@ export function ptNumbers(text: string): string {
     .replace(/(\d)\.(\d+)(?=\s*(?:×|x(?![a-z])|%|pp))/gi, '$1,$2')
     // Hyphen-minus in front of a number: the true minus sign.
     .replace(/(^|[\s(:])-(?=\$?\d)/g, '$1−')
+    // A minus before "$" is glued to it, as formatMoney writes it (SIGN_JOIN):
+    // an old stored "-$40" could wrap between the sign and the amount. A
+    // minus that already has the joiner is not followed by "$", so it is
+    // never added twice.
+    .replace(/−(?=\$)/g, MINUS + SIGN_JOIN)
 }
 
 /**
@@ -246,4 +251,36 @@ export function campaignGapNotes(notes: readonly {
       const base = `${n.store}: o Meta credita ${formatPct(Math.abs(gap), { digits: 0 })} ${gap > 0 ? 'mais' : 'menos'} vendas do que a loja registrou`
       return gap < 0 && n.shopSpend >= 0.005 ? `${base} (o resto: ${uncreditedSources(n.shopSpend)}).` : `${base}.`
     })
+}
+
+/**
+ * The Campanhas tab's lede: which closed days each action is judged on.
+ * One window: "(17–23 nov)"; several (Hibikura's Tokyo week): each with its
+ * stores, after a colon. Wrapping the list in parentheses nested them:
+ * "(17–23 nov (MOKOO, …); 18–24 nov (Hibikura))". The windows name only
+ * stores with campaigns of their own (lib/views/mobileDetail mergeCampaigns).
+ */
+export function judgedWindowsText(windows: readonly { label: string; stores: readonly string[] }[]): string {
+  const tail = 'o dinheiro, no período escolhido.'
+  if (windows.length === 0) return `A ação é julgada nos últimos 7 dias fechados; ${tail}`
+  if (windows.length === 1) return `A ação é julgada nos últimos 7 dias fechados (${windows[0].label}); ${tail}`
+  return `A ação é julgada nos últimos 7 dias fechados: ${joinNames(windows.map(w => `${w.label} (${w.stores.join(', ')})`))}; ${tail}`
+}
+
+/**
+ * The visible line under Países for stores without costs left out of the
+ * per-country rows (CountriesDetail leftOut), as the desktop's "Fora da soma
+ * por país": "Fora da soma por país: Glooty ($1.118 em vendas) — sem custos
+ * configurados, então não há contribuição por país para somar." A store that
+ * only spent on Meta is named for its Meta spend. Null when none.
+ */
+export function countriesLeftOutLine(leftOut: readonly { store: string; revenue: number; metaSpend: number }[]): string | null {
+  if (!leftOut.length) return null
+  const sold = leftOut.filter(s => s.revenue >= 0.005)
+  const spentOnly = leftOut.filter(s => s.revenue < 0.005 && s.metaSpend >= 0.005)
+  const parts = [
+    sold.length ? `Fora da soma por país: ${joinNames(sold.map(s => `${s.store} (${formatMoney(s.revenue)} em vendas)`))} — sem custos configurados, então não há contribuição por país para somar.` : null,
+    spentOnly.length ? `Sem o gasto no Meta de ${joinNames(spentOnly.map(s => `${s.store} (${formatMoney(s.metaSpend)})`))}: sem custos configurados.` : null,
+  ].filter((x): x is string => x !== null)
+  return parts.length ? parts.join(' ') : null
 }

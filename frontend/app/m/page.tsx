@@ -4,6 +4,7 @@ import { toOption } from '@/lib/views/mobile'
 import { REFERENCE_TZ } from '@/lib/engine/dates'
 import { loadSharedPairs, SHARED_LOOKBACK_DAYS } from '@/components/portfolio/data'
 import { sharedAccountBadges } from '@/components/portfolio/model'
+import { loadFirstOrderDates } from '@/lib/views/portfolio'
 import MobileApp from './MobileApp'
 import type { SharedAds } from './_lib/sharedAds'
 import s from './m.module.css'
@@ -44,7 +45,12 @@ async function loadSharedAds(active: StoreRef[]): Promise<SharedAds> {
   const badges = Object.fromEntries(active
     .map(st => [st.id, sharedAccountBadges(st.id, pairs, lookback)] as const)
     .filter(([, b]) => b.length > 0))
-  return { pairs, badges, lookbackDays: SHARED_LOOKBACK_DAYS }
+  // The sales stores' first sale: a window before it (CAMP HALLOW before
+  // 24 jul 2026) was not mixed, and there is no "antes" to add up. A failed
+  // read keeps the 90-day wording.
+  const firstSales = Object.fromEntries(await loadFirstOrderDates([...new Set(pairs.map(p => p.salesStoreId))])
+    .catch(err => { console.error('[m] first sales', err); return new Map<string, string>() }))
+  return { pairs, badges, lookbackDays: SHARED_LOOKBACK_DAYS, firstSales }
 }
 
 /**

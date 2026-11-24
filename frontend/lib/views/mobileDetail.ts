@@ -198,11 +198,19 @@ export interface CampaignsDetail extends DetailBase {
   /** Spend of ads the sync has not tied to a campaign yet (lib/data/campaigns'
    *  unsynced row): a bucket, not a campaign, so it has no status, no ROAS
    *  gauge and no place in the count — the desktop lists it as "sem
-   *  campanha". Its spend IS in `totals`. */
+   *  campanha". Its spend, Meta purchase value, purchases and estimated
+   *  profit ARE in `totals`: they are carried here so the tab can say so
+   *  (MOKOO · 7 dias: the header's "Receita pelo Meta $7.448 · Lucro
+   *  estimado −$1.508" held the bucket's $138 and +$42, the rows added up to
+   *  $7.310 and −$1.550, and the note named only its $52,89 of spend). */
   unsynced: {
     spend: number
     /** Ads in the bucket that spent in the window. */
     ads: number
+    purchaseValue: number
+    purchases: number
+    /** Null when no bucket is priced (no costs, or nothing to price). */
+    estimatedProfit: number | null
     /** Per store, biggest first; only stores whose bucket spent. */
     stores: { storeId: string; store: string; spend: number; ads: number }[]
   }
@@ -334,21 +342,43 @@ export interface MobileCountry {
      *  could not credit by country: Todas read US "1 compra atribuída (3% dos
      *  pedidos reais)" — EPOCH's one purchase against 38 orders, 31 of them
      *  MOKOO's and Dumpling's, whose Meta spend had no country split (EPOCH
-     *  alone: 1 of 5, 20%). */
+     *  alone: 1 of 5, 20%). Only the days Meta's split covers whole count
+     *  (getCountryReport captureOrders). */
     captureOrders: number
+    /** Meta's purchases on those same days: the capture's numerator, below
+     *  `purchases` when days are left out. Optional: an answer cached on the
+     *  phone from before the field has none. */
+    capturePurchases?: number
   }
   mergedCountries?: number
 }
 
 export interface CountriesDetail extends DetailBase {
   section: 'paises'
-  /** Biggest revenue first, then one "outros" row; sums to the stores' totals. */
+  /** The countries with orders, biggest revenue first (at most the limit),
+   *  then one "outros" row with the rest — the countries where only Meta
+   *  spent always go there ("N países só com gasto do Meta"), never into a
+   *  row of their own read as "0 pedidos · poucos pedidos para julgar".
+   *  Sums to the totals of the stores in the sum (`leftOut` are not). */
   countries: MobileCountry[]
   totals: { orders: number; revenue: number; contribution: number | null }
   meta: { label: string; caveat: string; coveredSpend: number; totalSpend: number; coveragePct: number | null; missingDays: number }
   notes: string[]
   smallSample: number
+  /** Stores without cost settings that sold, when every store of the answer
+   *  lacks them (Glooty alone): no country shows a contribution. Empty in a
+   *  sum with priced stores, which leaves such stores out (`leftOut`). */
   unconfiguredStores: string[]
+  /**
+   * Stores without cost settings left out of the per-country rows because
+   * other stores of the sum have them — the desktop Todas rule (app/countries
+   * "Fora da soma por país"). Folded in, Glooty's 6 US orders blanked the
+   * contribution of the 951 others ("Estados Unidos · sem custos"), and of
+   * México, Suíça and "Outros 62 países", with the reason only in the ⓘ.
+   * Only stores with sales or Meta spend in the window; optional: an answer
+   * cached on the phone from before the field has none.
+   */
+  leftOut?: { storeId: string; store: string; orders: number; revenue: number; metaSpend: number }[]
   /** Per store, the shared-account campaigns taken out of its Meta columns
    *  and capture (lib/data/countries sharedLeftOut: CAMP HALLOW's campaigns
    *  on EPOCH's account), with the stores their sales landed in, by name.
@@ -411,19 +441,31 @@ export function mergeCampaigns(
 ): Omit<CampaignsDetail, keyof DetailBase | 'section'> {
   const rows: MobileCampaign[] = []
   const buckets = new Map<string, { storeId: string; store: string; spend: number; ads: number }>()
+  // The buckets' money besides spend, all stores together (it is in `totals`).
+  const bucketMoney = { purchaseValue: 0, purchases: 0, estimatedProfit: 0, priced: 0 }
   const totals = { spend: 0, purchaseValue: 0, purchases: 0, estimatedProfit: 0, priced: 0, unpricedSpend: 0, actions: emptyActions() }
   const windows = new Map<string, { range: DateRange; stores: string[] }>()
   const storeNotes: CampaignStoreNote[] = []
   let thresholds: ScaleThresholds = DEFAULT_THRESHOLDS
   let formula = ''
 
+  // The judged windows name only stores with campaigns of their own: CAMP
+  // HALLOW (its ads run on EPOCH's account) and Glooty with no campaign in the
+  // window read as judged. Every store's window is kept apart as a fallback
+  // when none has a campaign, so the tab still names the dates.
+  const allWindows = new Map<string, { range: DateRange; stores: string[] }>()
   for (const { store, value: r } of loaded) {
     thresholds = r.thresholds
     formula = r.formula
     const wk = `${r.decisionWindow.from}|${r.decisionWindow.to}`
-    const w = windows.get(wk) ?? { range: r.decisionWindow, stores: [] }
-    w.stores.push(store.name)
-    windows.set(wk, w)
+    const any = allWindows.get(wk) ?? { range: r.decisionWindow, stores: [] }
+    any.stores.push(store.name)
+    allWindows.set(wk, any)
+    if (r.campaigns.some(c => !c.unsynced)) {
+      const w = windows.get(wk) ?? { range: r.decisionWindow, stores: [] }
+      w.stores.push(store.name)
+      windows.set(wk, w)
+    }
     const spends = spendsOf(store.id)
     storeNotes.push({
       storeId: store.id, store: store.name, configured: r.configured,
@@ -450,6 +492,9 @@ export function mergeCampaigns(
         b.spend += c.spend
         b.ads += spentAds(c.unsyncedAds).length
         buckets.set(store.id, b)
+        bucketMoney.purchaseValue += c.purchaseValue
+        bucketMoney.purchases += c.purchases
+        if (c.estimatedProfit !== null) { bucketMoney.estimatedProfit += c.estimatedProfit; bucketMoney.priced++ }
         continue
       }
       rows.push({
@@ -482,6 +527,9 @@ export function mergeCampaigns(
     unsynced: {
       spend: round2(unsynced.reduce((s, b) => s + b.spend, 0)),
       ads: unsynced.reduce((s, b) => s + b.ads, 0),
+      purchaseValue: round2(bucketMoney.purchaseValue),
+      purchases: bucketMoney.purchases,
+      estimatedProfit: bucketMoney.priced > 0 ? round2(bucketMoney.estimatedProfit) : null,
       stores: unsynced,
     },
     totals: {
@@ -494,7 +542,7 @@ export function mergeCampaigns(
     },
     rules: describeThresholds(thresholds),
     formula,
-    decisionWindows: [...windows.values()].map(w => ({ range: w.range, label: formatRange(w.range), stores: w.stores })),
+    decisionWindows: [...(windows.size ? windows : allWindows).values()].map(w => ({ range: w.range, label: formatRange(w.range), stores: w.stores })),
     storeNotes,
   }
 }
@@ -604,13 +652,28 @@ export const unconfiguredCountriesNote = (stores: string[]) =>
   `${stores.join(', ')} sem custos configurados: nos países onde ${stores.length > 1 ? 'essas lojas venderam' : 'ela vendeu'}, a contribuição não aparece.`
 
 export function mergeCountries(
-  loaded: Loaded<CountryReport>[], limit = DETAIL_LIMIT.paises, nameOf: (storeId: string) => string | null = () => null,
+  all: Loaded<CountryReport>[], limit = DETAIL_LIMIT.paises, nameOf: (storeId: string) => string | null = () => null,
 ): Omit<CountriesDetail, keyof DetailBase | 'section'> {
+  // The verdict rule for sums (lib/views/verdict judgedStores): with priced
+  // stores in the sum, a store without costs is left out of the rows — its
+  // "contribution" would be its whole revenue — and named (leftOut).
+  const mixed = all.some(l => l.value.configured) && all.some(l => !l.value.configured)
+  const loaded = mixed ? all.filter(l => l.value.configured) : all
+  const leftOut = mixed
+    ? all.filter(l => !l.value.configured && (l.value.totals.revenue > 0 || l.value.meta.totalSpend > 0)).map(l => ({
+      storeId: l.store.id, store: l.store.name, orders: l.value.totals.orders,
+      revenue: round2(l.value.totals.revenue), metaSpend: round2(l.value.meta.totalSpend),
+    }))
+    : []
   type Acc = {
     country: string; orders: number; revenue: number; variableCosts: number; contribution: number
     metaSpend: number; metaPurchaseValue: number; purchases: number
-    /** Orders of the stores in `captured` (the capture's denominator). */
+    /** Orders of the stores in `captured` (the capture's denominator),
+     *  only on the days Meta's country split covers whole (getCountryReport
+     *  captureOrders). */
     captureOrders: number
+    /** Meta's purchases on those same days (the capture's numerator). */
+    capturePurchases: number
   }
   const by = new Map<string, Acc>()
   const unconfiguredCountries = new Set<string>()
@@ -622,7 +685,7 @@ export function mergeCountries(
   const accOf = (code: string): Acc => {
     let cur = by.get(code)
     if (!cur) {
-      cur = { country: code, orders: 0, revenue: 0, variableCosts: 0, contribution: 0, metaSpend: 0, metaPurchaseValue: 0, purchases: 0, captureOrders: 0 }
+      cur = { country: code, orders: 0, revenue: 0, variableCosts: 0, contribution: 0, metaSpend: 0, metaPurchaseValue: 0, purchases: 0, captureOrders: 0, capturePurchases: 0 }
       by.set(code, cur)
     }
     return cur
@@ -680,6 +743,7 @@ export function mergeCountries(
         cur.metaSpend += m.spend
         cur.metaPurchaseValue += m.purchaseValue
         cur.purchases += m.purchases
+        cur.capturePurchases += m.purchases
         covered += m.spend
       }
     }
@@ -692,7 +756,14 @@ export function mergeCountries(
     for (const c of r.rows) {
       const cur = accOf(c.country)
       cur.orders += c.orders
-      if (captured.has(store.id)) cur.captureOrders += c.orders
+      // The report's own capture figures count only the days Meta's split
+      // covers whole: dividing every purchase by every order of the window
+      // read MOKOO's US (Mês passado) at 48% here while the desktop and the
+      // Funil said 87% / 86%. Rows built by hand fall back to the whole row.
+      if (captured.has(store.id)) {
+        cur.captureOrders += c.meta.captureOrders ?? c.orders
+        cur.capturePurchases += c.meta.capturePurchases ?? c.meta.purchases
+      }
       cur.revenue += c.revenue
       cur.variableCosts += c.variableCosts
       cur.contribution += c.contribution
@@ -703,11 +774,21 @@ export function mergeCountries(
     }
   }
   // rollUpCountries sums the tail into "outros" and recomputes every ratio
-  // from the summed money, exactly as one store's report does.
-  const head = [...by.values()].sort((a, b) => b.revenue - a.revenue || b.metaSpend - a.metaSpend).slice(0, Math.max(0, limit))
-  const headCodes = new Set(head.map(c => c.country))
+  // from the summed money, exactly as one store's report does. Only countries
+  // with orders get a row of their own: a country where only Meta spent read
+  // "0 pedidos · 0,0% das vendas · contribuição $0 (—)" under a Shopify lede,
+  // with "poucos pedidos para julgar" (EPOCH · Hoje: Índia, $131 of Meta and
+  // no order). They go into "outros" ("N países só com gasto do Meta"), as
+  // the desktop's Shopify table keeps them out (components/countries/fold).
+  const sold = (c: Acc) => c.orders > 0 || Math.abs(c.revenue) >= 0.005 || Math.abs(c.contribution) >= 0.005
+  const headLimit = Math.min(Math.max(0, limit), [...by.values()].filter(sold).length)
+  const ranked = [...by.values()].sort((a, b) => Number(sold(b)) - Number(sold(a)) || b.revenue - a.revenue || b.metaSpend - a.metaSpend)
+  const headCodes = new Set(ranked.slice(0, headLimit).map(c => c.country))
   const tailUnconfigured = [...unconfiguredCountries].some(c => !headCodes.has(c))
-  const rolled = rollUpCountries([...by.values()], revenue, limit)
+  const rolled = [
+    ...rollUpCountries(ranked.filter(c => headCodes.has(c.country)), revenue, headLimit),
+    ...rollUpCountries(ranked.filter(c => !headCodes.has(c.country)), revenue, 0),
+  ]
   // rollUpCountries recomputes capture over every order of the row: it is
   // recomputed here over the orders of `captured` stores only. "outros"
   // takes the countries the head rows do not show.
@@ -715,6 +796,9 @@ export function mergeCountries(
   const captureOrdersOf = (code: string) => code === 'outros'
     ? [...by.values()].filter(c => !shown.has(c.country)).reduce((sum, c) => sum + c.captureOrders, 0)
     : by.get(code)?.captureOrders ?? 0
+  const capturePurchasesOf = (code: string) => code === 'outros'
+    ? [...by.values()].filter(c => !shown.has(c.country)).reduce((sum, c) => sum + c.capturePurchases, 0)
+    : by.get(code)?.capturePurchases ?? 0
   const rows = rolled.map((row): MobileCountry => {
     const blind = row.country === 'outros' ? tailUnconfigured : unconfiguredCountries.has(row.country)
     const captureOrders = captureOrdersOf(row.country)
@@ -724,7 +808,7 @@ export function mergeCountries(
       contributionMargin: blind ? null : row.contributionMargin,
       contributionPerOrder: blind ? null : row.contributionPerOrder,
       smallSample: row.smallSample,
-      meta: { ...row.meta, capturePct: pct(row.meta.purchases, captureOrders), captureOrders },
+      meta: { ...row.meta, capturePct: pct(capturePurchasesOf(row.country), captureOrders), captureOrders, capturePurchases: capturePurchasesOf(row.country) },
       ...(row.mergedCountries ? { mergedCountries: row.mergedCountries } : {}),
     }
   })
@@ -742,6 +826,7 @@ export function mergeCountries(
     smallSample: SMALL_SAMPLE,
     unconfiguredStores: unconfigured,
     sharedLeftOut,
+    leftOut,
   }
 }
 

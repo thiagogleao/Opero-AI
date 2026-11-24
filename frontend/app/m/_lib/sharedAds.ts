@@ -24,6 +24,7 @@
 
 import type { SharedAdAccount } from '@/lib/attributionModels'
 import { formatMoney, plural } from '@/lib/format'
+import { dateBeside } from '@/components/campaigns/storeStart'
 
 export interface PairBadge { label: string; detail: string }
 
@@ -34,6 +35,10 @@ export interface SharedAds {
   badges: Record<string, PairBadge[]>
   /** components/portfolio/data SHARED_LOOKBACK_DAYS, sent by the server. */
   lookbackDays: number
+  /** Sales store id → its first kept order (lib/views/portfolio
+   *  loadFirstOrderDates), for the windows before it existed. Optional: an
+   *  older answer, or a failed read, has none and keeps the 90-day wording. */
+  firstSales?: Record<string, string>
 }
 
 export const NO_SHARED_ADS: SharedAds = { pairs: [], badges: {}, lookbackDays: 0 }
@@ -51,6 +56,29 @@ export function pairOrdersKnown(salesStoreOrders: number | null): 0 | null {
   return salesStoreOrders === 0 ? 0 : null
 }
 
+/** The window on screen, for the pair notes: a window that ends before the
+ *  sales store's first sale is not "antes vendia… some as duas lojas". */
+export interface PairWindow {
+  range: { from: string; to: string }
+  today: string
+  /** Other dates printed beside the window (the comparison's ends): a year
+   *  there puts the year on the first sale too (storeStart dateBeside). */
+  alsoShown?: readonly (string | null | undefined)[]
+}
+
+/** The sales store's first sale as printed beside the window, when the window
+ *  ends before it (components/portfolio/model pairBeforeSalesStart); else null. */
+function firstSaleAfter(shared: SharedAds, salesStoreId: string, w: PairWindow | undefined): string | null {
+  const first = shared.firstSales?.[salesStoreId]
+  if (!w || !first || !(w.range.to < first)) return null
+  return dateBeside(first, [w.range.from, w.range.to, ...(w.alsoShown ?? [])], w.today)
+}
+
+/** components/portfolio/model pairBeforeStartText, word for word (that module
+ *  cannot load in the browser). */
+const beforeStartText = (salesStoreName: string, firstSale: string, rangeLabel: string) =>
+  `Em ${rangeLabel}, a ${salesStoreName} ainda não vendia (1ª venda em ${firstSale}): nada deste período está misturado.`
+
 const history = (p: SharedAdAccount, days: number) =>
   `Nos últimos ${days} dias, ${plural(p.orders, 'pedido', 'pedidos')} da ${p.salesStoreName} (${formatMoney(p.revenue)}) vieram de anúncios pagos pela ${p.adStoreName}.`
 
@@ -60,20 +88,27 @@ const history = (p: SharedAdAccount, days: number) =>
  *  one store  the pairs that store is in, from its side (as the Resumo).
  * `ordersOf(storeId)` is the store's orders in the window when it is on
  * screen, null when it is not (EPOCH alone does not know CAMP HALLOW's).
+ * `win`: the window on screen; one that ends before the sales store's first
+ * sale says it did not sell yet (the desktop's pairBeforeStartText), not
+ * "Para períodos anteriores, some as duas lojas" for a past that is in the
+ * window's future.
  */
 export function pairNotes(
   shared: SharedAds, onScreen: { all: boolean; storeId: string | null }, rangeLabel: string,
-  ordersOf: (storeId: string) => number | null,
+  ordersOf: (storeId: string) => number | null, win?: PairWindow,
 ): PairNote[] {
   const out: PairNote[] = []
   for (const p of shared.pairs) {
     const key = `${p.adStoreId}-${p.salesStoreId}`
-    const now = pairOrdersKnown(ordersOf(p.salesStoreId))
+    // Before its first sale the sales store had no order, so none came from
+    // the other store's ads — known even when it is not on screen (EPOCH alone).
+    const notYet = firstSaleAfter(shared, p.salesStoreId, win)
+    const now = notYet ? 0 : pairOrdersKnown(ordersOf(p.salesStoreId))
     if (onScreen.all) {
       out.push({
         key, tone: now === 0 ? 'info' : 'warn',
         title: `${p.salesStoreName} ${now === 0 ? 'vendia' : 'vende'} com anúncios pagos pela ${p.adStoreName}`,
-        body: `${history(p, shared.lookbackDays)} ` + (now === 0
+        body: `${history(p, shared.lookbackDays)} ` + (notYet ? beforeStartText(p.salesStoreName, notYet, rangeLabel) : now === 0
           ? `Em ${rangeLabel}, a ${p.salesStoreName} não teve pedidos: o resultado deste período não está misturado. Para períodos anteriores, some as duas lojas.`
           : `O gasto fica na ${p.adStoreName} e a venda na ${p.salesStoreName}: se os pedidos deste período também vieram desses anúncios, o lucro de uma parece maior e o da outra menor do que é. A soma das lojas não muda; para julgar cada uma, some as duas.`),
       })
@@ -90,7 +125,9 @@ export function pairNotes(
     out.push(now === 0
       ? {
         key, tone: 'info', title,
-        body: `${history(p, shared.lookbackDays)} Em ${rangeLabel}, a ${p.salesStoreName} não teve pedidos: o resultado deste período não está misturado. Para períodos anteriores, some as duas lojas.`,
+        body: `${history(p, shared.lookbackDays)} ` + (notYet
+          ? beforeStartText(p.salesStoreName, notYet, rangeLabel)
+          : `Em ${rangeLabel}, a ${p.salesStoreName} não teve pedidos: o resultado deste período não está misturado. Para períodos anteriores, some as duas lojas.`),
       }
       : {
         key, tone: 'warn', title,
@@ -122,10 +159,14 @@ export function adsElsewhere(
 }
 
 /** The ads line of a store row with no ad spend of its own (as the desktop's
- *  ROAS cell): who paid for the ads it sells on, or plain "sem anúncios". */
-export function noSpendLine(shared: SharedAds, storeId: string, orders: number): string {
+ *  ROAS cell): who paid for the ads it sells on, or plain "sem anúncios". A
+ *  window before the store's first sale (`range`) has no "antes vendia": it
+ *  did not exist yet. */
+export function noSpendLine(shared: SharedAds, storeId: string, orders: number, range?: { from: string; to: string }): string {
   const sold = shared.pairs.find(p => p.salesStoreId === storeId)
   if (!sold) return 'sem anúncios'
+  const first = shared.firstSales?.[storeId]
+  if (range && first && range.to < first) return 'sem gasto em anúncio'
   return pairOrdersKnown(orders) === 0
     ? `sem gasto em anúncio · antes vendia com anúncios pagos pela ${sold.adStoreName}`
     : `sem gasto no período · vende com anúncios pagos pela ${sold.adStoreName}`

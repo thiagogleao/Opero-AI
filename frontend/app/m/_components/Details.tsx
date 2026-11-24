@@ -14,7 +14,7 @@ import {
   Block, Button, Callout, Chip, EmptyState, ErrorState, Money, RoasGauge, Skeleton,
 } from '@/components/ui'
 import { HorizontalBars, MiniBars } from '@/components/charts'
-import { formatCount, formatMoney, formatPct, formatRangeLabel, formatRelativeTime, formatRoas, plural } from '@/lib/format'
+import { formatCount, formatMoney, formatPct, formatRangeLabel, formatRelativeTime, formatRoas, formatSignedMoney, plural } from '@/lib/format'
 import type { CampaignAction } from '@/lib/campaignSignal'
 import { sharedLeftOutText } from '@/components/countries/sharedText'
 import type {
@@ -22,7 +22,7 @@ import type {
 } from '@/lib/views/mobileDetail'
 import { TABS, type Selection } from '../_lib/selection'
 import { useDetail } from '../_lib/useMobileData'
-import { campaignChip, campaignGapNotes, countriesMetaSide, creativeChip, shopAdsLine } from '../_lib/labels'
+import { campaignChip, campaignGapNotes, countriesLeftOutLine, countriesMetaSide, creativeChip, judgedWindowsText, shopAdsLine } from '../_lib/labels'
 import { adsElsewhere, type SharedAds } from '../_lib/sharedAds'
 import { StoreName } from './Home'
 import s from '../m.module.css'
@@ -31,10 +31,13 @@ const PANEL_ID = 'm-detail-panel'
 const tabButtonId = (k: DetailSection) => `m-detail-btn-${k}`
 
 /** What a section needs beyond its own answer: the shared ad-account pairs
- *  (CAMP HALLOW on EPOCH's account) and a way to open another store. */
-interface SectionCtx { shared: SharedAds; onStore: (loja: string) => void }
+ *  (CAMP HALLOW on EPOCH's account), a way to open another store, and the
+ *  home's "Sem dados de …: a loja está arquivada desde …" for an archived
+ *  store's window after its archive day (Home frozenTitle), which an empty
+ *  list says instead of "Nenhum pedido no período". */
+interface SectionCtx { shared: SharedAds; onStore: (loja: string) => void; frozenTitle: string | null }
 
-export function DetailTabs({ sel, aba, onTab, forceSignal, pollSignal, homeRange, now, scopeName, shared, onStore, frozen = false }: {
+export function DetailTabs({ sel, aba, onTab, forceSignal, pollSignal, homeRange, now, scopeName, shared, onStore, frozen = false, frozenTitle = null }: {
   sel: Selection
   aba: DetailSection | null
   onTab: (t: DetailSection | null) => void
@@ -49,8 +52,11 @@ export function DetailTabs({ sel, aba, onTab, forceSignal, pollSignal, homeRange
   /** An archived store: not synced, so a window ending today is not "parcial"
    *  (nothing more will arrive), as the verdict above says. */
   frozen?: boolean
+  /** Home frozenTitle of the home answer on screen, only when it answers this
+   *  selection: nothing was read in the window, so an empty list says that. */
+  frozenTitle?: string | null
 }) {
-  const ctx: SectionCtx = { shared, onStore }
+  const ctx: SectionCtx = { shared, onStore, frozenTitle }
   const d = useDetail(aba, sel, forceSignal, pollSignal, homeRange)
   const current = d.data && d.dataKey === d.key ? d.data : null
   // Only this tab's list for the previous store or period is "da seleção
@@ -186,9 +192,9 @@ function Section({ data, ctx }: { data: MobileDetailResponse; ctx: SectionCtx })
       <FailedStores data={data} />
       {data.section === 'campanhas' && <Campaigns d={data} ctx={ctx} />}
       {data.section === 'criativos' && <Creatives d={data} ctx={ctx} />}
-      {data.section === 'produtos' && <Products d={data} />}
-      {data.section === 'paises' && <Countries d={data} />}
-      {data.section === 'clientes' && <Customers d={data} />}
+      {data.section === 'produtos' && <Products d={data} frozen={ctx.frozenTitle} />}
+      {data.section === 'paises' && <Countries d={data} frozen={ctx.frozenTitle} />}
+      {data.section === 'clientes' && <Customers d={data} frozen={ctx.frozenTitle} />}
     </>
   )
 }
@@ -221,6 +227,7 @@ function useMore(total: number, first = 10) {
  * store runs no ads" while its sales came from EPOCH's campaigns.
  */
 function NoAds({ d, ctx, what }: { d: CampaignsDetail | CreativesDetail; ctx: SectionCtx; what: 'campanhas' | 'anuncios' }) {
+  if (ctx.frozenTitle) return <FrozenEmpty title={ctx.frozenTitle} />
   const one = d.request.store !== 'all' && d.stores.length === 1 ? d.stores[0].id : null
   const elsewhere = one ? adsElsewhere(ctx.shared, one, what) : null
   if (!elsewhere) {
@@ -232,6 +239,13 @@ function NoAds({ d, ctx, what }: { d: CampaignsDetail | CreativesDetail; ctx: Se
       {elsewhere.body}
     </EmptyState>
   )
+}
+
+/** An archived store's window after its archive day: nothing was read, so
+ *  not "nenhum pedido" (the Squishy World tabs said so right above the
+ *  refunds block's "Sem dados de 17–23 nov: a loja está arquivada desde 10 nov"). */
+function FrozenEmpty({ title }: { title: string }) {
+  return <EmptyState compact icon="clock" title={title} />
 }
 
 // ─── Campanhas ────────────────────────────────────────────────────────────────
@@ -248,7 +262,6 @@ function Campaigns({ d, ctx }: { d: CampaignsDetail; ctx: SectionCtx }) {
   const more = useMore(d.campaigns.length)
   const several = d.stores.length > 1
   const t = d.totals
-  const windows = d.decisionWindows.map(w => `${w.label}${d.decisionWindows.length > 1 ? ` (${w.stores.join(', ')})` : ''}`).join('; ')
   // Only stores whose ads run on Meta: a store selling through Shop
   // Campaigns is not Meta's to credit (labels campaignGapNotes).
   const gaps = campaignGapNotes(d.storeNotes)
@@ -265,7 +278,7 @@ function Campaigns({ d, ctx }: { d: CampaignsDetail; ctx: SectionCtx }) {
   return (
     <Block
       title={`Campanhas · ${formatCount(d.totalCampaigns)}`}
-      howTo={`A ação é julgada nos últimos 7 dias fechados (${windows}); o dinheiro, no período escolhido.`}
+      howTo={judgedWindowsText(d.decisionWindows)}
       info={<><p>{d.formula}</p>{(['cortar', 'escalar', 'manter', 'observar'] as CampaignAction[]).map(a => <p key={a} style={{ marginTop: 6 }}><b>{a[0].toUpperCase() + a.slice(1)}:</b> {d.rules[a]}</p>)}</>}
       infoLabel="Como cada ação é decidida"
       flush={d.campaigns.length > 0}
@@ -338,17 +351,29 @@ function Campaigns({ d, ctx }: { d: CampaignsDetail; ctx: SectionCtx }) {
 /**
  * Ads the sync has not tied to a campaign yet: one line, never a campaign row
  * (no "ativa/pausada", no ROAS gauge, not in the count). The desktop table
- * calls the same bucket "sem campanha".
+ * calls the same bucket "sem campanha". Its Meta revenue and estimated profit
+ * are in the header too, so the line names them: the header read $138 and
+ * $42 better than the rows with only "o gasto já está no total" to say why.
  */
 function UnsyncedLine({ u, several, total }: { u: CampaignsDetail['unsynced']; several: boolean; total: number }) {
-  if (!(u.spend >= 0.005)) return null
+  // An older answer (cached on the phone) has no purchaseValue.
+  const pv = u.purchaseValue ?? 0
+  const profit = u.estimatedProfit ?? null
+  if (!(u.spend >= 0.005) && !(pv >= 0.005)) return null
   const share = total > 0 ? (u.spend / total) * 100 : null
+  const inTotal = [
+    `o gasto (${formatMoney(u.spend)})`,
+    pv >= 0.005 ? `a receita pelo Meta (${formatMoney(pv)})` : null,
+    profit !== null && Math.abs(profit) >= 0.005 ? `o lucro estimado (${formatSignedMoney(profit)})` : null,
+  ].filter((x): x is string => x !== null)
+  const listed = inTotal.length > 1 ? `${inTotal.slice(0, -1).join(', ')} e ${inTotal[inTotal.length - 1]}` : inTotal[0]
   return (
     <p className={s.note} style={{ padding: '0 16px 12px' }}>
       <b>{formatMoney(u.spend)}</b> em anúncios ainda não ligados a uma campanha
       {share !== null && share >= 10 ? ` (${formatPct(share, { digits: 0 })} do gasto)` : ''}
       {several && u.stores.length > 0 ? `: ${u.stores.map(b => `${b.store} ${formatMoney(b.spend)}`).join(', ')}` : ''}.
-      {' '}A sincronização com o Meta ainda não trouxe o nome nem a campanha {u.ads === 1 ? 'desse anúncio' : 'desses anúncios'}; o gasto já está no total.
+      {' '}A sincronização com o Meta ainda não trouxe o nome nem a campanha {u.ads === 1 ? 'desse anúncio' : 'desses anúncios'}.
+      {' '}{inTotal.length > 1 ? `${listed.charAt(0).toUpperCase()}${listed.slice(1)} desses anúncios já estão nos totais acima, mas em nenhuma linha.` : 'O gasto já está no total.'}
     </p>
   )
 }
@@ -407,7 +432,7 @@ function Creatives({ d, ctx }: { d: CreativesDetail; ctx: SectionCtx }) {
 
 // ─── Produtos ─────────────────────────────────────────────────────────────────
 
-function Products({ d }: { d: ProductsDetail }) {
+function Products({ d, frozen }: { d: ProductsDetail; frozen: string | null }) {
   const more = useMore(d.products.length)
   const several = d.stores.length > 1
   return (
@@ -419,7 +444,7 @@ function Products({ d }: { d: ProductsDetail }) {
       footer={d.unconfiguredStores.length ? `${d.unconfiguredStores.join(', ')} sem custos configurados: a contribuição dos produtos ${d.unconfiguredStores.length > 1 ? 'delas' : 'dela'} não aparece.` : undefined}
     >
       {d.products.length === 0 ? (
-        <EmptyState compact icon="box" title="Nenhum produto vendido no período" />
+        frozen ? <FrozenEmpty title={frozen} /> : <EmptyState compact icon="box" title="Nenhum produto vendido no período" />
       ) : (
         <>
           <ul className={s.list}>
@@ -456,30 +481,41 @@ function Products({ d }: { d: ProductsDetail }) {
 
 // ─── Países ───────────────────────────────────────────────────────────────────
 
-/** "20% dos pedidos reais", or, when the row also holds orders of stores
- *  whose Meta spend has no country split (they cannot be credited by
- *  country), the orders it was measured on: "20% de 5 pedidos das lojas com
- *  divisão do Meta" — never one store's purchases over another's orders. */
-function captureText(c: CountriesDetail['countries'][number]): string {
+/** "20% dos pedidos reais", or, when the capture leaves orders out (stores
+ *  whose Meta spend has no country split, or days it covers only in part),
+ *  its own two figures, as the desktop's "154 ÷ 177": "87%: 154 compras ÷ 177
+ *  pedidos com divisão do Meta" — never purchases over orders Meta could not
+ *  credit by country. Without the figures, "46 compras atribuídas (88% de 41
+ *  pedidos …)" read as a contradiction. */
+export function captureText(c: Pick<CountriesDetail['countries'][number], 'orders' | 'meta'>): string {
   const pct = formatPct(c.meta.capturePct, { digits: 0 })
-  // An older answer (cached on the phone) has no captureOrders.
+  // An older answer (cached on the phone) has neither figure.
   const n = c.meta.captureOrders ?? c.orders
-  return n < c.orders ? `${pct} de ${plural(n, 'pedido', 'pedidos')} das lojas com divisão do Meta` : `${pct} dos pedidos reais`
+  const bought = Math.round(c.meta.capturePurchases ?? c.meta.purchases)
+  return n === c.orders && bought === Math.round(c.meta.purchases)
+    ? `${pct} dos pedidos reais`
+    : `${pct}: ${plural(bought, 'compra', 'compras')} ÷ ${plural(n, 'pedido', 'pedidos')} com divisão do Meta`
 }
 
-function Countries({ d }: { d: CountriesDetail }) {
+function Countries({ d, frozen }: { d: CountriesDetail; frozen: string | null }) {
   // No Meta line on any row — no Meta money in the window (Squishy World), or
   // spend Meta sent without a country split (MOKOO: 0% covered): the caveat
   // about Meta's own split would point at a column that is not there.
   const side = countriesMetaSide(d)
+  // Stores without costs left out of the rows of a sum with priced ones
+  // (mobileDetail mergeCountries leftOut): said in visible text, as the
+  // desktop's "Fora da soma por país", never only in the ⓘ.
+  const leftOutLine = countriesLeftOutLine(d.leftOut ?? [])
+  const lede = (d.leftOut ?? []).some(x => x.revenue >= 0.005) ? 'Pedidos reais da Shopify por país, das lojas com custos.' : 'Pedidos reais da Shopify por país.'
   return (
     <Block
       title="Países"
-      howTo={side === 'split' ? 'Pedidos reais da Shopify por país. A linha do Meta é a atribuição dele, só para comparar.' : 'Pedidos reais da Shopify por país.'}
+      howTo={side === 'split' ? `${lede} A linha do Meta traz o gasto dele no país e as compras que ele se atribui, só para comparar.` : lede}
       info={<>{d.notes.map((n, i) => <p key={i} style={{ marginTop: i ? 6 : 0 }}>{n}</p>)}</>}
       flush={d.countries.length > 0}
       // The Meta caveat is about comparing columns: noise under "Nenhum pedido".
-      footer={d.countries.length === 0 ? undefined : <>
+      footer={d.countries.length === 0 ? (leftOutLine ? <span>{leftOutLine}</span> : undefined) : <>
+        {leftOutLine && <span>{leftOutLine}</span>}
         {side === 'none'
           ? <span>Sem gasto no Meta no período: não há atribuição do Meta para comparar.</span>
           : side === 'no_split'
@@ -497,28 +533,37 @@ function Countries({ d }: { d: CountriesDetail }) {
       </>}
     >
       {d.countries.length === 0 ? (
-        <EmptyState compact icon="globe" title="Nenhum pedido no período" />
+        frozen ? <FrozenEmpty title={frozen} /> : <EmptyState compact icon="globe" title="Nenhum pedido no período" />
       ) : (
         <ul className={s.list}>
-          {d.countries.map(c => (
+          {d.countries.map(c => {
+            // Only Meta spent there (the "N países só com gasto do Meta" row):
+            // no "0 pedidos · 0,0% · contribuição $0 (—)", no small-sample chip.
+            const noSale = c.orders === 0 && Math.abs(c.revenue) < 0.005
+            return (
             <li key={c.country} className={`${s.row} ${s.rowNoAvatar}`}>
               <span style={{ minWidth: 0 }}>
                 <span className={s.rowName}>{c.name}</span>
                 <span className={s.rowSub} style={{ display: 'block' }}>
-                  {plural(c.orders, 'pedido', 'pedidos')} · {formatPct(c.revenueShare)} das vendas
-                  {c.contribution !== null ? <> · contribuição {formatMoney(c.contribution)} ({formatPct(c.contributionMargin)})</> : ' · sem custos'}
+                  {noSale ? 'Nenhum pedido na Shopify' : <>
+                    {plural(c.orders, 'pedido', 'pedidos')} · {formatPct(c.revenueShare)} das vendas
+                    {c.contribution !== null ? <> · contribuição {formatMoney(c.contribution)} ({formatPct(c.contributionMargin)})</> : ' · sem custos'}
+                  </>}
                 </span>
                 {(c.meta.spend > 0 || c.meta.purchases > 0) && (
                   <span className={s.rowSub} style={{ display: 'block' }}>
-                    Meta: {formatMoney(c.meta.spend)} · {plural(c.meta.purchases, 'compra atribuída', 'compras atribuídas')}
+                    {/* The figure named: "Meta: $5.720" beside $9.415 of sales read as
+                        sales Meta credited, under a lede about its attribution. */}
+                    Meta: gasto {formatMoney(c.meta.spend)} · {plural(c.meta.purchases, 'compra atribuída', 'compras atribuídas')}
                     {c.meta.capturePct !== null && ` (${captureText(c)})`}
                   </span>
                 )}
-                {c.smallSample && c.country !== 'outros' && <span className={s.rowTags}><Chip tone="neu" icon="ring" size="sm">poucos pedidos para julgar</Chip></span>}
+                {c.smallSample && c.country !== 'outros' && !noSale && <span className={s.rowTags}><Chip tone="neu" icon="ring" size="sm">poucos pedidos para julgar</Chip></span>}
               </span>
-              <span className={s.rowVal}><b>{formatMoney(c.revenue)}</b></span>
+              <span className={s.rowVal}>{noSale ? <><b className="mut">—</b><small>gasto sem venda</small></> : <b>{formatMoney(c.revenue)}</b>}</span>
             </li>
-          ))}
+            )
+          })}
         </ul>
       )}
     </Block>
@@ -527,7 +572,7 @@ function Countries({ d }: { d: CountriesDetail }) {
 
 // ─── Clientes ─────────────────────────────────────────────────────────────────
 
-function Customers({ d }: { d: CustomersDetail }) {
+function Customers({ d, frozen }: { d: CustomersDetail; frozen: string | null }) {
   const sp = d.split
   const total = sp.newOrders + sp.returningOrders + sp.guestOrders
   const w = (n: number) => `${total > 0 ? (n / total) * 100 : 0}%`
@@ -538,7 +583,7 @@ function Customers({ d }: { d: CustomersDetail }) {
       info={`Primeira compra contada sobre todo o histórico desde ${sp.historyStart ? formatRangeLabel({ from: sp.historyStart, to: sp.historyStart }) : 'o início dos dados'}, não só dentro do período.${d.perStoreCustomers ? ' Com várias lojas, quem comprou em duas conta duas vezes.' : ''}`}
     >
       {sp.orders === 0 ? (
-        <EmptyState compact icon="user" title="Nenhum pedido no período" />
+        frozen ? <FrozenEmpty title={frozen} /> : <EmptyState compact icon="user" title="Nenhum pedido no período" />
       ) : (
         <div className={s.stack}>
           <div className={s.kpis}>

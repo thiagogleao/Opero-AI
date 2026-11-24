@@ -7,6 +7,7 @@ import { getCampaignSignals, DEFAULT_SCALE_CONFIG, type CampaignSignal } from '.
 import { buildPortfolio, type PortfolioStoreRow, type PortfolioView } from './views/portfolio'
 import { buildVerdict, judgedStores, verdictInputFromPortfolio } from './views/verdict'
 import { formatMoney, formatPct, formatRoas, plural, readablePctChange } from './format'
+import { adChannelOf, channelRoas, type AdChannel } from './views/adChannel'
 
 /**
  * Alerts and the daily summary.
@@ -26,13 +27,16 @@ import { formatMoney, formatPct, formatRoas, plural, readablePctChange } from '.
 export interface Rule { enabled: boolean; threshold: number }
 
 export interface AlertConfig {
-  /** Meta ROAS of the day below the store's own break-even ROAS (revenue ÷
-   *  contribution over the last 7 complete days). `threshold` is the target
-   *  used only for stores without cost settings, whose break-even is unknown. */
+  /** ROAS of the day on the store's ad channel (lib/views/adChannel: Meta,
+   *  Shopify ads or both, as every screen measures it) below the store's own
+   *  break-even ROAS (revenue ÷ contribution over the last 7 complete days).
+   *  `threshold` is the target used only for stores without cost settings,
+   *  whose break-even is unknown. */
   roasDrop: Rule
   /** At least `threshold` dollars of ads today and not one sale. */
   spendNoSales: Rule
-  /** Day's Meta spend above this percentage of the trailing 7-day average. */
+  /** Day's ad spend (Meta + Shopify ads, as roasDrop and minSpend measure it)
+   *  above this percentage of its trailing 7-day average. */
   spendSpike: Rule
   /** Operating margin for the day below this percentage (stores with cost
    *  settings only: without costs the margin means nothing). */
@@ -42,7 +46,8 @@ export interface AlertConfig {
   scaleAlerts: Rule
   /** Push a summary of the day at `hour`, in the reference timezone (Brasília). */
   dailySummary: { enabled: boolean; hour: number }
-  /** A store below this Meta spend today is too early to judge on ROAS/margin. */
+  /** A store below this ad spend today (Meta + Shopify ads) is too early to
+   *  judge on ROAS/margin. */
   minSpend: number
   /** No performance alert before this hour of the store's own day. */
   fromHour: number
@@ -229,19 +234,47 @@ const thresholdPct = (v: number) =>
   formatPct(v, { digits: Number.isInteger(v) ? 0 : Number.isInteger(v * 10) ? 1 : 2 })
 const orders = (n: number) => plural(n, 'pedido', 'pedidos')
 
+/** "ROAS" (Meta), "ROAS Shopify", "ROAS dos anúncios": the channel a ROAS is
+ *  on, in the words of the phone's store rows (Home rowRoas). */
+const ALERT_ROAS_NAME: Record<AdChannel, string> = { meta: 'ROAS', shop: 'ROAS Shopify', both: 'ROAS dos anúncios' }
+
+/** "$608 na Meta", "$62,03 em anúncios Shopify", "$5,61 na Meta e $62,03 em
+ *  anúncios Shopify": every channel that spent, so the parts add up. */
+function spendText(t: Pick<PnL, 'metaSpend' | 'shopSpend'>): string {
+  const meta = `${money(t.metaSpend)} na Meta`
+  const shop = `${money(t.shopSpend)} em anúncios Shopify`
+  if (t.shopSpend > 0) return t.metaSpend > 0 ? `${meta} e ${shop}` : shop
+  return meta
+}
+
 /**
  * The phone, opened on one store and on the period the push talks about.
  * The period is always explicit: without it the phone restores the last one
  * used (app/m/_lib/selection resolveView), so a tap on today's "ROAS 0,36×"
  * could open "30 dias · no lucro". "today" is the store's own day, as the
  * alerts are.
+ *
+ * `dia` is the date a "today" push is about, on the calendar the link opens
+ * (the store's own; Todas' for the summary). "today" alone opened whatever day
+ * it was at the tap: Hibikura's alert about Tokyo's 23 nov, sent at 11h in
+ * Brasília and tapped at 12h05, landed on Tokyo's 24 nov at 00h05. The phone
+ * opens "Hoje" while it is still that date, and that date otherwise
+ * (selection resolveView, notificationDay).
+ *
+ * With another preset (the scale push's "7 dias") `dia` is the day it was
+ * sent: it marks the period and the tab as the link's (selection linkDayOf),
+ * so neither becomes the phone's saved choice. Without it the scale push's
+ * "7 dias" and Campanhas were stored as the owner's and reopened on every
+ * launch.
  */
-export const storeUrl = (storeId: string, opts: { tab?: string; periodo?: Period } = {}) =>
-  `/m?loja=${encodeURIComponent(storeId)}&periodo=${opts.periodo ?? 'today'}${opts.tab ? `&aba=${encodeURIComponent(opts.tab)}` : ''}`
+export const storeUrl = (storeId: string, opts: { tab?: string; periodo?: Period; dia?: string } = {}) => {
+  const periodo = opts.periodo ?? 'today'
+  return `/m?loja=${encodeURIComponent(storeId)}&periodo=${periodo}${periodo !== 'custom' && opts.dia ? `&dia=${opts.dia}` : ''}${opts.tab ? `&aba=${encodeURIComponent(opts.tab)}` : ''}`
+}
 
-/** The daily summary is about every store's day: Todas · Hoje, never the
- *  store last pinned on the phone. */
-export const SUMMARY_URL = '/m?loja=todas&periodo=today'
+/** The daily summary is about every store's day: Todas · Hoje (of `day`, on
+ *  Todas' calendar), never the store last pinned on the phone. */
+export const summaryUrl = (day: string) => `/m?loja=todas&periodo=today&dia=${day}`
 
 // ─── Threshold alerts (pure evaluation) ───────────────────────────────────────
 
@@ -286,7 +319,7 @@ export function evaluateStoreAlerts(
   if (!opts.ignoreHour && s.minutesIntoDay < cfg.fromHour * 60) return []
   const t = s.today
   const out: AlertCandidate[] = []
-  const base = { storeId: s.storeId, store: s.name, day: s.day, url: storeUrl(s.storeId) }
+  const base = { storeId: s.storeId, store: s.name, day: s.day, url: storeUrl(s.storeId, { dia: s.day }) }
 
   // The worst day of all: money going out and nothing coming in. Its own rule,
   // because ROAS 0 and "no revenue, no margin" used to skip every other one.
@@ -294,22 +327,37 @@ export function evaluateStoreAlerts(
     out.push({
       ...base, kind: 'spend_no_sales',
       title: `💸 ${money(t.adSpend)} em anúncios e nenhuma venda — ${s.name}`,
-      body: `Hoje até agora: ${money(t.metaSpend)} na Meta${t.shopSpend > 0 ? ` e ${money(t.shopSpend)} em anúncios Shopify` : ''}, 0 pedidos. Confira checkout, pagamento e pixel.`,
+      body: `Hoje até agora: ${spendText(t)}, 0 pedidos. Confira checkout, pagamento e pixel.`,
     })
   }
 
-  const judgeable = t.orders > 0 && t.metaSpend >= cfg.minSpend
-  if (cfg.roasDrop.enabled && judgeable && t.roas !== null) {
+  // Judged on all the ad money the margin carries (Meta + Shopify ads): gated
+  // on Meta alone, Dumpling 8jcp3a — whose ads are mostly Shopify ads — was
+  // never judged (7–16 nov: up to $1.567 a day of Shopify ads, $0 of Meta),
+  // and its −24,5% day fired only while part of the spend was on Meta.
+  const judgeable = t.orders > 0 && t.adSpend >= cfg.minSpend
+  // The ROAS of the store's ad channel, as Resumo, the phone and the overview
+  // measure it (lib/views/adChannel): revenue ÷ Meta read 2,07× on a day the
+  // screens read "ROAS dos anúncios 0,95× · empate 1,46× → no prejuízo".
+  const channel = adChannelOf(t)
+  const roas = channelRoas(t)
+  if (cfg.roasDrop.enabled && judgeable && roas !== null && channel !== null) {
     const own = s.configured ? (s.trailing.breakEvenRoas ?? t.breakEvenRoas) : null
     const target = s.configured ? own : cfg.roasDrop.threshold
-    if (target !== null && t.roas < target) {
+    if (target !== null && roas < target) {
       const why = s.configured
         ? `Empate desta loja: ${formatRoas(target)} (receita ÷ margem de contribuição, últimos ${TRAILING_DAYS} dias).`
         : `Custos não configurados: comparado com a meta fixa de ${formatRoas(target)}.`
+      // Without cost settings the engine's "lucro" is revenue − ads: never
+      // called lucro (the screen the push opens says the same), and the parts
+      // named add up to it.
+      const result = s.configured
+        ? `, lucro ${money(t.operatingProfit)}.`
+        : `: receita − anúncios ${money(t.revenue - t.adSpend)} (sem custos configurados).`
       out.push({
         ...base, kind: 'roas_drop',
-        title: `⚠️ ROAS ${formatRoas(t.roas)} abaixo do empate — ${s.name}`,
-        body: `${why} Hoje: ${money(t.revenue)} de receita, ${money(t.metaSpend)} na Meta, lucro ${money(t.operatingProfit)}.`,
+        title: `⚠️ ${ALERT_ROAS_NAME[channel]} ${formatRoas(roas)} abaixo do empate — ${s.name}`,
+        body: `${why} Hoje: ${money(t.revenue)} de receita, ${spendText(t)}${result}`,
       })
     }
   }
@@ -324,14 +372,19 @@ export function evaluateStoreAlerts(
     })
   }
 
+  // On all the ad money, as the rules above: measured on Meta alone, a store
+  // selling through Shopify ads (Dumpling 8jcp3a, 17 nov: $1.867 against about
+  // $860 a day) never spiked, and a Meta spike was told beside the Shopify ROAS.
   if (cfg.spendSpike.enabled) {
-    const avg = s.trailing.metaSpend / TRAILING_DAYS
-    const pct = avg > 0 ? (t.metaSpend / avg) * 100 : 0
-    if (avg > 0 && t.metaSpend >= cfg.minSpend && pct >= cfg.spendSpike.threshold) {
+    const avg = s.trailing.adSpend / TRAILING_DAYS
+    const pct = avg > 0 ? (t.adSpend / avg) * 100 : 0
+    if (avg > 0 && t.adSpend >= cfg.minSpend && pct >= cfg.spendSpike.threshold) {
+      // One channel: "$1.867 em anúncios Shopify hoje"; both: the total, then its parts.
+      const spent = t.metaSpend > 0 && t.shopSpend > 0 ? `${money(t.adSpend)} em anúncios hoje (${spendText(t)})` : `${spendText(t)} hoje`
       out.push({
         ...base, kind: 'spend_spike',
-        title: `📣 Gasto ${pct0(pct)} da média — ${s.name}`,
-        body: `${money(t.metaSpend)} hoje contra ${money(avg)} de média nos últimos ${TRAILING_DAYS} dias. ROAS ${formatRoas(t.roas)}.`,
+        title: `📣 Gasto em anúncios ${pct0(pct)} da média — ${s.name}`,
+        body: `${spent} contra ${money(avg)} de média por dia nos últimos ${TRAILING_DAYS} dias.${roas !== null && channel ? ` ${ALERT_ROAS_NAME[channel]} ${formatRoas(roas)}.` : ''}`,
       })
     }
   }
@@ -513,9 +566,10 @@ export async function runScaleChecks(opts: RunOpts = {}): Promise<FiredAlert[]> 
 
       // The phone, on this store's campaigns: /campaigns is a Clerk page the
       // phone cannot open. On "7 dias": the push names the last 7 closed days,
-      // the window the action is judged on.
+      // the window the action is judged on — the link's, never the phone's
+      // saved period (`dia`, storeUrl).
       const delivered = opts.dryRun ? 0 : await deliver(kind, `${store.id}:${c.campaignId}`, day, {
-        title, body, url: storeUrl(store.id, { tab: 'campanhas', periodo: '7d' }), kind: 'scale',
+        title, body, url: storeUrl(store.id, { tab: 'campanhas', periodo: '7d', dia: day }), kind: 'scale',
         tag: `${kind}-${c.campaignId}-${day}`,
         data: { kind, tenantId: store.id, campaignId: c.campaignId },
       }, opts)
@@ -603,7 +657,7 @@ export function summaryText(t: PnL, before: PnL | null, stores: SummaryStore[], 
 
 /**
  * The summary of a portfolio view, judged exactly as the verdict of the screen
- * the push opens (SUMMARY_URL: Todas · Hoje) — buildVerdict on the same view.
+ * the push opens (summaryUrl: Todas · Hoje) — buildVerdict on the same view.
  */
 export function dailySummaryOf(view: PortfolioView): DailySummary {
   const v = buildVerdict(verdictInputFromPortfolio(view))
@@ -647,7 +701,9 @@ export async function sendDailySummary(opts: RunOpts = {}): Promise<SummaryResul
     if (opts.dryRun) return { sent: false, delivered: 0, summary }
 
     res = await sendPushToAll({
-      title: summary.title, body: summary.body, url: SUMMARY_URL, kind: 'summary',
+      // The day the summary is about, on Todas' calendar: tapped after
+      // midnight it opens that day, not the new and nearly empty one.
+      title: summary.title, body: summary.body, url: summaryUrl(view.anchorToday), kind: 'summary',
       tag: `daily-summary-${day}`,
       data: { kind: 'daily_summary', profit: summary.profit },
     })

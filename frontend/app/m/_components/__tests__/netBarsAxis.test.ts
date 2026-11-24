@@ -17,7 +17,7 @@ describe('NetBars (phone) y axis', () => {
   it('labels every tick of a small-value axis in one format (cents on all of them)', () => {
     // Ticks −2, −1,5, −1, −0,5, 0 used to read "−$2 | −$1,50 | −$1 | −$0,50 | $0".
     const t = render([day('2026-11-16', -0.42), day('2026-11-17', -1.58), day('2026-11-18', -0.9)])
-    expect(t.map(l => l.text)).toEqual(['−$2,00', '−$1,50', '−$1,00', '−$0,50', '$0'])
+    expect(t.map(l => l.text)).toEqual(['−\u2060$2,00', '−\u2060$1,50', '−\u2060$1,00', '−\u2060$0,50', '$0'])
   })
 
   it('keeps whole dollars on a normal axis and fits every label in the margin', () => {

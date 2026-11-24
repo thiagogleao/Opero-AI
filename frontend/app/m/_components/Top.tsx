@@ -4,9 +4,9 @@
 
 import { useEffect, useRef } from 'react'
 import { Icon, StatusDot } from '@/components/ui'
-import { formatRangeLabel, formatRelativeTime } from '@/lib/format'
+import { formatRelativeTime } from '@/lib/format'
 import type { MobileResponse, MobileStoreOption } from '@/lib/views/mobile'
-import { ALL, PERIOD_MAIN, periodShort, type Selection } from '../_lib/selection'
+import { ALL, PERIOD_MAIN, periodButtonFull, periodButtonLabel, periodButtonYear, periodShort, type Selection } from '../_lib/selection'
 import { refreshOutcome, refreshProgress, skippedText, SOURCE_LABEL } from '../_lib/refreshProgress'
 import type { RefreshRun } from '../_lib/useMobileData'
 import { SoundIcon } from './Sheet'
@@ -130,8 +130,10 @@ export function PeriodBar({ sel, today, shown, onPick, onMore }: {
   onMore: () => void
 }) {
   const inMain = !!sel && (PERIOD_MAIN as string[]).includes(sel.periodo)
-  const moreLabel = !sel || inMain ? 'Mais'
-    : sel.periodo === 'custom' && sel.de && sel.ate ? formatRangeLabel(shown ?? { from: sel.de, to: sel.ate }, today) : periodShort(sel.periodo)
+  const chosen = !!sel && !inMain
+  const moreLabel = chosen ? periodButtonLabel(sel, shown) : 'Mais'
+  // Dates of another year: the year on a line of its own, under the dates.
+  const moreYear = chosen ? periodButtonYear(sel, shown, today) : null
   return (
     <div className={s.periods} role="group" aria-label="Período">
       {PERIOD_MAIN.map(p => (
@@ -139,8 +141,13 @@ export function PeriodBar({ sel, today, shown, onPick, onMore }: {
           {periodShort(p)}
         </button>
       ))}
-      <button type="button" className={s.periodBtn} aria-pressed={!!sel && !inMain} aria-haspopup="dialog" onClick={onMore}>
-        {moreLabel}<Icon name="chev" size={12} />
+      <button type="button" className={`${s.periodBtn} ${s.periodMore}${chosen ? ` ${s.periodMoreWide}` : ''}`}
+        aria-pressed={chosen} aria-haspopup="dialog" onClick={onMore}
+        title={chosen ? periodButtonFull(sel, shown, today) : undefined}>
+        {moreYear
+          ? <span className={`${s.periodLabel} ${s.periodLabel2}`}><span>{moreLabel}</span>{/* read as "25/12–3/1 2025–26"; no box in a flex column */}{" "}<small className={s.periodYear}>{moreYear}</small></span>
+          : <span className={s.periodLabel}>{moreLabel}</span>}
+        <Icon name="chev" size={12} />
       </button>
     </div>
   )

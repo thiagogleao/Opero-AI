@@ -19,8 +19,8 @@ import type { DetailSection } from '@/lib/views/mobileDetail'
 import { formatTimeInTz, tzCity } from '@/lib/format'
 import { REFERENCE_TZ, todayInTz } from '@/lib/engine/dates'
 import {
-  ALL, chipSelection, clockDiffers, patchSelection, periodLabel, periodShort, selectionKey, selectionPeriodLabel, selectionTz,
-  type Selection,
+  ALL, chipReturnLabel, chipSelection, chipView, clockDiffers, linkDayKey, linkDayNotice, patchSelection, periodLabel, periodShort,
+  rowTapSelection, selectionKey, selectionPeriodLabel, selectionTz, type Selection,
 } from './_lib/selection'
 import {
   applyUrl, configureStores, getServerView, getView, persistCurrent, revalidate, setView, subscribeView, takeLinkNotice,
@@ -34,7 +34,7 @@ import { usePush } from './_lib/usePush'
 import { NO_SHARED_ADS, type SharedAds } from './_lib/sharedAds'
 import { Header, PeriodBar, RefreshStrip, StoreChips, Strip } from './_components/Top'
 import {
-  Attention, ChargebackBlock, ClockBanner, DailyBlock, DayBlock, LiveFeed, RefundsBlock, SharedAdsNotes, StoreList, VerdictBlock,
+  Attention, ChargebackBlock, ClockBanner, DailyBlock, DayBlock, frozenTitle, LiveFeed, notYetTitle, RefundsBlock, SharedAdsNotes, StoreList, VerdictBlock,
 } from './_components/Home'
 import { DetailTabs } from './_components/Details'
 import { AlertsSheet, PeriodSheet, SettingsSheet } from './_components/Sheets'
@@ -69,8 +69,12 @@ export default function MobileApp({ stores, archived, sharedAds }: {
   const [sheet, setSheet] = useState<SheetName>(null)
   const [force, setForce] = useState(0)
   const [notice, setNotice] = useState<string | null>(null)
-  // A link's custom range cut before asking (selection linkRangeNotice).
+  // A link whose custom range was cut before asking (selection linkRangeNotice).
   const [rangeNotice, setRangeNotice] = useState<string | null>(null)
+  // The notification strip the owner closed (selection linkDayNotice), by the
+  // notification it was about (selection linkDayKey: not the store, so a
+  // store row does not bring it back); a new notification tap shows its own.
+  const [closedLinkDay, setClosedLinkDay] = useState<string | null>(null)
   const deviceTz = useMemo(() => (typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : REFERENCE_TZ), [])
 
   const activeIds = useMemo(() => new Set(stores.map(x => x.id)), [stores])
@@ -114,13 +118,22 @@ export default function MobileApp({ stores, archived, sharedAds }: {
     setView({ ...v, sel: patchSelection(v.sel, patch) })
   }, [])
   // A store row of "Todas" may also open the dates it showed, for that store
-  // only (selection storeRowSelection).
+  // only (selection storeRowSelection). It picks a store, not a period: a
+  // period a notification opened stays the link's (selection rowTapSelection),
+  // read from then on on the store's own clock.
   const pickRow = useCallback((patch: Partial<Selection>) => {
-    pick(patch)
+    const v = getView()
+    if (!v) return
+    setNotice(null)
+    setRangeNotice(null)
+    const todayOf = (loja: string) => todayInTz(selectionTz(loja, stores, archived), new Date())
+    setView({ ...v, sel: rowTapSelection(v.sel, patch, todayOf) })
     window.scrollTo({ top: 0, behavior: 'smooth' })
-  }, [pick])
-  // A chip keeps the period, except row dates: leaving the store a row opened
-  // brings back the owner's preset (selection chipSelection).
+  }, [stores, archived])
+  // A store opened from inside the screen ("Abrir EPOCH" in Campanhas, "Ver
+  // as lojas juntas", an archived store in Ajustes): the period stays, except
+  // row dates and a notification's period, which go back to the owner's
+  // (selection chipSelection). The open tab stays: the link was read in it.
   const pickStore = useCallback((loja: string) => {
     const v = getView()
     if (!v) return
@@ -129,9 +142,20 @@ export default function MobileApp({ stores, archived, sharedAds }: {
     setView({ ...v, sel: chipSelection(v.sel, loja) })
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }, [])
+  // The store buttons at the top: the same, and a tab a notification opened
+  // gives way to the owner's own (selection chipView).
+  const pickChip = useCallback((loja: string) => {
+    const v = getView()
+    if (!v) return
+    setNotice(null)
+    setRangeNotice(null)
+    setView(chipView(v, loja))
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }, [])
+  // A tab the owner opens or closes is theirs, whatever a notification opened.
   const pickTab = useCallback((aba: DetailSection | null) => {
     const v = getView()
-    if (v) setView({ ...v, aba })
+    if (v) setView({ sel: v.sel, aba })
   }, [])
 
   // ── Sound: new sales of what is on screen, never on a switch ────────────
@@ -161,6 +185,7 @@ export default function MobileApp({ stores, archived, sharedAds }: {
         const v = getView()
         setNotice(missing && v ? linkNotice(v.sel.loja) : null)
         setRangeNotice(takeLinkRangeNotice())
+        setClosedLinkDay(null)
         return
       }
       const v = getView()
@@ -232,6 +257,11 @@ export default function MobileApp({ stores, archived, sharedAds }: {
   // sheet (Tokyo's "today" offered for a Brazilian store).
   const selTz = sel ? selectionTz(sel.loja, stores, archived) : REFERENCE_TZ
   const selToday = now ? todayInTz(selTz, new Date(now)) : undefined
+  // A period a notification opened, for as long as it is on screen (it goes
+  // back to the owner's own on the next chip or day): which day, and to what.
+  const linkKey = sel ? linkDayKey(sel) : null
+  const linkDayText = sel && selToday && linkKey !== closedLinkDay ? linkDayNotice(sel, selToday) : null
+  const backTo = sel ? chipReturnLabel(sel, selToday) : null
   // A custom period is named by its dates: "Escolher datas" is the action.
   const pendingName = sel ? `${sel.loja === ALL ? 'Todas' : nameOf(sel.loja)} · ${selectionPeriodLabel(sel, selToday)}` : ''
   const shownName = data
@@ -271,7 +301,7 @@ export default function MobileApp({ stores, archived, sharedAds }: {
         onSettings={() => setSheet('settings')}
         settingsAlert={pushAlert}
       />
-      <StoreChips stores={stores} archived={archived} sel={sel} pendingKey={loadingThis && !fresh ? sel?.loja ?? null : null} onPick={pickStore} />
+      <StoreChips stores={stores} archived={archived} sel={sel} pendingKey={loadingThis && !fresh ? sel?.loja ?? null : null} onPick={pickChip} />
       <PeriodBar
         sel={sel}
         today={data?.anchorToday ?? selToday}
@@ -288,11 +318,14 @@ export default function MobileApp({ stores, archived, sharedAds }: {
       {/* The phone cut a link's custom range before asking (the server then
           has nothing to cut and sends no rangeNote): this says why. */}
       {rangeNotice && <Strip tone="info" icon="info" onClose={() => setRangeNotice(null)}>{rangeNotice}</Strip>}
+      {/* A period a notification opened (the day it was about, or Hoje over
+          another stored period): which day, and what the next chip brings back. */}
+      {linkDayText && <Strip tone="info" icon="info" onClose={() => setClosedLinkDay(linkKey)}>{linkDayText}</Strip>}
       {/* Dates a store row opened: say whose they are and how to get the
           owner's preset back on this store's own clock. */}
       {fresh && data && sel?.rowPreset && (
         <Strip tone="info" icon="clock">
-          Mesmas datas de Todas · {periodShort(sel.rowPreset)} ({data.rangeLabel}). Ao trocar de loja, volta para “{periodShort(sel.rowPreset)}”.{' '}
+          Mesmas datas de Todas · {periodShort(sel.rowPreset)} ({data.rangeLabel}). Ao trocar de loja, volta para “{backTo}”.{' '}
           <button type="button" className={s.linkBtn} onClick={() => pick({ periodo: sel.rowPreset, de: null, ate: null })}>
             Ver “{periodShort(sel.rowPreset)}” no relógio de {tzCity(selTz)}
           </button>
@@ -354,7 +387,10 @@ export default function MobileApp({ stores, archived, sharedAds }: {
       {sel && (
         <div className={s.content}>
           <DetailTabs sel={sel} aba={view?.aba ?? null} onTab={pickTab} forceSignal={force} pollSignal={home.fetchedAt ?? 0} homeRange={fresh && data ? `${data.range.from}|${data.range.to}` : null} now={now} scopeName={scopeName}
-            shared={shared} onStore={pickStore} frozen={archivedSel} />
+            shared={shared} onStore={pickStore} frozen={archivedSel}
+            // An empty list of a window with nothing to read (archived after it,
+            // or before the first sale) says why, as the home blocks do.
+            frozenTitle={fresh && data ? notYetTitle(data) ?? frozenTitle(data) : null} />
           {data && fresh && verdict && (
             <>
               <RefundsBlock data={data} />

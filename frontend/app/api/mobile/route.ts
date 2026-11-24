@@ -1,7 +1,7 @@
 import { mobileAuthOk, unauthorized } from '@/lib/mobileAuth'
 import { listStores } from '@/lib/access'
 import { isIsoDate, isPeriod } from '@/lib/engine/dates'
-import { PortfolioInputError } from '@/lib/views/portfolio'
+import { buildPortfolio, COMPARE_AS, PortfolioInputError } from '@/lib/views/portfolio'
 import { tooEarlyRangeError } from '@/lib/views/portfolioLimits'
 import {
   portfolioOnce, selectStores, StoreSelectionError, toOption, type MobileResponse,
@@ -17,6 +17,8 @@ export const dynamic = 'force-dynamic'
  *          requires from and to (YYYY-MM-DD).
  *  store   'all' (default: every active store) or one or more store ids,
  *          comma-separated.
+ *  compare optional, with 'custom' only: 'mtd' or 'lastmonth' compares the
+ *          dates by that preset's rule (lib/views/portfolio compareAs).
  *
  * Answers with lib/views/mobile.ts MobileResponse: the portfolio view built on
  * the profit engine, the request echoed back, and the store picker.
@@ -45,11 +47,20 @@ export async function GET(req: Request) {
   const early = period === 'custom' ? tooEarlyRangeError(from, to) : null
   if (early) return Response.json({ error: early }, { status: 400 })
 
+  // Custom dates a store row opened from "Este mês" / "Mês passado" are
+  // compared by that preset's rule (app/m/_lib/selection compareAsOf).
+  const compare = sp.get('compare')
+  const compareAs = period === 'custom' && isPeriod(compare) && COMPARE_AS.includes(compare) ? compare : null
+
   try {
     const visible = await listStores({ kind: 'owner' }, { includeArchived: true })
     const { key, stores } = selectStores(sp.get('store'), visible)
     const custom = period === 'custom'
-    const view = await portfolioOnce(key, stores, period, custom ? from : null, custom ? to : null)
+    // portfolioOnce shares in-flight answers by store and dates only: an
+    // answer compared as a preset is built on its own (rare: row dates only).
+    const view = compareAs
+      ? await buildPortfolio(stores, period, from, to, new Date(), { compareAs })
+      : await portfolioOnce(key, stores, period, custom ? from : null, custom ? to : null)
     const body: MobileResponse = {
       ...view,
       request: { store: key, period, from: custom ? from : null, to: custom ? to : null },

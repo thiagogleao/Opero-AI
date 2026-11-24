@@ -178,11 +178,13 @@ export async function POST(req: Request) {
       kind: 'sale',
       title,
       body,
-      // The push says "Lucro hoje": open that day. Without a period the phone
+      // The push says "Lucro hoje": open that day — the store's today at the
+      // sale (`dia`), so a tap the next morning opens that day, not the new
+      // one (app/m/_lib/selection notificationDay). Without a period the phone
       // restores the last one used (a tap could land on "7 dias"). Same URL as
       // lib/alerts storeUrl, inlined so the webhook does not load the alerts
       // module graph.
-      url: `/m?loja=${encodeURIComponent(tenant.id)}&periodo=today`,
+      url: `/m?loja=${encodeURIComponent(tenant.id)}&periodo=today&dia=${todayInTz(tenant.timezone)}`,
       tag: `order-${tenant.id}-${orderId}`,
       data: { tenantId: tenant.id, orderId, total, currency, totalUsd: usdTotal, profitToday: profit },
     })

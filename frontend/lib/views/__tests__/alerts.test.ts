@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { sumPnL, type PnL, type PnLLines } from '../../engine/pnl'
 import {
-  alertPatchProblems, dailySummaryOf, DEFAULT_CONFIG, evaluateStoreAlerts, mergeAlertConfig, storeUrl, summaryText, SUMMARY_URL,
+  alertPatchProblems, dailySummaryOf, DEFAULT_CONFIG, evaluateStoreAlerts, mergeAlertConfig, storeUrl, summaryText, summaryUrl,
   type StoreAlertInput,
 } from '../../alerts'
 import { buildVerdict, verdictInputFromPortfolio } from '../verdict'
@@ -25,7 +25,7 @@ describe('evaluateStoreAlerts', () => {
     const fired = evaluateStoreAlerts(input({ orders: 0, metaSpend: 400 }, WEEK), DEFAULT_CONFIG)
     expect(fired.map(a => a.kind)).toEqual(['spend_no_sales'])
     // The period is explicit: the phone would otherwise restore the last one used.
-    expect(fired[0].url).toBe('/m?loja=s1&periodo=today')
+    expect(fired[0].url).toBe('/m?loja=s1&periodo=today&dia=2026-11-17')
     expect(fired[0].title).toContain('nenhuma venda')
   })
   it('counts Shopify ads toward spend without sales', () => {
@@ -51,9 +51,55 @@ describe('evaluateStoreAlerts', () => {
     expect(evaluateStoreAlerts(input({ orders: 0, metaSpend: 400 }, WEEK, { minutesIntoDay: 3 * 60 }), DEFAULT_CONFIG, { ignoreHour: true })).toHaveLength(1)
     expect(kinds(input({ revenue: 50, orders: 1, cogs: 30, metaSpend: 40 }, WEEK))).toEqual([])
   })
+  it('judges a store whose ads are Shopify ads: the gate is all the ad money, as the margin is', () => {
+    // Dumpling 8jcp3a's losing 4 nov with every dollar of ads on Shopify ads:
+    // $835 of sales, $767 of Shopify ads, $0 of Meta. Before: nothing fired.
+    const day = { revenue: 835, orders: 9, cogs: 272, shopSpend: 767 }
+    expect(kinds(input(day, WEEK))).toEqual(['roas_drop'])
+    // Live 24 nov: 2 orders, $101,52, Meta $5,61 + Shopify $62,03, margin 2,9%.
+    const thin = { revenue: 101.52, orders: 2, cogs: 30, metaSpend: 5.61, shopSpend: 62.03 }
+    const cfg = { ...DEFAULT_CONFIG, roasDrop: { enabled: false, threshold: 1.5 } }
+    expect(kinds(input(thin, WEEK), cfg)).toEqual(['margin_drop'])
+  })
+  it('measures ROAS on the store ad channel and names it, as the screens do', () => {
+    // $1.000 of sales on $500 of Meta + $560 of Shopify ads: revenue ÷ Meta
+    // is 2,0×, the channel ROAS (both) 0,94×.
+    const [a] = evaluateStoreAlerts(input({ revenue: 1000, orders: 10, cogs: 600, metaSpend: 500, shopSpend: 560 }, WEEK), DEFAULT_CONFIG)
+    expect(a.kind).toBe('roas_drop')
+    expect(a.title).toBe('⚠️ ROAS dos anúncios 0,94× abaixo do empate — MOKOO')
+    expect(a.body).toContain('$500 na Meta e $560 em anúncios Shopify')
+    const [shop] = evaluateStoreAlerts(input({ revenue: 835, orders: 9, cogs: 272, shopSpend: 767 }, WEEK), DEFAULT_CONFIG)
+    expect(shop.title).toBe('⚠️ ROAS Shopify 1,09× abaixo do empate — MOKOO')
+    expect(shop.body).toContain('$767 em anúncios Shopify')
+    expect(shop.body).not.toContain('na Meta')
+  })
+  it('never calls revenue − ads "lucro" for a store without cost settings', () => {
+    // Glooty, 8 nov: $372 of sales, $608 of Meta.
+    const [a] = evaluateStoreAlerts(input({ revenue: 371.76, orders: 4, metaSpend: 607.94 }, WEEK, { configured: false, name: 'Glooty' }), DEFAULT_CONFIG)
+    expect(a.title).toBe('⚠️ ROAS 0,61× abaixo do empate — Glooty')
+    expect(a.body).toBe('Custos não configurados: comparado com a meta fixa de 1,50×. Hoje: $372 de receita, $608 na Meta: receita − anúncios −\u2060$236 (sem custos configurados).')
+    expect(a.body).not.toContain('lucro')
+  })
   it('flags a spend spike against the trailing average when enabled', () => {
     const cfg = { ...DEFAULT_CONFIG, spendSpike: { enabled: true, threshold: 200 } }
     expect(kinds(input({ revenue: 4000, orders: 40, cogs: 2400, metaSpend: 1100 }, WEEK), cfg)).toEqual(['spend_spike'])
+  })
+  // Regression: measured on Meta alone, Dumpling 8jcp3a (Shopify ads, 17 nov:
+  // $1.867 against about $860 a day, $60 of Meta against $0) never spiked.
+  it('measures the spike on all the ad money, Shopify ads included, and names the channel', () => {
+    const cfg = { ...DEFAULT_CONFIG, spendSpike: { enabled: true, threshold: 200 } }
+    const dumplingWeek = { revenue: 21000, orders: 700, cogs: 9000, shopSpend: 6019 }
+    const day = { revenue: 6400, orders: 210, cogs: 2700, shopSpend: 1867.45, metaSpend: 60 }
+    const fired = evaluateStoreAlerts(input(day, dumplingWeek, { name: 'Dumpling Squishy · 8jcp3a' }), cfg)
+    const spike = fired.find(a => a.kind === 'spend_spike')
+    expect(spike?.title).toBe('📣 Gasto em anúncios 224% da média — Dumpling Squishy · 8jcp3a')
+    expect(spike?.body).toBe('$1.927 em anúncios hoje ($60,00 na Meta e $1.867 em anúncios Shopify) contra $860 de média por dia nos últimos 7 dias. ROAS Shopify 3,43×.')
+    // (Meta under 10% of the spend: the store's channel, and its ROAS, stay Shopify's.)
+    // Shopify ads alone: the spend named as such, beside the Shopify ROAS.
+    const shopOnly = evaluateStoreAlerts(input({ ...day, metaSpend: 0 }, dumplingWeek), cfg).find(a => a.kind === 'spend_spike')
+    expect(shopOnly?.body).toBe('$1.867 em anúncios Shopify hoje contra $860 de média por dia nos últimos 7 dias. ROAS Shopify 3,43×.')
+    // Below the trailing threshold: nothing.
+    expect(kinds(input({ ...day, shopSpend: 900, metaSpend: 0 }, dumplingWeek), cfg)).not.toContain('spend_spike')
   })
 })
 
@@ -91,9 +137,9 @@ describe('summaryText', () => {
     expect(s.title).toBe('📊 Hoje: $220 de lucro (+120% vs ontem nesta hora)')
     expect(s.body.startsWith('10 pedidos · $1.000 receita · $380 anúncios · margem 22% · ')).toBe(true)
     expect(s.body).toContain('Melhor: MOKOO $300')
-    expect(s.body).toContain('Pior: EPOCH −$80,00')
+    expect(s.body).toContain('Pior: EPOCH −\u2060$80,00')
     expect(s.body).toContain('Sem vendas: EPOCH ($80,00 em anúncios)')
-    expect(s.body).toContain('Fora do lucro, sem custos configurados: Glooty (receita − anúncios −$120)')
+    expect(s.body).toContain('Fora do lucro, sem custos configurados: Glooty (receita − anúncios −\u2060$120)')
     expect(s.body).not.toContain('Pior: Glooty')
     expect(s.body).not.toContain('Sem vendas: Glooty')
   })
@@ -132,7 +178,7 @@ describe('dailySummaryOf', () => {
   })
   it('compares with the judged stores of yesterday and keeps Glooty out of the margin and the ranks', () => {
     expect(s.title.endsWith('vs ontem nesta hora)')).toBe(true)
-    expect(s.body).toContain('Fora do lucro, sem custos configurados: Glooty (receita − anúncios −$138)')
+    expect(s.body).toContain('Fora do lucro, sem custos configurados: Glooty (receita − anúncios −\u2060$138)')
     expect(s.body).not.toMatch(/Melhor: Glooty|Pior: Glooty/)
     expect(s.body).toContain(`margem ${Math.round(verdict.totals.margin!)}%`)
   })
@@ -154,10 +200,16 @@ describe('push links carry their period', () => {
   it('store alerts open the store on its own today; a tab keeps the period too', () => {
     expect(storeUrl('user_3CV')).toBe('/m?loja=user_3CV&periodo=today')
     expect(storeUrl('a b', { tab: 'campanhas', periodo: '7d' })).toBe('/m?loja=a%20b&periodo=7d&aba=campanhas')
+    // The scale push names the day it was sent, so the phone keeps its "7 dias" as the link's.
+    expect(storeUrl('a b', { tab: 'campanhas', periodo: '7d', dia: '2026-11-24' })).toBe('/m?loja=a%20b&periodo=7d&dia=2026-11-24&aba=campanhas')
   })
-  it('the daily summary opens Todas · Hoje, not the store last pinned', () => {
-    expect(SUMMARY_URL).toBe('/m?loja=todas&periodo=today')
-    const q = new URLSearchParams(SUMMARY_URL.split('?')[1])
-    expect([q.get('loja'), q.get('periodo')]).toEqual(['todas', 'today'])
+  it('the daily summary opens Todas · Hoje of its own day, not the store last pinned', () => {
+    expect(summaryUrl('2026-11-23')).toBe('/m?loja=todas&periodo=today&dia=2026-11-23')
+    const q = new URLSearchParams(summaryUrl('2026-11-23').split('?')[1])
+    expect([q.get('loja'), q.get('periodo'), q.get('dia')]).toEqual(['todas', 'today', '2026-11-23'])
+  })
+  it('a threshold alert names the store-day it is about (the phone opens that day once it is over)', () => {
+    const [a] = evaluateStoreAlerts(input({ orders: 0, metaSpend: 400 }, WEEK, { day: '2026-11-23' }), DEFAULT_CONFIG)
+    expect(a.url).toBe('/m?loja=s1&periodo=today&dia=2026-11-23')
   })
 })
