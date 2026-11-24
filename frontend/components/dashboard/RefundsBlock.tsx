@@ -1,7 +1,9 @@
 /**
  * RefundsBlock — refunds and chargebacks: what ARRIVED in the period (dated
  * when it arrived, as the books keep it), the cash result it leaves, and the
- * store's 90-day chargeback health with the disputes still answerable.
+ * store's 90-day chargeback health with EVERY dispute still answerable (the
+ * soonest four, then "Mostrar as outras N") and a count of those past their
+ * deadline.
  *
  * The period part is synchronous (it is in the window's engine totals); the
  * 90-day health is a property of the store, not of the period, and streams in
@@ -15,6 +17,7 @@ import { Suspense } from 'react'
 import type { PageContext } from '@/lib/views/page'
 import type { StoreSummary } from '@/lib/views/store'
 import { CHARGEBACK_LIMIT_PCT, CHARGEBACK_WATCH_PCT, dueInTz, loadChargebacks } from '@/lib/views/store'
+import type { ChargebackHealth } from '@/lib/adjustments'
 import { formatClock, formatDate, formatMoney, formatNumber, formatPct, plural } from '@/lib/format'
 import { Block, Callout, Chip, ErrorState, Money, Skeleton } from '@/components/ui'
 import s from './dashboard.module.css'
@@ -93,9 +96,9 @@ export function RefundsBlock({ ctx, summary }: { ctx: PageContext; summary: Stor
   )
 }
 
-/** A dispute's deadline in words. The list is every dispute still marked
- *  "needs response", so one whose deadline already passed says so instead of
- *  "até 10 nov" under a heading that promises it can still be answered. */
+/** A dispute's deadline in words. The list holds only disputes still in time
+ *  (lib/adjustments getChargebackHealth), but one whose deadline passed while
+ *  the page was open still says so instead of "até 10 nov". */
 function DueBy({ dueBy, today, timezone }: { dueBy: string | null; today: string; timezone: string }) {
   const due = dueBy ? dueInTz(dueBy, timezone) : null
   if (!due) return <span className="mut">sem prazo informado</span>
@@ -107,6 +110,19 @@ function DueBy({ dueBy, today, timezone }: { dueBy: string | null; today: string
   return <span className="warn">até {at}</span>
 }
 
+/** Disputes listed before "Mostrar as outras N". */
+const DUE_SHOWN = 4
+
+function DueRow({ d, today, timezone }: { d: ChargebackHealth['dueSoon'][number]; today: string; timezone: string }) {
+  return (
+    <div className={s.dueRow}>
+      <b className="num">{d.currency && d.currency.toUpperCase() !== 'USD' ? `${d.currency.toUpperCase()} ${formatNumber(d.amount)}` : formatMoney(d.amount)}</b>
+      <span>{d.reason ? (Object.hasOwn(REASON, d.reason) ? REASON[d.reason] : d.reason.replace(/_/g, ' ')) : 'motivo não informado'}</span>
+      <DueBy dueBy={d.dueBy} today={today} timezone={timezone} />
+    </div>
+  )
+}
+
 async function ChargebackHealthPart({ storeId, today, timezone }: { storeId: string; today: string; timezone: string }) {
   let data
   try {
@@ -116,6 +132,10 @@ async function ChargebackHealthPart({ storeId, today, timezone }: { storeId: str
     return <div className={s.health}><ErrorState compact title="Saúde de chargebacks indisponível" /></div>
   }
   const h = data.health
+  // Every dispute still in time, soonest first (not the first five), and the
+  // ones past their deadline counted apart.
+  const due = h.dueSoon
+  const overdue = h.overdue ?? 0
   const scaleMax = CHARGEBACK_LIMIT_PCT * 2
   const fill = Math.min(100, (h.rate / scaleMax) * 100)
   const levelChip = data.level === 'over'
@@ -149,20 +169,31 @@ async function ChargebackHealthPart({ storeId, today, timezone }: { storeId: str
         Taxa por contagem de pedidos, a que o processador acompanha, por loja.
         {h.count > 0 && <> {h.open} em aberto · {h.lost} perdidas · {h.won} ganhas · <b>{formatMoney(h.amount)}</b> disputados + <b>{formatMoney(h.fees)}</b> em taxas.</>}
       </span>
-      {h.open > 0 && h.dueSoon.length === 0 && (
+      {h.open > 0 && due.length === 0 && overdue === 0 && (
         <span className={s.adjNote}>Nenhuma das abertas espera resposta da loja agora: estão em análise.</span>
       )}
-      {h.dueSoon.length > 0 && (
+      {due.length > 0 && (
         <div className={s.due}>
-          <span className="lbl">Esperando resposta da loja</span>
-          {h.dueSoon.map(d => (
-            <div key={d.externalId} className={s.dueRow}>
-              <b className="num">{d.currency && d.currency.toUpperCase() !== 'USD' ? `${d.currency.toUpperCase()} ${formatNumber(d.amount)}` : formatMoney(d.amount)}</b>
-              <span>{d.reason ? REASON[d.reason] ?? d.reason.replace(/_/g, ' ') : 'motivo não informado'}</span>
-              <DueBy dueBy={d.dueBy} today={today} timezone={timezone} />
-            </div>
-          ))}
+          <span className="lbl">Esperando resposta da loja · {plural(due.length, 'disputa no prazo', 'disputas no prazo')}</span>
+          {due.slice(0, DUE_SHOWN).map(d => <DueRow key={d.externalId} d={d} today={today} timezone={timezone} />)}
+          {due.length > DUE_SHOWN && (
+            // Native disclosure: the whole list without client code.
+            <details className={s.dueMore}>
+              <summary>
+                <span className={s.whenClosed}>Mostrar {due.length - DUE_SHOWN === 1 ? 'a outra' : `as outras ${due.length - DUE_SHOWN}`}</span>
+                <span className={s.whenOpen}>Esconder {due.length - DUE_SHOWN === 1 ? 'a outra' : `as outras ${due.length - DUE_SHOWN}`}</span>
+              </summary>
+              <div className={s.due}>
+                {due.slice(DUE_SHOWN).map(d => <DueRow key={d.externalId} d={d} today={today} timezone={timezone} />)}
+              </div>
+            </details>
+          )}
         </div>
+      )}
+      {overdue > 0 && (
+        <span className={s.adjNote}>
+          <b className="neg">{plural(overdue, 'disputa', 'disputas')}</b> sem resposta já {overdue === 1 ? 'passou' : 'passaram'} do prazo: não dá mais para enviar a defesa.
+        </span>
       )}
       {data.neverSeen && (
         <Callout tone="neu">Nenhuma disputa foi lida desta loja até hoje. Se o app não tiver permissão para ler disputas na Shopify, zero aqui não prova que não houve.</Callout>

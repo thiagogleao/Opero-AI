@@ -67,6 +67,85 @@ describe('dailyAxis', () => {
   })
 })
 
+// The two geometries the charts use: the desktop chart (1000 wide, 56 left and
+// 8 right margins) and the phone column (340 wide, 44 and 8).
+const GEOMETRIES = [
+  { name: '1000', x0: 56, right: 992 },
+  { name: '340', x0: 44, right: 332 },
+] as const
+
+describe('dailyAxis at long ranges (regression: 366 days read "1 dez 1 1 fev 1 1 abr")', () => {
+  const month = (d: string) => Number(d.slice(5, 7)) - 1
+
+  for (const g of GEOMETRIES) {
+    for (const n of [30, 90, 180, 366, 730]) {
+      // The Resumo draws the window plus up to 30 days before it.
+      for (const len of [n, n + 30]) {
+        it(`${len} days in ${g.name} units: clean rows, every month name regular, no bare day 1`, () => {
+          const ds = dates(shift('2026-11-18', -(len - 1)), len)
+          const band = (g.right - g.x0) / len
+          const ax = dailyAxis(ds, { x0: g.x0, band, right: g.right, partialIdx: len - 1 })
+          assertClean(ax.days, 11, g.x0, g.right)
+          assertClean(ax.months, 10.5, g.x0, g.right, 'sans')
+          expect(ax.days.find(l => l.i === len - 1)?.text).toBe('hoje')
+          // Month names sit on month starts (or the first day), on one calendar step.
+          for (const l of ax.months) {
+            expect(l.i === 0 || ax.boundaries.includes(l.i)).toBe(true)
+            if (l.i !== 0) expect(month(ds[l.i]) % ax.monthStep).toBe(0)
+          }
+          // Every month start on that step is named, except one pushed out at the right edge.
+          const due = ax.boundaries.filter(i => month(ds[i]) % ax.monthStep === 0)
+          const named = ax.months.filter(l => l.i !== 0).length
+          expect(named === due.length || named === due.length - 1).toBe(true)
+          // A day label "1" always has its month under it.
+          for (const l of ax.days) {
+            if (l.text === '1' && l.i !== 0) expect(ax.months.some(m => m.i === l.i)).toBe(true)
+          }
+          // The axis still says when: at least two month names from three months on.
+          if (len >= 90) expect(ax.months.length).toBeGreaterThanOrEqual(2)
+        })
+      }
+    }
+  }
+
+  it('a year on the desktop chart: every month named, no day numbers but "hoje"', () => {
+    const len = 366 + 30
+    const ds = dates(shift('2026-11-18', -(len - 1)), len)
+    const ax = dailyAxis(ds, { x0: 56, band: 936 / len, right: 992, partialIdx: len - 1 })
+    expect(ax.stride).toBe(0)
+    expect(ax.monthStep).toBe(1)
+    expect(ax.days.map(l => l.text)).toEqual(['hoje'])
+    expect(ax.months.map(l => l.text)).toEqual(
+      ['out', 'nov', 'dez', 'jan 2026', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov'])
+  })
+
+  it('a year in the phone column: one name per quarter, January with its year', () => {
+    const len = 366 + 30
+    const ds = dates(shift('2026-11-18', -(len - 1)), len)
+    const ax = dailyAxis(ds, { x0: 44, band: 288 / len, right: 332, partialIdx: len - 1 })
+    expect(ax.monthStep).toBe(3)
+    expect(ax.days.map(l => l.text)).toEqual(['hoje'])
+    expect(ax.months.map(l => l.text)).toEqual(['out', 'jan 2026', 'abr', 'jul', 'out'])
+  })
+
+  it('two years: every other month on the desktop, every half-year on the phone', () => {
+    const len = 730
+    const ds = dates(shift('2026-11-18', -(len - 1)), len)
+    expect(dailyAxis(ds, { x0: 56, band: 936 / len, right: 992 }).monthStep).toBe(2)
+    expect(dailyAxis(ds, { x0: 44, band: 288 / len, right: 332 }).monthStep).toBe(6)
+  })
+
+  it('short ranges keep their day numbers and every month name', () => {
+    for (const [len, g] of [[37, GEOMETRIES[0]], [120, GEOMETRIES[0]], [210, GEOMETRIES[0]], [30, GEOMETRIES[1]], [90, GEOMETRIES[1]]] as const) {
+      const ds = dates(shift('2026-11-18', -(len - 1)), len)
+      const ax = dailyAxis(ds, { x0: g.x0, band: (g.right - g.x0) / len, right: g.right, partialIdx: len - 1 })
+      expect(ax.stride).toBeGreaterThan(0)
+      expect(ax.monthStep).toBe(1)
+      expect(ax.days.filter(l => l.text !== 'hoje').length).toBeGreaterThan(ax.boundaries.length)
+    }
+  })
+})
+
 describe('clampLabel', () => {
   it('anchors a label at the right edge instead of spilling past it', () => {
     expect(clampLabel(W - 10, 40, L, R)).toMatchObject({ x: R, anchor: 'end' })

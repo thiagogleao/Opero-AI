@@ -75,6 +75,22 @@ export function storeSwitchHref(pathname: string, stateQuery: string, currentSea
   return `${pathname}${mergeQuery(stateQuery, search)}`
 }
 
+/**
+ * Whether picking `pickedId` in the store picker changes nothing. A store
+ * counts as the current choice only when the URL names it: on a one-store
+ * page opened from Todas (`carriedId` 'todas', lib/views/page carriedLoja) the
+ * store on screen can still be picked, which pins it and ends the Todas the
+ * sidebar was carrying. "Todas as lojas" is compared with what is shown, so
+ * from there it still opens /overview. `opening` (inFlightParam('loja'): the
+ * loja of a navigation still loading, null for none, undefined when nothing
+ * loads) wins over both.
+ */
+export function pickIsNoop(pickedId: string, currentId: string, carriedId?: string, opening?: string | null): boolean {
+  if (opening !== undefined) return pickedId === (opening ?? currentId)
+  if (pickedId === 'todas') return currentId === 'todas'
+  return pickedId === (carriedId ?? currentId)
+}
+
 // ─── A choice made while another one is still loading ────────────────────────
 //
 // Every control builds its URL from the state ON SCREEN (the server-built

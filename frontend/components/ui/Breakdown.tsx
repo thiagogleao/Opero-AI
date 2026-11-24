@@ -30,7 +30,9 @@
  *                          title?: ReactNode; sub?: ReactNode; bar?: boolean (draw the
  *                          BreakdownBar above the table, default true);
  *                          notes?: Partial<Record<LedgerKey, ReactNode>> (override a line's
- *                          small print, e.g. { cogs: 'tabela do fornecedor…' }) }
+ *                          small print, e.g. { cogs: 'tabela do fornecedor…' });
+ *                          emptyTitle?, emptyText?: ReactNode (the no-sales state's words,
+ *                          e.g. "A loja ainda não vendia" before the first sale) }
  * LedgerKey: 'revenue'|'cogs'|'shipping'|'fees'|'extras'|'meta'|'shop'|'fixed'|'profit'|'adjustments'|'cash'
  */
 
@@ -165,9 +167,13 @@ export interface BreakdownLedgerProps {
   sub?: ReactNode
   bar?: boolean
   notes?: Partial<Record<LedgerKey, ReactNode>>
+  /** The empty state's words when the default "Sem vendas no período" would
+   *  mislead (a window before the store's first sale: "A loja ainda não vendia"). */
+  emptyTitle?: ReactNode
+  emptyText?: ReactNode
 }
 
-export function BreakdownLedger({ pnl, configured = true, split, title, sub, bar = true, notes = {} }: BreakdownLedgerProps) {
+export function BreakdownLedger({ pnl, configured = true, split, title, sub, bar = true, notes = {}, emptyTitle, emptyText }: BreakdownLedgerProps) {
   const rev = pnl.revenue
   const parts = costParts(pnl)
   const profitBase = configured ? pnl.operatingProfit : pnl.revenue - pnl.adSpend
@@ -217,8 +223,8 @@ export function BreakdownLedger({ pnl, configured = true, split, title, sub, bar
     return (
       <div>
         {head}
-        <EmptyState compact icon="ring" title="Sem vendas no período">
-          Nenhum pedido e nenhum gasto com anúncios: não há dólar para dividir.
+        <EmptyState compact icon={emptyTitle ? 'clock' : 'ring'} title={emptyTitle ?? 'Sem vendas no período'}>
+          {emptyText ?? 'Nenhum pedido e nenhum gasto com anúncios: não há dólar para dividir.'}
         </EmptyState>
       </div>
     )

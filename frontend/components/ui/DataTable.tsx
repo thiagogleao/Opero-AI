@@ -41,14 +41,17 @@
  *   stickyFirstColumn? boolean (default false) — the first column stays put while a wide
  *                 table scrolls sideways (names on a phone); it gets an opaque background
  *                 and a hairline on its right edge.
+ * A table wider than its box scrolls sideways inside it, with an edge fade on
+ * each side that still hides columns (./tableEdges), so they can be found.
  */
 
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Icon } from './Icon'
 import { InfoTip } from './InfoTip'
 import { EmptyState } from './Card'
+import { hiddenEdges } from './tableEdges'
 import s from './DataTable.module.css'
 
 export interface DataColumn {
@@ -85,11 +88,38 @@ export interface DataTableProps {
 
 const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ')
 
+/**
+ * The edge fade of a table wider than its box (below 1024px, or a narrow
+ * column): without it the inner scroll gave no sign that columns were hidden
+ * past the right edge. Measured after hydration, on scroll and on resize of
+ * the box or the table; the server renders no fade.
+ */
+function useHiddenEdges(active: boolean) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [edges, setEdges] = useState({ left: false, right: false })
+  useEffect(() => {
+    const el = ref.current
+    if (!active || !el) return
+    const measure = () => {
+      const next = hiddenEdges(el.scrollLeft, el.scrollWidth, el.clientWidth)
+      setEdges(e => (e.left === next.left && e.right === next.right ? e : next))
+    }
+    measure()
+    el.addEventListener('scroll', measure, { passive: true })
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
+    ro?.observe(el)
+    if (el.firstElementChild) ro?.observe(el.firstElementChild)
+    return () => { el.removeEventListener('scroll', measure); ro?.disconnect() }
+  }, [active])
+  return { ref, edges }
+}
+
 export function DataTable({
   columns, rows, caption, initialSort, empty, footer, maxHeight, dense, stickyHeader = true, stickyFooter = false, stickyFirstColumn = false,
 }: DataTableProps) {
   const router = useRouter()
   const [sort, setSort] = useState(initialSort ?? null)
+  const { ref: wrapRef, edges } = useHiddenEdges(rows.length > 0)
 
   const sorted = useMemo(() => {
     if (!sort) return rows
@@ -113,7 +143,11 @@ export function DataTable({
   }
 
   return (
-    <div className={s.wrap} style={maxHeight ? { maxHeight } : undefined}>
+    // The fades sit on the frame, outside the scrolling box, so they stay at
+    // its edges; a pinned first column already shows what scrolled under it,
+    // so it gets no left fade.
+    <div className={cx(s.frame, edges.right && s.moreRight, edges.left && !stickyFirstColumn && s.moreLeft)}>
+    <div ref={wrapRef} className={s.wrap} style={maxHeight ? { maxHeight } : undefined}>
       <table className={cx(s.table, stickyHeader && s.sticky, stickyFooter && s.stickyFoot, stickyFirstColumn && s.stickyFirst, dense && s.dense)}>
         <caption className={s.caption}>{caption}</caption>
         <thead>
@@ -178,6 +212,7 @@ export function DataTable({
           </tfoot>
         )}
       </table>
+    </div>
     </div>
   )
 }

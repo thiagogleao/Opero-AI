@@ -6,7 +6,9 @@
  *
  * A store without cost settings gets NetSalesBars (revenue − ads, never called
  * profit) and no intraday curve. In the partner split (?parte=50) both charts
- * draw the viewer's share, like the verdict above them; a series with no sale,
+ * draw the viewer's share, like the verdict above them (both get the whole
+ * day's numbers plus `share`, so their tooltips can show the whole day and a
+ * margin that is never halved); a series with no sale,
  * no spend and no cost on any day is said in words instead of drawn.
  */
 
@@ -140,8 +142,12 @@ export async function ProfitChartBlock({ ctx, summary }: { ctx: PageContext; sum
       footer={footer}
     >
       {configured ? (
+        // The WHOLE day's profit plus the share: the chart draws profit × share
+        // but its tooltip keeps the whole day's profit and margin beside "sua
+        // parte" (a halved profit read "margem 9,5%" for a 19,1% day).
         <DailyProfitBars
-          days={series.map(d => ({ date: d.date, profit: chartValue(d, true, ctx.splitFactor), revenue: d.revenue, metaSpend: d.metaSpend, shopSpend: d.shopSpend, orders: d.orders }))}
+          days={series.map(d => ({ date: d.date, profit: chartValue(d, true), revenue: d.revenue, metaSpend: d.metaSpend, shopSpend: d.shopSpend, orders: d.orders }))}
+          share={ctx.splitFactor}
           selected={band}
           selectedLabel={bandLabel}
           partialDate={partialDate}

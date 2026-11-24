@@ -1,4 +1,14 @@
+.frame { position: relative; min-width: 0; }
 .wrap { position: relative; overflow: auto; min-width: 0; }
+/* Edge fades while columns are hidden past a side (DataTable useHiddenEdges). */
+.frame::before, .frame::after {
+  content: ''; position: absolute; top: 0; bottom: 0; width: 32px; z-index: 6;
+  pointer-events: none; opacity: 0; transition: opacity .15s ease;
+}
+.frame::before { left: 0; background: linear-gradient(to right, var(--card), transparent); }
+.frame::after { right: 0; background: linear-gradient(to left, var(--card), transparent); }
+.moreLeft::before, .moreRight::after { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .frame::before, .frame::after { transition: none; } }
 .table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
 .caption { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   beginNavigation, detailRoute, endNavigation, IN_FLIGHT_TTL_MS, inFlightParam, layerHref, mergeQuery, NAV_LAYER,
-  navigationInFlight, onTopOfInFlight, storeSwitchHref,
+  navigationInFlight, onTopOfInFlight, pickIsNoop, storeSwitchHref,
 } from '../url'
 
 const MOKOO = 'user_3CVoVQYfnj1Ljnm3tf0iHP40fxX'
@@ -131,5 +131,25 @@ describe('the navigation in flight', () => {
     expect(navigationInFlight(t0 + IN_FLIGHT_TTL_MS + 1)).toBeNull()
     expect(onTopOfInFlight(`/?loja=${EPOCH}&periodo=today`, NAV_LAYER.period, t0 + IN_FLIGHT_TTL_MS + 1)).toBe(`/?loja=${EPOCH}&periodo=today`)
     endNavigation(tok)
+  })
+})
+
+describe('pickIsNoop (regression: on a one-store page opened from Todas, the store on screen could not be picked)', () => {
+  it('the store the URL names is the current choice; picking it again does nothing', () => {
+    expect(pickIsNoop(MOKOO, MOKOO)).toBe(true)
+    expect(pickIsNoop(EPOCH, MOKOO)).toBe(false)
+    expect(pickIsNoop('todas', 'todas')).toBe(true)
+  })
+
+  it('Resumo opened from Todas shows MOKOO: picking MOKOO pins it, picking Todas opens /overview', () => {
+    expect(pickIsNoop(MOKOO, MOKOO, 'todas')).toBe(false)
+    expect(pickIsNoop('todas', MOKOO, 'todas')).toBe(false)
+    expect(pickIsNoop(EPOCH, MOKOO, 'todas')).toBe(false)
+  })
+
+  it('a navigation still loading decides what is current, as before', () => {
+    expect(pickIsNoop(GLOOTY, MOKOO, 'todas', GLOOTY)).toBe(true)
+    expect(pickIsNoop(MOKOO, MOKOO, 'todas', GLOOTY)).toBe(false)
+    expect(pickIsNoop(MOKOO, MOKOO, undefined, null)).toBe(true)
   })
 })

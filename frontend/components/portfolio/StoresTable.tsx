@@ -14,7 +14,7 @@
 
 import type { PageContext } from '@/lib/views/page'
 import type { PortfolioStoreRow, PortfolioView } from '@/lib/views/portfolio'
-import { storeStatus, type Verdict } from '@/lib/views/verdict'
+import { storeStatusChips, type Verdict } from '@/lib/views/verdict'
 import { formatDate, formatMoney, formatRangeLabel, plural } from '@/lib/format'
 import {
   Avatar, Badge, Block, Chip, CodePill, Count, DataTable, Delta, EmptyState, Money, Pct, StatusDot,
@@ -30,7 +30,9 @@ import s from './portfolio.module.css'
 
 function StoreCell({ ctx, row, extras }: { ctx: PageContext; row: PortfolioStoreRow; extras: RowExtras }) {
   const opt = ctx.storeOptions.find(o => o.id === row.id)
-  const status = storeStatus(row, { singleDay: ctx.range.from === ctx.range.to })
+  // The same chips as the phone store list (storeStatusChips): the status, and
+  // "custos não configurados" second whenever the status says something else.
+  const chips = storeStatusChips(row, { singleDay: ctx.range.from === ctx.range.to })
   const shared = sharedAccountBadges(row.id, extras.shared, 'Nos últimos 90 dias')
   const currency = extras.currencies.get(row.id)
   const dayBadge = row.badges.find(b => b.code === 'dia_encerrado' || b.code === 'dia_nao_comecou')
@@ -47,8 +49,7 @@ function StoreCell({ ctx, row, extras }: { ctx: PageContext; row: PortfolioStore
           {opt?.city ?? row.timezone} · <StatusDot state={fresh.state} title={fresh.detail}>{freshText}</StatusDot>
         </span>
         <span className={s.badges}>
-          <VerdictChips chips={[status]} size="sm" />
-          {!row.configured && status.code !== 'sem_custos' && <Chip tone="cfg" icon="sliders" size="sm">custos não configurados</Chip>}
+          <VerdictChips chips={chips} size="sm" />
           {opt?.dayLabel && <Chip tone="info" icon="clock" size="sm" title={dayBadge?.detail}>{opt.dayLabel}{dayBadge ? ` · ${dayBadge.code === 'dia_encerrado' ? 'dia encerrado' : 'dia não começou'}` : ''}</Chip>}
           {shared.map(b => <Badge key={b.label} tone="info" icon="swap" title={b.detail}>{b.label}</Badge>)}
           {currency && <Badge tone="mut" title={`Vende em ${currency}; os valores aparecem convertidos em dólar, no câmbio de cada pedido.`}>vende em {currency}</Badge>}

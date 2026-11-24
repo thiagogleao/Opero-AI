@@ -32,6 +32,7 @@ import { TopCountries, TopProducts } from '@/components/dashboard/TopLists'
 import { RefundsBlock } from '@/components/dashboard/RefundsBlock'
 import { SharedAccountNote } from '@/components/dashboard/SharedAccountNote'
 import { QuietStoreNote } from '@/components/dashboard/QuietStoreNote'
+import { beforeStartText, isBeforeStart } from '@/components/campaigns/storeStart'
 import s from '@/components/dashboard/dashboard.module.css'
 
 // Absolute: the root layout's "%s · Opero" template only reaches child
@@ -59,15 +60,11 @@ export const dynamic = 'force-dynamic'
 /**
  * The URL asked for "Todas" (a sidebar link from an all-stores page) and this
  * page reads one store at a time: getPageContext then shows the store the
- * browser last picked, which may have been chosen in another tab. Say which
- * one, as Atribuição does, instead of switching silently. Not for a one-store
- * partner, who has no "Todas" to come from.
+ * browser last picked, which may have been chosen in another tab (ctx.fromAll).
+ * Say which one, as Atribuição does, instead of switching silently. Not for a
+ * one-store partner, who has no "Todas" to come from. The sidebar keeps
+ * loja=todas meanwhile (ctx.navHref), so Campanhas or Produtos open Todas.
  */
-function cameFromAll(sp: SearchParams, ctx: PageContext): boolean {
-  const loja = Array.isArray(sp.loja) ? sp.loja[0] : sp.loja
-  return loja?.trim() === ALL_STORES && ctx.scope === 'store' && ctx.allowAll && !!ctx.store
-}
-
 function FromAllNote({ ctx, store }: { ctx: PageContext; store: StoreRef }) {
   return (
     <Callout tone="neu" icon="store" title={`Mostrando a ${store.name}`}>
@@ -81,7 +78,7 @@ export default async function ResumoPage({ searchParams }: { searchParams: Promi
   const sp = await searchParams
   const ctx = await getPageContext(sp, { scope: 'store' })
   const store = ctx.store
-  const fromAll = cameFromAll(sp, ctx)
+  const fromAll = ctx.fromAll && !!store
 
   if (!store) {
     return (
@@ -119,6 +116,17 @@ export default async function ResumoPage({ searchParams }: { searchParams: Promi
   const v = buildVerdict(verdictInputFromPortfolio(summary.view, { split: ctx.split }))
   const configured = summary.pnl.configured
   const sold = summary.pnl.totals.revenue > 0
+  const t = summary.pnl.totals
+  // A window that ends before the first sale: the store did not sell yet, so
+  // the ledger says that instead of "Sem vendas no período" next to a verdict
+  // that reads "A Hibikura começou a vender em 7 nov" (components/campaigns/
+  // storeStart: the rule and the words every page uses).
+  const firstOrder = summary.row.firstOrderDate
+  const beforeStart = firstOrder && isBeforeStart(firstOrder, ctx.range, { orders: t.orders, revenue: t.revenue, spend: t.adSpend })
+    ? beforeStartText({ storeName: store.name, firstOrderDate: firstOrder, period: ctx.period, range: ctx.range, today: ctx.today })
+    : null
+  // "A Hibikura começou a vender em 7 nov — não há dados de …" → its first half.
+  const startedLine = beforeStart ? beforeStart.headline.slice(0, beforeStart.headline.lastIndexOf(' — ')) : null
   const storeNames = new Map(ctx.stores.map(st => [st.id, st.name]))
   if (!storeNames.has(store.id)) storeNames.set(store.id, store.name)
 
@@ -168,7 +176,9 @@ export default async function ResumoPage({ searchParams }: { searchParams: Promi
               // "De cada $1: 0¢ Meta" over $0 of sales: no bar to split, and the sub says so.
               bar={sold}
               title="Para onde foi cada dólar"
-              sub={sold ? `De cada $1,00 vendido em ${ctx.rangeLabel}` : `Nenhuma venda em ${ctx.rangeLabel}`} />
+              sub={sold ? `De cada $1,00 vendido em ${ctx.rangeLabel}` : `Nenhuma venda em ${ctx.rangeLabel}`}
+              emptyTitle={startedLine ? 'A loja ainda não vendia' : undefined}
+              emptyText={startedLine ? `${startedLine}: escolha um período a partir dessa data.` : undefined} />
           }
         />
 

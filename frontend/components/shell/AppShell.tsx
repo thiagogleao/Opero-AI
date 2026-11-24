@@ -20,7 +20,8 @@
  * with 2+ stores) · Resumo / · Todas as lojas /overview · Campanhas /campaigns ·
  * Produtos /products · Países e clientes /countries · Atribuição /attribution ·
  * Custos /profit · Ajustes /settings — active item from the pathname, every
- * link keeping loja/periodo/de/ate/parte · footer with the clock used.
+ * link keeping loja/periodo/de/ate/parte (ctx.navHref: Todas stays Todas
+ * across a one-store page until a store is picked) · footer with the clock used.
  * Top bar: PeriodPicker · SplitToggle · Freshness (streams in) · Copilot ·
  * viewer ("Modo dono · sair" / "Sócio · sair").
  * Responsive: full sidebar ≥1200px, icon rail 768–1199px, drawer below 768px
@@ -65,15 +66,20 @@ export function Logo() {
 }
 
 export function AppShell({ ctx, children, copilot = true }: { ctx: PageContext; children: ReactNode; copilot?: boolean }) {
+  // The shell's navigation is built from ctx.navHref, not hrefWith: after the
+  // viewer chose Todas, a one-store page shows the remembered store but its
+  // sidebar, period picker and split toggle keep loja=todas, so Todas →
+  // Resumo → Campanhas still opens Todas (lib/views/page carriedLoja).
+  const go = ctx.navHref
   const nav: NavItem[] = [
-    { match: '/', label: 'Resumo', icon: 'sum', href: ctx.hrefWith('/') },
-    ...(ctx.allowAll ? [{ match: '/overview', label: 'Todas as lojas', icon: 'all' as const, href: ctx.hrefWith('/overview') }] : []),
-    { match: '/campaigns', label: 'Campanhas', icon: 'camp', href: ctx.hrefWith('/campaigns') },
-    { match: '/products', label: 'Produtos', icon: 'box', href: ctx.hrefWith('/products') },
-    { match: '/countries', label: 'Países e clientes', icon: 'globe', href: ctx.hrefWith('/countries') },
-    { match: '/attribution', label: 'Atribuição', icon: 'attr', href: ctx.hrefWith('/attribution') },
-    { match: '/profit', label: 'Custos', icon: 'coin', href: ctx.hrefWith('/profit') },
-    { match: '/settings', label: 'Ajustes', icon: 'set', href: ctx.hrefWith('/settings') },
+    { match: '/', label: 'Resumo', icon: 'sum', href: go('/') },
+    ...(ctx.allowAll ? [{ match: '/overview', label: 'Todas as lojas', icon: 'all' as const, href: go('/overview') }] : []),
+    { match: '/campaigns', label: 'Campanhas', icon: 'camp', href: go('/campaigns') },
+    { match: '/products', label: 'Produtos', icon: 'box', href: go('/products') },
+    { match: '/countries', label: 'Países e clientes', icon: 'globe', href: go('/countries') },
+    { match: '/attribution', label: 'Atribuição', icon: 'attr', href: go('/attribution') },
+    { match: '/profit', label: 'Custos', icon: 'coin', href: go('/profit') },
+    { match: '/settings', label: 'Ajustes', icon: 'set', href: go('/settings') },
   ]
   // An archived store opened by id (its history) is listed too, so the picker
   // names what is on screen instead of silently showing another store.
@@ -95,7 +101,7 @@ export function AppShell({ ctx, children, copilot = true }: { ctx: PageContext; 
         href: ctx.mode === 'store' ? ctx.hrefWith('/overview', { loja: ALL_STORES }) : undefined,
       }
     : null
-  const toOption = (p: { key: Period; label: string }): PeriodOption => ({ ...p, query: ctx.hrefWith('', { periodo: p.key }) })
+  const toOption = (p: { key: Period; label: string }): PeriodOption => ({ ...p, query: go('', { periodo: p.key }) })
   const tzNote = ctx.scope === 'store' ? ctx.storeOptions.find(o => o.id === ctx.store?.id)?.dayLabel ?? null : null
   const clock = ctx.scope === 'all'
     ? 'Brasília · cada loja no seu fuso'
@@ -103,14 +109,15 @@ export function AppShell({ ctx, children, copilot = true }: { ctx: PageContext; 
 
   const sidebar = (
     <>
-      <Link href={ctx.hrefWith('/')} className={s.brand} aria-label="Opero, início">
+      <Link href={go('/')} className={s.brand} aria-label="Opero, início">
         <span className={s.brandMark}><Logo /></span>
         <span className={s.brandName}>opero</span>
         <span className={s.brandTag}>AI</span>
       </Link>
       <div style={{ width: '100%' }}>
         <div className={s.sideLabel}>Loja</div>
-        <StorePicker options={options} all={all} currentId={ctx.params.loja ?? ''} />
+        <StorePicker options={options} all={all} currentId={ctx.params.loja ?? ''}
+          carriedId={ctx.navParams.loja !== ctx.params.loja ? ctx.navParams.loja ?? undefined : undefined} />
       </div>
       <NavLinks items={nav} />
       <div className={s.sideFoot}>
@@ -129,7 +136,7 @@ export function AppShell({ ctx, children, copilot = true }: { ctx: PageContext; 
             main={MAIN.map(toOption)}
             more={MORE.map(toOption)}
             current={ctx.period}
-            customBase={ctx.hrefWith('', { periodo: null })}
+            customBase={go('', { periodo: null })}
             today={ctx.today}
             minDate={MIN_PAGE_DATE}
             maxDays={MAX_WINDOW_DAYS}
@@ -140,7 +147,7 @@ export function AppShell({ ctx, children, copilot = true }: { ctx: PageContext; 
           />
         </div>
         <div className={s.topRight}>
-          <SplitToggle on={ctx.split} onQuery={ctx.hrefWith('', { parte: true })} offQuery={ctx.hrefWith('', { parte: false })} />
+          <SplitToggle on={ctx.split} onQuery={go('', { parte: true })} offQuery={go('', { parte: false })} />
           <Suspense fallback={<FreshnessFallback />}>
             <Freshness stores={ctx.selected} now={ctx.now} />
           </Suspense>

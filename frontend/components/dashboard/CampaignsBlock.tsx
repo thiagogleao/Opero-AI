@@ -116,6 +116,10 @@ export async function CampaignsBlock({ ctx, summary, storeNames }: {
         </div>
       }
     >
+      {/* campBox: headers may wrap, and the name and reason columns narrow in a
+          small box (dashboard.module.css) — at 1024px the table was 914px in a
+          906px box, its last column behind an inner scroll. */}
+      <div className={s.campBox}>
       <DataTable
         caption={`Campanhas da ${summary.store.name} em ${ctx.rangeLabel}, por gasto`}
         dense
@@ -147,6 +151,7 @@ export async function CampaignsBlock({ ctx, summary, storeNames }: {
           },
         }))}
       />
+      </div>
     </Block>
   )
 }

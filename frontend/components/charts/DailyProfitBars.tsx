@@ -28,15 +28,22 @@
  *   height?       viewBox height (default 260).
  *   width?        viewBox width (default 1000; ~340 in a phone column). The SVG is fluid.
  *   annotate?     label the best and the worst day (default true).
+ *   labels?       DailyProfitLabels — the tooltip's and the aria labels' words for
+ *                 profit, the whole day's profit (split view), revenue and orders
+ *                 (defaults "lucro", "lucro do dia", "receita", "pedidos"). A chart
+ *                 of something else names it honestly: the creative page plots an
+ *                 estimate over Meta-attributed sales and Meta's credited purchases
+ *                 ("lucro estimado", "vendas atribuídas", "compras (Meta)").
  *   ariaLabel     what the chart shows, in words.
  * Coral = loss, green = profit; the x axis says the day and the month in pt-BR.
  * Keyboard: the chart is one tab stop — Tab lands on the first day of the
  * window (else the latest day), ←/→ move day by day with the tooltip, Home/End
  * jump to the ends, the next Tab leaves the chart (ChartTips, ./roving).
- * Labels never overlap at any length (7 days to a year, 1000 or 340 wide): day
- * numbers thin out to calendar-regular days (1, 8, 15, 22, 29…), each month
- * change is named once with a tick, and "hoje" and the value labels stay
- * inside the plot (./axis dailyAxis, clampLabel).
+ * Labels never overlap at any length (7 days to two years, 1000 or 340 wide):
+ * day numbers thin out to calendar-regular days (1, 8, 15, 22, 29…) and give
+ * way to the month row alone on long ranges; every month start gets a tick and
+ * month names thin to a calendar step (every month, every 2nd, every quarter…);
+ * "hoje" and the value labels stay inside the plot (./axis dailyAxis, clampLabel).
  */
 
 import { useId } from 'react'
@@ -56,6 +63,15 @@ export interface DailyPoint {
   orders?: number
 }
 
+/** The words the tooltip and the aria labels use; each one falls back to the
+ *  store-profit wording. */
+export interface DailyProfitLabels {
+  profit?: string
+  wholeProfit?: string
+  revenue?: string
+  orders?: string
+}
+
 export interface DailyProfitBarsProps {
   days: DailyPoint[]
   share?: number
@@ -67,11 +83,12 @@ export interface DailyProfitBarsProps {
   height?: number
   width?: number
   annotate?: boolean
+  labels?: DailyProfitLabels
   ariaLabel: string
 }
 
 export function DailyProfitBars({
-  days: whole, share = 1, selected, selectedLabel, partialDate, partialNote, today, height = 260, width = 1000, annotate = true, ariaLabel,
+  days: whole, share = 1, selected, selectedLabel, partialDate, partialNote, today, height = 260, width = 1000, annotate = true, labels, ariaLabel,
 }: DailyProfitBarsProps) {
   const uid = useId()
   const hatch = svgId(uid, 'hatch')
@@ -79,6 +96,10 @@ export function DailyProfitBars({
   const H = height
   const split = share !== 1
   const shareLabel = `sua parte (${formatPct(share * 100, { digits: 0 })})`
+  const profitWord = labels?.profit ?? 'lucro'
+  const wholeProfitWord = labels?.wholeProfit ?? 'lucro do dia'
+  const revenueWord = labels?.revenue ?? 'receita'
+  const ordersWord = labels?.orders ?? 'pedidos'
   // What is drawn is the viewer's share of each day; the whole day (whole[i])
   // stays at hand for the tooltip, whose margin is never halved.
   const days = split ? whole.map(d => ({ ...d, profit: d.profit * share })) : whole
@@ -167,12 +188,12 @@ export function DailyProfitBars({
   const tipFor = (d: DailyPoint, i: number): ChartTip => {
     const w = whole[i]
     const rows: ChartTip['rows'] = split
-      ? [[shareLabel, formatMoney(d.profit), d.profit < 0 ? 'neg' : 'pos'], ['lucro do dia', formatMoney(w.profit)]]
-      : [['lucro', formatMoney(d.profit), d.profit < 0 ? 'neg' : 'pos']]
-    if (d.revenue !== undefined) rows.push(['receita', formatMoney(d.revenue)])
+      ? [[shareLabel, formatMoney(d.profit), d.profit < 0 ? 'neg' : 'pos'], [wholeProfitWord, formatMoney(w.profit)]]
+      : [[profitWord, formatMoney(d.profit), d.profit < 0 ? 'neg' : 'pos']]
+    if (d.revenue !== undefined) rows.push([revenueWord, formatMoney(d.revenue)])
     if (d.metaSpend !== undefined) rows.push(['Anúncios Meta', formatMoney(d.metaSpend)])
     if (d.shopSpend) rows.push(['Anúncios Shopify', formatMoney(d.shopSpend)])
-    if (d.orders !== undefined) rows.push(['pedidos', formatCount(d.orders)])
+    if (d.orders !== undefined) rows.push([ordersWord, formatCount(d.orders)])
     if (d.revenue) rows.push(['margem', formatPct((w.profit / d.revenue) * 100)])
     return {
       title: `${formatWeekdayDate(d.date, today)}${d.date === partialDate && partialNote ? ` · ${partialNote}` : ''}`,
@@ -231,7 +252,7 @@ export function DailyProfitBars({
           const vl = valueLabels.get(i)
           return (
             <g key={d.date} className={s.col} data-tip={tipAttr(tipFor(d, i))} tabIndex={i === tabStop ? 0 : -1} role="img"
-               aria-label={`${formatWeekdayDate(d.date, today)}: ${split ? `${shareLabel} ${formatMoney(d.profit)}, lucro do dia ${formatMoney(whole[i].profit)}` : `lucro ${formatMoney(d.profit)}`}${partial ? ' (parcial)' : ''}`}>
+               aria-label={`${formatWeekdayDate(d.date, today)}: ${split ? `${shareLabel} ${formatMoney(d.profit)}, ${wholeProfitWord} ${formatMoney(whole[i].profit)}` : `${profitWord} ${formatMoney(d.profit)}`}${partial ? ' (parcial)' : ''}`}>
               <rect className={s.hit} x={x(i)} y={m.t - (selected ? 24 : 4)} width={band} height={ih + (selected ? 24 : 4) + 20} />
               <path className={`${s.bar} ${cls}`} d={barPath(bx, bw, y0, yv, 4)} fill={partial ? `url(#${hatch})` : undefined} />
               {dl && (

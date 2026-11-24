@@ -44,6 +44,8 @@
  *   all       { query: string; count: number; href?: string } | null — the "Todas as lojas"
  *             entry (href set on one-store pages: it opens /overview)
  *   currentId the store id shown, or 'todas'
+ *   carriedId the URL's ?loja when it is not the store shown ('todas' on a one-store
+ *             page opened from Todas): picking the shown store then pins it (./url pickIsNoop)
  */
 
 import { usePathname } from 'next/navigation'
@@ -51,7 +53,7 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 import type { StoreOption } from '@/lib/views/page'
 import { Avatar } from '@/components/ui/Card'
 import { Icon } from '@/components/ui/Icon'
-import { inFlightParam, navigationInFlight, NAV_LAYER, onTopOfInFlight, storeSwitchHref } from './url'
+import { inFlightParam, navigationInFlight, NAV_LAYER, onTopOfInFlight, pickIsNoop, storeSwitchHref } from './url'
 import { useShellNavigation } from './useShellNavigation'
 import s from './shell.module.css'
 
@@ -59,6 +61,11 @@ export interface StorePickerProps {
   options: (StoreOption & { query: string; href?: string })[]
   all: { query: string; count: number; href?: string } | null
   currentId: string
+  /** The ?loja the URL carries when it is not the store shown: 'todas' on a
+   *  one-store page opened from Todas (it shows the remembered store). Picking
+   *  that very store then still navigates, to ?loja=<id>, so the choice sticks
+   *  and the sidebar stops carrying Todas. */
+  carriedId?: string
 }
 
 /** Cancelable window event sent before the picker opens another store. */
@@ -90,7 +97,7 @@ const rememberWhenShown = (storeId: string | null) => { rememberOnArrival = stor
 
 const NOT_SAVED = 'A loja abriu, mas não ficou salva como padrão neste navegador.'
 
-export function StorePicker({ options, all, currentId }: StorePickerProps) {
+export function StorePicker({ options, all, currentId, carriedId }: StorePickerProps) {
   const pathname = usePathname() || '/'
   const listId = useId()
   const [open, setOpen] = useState(false)
@@ -160,8 +167,9 @@ export function StorePicker({ options, all, currentId }: StorePickerProps) {
     btn.current?.focus()
     // While another choice is loading, the store that counts is the one being
     // opened: picking the store still on screen then takes the choice back.
-    const opening = inFlightParam('loja')
-    if (e.id === (opening ?? currentId)) return
+    // On a one-store page opened from Todas, the store on screen is not yet a
+    // choice (pickIsNoop): picking it pins it.
+    if (pickIsNoop(e.id, currentId, carriedId, inFlightParam('loja'))) return
     // Another page (href) starts clean; the same page keeps its own keys,
     // except on a page of one store's object (an ad), which opens that list
     // of the chosen store instead (./url DETAIL_ROUTES). A period or split

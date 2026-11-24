@@ -205,6 +205,24 @@ export function buildHref(path: string, state: PageParams, overrides: HrefOverri
   return `${pathname}${qs ? `?${qs}` : ''}${hash ? `#${hash}` : ''}`
 }
 
+/**
+ * The ?loja the shell's navigation carries (sidebar links, the period picker,
+ * the split toggle). Normally the store or Todas on screen. The exception: a
+ * one-store page (Resumo, Atribuição, Custos, Ajustes) opened with
+ * ?loja=todas shows the remembered store with a note, but the viewer chose
+ * Todas, so the navigation keeps 'todas' until a store is picked in the
+ * picker: Todas → Resumo → Campanhas landed on MOKOO's Campanhas when the
+ * links carried the store on screen. A viewer without Todas (one store)
+ * carries the store.
+ */
+export function carriedLoja(
+  asked: string | null, scope: 'store' | 'all', allowAll: boolean, shownStoreId: string | null,
+): string | null {
+  if (scope === 'all') return ALL_STORES
+  if (asked === ALL_STORES && allowAll && shownStoreId) return ALL_STORES
+  return shownStoreId
+}
+
 /** A store as the shell's pickers need it (serialisable for client props). */
 export interface StoreOption {
   id: string
@@ -252,15 +270,26 @@ export interface PageContext extends PeriodWindow {
   storeIds: string[]
   /** What the shell shows as the current choice ("MOKOO", "Todas as lojas"). */
   scopeName: string
-  /** The normalised URL state, with loja resolved (id or 'todas'). */
+  /** The normalised URL state, with loja resolved to what is shown (store id or 'todas'). */
   params: PageParams
+  /** The state the shell's navigation carries: `params`, except that a
+   *  one-store page opened from Todas keeps loja='todas' (carriedLoja). */
+  navParams: PageParams
+  /** The URL asked for Todas and this one-store page shows the remembered
+   *  store instead: the page says which (and its navigation keeps Todas). */
+  fromAll: boolean
   /** Partner view (?parte=50): money results are halved. */
   split: boolean
   splitFactor: number
   /** v × splitFactor — for profit, profit/order, cash result, refunds only. */
   part: (v: number) => number
-  /** Link to another page (or this one) keeping loja/periodo/de/ate/parte. */
+  /** Link to another page (or this one) keeping loja/periodo/de/ate/parte,
+   *  loja = the store on screen: for links about what the page shows ("Ver as
+   *  6 campanhas" of this store's block, "Configurar custos"). */
   hrefWith: (path: string, overrides?: HrefOverrides) => string
+  /** The same from `navParams`: for the shell's navigation (sidebar, period
+   *  picker, split toggle), which must not turn Todas into one store. */
+  navHref: (path: string, overrides?: HrefOverrides) => string
   now: Date
 }
 
@@ -319,6 +348,7 @@ export async function getPageContext(
     de: raw.periodo === 'custom' ? win.range.from : null,
     ate: raw.periodo === 'custom' ? win.range.to : null,
   }
+  const navParams: PageParams = { ...params, loja: carriedLoja(raw.loja, scope, allowAll, store?.id ?? null) }
   const splitFactor = raw.parte ? SPLIT_SHARE : 1
 
   return {
@@ -331,10 +361,13 @@ export async function getPageContext(
     storeIds: selected.map(s => s.id),
     scopeName: scope === 'all' ? 'Todas as lojas' : store?.name ?? 'Nenhuma loja',
     params,
+    navParams,
+    fromAll: scope === 'store' && navParams.loja === ALL_STORES,
     split: raw.parte,
     splitFactor,
     part: (v: number) => v * splitFactor,
     hrefWith: (path, overrides) => buildHref(path, params, overrides, defaultPeriod),
+    navHref: (path, overrides) => buildHref(path, navParams, overrides, defaultPeriod),
     now,
   }
 }

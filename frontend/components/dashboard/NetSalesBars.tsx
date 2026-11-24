@@ -21,8 +21,8 @@
  */
 
 import type { DateRange } from '@/lib/engine/dates'
-import { formatCount, formatMoney, formatMoneyAxis, formatPct, formatRangeLabel, formatWeekdayDate, monthShort } from '@/lib/format'
-import { ChartTips, barPath, linear, niceTicks, tipAttr } from '@/components/charts'
+import { formatCount, formatMoney, formatMoneyAxis, formatPct, formatRangeLabel, formatWeekdayDate } from '@/lib/format'
+import { ChartTips, barPath, dailyAxis, linear, niceTicks, textWidth, tipAttr } from '@/components/charts'
 import s from './dashboard.module.css'
 
 export interface NetDay { date: string; value: number; revenue: number; adSpend: number; orders: number }
@@ -48,7 +48,21 @@ export function NetSalesBars({ days, share = 1, selected, selectedLabel, partial
   const inSel = (d: string) => !!selected && d >= selected.from && d <= selected.to
   const sel = days.map((d, i) => (inSel(d.date) ? i : -1)).filter(i => i >= 0)
   const selSum = days.filter(d => inSel(d.date)).reduce((a, d) => a + shown(d), 0)
-  const labelEvery = Math.max(1, Math.ceil(18 / band))
+  const right = W - m.r
+  const partialIdx = partialDate ? days.findIndex(d => d.date === partialDate) : -1
+  // The shared axis rules (components/charts/axis), as in DailyProfitBars: a
+  // fixed "every Nth bar plus every day 1" put labels on top of each other and
+  // a month name under every day 1 at long ranges (Glooty over a year).
+  const axis = dailyAxis(days.map(d => d.date), { x0: m.l, band, right, partialIdx })
+  const dayLabel = new Map(axis.days.map(l => [l.i, l]))
+  const monthLabel = new Map(axis.months.map(l => [l.i, l]))
+  // One tab stop for the chart (ChartTips roving): the window's first day.
+  const tabStop = sel.length ? sel[0] : days.length - 1
+  // The band label starts inside the band and is pulled left when it would
+  // run past the plot (a band at the right edge: "ontem").
+  const bandText = selected ? (selectedLabel ?? `${formatRangeLabel(selected, today)} · `) : ''
+  const bandW = textWidth(bandText, 11.5, 'sans') + (selectedLabel ? 0 : textWidth(formatMoney(selSum), 11.5))
+  const bandX = sel.length ? Math.max(m.l, Math.min(x(sel[0]) + 8, right - bandW)) : 0
 
   return (
     <ChartTips>
@@ -56,11 +70,15 @@ export function NetSalesBars({ days, share = 1, selected, selectedLabel, partial
         {sel.length > 0 && (
           <g>
             <rect x={x(sel[0]) + 1} y={m.t - 24} rx={6} width={(sel[sel.length - 1] - sel[0] + 1) * band - 2} height={ih + 24} className={s.netBand} />
-            <text x={x(sel[0]) + 8} y={m.t - 9} className={s.netLabel} style={{ fontFamily: 'var(--sans)' }} fontSize={11.5}>
-              {selectedLabel ?? <>{formatRangeLabel(selected!, today)} · <tspan style={{ fontFamily: 'var(--mono)' }}>{formatMoney(selSum)}</tspan></>}
+            <text x={bandX} y={m.t - 9} className={s.netLabel} style={{ fontFamily: 'var(--sans)' }} fontSize={11.5}>
+              {bandText}
+              {!selectedLabel && <tspan style={{ fontFamily: 'var(--mono)' }}>{formatMoney(selSum)}</tspan>}
             </text>
           </g>
         )}
+        {axis.boundaries.map(i => (
+          <line key={`m${i}`} x1={x(i)} x2={x(i)} y1={H - m.b + 21} y2={H - m.b + 34} className={s.netGrid} aria-hidden="true" />
+        ))}
         {ticks.map(t => (
           <g key={t}>
             <line x1={m.l} x2={W - m.r} y1={y(t)} y2={y(t)} className={t === 0 ? s.netZero : s.netGrid} />
@@ -69,8 +87,8 @@ export function NetSalesBars({ days, share = 1, selected, selectedLabel, partial
         ))}
         {days.map((d, i) => {
           const partial = d.date === partialDate
-          const day = Number(d.date.slice(8, 10))
-          const first = i === 0 || day === 1
+          const dl = dayLabel.get(i)
+          const ml = monthLabel.get(i)
           const v = shown(d)
           const tip = tipAttr({
             title: `${formatWeekdayDate(d.date, today)}${partial && partialNote ? ` · ${partialNote}` : ''}`,
@@ -84,14 +102,12 @@ export function NetSalesBars({ days, share = 1, selected, selectedLabel, partial
             note: partial ? 'Dia em andamento: ainda vai mudar.' : 'Não é lucro: falta o custo dos produtos, do frete e as taxas.',
           })
           return (
-            <g key={d.date} className={s.netCol} data-tip={tip} tabIndex={0} role="img"
+            <g key={d.date} className={s.netCol} data-tip={tip} tabIndex={i === tabStop ? 0 : -1} role="img"
                aria-label={`${formatWeekdayDate(d.date, today)}: receita menos anúncios ${formatMoney(v)}${split ? ` (${shareLabel})` : ''}${partial ? ' (parcial)' : ''}`}>
               <rect className={s.netHit} x={x(i)} y={m.t - 4} width={band} height={ih + 24} />
               <path d={barPath(x(i) + (band - bw) / 2, bw, y0, y(v), 4)} className={partial ? s.netPartial : v < 0 ? s.netNeg : s.netPos} />
-              {(partial || i % labelEvery === 0 || first) && (
-                <text x={x(i) + band / 2} y={H - m.b + 16} textAnchor="middle">{partial ? 'hoje' : day}</text>
-              )}
-              {first && <text x={x(i) + band / 2} y={H - m.b + 31} textAnchor="middle" style={{ fontFamily: 'var(--sans)' }} fontSize={10.5}>{monthShort(d.date)}</text>}
+              {dl && <text x={dl.x} y={H - m.b + 16} textAnchor={dl.anchor}>{dl.text}</text>}
+              {ml && <text x={ml.x} y={H - m.b + 31} textAnchor={ml.anchor} style={{ fontFamily: 'var(--sans)' }} fontSize={10.5}>{ml.text}</text>}
             </g>
           )
         })}

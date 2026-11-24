@@ -470,6 +470,9 @@ export async function getAdjustmentImpact(
   }
 }
 
+/** A dispute waiting for the store's evidence. */
+export interface AwaitingDispute { externalId: string; amount: number; currency: string; reason: string; dueBy: string | null }
+
 export interface ChargebackHealth {
   /** Disputes opened in the last 90 days. */
   count: number
@@ -481,20 +484,56 @@ export interface ChargebackHealth {
   open: number
   lost: number
   won: number
-  /** Disputes still answerable, soonest deadline first. */
-  dueSoon: { externalId: string; amount: number; currency: string; reason: string; dueBy: string | null }[]
+  /**
+   * EVERY dispute still waiting for the store's evidence ("needs_response")
+   * whose deadline has not passed (or is unknown), soonest deadline first.
+   * Not the first rows: a cut at 5 per store, then at 5 across stores, showed
+   * "4–5 of 12" under a heading that reads as the to-do list.
+   */
+  dueSoon: AwaitingDispute[]
+  /** Still "needs_response" but the evidence deadline already passed: counted,
+   *  not listed (nothing can be sent any more). Optional for hand-built
+   *  fixtures; getChargebackHealth always sets it. */
+  overdue?: number
   hasData: boolean
 }
 
+/** A "needs_response" chargeback row as the health query reads it. */
+export interface NeedsResponseRow {
+  external_id: string
+  amount: string | number
+  currency: string | null
+  reason: string | null
+  evidence_due_by: string | null
+  /** evidence_due_by is set and already past (decided by the database clock). */
+  overdue: boolean
+}
+
+/** Rows already ordered by deadline → the answerable list and the overdue count. */
+export function splitNeedsResponse(rows: readonly NeedsResponseRow[]): { dueSoon: AwaitingDispute[]; overdue: number } {
+  const dueSoon: AwaitingDispute[] = []
+  let overdue = 0
+  for (const r of rows) {
+    if (r.overdue) { overdue++; continue }
+    dueSoon.push({
+      externalId: r.external_id,
+      amount: Number(r.amount) || 0,
+      currency: r.currency || 'USD',
+      // Empty when Shopify gave none: the screen says "motivo não informado".
+      reason: r.reason ?? '',
+      dueBy: r.evidence_due_by,
+    })
+  }
+  return { dueSoon, overdue }
+}
+
 /**
- * Chargeback health across several stores at once.
- *
- * The rate is recomputed from the summed counts rather than averaged: a store
- * with four orders and one dispute would otherwise drag the whole number up as
- * hard as one with four thousand.
+ * Several stores' health, summed (pure). The rate is recomputed from the
+ * summed counts rather than averaged: a store with four orders and one dispute
+ * would otherwise drag the whole number up as hard as one with four thousand.
+ * The answerable disputes of every store are kept, soonest deadline first.
  */
-export async function getCombinedChargebackHealth(tenantIds: string[]): Promise<ChargebackHealth> {
-  const each = await Promise.all(tenantIds.map(id => getChargebackHealth(id)))
+export function combineChargebackHealth(each: readonly ChargebackHealth[]): ChargebackHealth {
   const sum = each.reduce((a, h) => ({
     count: a.count + h.count,
     orders: a.orders + h.orders,
@@ -503,23 +542,28 @@ export async function getCombinedChargebackHealth(tenantIds: string[]): Promise<
     open: a.open + h.open,
     lost: a.lost + h.lost,
     won: a.won + h.won,
-  }), { count: 0, orders: 0, amount: 0, fees: 0, open: 0, lost: 0, won: 0 })
+    overdue: a.overdue + (h.overdue ?? 0),
+  }), { count: 0, orders: 0, amount: 0, fees: 0, open: 0, lost: 0, won: 0, overdue: 0 })
 
   return {
     ...sum,
     rate: sum.orders > 0 ? (sum.count / sum.orders) * 100 : 0,
     dueSoon: each.flatMap(h => h.dueSoon)
-      .sort((a, b) => (a.dueBy ?? '9999').localeCompare(b.dueBy ?? '9999'))
-      .slice(0, 5),
+      .sort((a, b) => (a.dueBy ?? '9999').localeCompare(b.dueBy ?? '9999')),
     hasData: each.some(h => h.hasData),
   }
+}
+
+/** Chargeback health across several stores at once (combineChargebackHealth). */
+export async function getCombinedChargebackHealth(tenantIds: string[]): Promise<ChargebackHealth> {
+  return combineChargebackHealth(await Promise.all(tenantIds.map(id => getChargebackHealth(id))))
 }
 
 /** The number that decides whether Shopify Payments stays switched on. */
 export async function getChargebackHealth(tenantId: string): Promise<ChargebackHealth> {
   const empty: ChargebackHealth = {
     count: 0, orders: 0, rate: 0, amount: 0, fees: 0,
-    open: 0, lost: 0, won: 0, dueSoon: [], hasData: false,
+    open: 0, lost: 0, won: 0, dueSoon: [], overdue: 0, hasData: false,
   }
   try {
     const [row] = await query<Record<string, string>>(
@@ -542,16 +586,18 @@ export async function getChargebackHealth(tenantId: string): Promise<ChargebackH
          AND o.financial_status NOT IN ('voided')`,
       [tenantId]
     )
-    const dueSoon = await query<{
-      external_id: string; amount: string; currency: string; reason: string; evidence_due_by: string | null
-    }>(
-      `SELECT external_id, amount::text, currency, reason, evidence_due_by::text
+    // Every dispute waiting for evidence, whatever its age (the deadline, not
+    // the 90 days, decides whether it can still be answered); the database
+    // clock splits the answerable ones from those past their deadline.
+    const waiting = await query<NeedsResponseRow>(
+      `SELECT external_id, amount::text, currency, reason, evidence_due_by::text,
+              (evidence_due_by IS NOT NULL AND evidence_due_by <= now()) AS overdue
        FROM order_adjustments
        WHERE tenant_id = $1 AND kind = 'chargeback' AND status = 'needs_response'
-       ORDER BY evidence_due_by NULLS LAST
-       LIMIT 5`,
+       ORDER BY evidence_due_by NULLS LAST, external_id`,
       [tenantId]
     )
+    const { dueSoon, overdue } = splitNeedsResponse(waiting)
 
     const count = Number(row?.n ?? 0)
     const orders = Number(ord?.n ?? 0)
@@ -563,13 +609,8 @@ export async function getChargebackHealth(tenantId: string): Promise<ChargebackH
       open: Number(row?.open ?? 0),
       lost: Number(row?.lost ?? 0),
       won: Number(row?.won ?? 0),
-      dueSoon: dueSoon.map(d => ({
-        externalId: d.external_id,
-        amount: Number(d.amount),
-        currency: d.currency,
-        reason: d.reason,
-        dueBy: d.evidence_due_by,
-      })),
+      dueSoon,
+      overdue,
       hasData: count > 0,
     }
   } catch {

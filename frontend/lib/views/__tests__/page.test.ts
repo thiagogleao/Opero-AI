@@ -1,14 +1,14 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-// The pure parts only: lib/access (cookies, database) is never reached.
+// lib/access (cookies, database) is never reached: it is answered here.
 vi.mock('../../access', () => ({ getViewer: vi.fn(), listStores: vi.fn(), resolveStore: vi.fn() }))
 vi.mock('next/navigation', () => ({ notFound: vi.fn(), redirect: vi.fn() }))
 
-import { getViewer, listStores } from '../../access'
+import { getViewer, listStores, resolveStore, type StoreRef } from '../../access'
 import { notFound } from 'next/navigation'
 import {
-  ALL_STORES, buildHref, MAX_WINDOW_DAYS, MIN_PAGE_DATE, pageMetadata, parsePageParams, resolvePeriodWindow, toStoreOption,
-  type PageParams, type SearchParams,
+  ALL_STORES, buildHref, carriedLoja, getPageContext, MAX_WINDOW_DAYS, MIN_PAGE_DATE, pageMetadata, parsePageParams,
+  resolvePeriodWindow, toStoreOption, type PageParams, type SearchParams,
 } from '../page'
 
 // 2026-11-17 13:38 in Brasília = 16:38 UTC = 2026-11-18 01:38 in Tokyo.
@@ -201,5 +201,90 @@ describe('pageMetadata (regression: 404s kept the page title, e.g. "Resumo · Op
     const meta = pageMetadata('Criativo', { exists: async p => p.id === '42' })
     await expect(meta({ params: Promise.resolve({ id: '123' }), searchParams: sp({ loja: 'user_3CV' }) })).rejects.toThrow('NEXT_NOT_FOUND')
     await expect(meta({ params: Promise.resolve({ id: '42' }), searchParams: sp({ loja: 'user_3CV' }) })).resolves.toEqual({ title: 'Criativo' })
+  })
+})
+
+describe('Todas is never silently turned into one store (regression: Todas → Resumo → Campanhas opened MOKOO)', () => {
+  const store = (id: string, name: string, timezone: string): StoreRef =>
+    ({ id, name, shopName: name, domain: null, timezone, archived: false, userId: null })
+  const MOKOO = store('user_3CV', 'MOKOO', 'America/Belem')
+  const EPOCH = store('73a1', 'EPOCH', 'America/Sao_Paulo')
+
+  /** The owner's two stores; the browser remembers MOKOO. */
+  function viewer(kind: 'owner' | 'partner', stores: StoreRef[]) {
+    vi.mocked(getViewer).mockResolvedValue(kind === 'owner' ? { kind } : { kind, userId: 'u1' })
+    vi.mocked(listStores).mockResolvedValue(stores)
+    vi.mocked(resolveStore).mockImplementation(async (_v, urlId) => ({
+      store: (urlId ? stores.find(s => s.id === urlId) : stores[0]) ?? null, stores,
+    }))
+  }
+  beforeEach(() => { viewer('owner', [MOKOO, EPOCH]) })
+
+  it('carriedLoja: Todas asked on a one-store page is carried; anything else carries what is shown', () => {
+    expect(carriedLoja(ALL_STORES, 'store', true, MOKOO.id)).toBe(ALL_STORES)
+    expect(carriedLoja(MOKOO.id, 'store', true, MOKOO.id)).toBe(MOKOO.id)
+    expect(carriedLoja(null, 'store', true, MOKOO.id)).toBe(MOKOO.id)
+    expect(carriedLoja(ALL_STORES, 'all', true, null)).toBe(ALL_STORES)
+    // A one-store partner has no Todas to keep.
+    expect(carriedLoja(ALL_STORES, 'store', false, MOKOO.id)).toBe(MOKOO.id)
+    // No store at all: nothing to carry but nothing to show either.
+    expect(carriedLoja(ALL_STORES, 'store', true, null)).toBeNull()
+  })
+
+  it('Resumo with ?loja=todas shows the remembered store, but its navigation keeps Todas', async () => {
+    const ctx = await getPageContext({ loja: ALL_STORES, periodo: '30d' }, { scope: 'store', now: NOW })
+    expect(ctx.store?.id).toBe(MOKOO.id)
+    expect(ctx.scope).toBe('store')
+    expect(ctx.fromAll).toBe(true)
+    expect(ctx.params.loja).toBe(MOKOO.id)
+    expect(ctx.navParams.loja).toBe(ALL_STORES)
+    // Sidebar: Campanhas, Produtos, Países e clientes, Todas as lojas keep Todas.
+    expect(ctx.navHref('/campaigns')).toBe('/campaigns?loja=todas&periodo=30d')
+    expect(ctx.navHref('/products')).toBe('/products?loja=todas&periodo=30d')
+    expect(ctx.navHref('/countries')).toBe('/countries?loja=todas&periodo=30d')
+    expect(ctx.navHref('/overview')).toBe('/overview?loja=todas&periodo=30d')
+    // Period picker and split toggle reload the page still from Todas.
+    expect(ctx.navHref('', { periodo: '7d' })).toBe('?loja=todas')
+    expect(ctx.navHref('', { parte: true })).toBe('?loja=todas&periodo=30d&parte=50')
+    // A link about the store on screen (its campaigns block) names it.
+    expect(ctx.hrefWith('/campaigns')).toBe(`/campaigns?loja=${MOKOO.id}&periodo=30d`)
+  })
+
+  it('Custos with ?loja=todas (scope store) sends Produtos to Todas', async () => {
+    const ctx = await getPageContext({ loja: ALL_STORES }, { scope: 'store', now: NOW })
+    expect(ctx.store?.id).toBe(MOKOO.id)
+    expect(ctx.navHref('/products')).toBe('/products?loja=todas')
+    expect(ctx.navHref('/profit')).toBe('/profit?loja=todas')
+  })
+
+  it('once a store is picked (?loja=<id>) the navigation carries that store', async () => {
+    const ctx = await getPageContext({ loja: MOKOO.id }, { scope: 'store', now: NOW })
+    expect(ctx.fromAll).toBe(false)
+    expect(ctx.navHref('/campaigns')).toBe(`/campaigns?loja=${MOKOO.id}`)
+    expect(ctx.navHref('/campaigns')).toBe(ctx.hrefWith('/campaigns'))
+  })
+
+  it('a bare URL carries the remembered store, as before', async () => {
+    const ctx = await getPageContext({}, { scope: 'store', now: NOW })
+    expect(ctx.fromAll).toBe(false)
+    expect(ctx.navHref('/campaigns')).toBe(`/campaigns?loja=${MOKOO.id}`)
+  })
+
+  it('pages that show Todas keep it in both builders', async () => {
+    const either = await getPageContext({ loja: ALL_STORES }, { now: NOW })
+    expect(either.scope).toBe('all')
+    expect(either.fromAll).toBe(false)
+    expect(either.navHref('/')).toBe('/?loja=todas')
+    expect(either.hrefWith('/')).toBe('/?loja=todas')
+    const all = await getPageContext({}, { scope: 'all', now: NOW })
+    expect(all.navHref('/campaigns')).toBe('/campaigns?loja=todas')
+  })
+
+  it('a one-store partner asking for Todas just gets the store (no Todas to keep, no note)', async () => {
+    viewer('partner', [EPOCH])
+    const ctx = await getPageContext({ loja: ALL_STORES }, { scope: 'store', now: NOW })
+    expect(ctx.allowAll).toBe(false)
+    expect(ctx.fromAll).toBe(false)
+    expect(ctx.navHref('/campaigns')).toBe(`/campaigns?loja=${EPOCH.id}`)
   })
 })
