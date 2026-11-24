@@ -42,6 +42,45 @@ describe('creativeVerdict', () => {
     expect(creativeVerdict({ ...base, frequency: 4.2 }).signal).toBe('refresh')
     expect(creativeVerdict({ ...base, frequency: null }).signal).toBe('ok')
   })
+  it('names the window its figures cover when it is not the screen\'s', () => {
+    const w = { ...base, window: 'nos 7 dias fechados' }
+    expect(creativeVerdict({ ...w, roas: 0.96, spend: 1419.4, breakEven: 1.29 }).reason)
+      .toBe('ROAS 0,96× com $1.419 gastos nos 7 dias fechados — abaixo de 80% do empate desses dias (1,29×)')
+    expect(creativeVerdict({ ...w, roas: 2.2 }).reason).toBe('ROAS 2,20× nos 7 dias fechados — 40% ou mais acima do empate desses dias (1,50×) com 5 vendas')
+    expect(creativeVerdict({ ...w, spend: 0, roas: null })).toEqual({ signal: null, reason: 'Sem gasto nos 7 dias fechados' })
+    expect(creativeVerdict({ ...w, frequency: 4.2 }).reason).toBe('Frequência 4,2 nos 7 dias fechados — o público já viu demais')
+    // Without a window, the reasons are the screen's own (unchanged).
+    expect(creativeVerdict({ ...base, spend: 0, roas: null }).reason).toBe('Sem gasto no período')
+    expect(creativeVerdict({ ...base, roas: 0.96, spend: 1419.4, breakEven: 1.29 }).reason)
+      .toBe('ROAS 0,96× com $1.419 gastos — abaixo de 80% do empate (1,29×)')
+  })
+  it('leads a "no action" reason with the window\'s ROAS, so the row\'s own ROAS and break-even are not read against it', () => {
+    // Phone row: "ROAS 0,80× · empate do período 1,58×" under a reason that
+    // judged the 7 closed days: the reason gives its own ROAS and names its
+    // break-even as those days'.
+    const w = { ...base, window: 'nos 7 dias fechados' }
+    expect(creativeVerdict({ ...w, roas: 1.6 })).toEqual({
+      signal: 'ok', label: 'Manter', reason: 'ROAS 1,60× nos 7 dias fechados — acima do empate desses dias (1,50×)',
+    })
+    expect(creativeVerdict({ ...w, roas: 1.5 }).reason).toBe('ROAS 1,50× nos 7 dias fechados — acima do empate desses dias (1,50×)')
+    expect(creativeVerdict({ ...w, roas: 1.3 })).toEqual({
+      signal: 'ok', label: 'Abaixo do empate',
+      reason: 'ROAS 1,30× nos 7 dias fechados — abaixo do empate desses dias (1,50×), mas acima da linha de corte (1,20×)',
+    })
+    expect(creativeVerdict({ ...w, roas: 1.1, spend: 45.5 }).reason)
+      .toBe('ROAS 1,10× nos 7 dias fechados — abaixo do empate desses dias (1,50×), ainda com pouco gasto para cortar ($45,50 de $50)')
+    // Without a window the "no action" reasons stay as they were.
+    expect(creativeVerdict({ ...base, roas: 1.6 }).reason).toBe('Acima do empate (1,50×)')
+    expect(creativeVerdict({ ...base, roas: 1.1, spend: 45.5 }).reason)
+      .toBe('Abaixo do empate (1,50×), ainda com pouco gasto para cortar ($45,50 de $50)')
+  })
+  it('says "desse dia" when the window is a single closed day', () => {
+    const one = { ...base, window: 'no último dia fechado' }
+    expect(creativeVerdict({ ...one, roas: 0.96, spend: 1419.4, breakEven: 1.29 }).reason)
+      .toBe('ROAS 0,96× com $1.419 gastos no último dia fechado — abaixo de 80% do empate desse dia (1,29×)')
+    expect(creativeVerdict({ ...one, roas: 2.2 }).reason).toBe('ROAS 2,20× no último dia fechado — 40% ou mais acima do empate desse dia (1,50×) com 5 vendas')
+    expect(creativeVerdict({ ...one, roas: 1.6 }).reason).toBe('ROAS 1,60× no último dia fechado — acima do empate desse dia (1,50×)')
+  })
 })
 
 describe('legacy creativeSignal', () => {

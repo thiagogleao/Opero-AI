@@ -8,8 +8,10 @@ import type { CreativeDetail } from '@/lib/data/creatives'
 import type { Verdict, VerdictChip, VerdictLine } from '@/lib/views/verdict'
 import { SPLIT_SHARE } from '@/lib/views/verdict'
 import type { PnL } from '@/lib/engine/pnl'
-import { formatDate, formatMoney, formatRoas, plural } from '@/lib/format'
-import { adSignalChip, ptText } from './text'
+import { BELOW_BREAK_EVEN_LABEL, KEEP_LABEL, type CreativeVerdict } from '@/lib/creativeSignal'
+import { eachDay, type DateRange } from '@/lib/engine/dates'
+import { formatDate, formatMoney, formatRangeLabel, formatRoas, plural } from '@/lib/format'
+import { adVerdictChip, ptText } from './text'
 
 const line = (...parts: (string | { text: string; strong?: boolean; tone?: 'pos' | 'neg' | 'warn' })[]): VerdictLine => {
   const ps = parts.map(p => (typeof p === 'string' ? { text: p } : p))
@@ -17,6 +19,38 @@ const line = (...parts: (string | { text: string; strong?: boolean; tone?: 'pos'
 }
 /** A sentence without its closing period(s), so exactly one can be added. */
 const stripStop = (t: string) => t.trim().replace(/[.\s]+$/, '')
+
+const sameRange = (a: DateRange, b: DateRange) => a.from === b.from && a.to === b.to
+
+/** "O veredito vem dos 7 dias fechados (17–23 nov): neles, …": the days a
+ *  verdict judged on, named where the headline reads against it. */
+function verdictSource(w: DateRange, dates: string, what: string): string {
+  const days = eachDay(w.from, w.to).length
+  return days === 1
+    ? `O veredito vem do último dia fechado (${dates}): nele, ${what}.`
+    : `O veredito vem dos ${days} dias fechados (${dates}): neles, ${what}.`
+}
+
+/**
+ * What the verdict says the ad did over ITS window, when that reads against
+ * the page window's estimate: a "Desligar" over a day that made money, a
+ * "Manter" over a window that lost it. Null when the two agree or the verdict
+ * has no direction (no signal, refresh).
+ */
+function verdictAgainstWindow(v: CreativeVerdict, windowProfit: number): string | null {
+  const bad = v.signal === 'kill' || (v.signal === 'ok' && v.label === BELOW_BREAK_EVEN_LABEL)
+  const good = v.signal === 'scale' || (v.signal === 'ok' && v.label === KEEP_LABEL)
+  if (windowProfit >= 0 && bad) return v.signal === 'kill' ? 'ficou abaixo de 80% do empate' : 'ficou abaixo do empate'
+  if (windowProfit < 0 && good) return v.signal === 'scale' ? 'ficou 40% ou mais acima do empate' : 'ficou no empate ou acima'
+  return null
+}
+
+/** The text after "não teve gasto": "hoje", "em 24 nov", "em 10–16 nov" —
+ *  never "entre 24 nov e 24 nov". */
+export function noSpendWhen(range: DateRange, today: string): string {
+  if (range.from === range.to) return range.from === today ? 'hoje' : `em ${formatDate(range.from, today)}`
+  return `em ${formatRangeLabel(range, today)}`
+}
 
 export function buildCreativeVerdict(input: {
   detail: CreativeDetail
@@ -44,22 +78,43 @@ export function buildCreativeVerdict(input: {
   }
 
   if (!d.hasSpend) {
+    // The ad's last spend on record, any window: the window's own is always
+    // empty here, which left "Último dia com gasto" unreachable.
+    const last = d.lastSpendDayEver ?? c.lastSpendDay
     chips.push({ code: 'sem_vendas', label: 'Sem gasto neste período', tone: 'neu', icon: 'ring' })
     return {
       ...base, tone: 'neu', chips,
       headline: `Este anúncio não gastou ${periodPhrase}.`,
       amount: null, amountTone: 'neu', amountCaption: 'escolha um período maior para ver o histórico dele',
-      details: [line(c.lastSpendDay ? `Último dia com gasto: ${formatDate(c.lastSpendDay, input.today)}.` : 'Nenhum gasto registrado nas datas escolhidas.')],
+      details: [line(last ? `Último dia com gasto: ${formatDate(last, input.today)}.` : 'Nenhum gasto registrado para este anúncio.')],
       notes, basis: 'none',
     }
   }
 
   const sig = c.verdict.signal
-  if (early) {
+  // The verdict's own word: it is judged on the campaigns' last closed days
+  // (d.verdictWindow), not on this window's ROAS. When those are other days
+  // than the page's, the chip carries its own dates ("Desligar · 17–23 nov"):
+  // next to the card's "24 nov" a bare "Desligar" read as the verdict on a
+  // day the ad made money (ROAS 5,75× against 1,34×).
+  const ownWindow = !sameRange(d.verdictWindow, d.range)
+  const verdictDates = formatRangeLabel(d.verdictWindow, input.today)
+  const spec = adVerdictChip(c.verdict)
+  const decided = !!(sig && spec)
+  // "Cedo" is about TODAY's figures. It replaces the verdict only when the
+  // verdict itself is judged on the running day; one judged on closed days
+  // (ownWindow) stands. Otherwise at 01h the page said "Cedo demais para
+  // julgar" over the kill reason of the 7 closed days, while Campanhas →
+  // Criativos said "Desligar" for the same ad at the same moment.
+  const earlyHidesVerdict = early && (!ownWindow || !decided)
+  if (earlyHidesVerdict) {
     chips.push({ code: 'cedo', label: 'Cedo demais para julgar', tone: 'neu', icon: 'clock' })
-  } else if (sig) {
-    const spec = adSignalChip(sig, c.roas, d.breakEvenRoas)
-    chips.push({ code: sig === 'kill' ? 'prejuizo' : sig === 'scale' ? 'lucro' : 'margem_fina', label: spec.label, tone: spec.tone === 'mut' ? 'neu' : spec.tone, icon: spec.icon })
+  } else if (sig && spec) {
+    chips.push({
+      code: sig === 'kill' ? 'prejuizo' : sig === 'scale' ? 'lucro' : 'margem_fina',
+      label: ownWindow ? `${spec.label} · ${verdictDates}` : spec.label,
+      tone: spec.tone === 'mut' ? 'neu' : spec.tone, icon: spec.icon,
+    })
   } else if (!c.running) {
     chips.push({ code: 'sem_vendas', label: 'Pausado', tone: 'neu', icon: 'ring' })
   }
@@ -70,10 +125,18 @@ export function buildCreativeVerdict(input: {
   const est = c.estimatedProfit
   const be = d.breakEvenRoas
   let headline: string
-  if (early) {
+  if (earlyHidesVerdict) {
     headline = 'Cedo demais para julgar este anúncio hoje: o Meta ainda está atribuindo as vendas do dia.'
+  } else if (early) {
+    const days = eachDay(d.verdictWindow.from, d.verdictWindow.to).length
+    const closed = days === 1 ? `do último dia fechado (${verdictDates})` : `dos ${days} dias fechados (${verdictDates})`
+    headline = `Os números de hoje ainda são cedo: o Meta está atribuindo as vendas do dia. O veredito ${closed} continua valendo: ${spec!.label}.`
   } else if (est !== null) {
     headline = `Este anúncio deu ${est >= 0 ? 'lucro' : 'prejuízo'} ${periodPhrase}, pela atribuição do Meta: ROAS ${formatRoas(c.roas)}${be !== null ? ` contra empate ${formatRoas(be)}` : ''}.`
+    // A verdict from other days that points the other way is said here, in
+    // the sentence it contradicts, not only in the fine print below.
+    const against = ownWindow ? verdictAgainstWindow(c.verdict, est) : null
+    if (against) headline += ` ${verdictSource(d.verdictWindow, verdictDates, against)}`
   } else if (c.shared) {
     headline = `Este anúncio rodou em conta compartilhada: as vendas dele podem ser de outra loja.`
   } else {
@@ -107,7 +170,11 @@ export function buildCreativeVerdict(input: {
   }
   return {
     ...base,
-    tone: early ? 'neu' : sig === 'kill' ? 'neg' : est >= 0 ? 'pos' : 'neg',
+    // The card's colour is the window's result, like the amount under it. On
+    // the verdict's own window a kill is always a loss (ROAS under 80% of the
+    // break-even), so this only differs when the verdict judged other days,
+    // and then a profitable day stays green with the chip naming its days.
+    tone: early ? 'neu' : est >= 0 ? 'pos' : 'neg',
     chips,
     headline,
     amount: est * k,

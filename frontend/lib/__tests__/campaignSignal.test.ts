@@ -150,21 +150,29 @@ describe('reasons and rules are written the pt-BR way', () => {
     const big = decideCampaign(input({ days: flat(WINDOW, 1500, 0, 0) }))
     expect(big.reason).toBe('$10.500 em 7 dias sem nenhuma venda atribuída pelo Meta')
     const few = decideCampaign(input({ days: flat(WINDOW, 6.5, 20, 1) }))
-    expect(few.reason).toBe('Pouco volume para julgar: 7 pedidos e $45,50 em 7 dias (mínimo 10 pedidos e $150)')
+    // Meta's purchases and the spend, in the row's own words ('Gasto', 'compras'):
+    // '2 pedidos e $602 em 7 dias' read the spend as sales (EPOCH 1936 BIDCAP).
+    expect(few.reason).toBe('Pouco volume para julgar: 7 compras atribuídas e $45,50 de gasto em 7 dias (mínimo 10 compras e $150)')
     const one = decideCampaign(input({ days: [{ date: WINDOW.to, spend: 20, revenue: 30, purchases: 1 }] }))
-    expect(one.reason).toBe('Pouco volume para julgar: 1 pedido e $20,00 em 7 dias (mínimo 10 pedidos e $150)')
+    expect(one.reason).toBe('Pouco volume para julgar: 1 compra atribuída e $20,00 de gasto em 7 dias (mínimo 10 compras e $150)')
+    // EPOCH 1936 BIDCAP, 17–23 nov: $602 spent, 2 purchases credited, ROAS 0,31×.
+    const bidcap = flat(WINDOW, 86, 0, 0)
+    bidcap[0] = { ...bidcap[0], revenue: 90, purchases: 1 }
+    bidcap[3] = { ...bidcap[3], revenue: 96.62, purchases: 1 }
+    const robustCut = decideCampaign(input({ days: bidcap }))
+    expect(robustCut.reason).toBe('2 compras atribuídas e $602 de gasto em 7 dias: mesmo com 50% mais vendas ficaria no prejuízo')
     const better = decideCampaign(input({ days: [...flat(PREVIOUS, 50, 100, 1), ...flat(WINDOW, 50, 150, 2)] }))
     expect(better.notes).toEqual(['ROAS 50% melhor que nos 7 dias anteriores'])
-    for (const d of [cut, big, few, one, better, decideCampaign(input())]) {
+    for (const d of [cut, big, few, one, robustCut, better, decideCampaign(input())]) {
       for (const t of [d.reason, ...d.notes]) expect(t, t).not.toMatch(enUS)
     }
   })
 
   it('the rule legend', () => {
     const rules = describeThresholds({ ...DEFAULT_THRESHOLDS, minSpend: 1500 })
-    expect(rules.observar).toBe('Entre −10% e 0% de margem, ou pouco volume para julgar (menos de 10 pedidos ou $1.500).')
+    expect(rules.observar).toBe('Entre −10% e 0% de margem, ou pouco volume para julgar (menos de 10 compras atribuídas ou $1.500 de gasto).')
     expect(rules.cortar).toBe('Margem de −10% ou pior com volume suficiente; ou $1.500 gastos e o prejuízo continuaria mesmo com 50% mais vendas.')
-    expect(describeThresholds({ ...DEFAULT_THRESHOLDS, minSpend: 50 }).escalar).toContain('com pelo menos 10 pedidos e $50 de gasto')
+    expect(describeThresholds({ ...DEFAULT_THRESHOLDS, minSpend: 50 }).escalar).toContain('com pelo menos 10 compras atribuídas e $50 de gasto')
     for (const t of Object.values(rules)) expect(t, t).not.toMatch(enUS)
   })
 })
@@ -173,5 +181,14 @@ describe('legacy campaignTrend', () => {
   it('never says "escalar" when the window has no earlier days (H2)', () => {
     const series = eachDay('2026-11-11', '2026-11-17').map(date => ({ date, spend: 50, revenue: 200 }))
     expect(campaignTrend(series, '2026-11-17', 0.6).trend).toBe('curto')
+  })
+})
+
+describe('cost per purchase', () => {
+  it('has no CPA without spend, even with late purchases credited', () => {
+    // A paused campaign's conversions from earlier clicks: 2 purchases, $0.
+    const late = decideCampaign(input({ status: 'PAUSED', days: [{ date: WINDOW.to, spend: 0, revenue: 108.59, purchases: 2 }] }))
+    expect(late.cpa).toBeNull()
+    expect(decideCampaign(input()).cpa).toBeCloseTo(25, 6)
   })
 })

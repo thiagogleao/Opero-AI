@@ -11,7 +11,7 @@
  */
 
 import type { CampaignAction, TrendArrow } from '@/lib/campaignSignal'
-import { BELOW_BREAK_EVEN_LABEL, KEEP_LABEL, signalLabel, type Signal } from '@/lib/creativeSignal'
+import { BELOW_BREAK_EVEN_LABEL, KEEP_LABEL, signalLabel, type CreativeVerdict, type Signal } from '@/lib/creativeSignal'
 import type { ChipTone } from '@/components/ui'
 import type { ChipIcon } from '@/lib/views/verdict'
 import { formatMoney, formatPct } from '@/lib/format'
@@ -60,9 +60,24 @@ export const SIGNAL_CHIP: Record<Signal, ChipSpec> = {
  * contradict the reason, so it reads "Abaixo do empate" with a neutral ring.
  */
 export function adSignalChip(signal: Signal, roas: number | null, breakEven: number | null): ChipSpec {
-  const label = signalLabel(signal, roas, breakEven)
+  return chipForLabel(signal, signalLabel(signal, roas, breakEven))
+}
+
+function chipForLabel(signal: Signal, label: string): ChipSpec {
   if (label === BELOW_BREAK_EVEN_LABEL) return { label, tone: 'neu', icon: 'ring' }
   return { ...SIGNAL_CHIP[signal], label }
+}
+
+/**
+ * The chip of an ad's verdict from the verdict itself. The verdict is judged
+ * on the campaigns' last 7 closed days (lib/data/creatives), so its word
+ * ("Manter" / "Abaixo do empate") comes from that ROAS and break-even: read
+ * from the row's own ROAS of "Hoje", a 3,01× ad kept for the week would read
+ * "Abaixo do empate" on a morning at 0,00×. Null without a signal.
+ */
+export function adVerdictChip(v: CreativeVerdict): ChipSpec | null {
+  if (!v.signal) return null
+  return chipForLabel(v.signal, v.label ?? SIGNAL_CHIP[v.signal].label)
 }
 
 /** What the ad's chip column means, for the column's ⓘ. */

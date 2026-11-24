@@ -8,7 +8,7 @@ import { formatRangeLabel, formatMoney, plural } from '@/lib/format'
 import { listStores, type StoreRef } from '@/lib/access'
 import { getAlertConfig } from '@/lib/alerts'
 import { getSharedAdAccounts } from '@/lib/attribution'
-import { decisionWindows, getCampaignReport, getOwnAttribution, type CampaignReport } from '@/lib/data/campaigns'
+import { decisionWindows, getCampaignReport, getOwnAttribution, getStoreCampaignName, type CampaignReport } from '@/lib/data/campaigns'
 import { getCreativesReport } from '@/lib/data/creatives'
 import type { ScaleThresholds } from '@/lib/campaignSignal'
 import { AppShell, PageHeader, PeriodNote } from '@/components/shell'
@@ -18,6 +18,8 @@ import { ReconciliationLedger } from '@/components/campaigns/ReconciliationLedge
 import { ScaleRoom } from '@/components/campaigns/ScaleRoom'
 import { CampaignTable } from '@/components/campaigns/CampaignTable'
 import { CreativesView } from '@/components/campaigns/CreativesView'
+import { campaignFilterText, type CreativesFilter } from '@/components/campaigns/campaignFilter'
+import { noSpendWhen } from '@/components/campaigns/creativeVerdict'
 import { BilledElsewhere } from '@/components/campaigns/BilledElsewhere'
 import { PortfolioAdsTable, SharedAccountsCallout, buildPortfolioAdsVerdict } from '@/components/campaigns/PortfolioAds'
 import { storeMarginFromPnL } from '@/components/campaigns/margin'
@@ -56,7 +58,7 @@ export default async function CampaignsPage({ searchParams }: { searchParams: Pr
   if (!store) {
     return (
       <AppShell ctx={ctx}>
-        <PageHeader ctx={ctx} title="Campanhas" />
+        <PageHeader ctx={ctx} title="Campanhas" halved={false} />
         <EmptyState icon="store" title="Nenhuma loja para mostrar">Este acesso ainda não tem loja conectada.</EmptyState>
       </AppShell>
     )
@@ -115,7 +117,7 @@ async function StoreCampaigns({ ctx, store, tab, campaignId, showAll }: {
     )
   }
 
-  const opt = ctx.storeOptions.find(o => o.id === store.id)
+  const opt = ctx.storeOption
   const decisionLabel = formatRangeLabel(decision.window, ctx.today)
   const billedElsewhere = report.billedElsewhere.length ? {
     spend: report.billedElsewhere.reduce((t, b) => t + b.spend, 0),
@@ -184,13 +186,22 @@ async function TabContent({ ctx, store, tab, report, campaignId, showAll, storeN
   ctx: PageContext; store: StoreRef; tab: 'campanhas' | 'criativos'; report: CampaignReport
   campaignId: string | null; showAll: boolean; storeNames: Map<string, string>; margin: ReturnType<typeof storeMarginFromPnL>
 }) {
-  // A campaign filter only applies to the creatives tab, and only to a
-  // campaign of this store's list (anything else reads as no filter).
-  const filterRow = tab === 'criativos' && campaignId ? report.campaigns.find(c => c.campaignId === campaignId) ?? null : null
-  let creatives
+  // A campaign filter only applies to the creatives tab. It stays on even when
+  // the campaign has no row in this window (a period change keeps ?campanha=)
+  // or is not this store's: the tab then lists none of its ads and says why.
+  // Read as "no filter", it listed every ad of the store under the totals of
+  // an unfiltered list, and the filter came back by itself later.
+  const filterId = tab === 'criativos' && campaignId ? campaignId : null
+  let creatives, filter: CreativesFilter | null = null
   try {
+    const filterRow = filterId ? report.campaigns.find(c => c.campaignId === filterId) ?? null : null
+    if (filterId) filter = await campaignFilter(ctx, store, filterId, filterRow?.name ?? null)
+    // The ads are judged on the campaigns' window and margin: pass the
+    // report's decision margin so it is not priced twice.
     creatives = await getCreativesReport(store, ctx.range, {
-      storeNames, margin, now: ctx.now, campaignId: filterRow?.campaignId ?? undefined,
+      storeNames, margin, now: ctx.now, campaignId: filterId ?? undefined,
+      windowDays: report.thresholds.windowDays,
+      verdictMargin: { configured: report.configured, contributionRate: report.decisionContributionRate, breakEvenRoas: report.decisionBreakEvenRoas },
     })
   } catch (err) {
     console.error('[campaigns] creatives', err)
@@ -203,10 +214,11 @@ async function TabContent({ ctx, store, tab, report, campaignId, showAll, storeN
         report={creatives}
         hrefWith={p => ctx.hrefWith(p)}
         rangeLabel={ctx.rangeLabel}
-        filter={filterRow ? { name: filterRow.name, clearHref: ctx.hrefWith('/campaigns?aba=criativos') } : null}
+        filter={filter}
         limit={showAll ? null : TABLE_LIMIT}
-        showAllHref={ctx.hrefWith(`/campaigns?aba=criativos${filterRow?.campaignId ? `&campanha=${encodeURIComponent(filterRow.campaignId)}` : ''}&mostrar=todos`)}
+        showAllHref={ctx.hrefWith(`/campaigns?aba=criativos${filterId ? `&campanha=${encodeURIComponent(filterId)}` : ''}&mostrar=todos`)}
         split={ctx.split}
+        storeRevenue={margin.revenue}
       />
     )
   }
@@ -225,6 +237,17 @@ async function TabContent({ ctx, store, tab, report, campaignId, showAll, storeN
   )
 }
 
+/** The Criativos filter of ?campanha=<id>: the row's name when the campaign
+ *  has one in this window, else the store's own campaign name (or none for
+ *  another store's campaign) and why its ads are not listed. */
+async function campaignFilter(ctx: PageContext, store: StoreRef, id: string, rowName: string | null): Promise<CreativesFilter> {
+  const name = rowName ?? await getStoreCampaignName(store.id, id)
+  return {
+    ...campaignFilterText({ name, inWindow: rowName !== null, storeName: store.name, when: noSpendWhen(ctx.range, ctx.today) }),
+    clearHref: ctx.hrefWith('/campaigns?aba=criativos'),
+  }
+}
+
 /**
  * A link to another store's Campanhas on the dates this page shows. The same
  * `periodo` resolves on that store's own clock, which can be a day ahead
@@ -237,7 +260,7 @@ function otherStoreHref(ctx: PageContext, storeId: string): string {
 }
 
 async function AllStores({ ctx }: { ctx: PageContext }) {
-  const header = <PageHeader ctx={ctx} title="Campanhas · todas as lojas" />
+  const header = <PageHeader ctx={ctx} title="Campanhas · todas as lojas" halved={false} />
   const names = new Map(ctx.selected.map(x => [x.id, x.name]))
   const loaded = await Promise.all([
     buildPortfolio(ctx.selected, ctx.period, ctx.params.de, ctx.params.ate, ctx.now, { liveFeed: false, chargebackHealth: false, freshness: false }),

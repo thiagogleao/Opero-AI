@@ -6,7 +6,7 @@
  * the reason: the collector stores play starts, not 3-second views.
  * Server component (the table sorts on the client from pre-rendered cells).
  *
- * Props: { report: CreativesReport; hrefWith; rangeLabel; filter: { name; clearHref } | null;
+ * Props: { report: CreativesReport; hrefWith; rangeLabel; filter: CreativesFilter | null (./campaignFilter);
  *          limit: number | null (rows shown; null = all); showAllHref: string;
  *          split?: boolean (partner view: estimated profit is the partner's half,
  *            labelled "sua parte", as on the Resumo; spend and ROAS stay whole) }
@@ -20,11 +20,13 @@ import {
   Block, ButtonLink, Callout, Chip, Count, DataTable, EmptyState, InfoTip, Money, Pct,
   type DataColumn, type DataRow,
 } from '@/components/ui'
-import { formatMoney, formatPct, formatRoas, plural } from '@/lib/format'
+import { formatMoney, formatPct, formatRangeLabel, formatRoas, plural } from '@/lib/format'
+import { eachDay } from '@/lib/engine/dates'
 import { SPLIT_SHARE } from '@/lib/views/verdict'
-import { AD_VERDICT_RULE, adSignalChip, ptText } from './text'
+import { AD_VERDICT_RULE, adVerdictChip, ptText } from './text'
 import { AdThumb } from './AdThumb'
 import { RoasCell } from './RoasCell'
+import type { CreativesFilter } from './campaignFilter'
 import s from './campaigns.module.css'
 
 const CARD_LIMIT = 12
@@ -36,19 +38,20 @@ function Thumb({ ad, className, large }: { ad: CreativeRow; className: string; l
   return <AdThumb sources={sources} video={!!ad.video} className={className} expired={ad.previewExpired} label={large} />
 }
 
-function VerdictChip({ ad, breakEven }: { ad: CreativeRow; breakEven: number | null }) {
-  if (!ad.verdict.signal) return <span className={s.why}>{ad.running ? 'sem veredito' : 'pausado'}</span>
-  const spec = adSignalChip(ad.verdict.signal, ad.roas, breakEven)
+/** The verdict's own word (judged on the verdict window, not on the row's ROAS). */
+function VerdictChip({ ad }: { ad: CreativeRow }) {
+  const spec = adVerdictChip(ad.verdict)
+  if (!spec) return <span className={s.why}>{ad.running ? 'sem veredito' : 'pausado'}</span>
   return <Chip tone={spec.tone} icon={spec.icon} size="sm">{spec.label}</Chip>
 }
 
-function AdCard({ ad, href, breakEven, k }: { ad: CreativeRow; href: string; breakEven: number | null; k: number }) {
+function AdCard({ ad, href, k }: { ad: CreativeRow; href: string; k: number }) {
   const est = ad.estimatedProfit === null ? null : ad.estimatedProfit * k
   return (
     <Link href={href} className={s.card}>
       <Thumb ad={ad} className={s.thumb} large />
       <span className={s.cardBody}>
-        <span><VerdictChip ad={ad} breakEven={breakEven} /></span>
+        <span><VerdictChip ad={ad} /></span>
         <span className={s.cardName} title={ad.name}>{ad.name}</span>
         <span className={s.cardCamp} title={ad.campaignName ?? undefined}>{ad.campaignName ?? 'campanha não sincronizada'}</span>
         <span className={s.cardFigs}>
@@ -62,16 +65,27 @@ function AdCard({ ad, href, breakEven, k }: { ad: CreativeRow; href: string; bre
   )
 }
 
-export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, showAllHref, split = false }: {
+export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, showAllHref, split = false, storeRevenue }: {
   report: CreativesReport
   hrefWith: (path: string) => string
   rangeLabel: string
-  filter: { name: string; clearHref: string } | null
+  filter: CreativesFilter | null
   limit: number | null
   showAllHref: string
   split?: boolean
+  /** The store's revenue in the window (engine): tells the ROAS gauges'
+   *  "sem empate → loja sem vendas" apart from an unknown break-even. */
+  storeRevenue?: number | null
 }) {
   const be = report.configured ? report.breakEvenRoas : null
+  // Verdicts are judged on the campaigns' last closed days (lib/data/creatives),
+  // whatever window the figures show: the tab says which.
+  const vw = report.verdictWindow
+  const verdictDays = eachDay(vw.from, vw.to).length
+  const verdictLabel = formatRangeLabel(vw)
+  const sameWindow = vw.from === report.range.from && vw.to === report.range.to
+  const verdictBe = report.configured ? report.verdictBreakEvenRoas : null
+  const windowNote = `O veredito de cada anúncio olha os últimos ${verdictDays} dias fechados (${verdictLabel}), como o das campanhas, seja qual for o período da tabela.`
   const k = split ? SPLIT_SHARE : 1
   const est = (a: CreativeRow) => (a.estimatedProfit === null ? null : a.estimatedProfit * k)
   const ads = report.creatives
@@ -99,7 +113,7 @@ export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, sho
     { key: 'est', label: split ? 'Lucro est. (sua parte)' : 'Lucro est.', numeric: true, sortable: true, info: split ? `${ptText(report.formula)} Na visão de sócio, cada valor é a sua parte (50%).` : ptText(report.formula) },
     ...(singleDay ? [{ key: 'freq', label: 'Frequência', numeric: true, sortable: true, info: 'Impressões ÷ alcance do dia.' } as DataColumn] : []),
     { key: 'hook', label: <span className={s.colHook}>Hook</span>, info: HOOK_RATE_UNAVAILABLE },
-    { key: 'verdict', label: 'Veredito', sortable: true, info: AD_VERDICT_RULE },
+    { key: 'verdict', label: `Veredito · ${verdictDays} dias`, sortable: true, info: `${AD_VERDICT_RULE} ${windowNote}` },
   ]
   const rank = (a: CreativeRow) => (a.verdict.signal === 'kill' ? 0 : a.verdict.signal === 'scale' ? 1 : a.verdict.signal === 'refresh' ? 2 : a.verdict.signal === 'ok' ? 3 : 4)
   const rows: DataRow[] = shown.map(a => ({
@@ -122,7 +136,8 @@ export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, sho
       spend: <Money value={a.spend} />,
       purchases: <><Count value={a.purchases} />{a.ctr !== null && <span className={`${s.cellSub} ${s.inlineCtr}`}>CTR {formatPct(a.ctr, { digits: 2 })}</span>}</>,
       ctr: <span className={s.colCtr}><Pct value={a.ctr} digits={2} /></span>,
-      roas: a.shared ? <span className={s.why}>{formatRoas(a.roas)} · sem empate</span> : <RoasCell roas={a.roas} breakEven={be} paused={!a.running} />,
+      roas: a.shared ? <span className={s.why}>{formatRoas(a.roas)} · sem empate</span> : <RoasCell roas={a.roas} breakEven={be} paused={!a.running}
+        configured={report.configured} revenue={storeRevenue} contribution={report.contributionRate} />,
       est: a.estimatedProfit === null ? <span className={s.muted}>—</span> : <Money value={est(a)} />,
       freq: <span>{a.frequency === null ? '—' : a.frequency.toLocaleString('pt-BR', { maximumFractionDigits: 1 })}</span>,
       hook: (
@@ -132,7 +147,7 @@ export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, sho
             : <span className={s.muted}>imagem</span>}
         </span>
       ),
-      verdict: <span className={s.verdictCell} title={ptText(a.verdict.reason)}>{a.verdict.signal && <VerdictChip ad={a} breakEven={be} />}<span className={s.why}>{ptText(a.verdict.reason)}</span></span>,
+      verdict: <span className={s.verdictCell} title={ptText(a.verdict.reason)}>{a.verdict.signal && <VerdictChip ad={a} />}<span className={s.why}>{ptText(a.verdict.reason)}</span></span>,
     },
     sort: {
       spend: a.spend, purchases: a.purchases, ctr: a.ctr, roas: a.roas,
@@ -148,14 +163,16 @@ export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, sho
   return (
     <div className={s.stack}>
       {filter && (
-        <Callout tone="neu" icon="sliders" title={`Só os anúncios de "${filter.name}".`}>
-          {' '}<Link href={filter.clearHref}>Ver os anúncios de todas as campanhas</Link>
+        <Callout tone="neu" icon="sliders" title={filter.title}>
+          {filter.note ? <> {filter.note}</> : null}{' '}<Link href={filter.clearHref}>Ver os anúncios de todas as campanhas</Link>
         </Callout>
       )}
       <Block
         title="Anúncios que pedem decisão"
-        howTo={`Desligar ou escalar, pelo ROAS de ${rangeLabel} contra o empate da loja${be !== null ? ` (${formatRoas(be)})` : ''}. Os mais urgentes primeiro.${split ? ' "Sua parte" é a sua metade do lucro estimado do anúncio.' : ''}`}
-        info="O mesmo veredito aparece no celular e no Copiloto. Anúncios pausados não recebem recomendação."
+        howTo={sameWindow
+          ? `Desligar ou escalar, pelo ROAS de ${rangeLabel} contra o empate da loja${verdictBe !== null ? ` (${formatRoas(verdictBe)})` : ''} — os últimos ${verdictDays} dias fechados, a janela do veredito das campanhas. Os mais urgentes primeiro.${split ? ' "Sua parte" é a sua metade do lucro estimado do anúncio.' : ''}`
+          : `Desligar ou escalar, pelo ROAS dos últimos ${verdictDays} dias fechados (${verdictLabel}) contra o empate da loja nesses dias${verdictBe !== null ? ` (${formatRoas(verdictBe)})` : ''}, como o veredito das campanhas. Gasto, ROAS e lucro de cada cartão são de ${rangeLabel}.${split ? ' "Sua parte" é a sua metade do lucro estimado do anúncio.' : ''}`}
+        info="O mesmo veredito aparece no celular. Um dia ainda aberto não decide: o Meta atribui as vendas com atraso. Anúncios pausados não recebem recomendação."
       >
         {!report.configured ? (
           <EmptyState icon="sliders" title="Custos não configurados">
@@ -163,11 +180,11 @@ export function CreativesView({ report, hrefWith, rangeLabel, filter, limit, sho
           </EmptyState>
         ) : decide.length === 0 ? (
           <EmptyState compact title="Nenhum anúncio para desligar ou escalar">
-            {ads.length ? 'Os anúncios com gasto estão entre os limites, ou com pouco gasto para julgar.' : 'Nenhum anúncio teve gasto no período.'}
+            {ads.length ? 'Os anúncios com gasto estão entre os limites, ou com pouco gasto para julgar.' : filter ? 'Nenhum anúncio desta campanha teve gasto no período.' : 'Nenhum anúncio teve gasto no período.'}
           </EmptyState>
         ) : (
           <div className={s.cards}>
-            {decide.slice(0, CARD_LIMIT).map(a => <AdCard key={a.adId} ad={a} href={hrefOf(a)} breakEven={be} k={k} />)}
+            {decide.slice(0, CARD_LIMIT).map(a => <AdCard key={a.adId} ad={a} href={hrefOf(a)} k={k} />)}
           </div>
         )}
       </Block>

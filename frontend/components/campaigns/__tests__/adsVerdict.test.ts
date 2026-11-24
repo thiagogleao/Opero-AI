@@ -192,6 +192,41 @@ describe('buildAdsVerdict', () => {
     expect(verdict.chips[0].label).toBe('Gasto sem vendas')
   })
 
+  it('keeps "gasto sem vendas" on a day without sales, whatever the rows priced', () => {
+    // MOKOO "Hoje" at 01h20: 4 campaigns, $32,55, no order. Every row priced at
+    // −spend (Meta credited nothing), so the estimate is −32,55, not null; the
+    // caption read "cada venda já sai no prejuízo" with no sale at all.
+    const w: AdsWindow = { ...WINDOW, period: 'today', rangeLabel: '24 nov', periodPhrase: 'hoje', partial: true, partialLabel: 'parcial · até 05h20', minutesIntoDay: 320 }
+    const rows = [row({ spend: 20.44 }), row({ campaignId: 'c2', spend: 12.11 })]
+    const noSales = pnl({ metaSpend: 32.55, adSpend: 32.55, operatingProfit: -32.55, roas: 0 })
+    const r = report(rows, { contributionRate: null, breakEvenRoas: null, storeRevenue: 0 })
+    r.totals = { ...r.totals, estimatedProfit: -32.55 }
+    const v = buildAdsVerdict({ storeName: 'MOKOO', report: r, pnl: noSales, window: w, decision: null }).verdict
+    expect(v.headline).toBe('A MOKOO gastou $32,55 no Meta hoje e não vendeu nada.')
+    expect(v.chips[0].label).toBe('Gasto sem vendas')
+    expect(v.amount).toBeCloseTo(-32.55, 6)
+    expect(v.amountCaption).toBe('gasto no Meta sem margem para cobri-lo')
+    expect(v.amountCaption).not.toContain('cada venda')
+
+    // One campaign credited (unpriced without a rate), one not: the estimate
+    // is only part of the spend; the amount stays the whole Meta spend.
+    const mixed = report([row({ spend: 20, purchaseValue: 30 }), row({ campaignId: 'c2', spend: 12.55 })], { contributionRate: null, breakEvenRoas: null, storeRevenue: 0 })
+    mixed.totals = { ...mixed.totals, estimatedProfit: -12.55 }
+    const m = buildAdsVerdict({ storeName: 'MOKOO', report: mixed, pnl: noSales, window: w, decision: null, split: true }).verdict
+    expect(m.amount).toBeCloseTo(-32.55 / 2, 6)
+    expect(m.amountCaption).toBe('sua parte do gasto no Meta sem margem para cobri-lo')
+  })
+
+  it('keeps "cada venda já sai no prejuízo" for sales that do not cover their own costs', () => {
+    const rows = [row({ spend: 100, purchaseValue: 300 })]
+    const p = pnl({ revenue: 812, orders: 9, contribution: -40, variableCosts: 852, metaSpend: 100, adSpend: 100, operatingProfit: -140 })
+    const r = report(rows, { contributionRate: -40 / 812, breakEvenRoas: null, storeRevenue: 812 })
+    r.totals = { ...r.totals, estimatedProfit: 300 * (-40 / 812) - 100 }
+    const v = buildAdsVerdict({ storeName: 'X', report: r, pnl: p, window: WINDOW, decision: null }).verdict
+    expect(v.amountCaption).toBe('de lucro estimado das campanhas: cada venda já sai no prejuízo')
+    expect(v.amount).toBeCloseTo(300 * (-40 / 812) - 100, 6)
+  })
+
   it('keeps the partial clock in its chip, not twice in the date line', () => {
     const rows = [row({ spend: 100, purchaseValue: 300 })]
     const w: AdsWindow = { ...WINDOW, period: 'today', rangeLabel: '18 nov', partial: true, partialLabel: 'parcial · até 15h10', minutesIntoDay: 910 }
@@ -238,7 +273,7 @@ describe('buildAdsVerdict — round-2 wording', () => {
     const { verdict } = buildAdsVerdict({ storeName: 'EPOCH ®️', report: r, pnl: p, window: { ...WINDOW, periodPhrase: 'no mês passado' }, decision: null })
     expect(verdict.details[0].text).toBe(
       'Gasto no Meta: $25.162 em 1 campanha desta loja (mais $22.058 em 1 de conta compartilhada). '
-      + 'O Meta credita às da loja $33.910 em vendas — ROAS atribuído 1,35× contra empate 1,27×.',
+      + 'O Meta credita à da loja $33.910 em vendas — ROAS atribuído 1,35× contra empate 1,27×.',
     )
     // The judgement leaves out 47% of the spend, and says so up front.
     expect(verdict.headline).toBe('As campanhas da EPOCH ®️ deram lucro no mês passado, pela atribuição do Meta, sem contar 47% do gasto (campanhas de conta compartilhada) — mas a loja inteira não cobriu o gasto com anúncios.')
@@ -247,8 +282,11 @@ describe('buildAdsVerdict — round-2 wording', () => {
 
   it('keeps the plain sentence for a store without shared campaigns', () => {
     const { verdict } = buildAdsVerdict({ storeName: 'MOKOO', report: report([row({ spend: 3000, purchaseValue: 4000 })]), pnl: store(), window: WINDOW, decision: null })
-    expect(verdict.details[0].text).toBe('Gasto no Meta: $3.000 em 1 campanha. O Meta credita a elas $4.000 em vendas — ROAS atribuído 1,33× contra empate 1,67×.')
+    expect(verdict.details[0].text).toBe('Gasto no Meta: $3.000 em 1 campanha. O Meta credita a ela $4.000 em vendas — ROAS atribuído 1,33× contra empate 1,67×.')
     expect(verdict.headline).not.toContain('sem contar')
+    // Two campaigns: the plural pronoun.
+    const two = buildAdsVerdict({ storeName: 'MOKOO', report: report([row({ spend: 2000, purchaseValue: 3000 }), row({ campaignId: 'c2', spend: 1000, purchaseValue: 1000 })]), pnl: store(), window: WINDOW, decision: null })
+    expect(two.verdict.details[0].text).toBe('Gasto no Meta: $3.000 em 2 campanhas. O Meta credita a elas $4.000 em vendas — ROAS atribuído 1,33× contra empate 1,67×.')
   })
 
   it('gives the real reason when a store with costs has no break-even', () => {
@@ -258,7 +296,7 @@ describe('buildAdsVerdict — round-2 wording', () => {
     const r = report(rows, { breakEvenRoas: null, storeRevenue: 0,
       reconciliation: { engineMetaSpend: 347.32, listedSpend: 347.32, gap: 0, unsyncedSpend: 0, phantomAdDays: 0, phantomValueDropped: 0 } })
     const a = buildAdsVerdict({ storeName: 'EPOCH ®️', report: r, pnl: noSales, window: WINDOW, decision: null }).verdict
-    expect(a.details[0].text).toBe('Gasto no Meta: $347 em 1 campanha. O Meta credita a elas $0 em vendas — ROAS atribuído 0,00× (sem vendas no período, não há empate).')
+    expect(a.details[0].text).toBe('Gasto no Meta: $347 em 1 campanha. O Meta credita a ela $0 em vendas — ROAS atribuído 0,00× (sem vendas no período, não há empate).')
     expect(a.details[0].text).not.toContain('sem custos')
 
     expect(noEmpateWhy(true, { revenue: 812, contribution: -40 })).toBe('as vendas não cobrem produto, frete e taxas: nenhum ROAS empata')

@@ -6,14 +6,22 @@
  *
  * Props: { roas: number|null; breakEven: number|null; paused?: boolean;
  *          showValue?: boolean (false where the ROAS is already the big number
- *          above, e.g. a KPI card: the line then names the break-even instead) }
+ *          above, e.g. a KPI card: the line then names the break-even instead);
+ *          configured?, revenue?, contribution?, reason? — the store's facts for
+ *          the same window, passed on to the gauge so that, without a
+ *          break-even, its tooltip (and what a screen reader reads) says why:
+ *          "sem empate → loja sem vendas", not "empate desconhecido" }
  */
 
 import { RoasGauge } from '@/components/ui'
+import type { BreakEvenReason } from '@/components/ui/roasReason'
 import { formatRoas } from '@/lib/format'
 import s from './campaigns.module.css'
 
-export function RoasCell({ roas, breakEven, paused, showValue = true }: { roas: number | null; breakEven: number | null; paused?: boolean; showValue?: boolean }) {
+export function RoasCell({ roas, breakEven, paused, showValue = true, configured, revenue, contribution, reason }: {
+  roas: number | null; breakEven: number | null; paused?: boolean; showValue?: boolean
+  configured?: boolean; revenue?: number | null; contribution?: number | null; reason?: BreakEvenReason | null
+}) {
   if (roas === null) return <span className={s.muted}>— sem gasto</span>
   const be = breakEven !== null && breakEven > 0 ? breakEven : null
   const state = paused ? 'pausada' : be === null ? 'sem empate' : roas >= be ? 'no lucro' : 'no prejuízo'
@@ -24,7 +32,8 @@ export function RoasCell({ roas, breakEven, paused, showValue = true }: { roas: 
         {showValue ? <><b>{formatRoas(roas)}</b> </> : be !== null ? <>empate <b>{formatRoas(be)}</b> </> : null}
         <span className={cls}>→ {state}</span>
       </span>
-      <RoasGauge roas={roas} breakEven={be} size="mini" paused={paused} words={false} />
+      <RoasGauge roas={roas} breakEven={be} size="mini" paused={paused} words={false}
+        configured={configured} revenue={revenue} contribution={contribution} reason={reason} />
     </span>
   )
 }

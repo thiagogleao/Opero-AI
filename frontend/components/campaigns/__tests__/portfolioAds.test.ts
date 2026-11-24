@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { PnL } from '@/lib/engine/pnl'
 import type { OwnAttribution } from '@/lib/data/campaigns'
-import { buildPortfolioAdsVerdict, metaBasis, storeAdsRow, type PortfolioAdsStore } from '../portfolioAdsModel'
+import { allJudgedSentence, buildPortfolioAdsVerdict, metaBasis, storeAdsRow, type PortfolioAdsStore } from '../portfolioAdsModel'
 
 function pnl(over: Partial<PnL>): PnL {
   const base = {
@@ -88,12 +88,38 @@ describe('metaBasis', () => {
 describe('buildPortfolioAdsVerdict', () => {
   it('judges each store on its own channel and names the basis of "ROAS das lojas"', () => {
     const v = buildPortfolioAdsVerdict({ stores: WEEK, attribution: null, pairs: [], ...WIN })
-    expect(v.headline).toBe('Todas as lojas com custos cobriram o gasto com anúncios nos últimos 7 dias.')
+    // 4 of the 6 stores with costs spent on Meta: the headline names those 4,
+    // the same count as the chip, never "Todas as lojas com custos".
+    expect(v.headline).toBe('As 4 lojas com custos que anunciaram no Meta cobriram o gasto com anúncios nos últimos 7 dias.')
     expect(v.chips[0].label).toBe('4 cobriram os anúncios')
     const text = v.details.map(d => d.text).join(' ')
     expect(text).toContain('As lojas que anunciam no Meta — EPOCH ®️, MOKOO, Hibikura e Glooty — venderam $30.014 contra $18.468 de Meta: ROAS das lojas 1,63×.')
     expect(text).not.toContain('2,76×')
     expect(v.notes.map(n => n.text).join(' ')).toContain('Dumpling Squishy · 8jcp3a ($6.436 em Anúncios Shopify, $59,84 no Meta) anuncia sobretudo fora do Meta')
+  })
+
+  it('says "sobretudo fora do Meta" only of a store whose Meta is a side cost, and puts every Meta dollar somewhere', () => {
+    const v = buildPortfolioAdsVerdict({ stores: WEEK, attribution: null, pairs: [], ...WIN })
+    expect(v.notes[0].text).toBe('Dumpling Squishy · 8jcp3a ($6.436 em Anúncios Shopify, $59,84 no Meta) anuncia sobretudo fora do Meta: o ROAS da tabela é medido em Anúncios Shopify, como no Resumo. Por isso ela fica fora do ROAS das lojas acima: os $59,84 de Meta dela estão nos $18.528 gastos no Meta, não nos $18.468.')
+  })
+
+  it("names a store on both channels as such, and says its Meta spend is outside 'ROAS das lojas'", () => {
+    // Todas, 25 out – 5 nov (engine, read-only): Dumpling 8jcp3a spent
+    // $2.641,91 on Meta and $1.031,43 on Shopify ads (72% Meta → 'both').
+    const stores = [
+      st('MOKOO', 9000, 4200, 0, 1.51),
+      st('EPOCH ®️', 12000, 5800, 0, 1.29),
+      st('Glooty', 900, 478, 0, null, false),
+      st('Dumpling Squishy · 8jcp3a', 9500, 2641.91, 1031.43, 1.46),
+    ]
+    const v = buildPortfolioAdsVerdict({ stores, attribution: null, pairs: [], ...WIN })
+    expect(storeAdsRow(stores[3], null).channel).toBe('both')
+    const notes = v.notes.map(n => n.text).join(' ')
+    expect(notes).not.toContain('sobretudo fora do Meta')
+    expect(notes).toContain('Dumpling Squishy · 8jcp3a ($2.642 no Meta + $1.031 em Anúncios Shopify) anuncia no Meta e em Anúncios Shopify: o ROAS da tabela soma os dois canais, como no Resumo, porque as vendas não se separam por canal. Por isso ela fica fora do ROAS das lojas acima: os $2.642 de Meta dela estão nos $13.120 gastos no Meta, não nos $10.478.')
+    // The headline's total is every store's Meta spend; the basis, the Meta stores'.
+    expect(v.amount).toBeCloseTo(13119.91, 2)
+    expect(v.details.map(d => d.text).join(' ')).toContain('contra $10.478 de Meta')
   })
 
   it('credits Meta on the own campaigns and names the shared part', () => {
@@ -111,7 +137,32 @@ describe('buildPortfolioAdsVerdict', () => {
     const weak = st('Dumpling', 9000, 59.84, 6436, 1.46)
     const v = buildPortfolioAdsVerdict({ stores: [weak], attribution: null, pairs: [], ...WIN })
     expect(storeAdsRow(weak, null).roas?.roas).toBeCloseTo(9000 / 6436, 6)
-    expect(v.headline).toBe('Nenhuma loja cobriu o gasto com anúncios nos últimos 7 dias.')
+    expect(v.headline).toBe('A única loja com gasto no Meta, Dumpling, não cobriu o gasto com anúncios nos últimos 7 dias.')
     expect(v.chips[0].label).toBe('1 abaixo do empate')
+  })
+})
+
+describe('the headline names the stores that were judged', () => {
+  it('Hoje at 00h12 in Brasília: only the Tokyo store has spent', () => {
+    const stores = [
+      st('MOKOO', 0, 0, 0, 1.51), st('EPOCH ®️', 0, 0, 0, 1.29), st('Hibikura', 900, 300, 0, 1.34),
+      st('Glooty', 0, 0, 0, null, false), st('Dumpling Squishy · 8jcp3a', 0, 0, 0, 1.46),
+    ]
+    const v = buildPortfolioAdsVerdict({ stores, attribution: null, pairs: [], ...WIN, periodPhrase: 'hoje' })
+    expect(v.chips[0].label).toBe('1 cobriu os anúncios')
+    expect(v.headline).toBe('A única loja com gasto no Meta, Hibikura, cobriu o gasto com anúncios hoje.')
+  })
+
+  it('one store with costs judged while a store without costs also spent', () => {
+    expect(allJudgedSentence([{ name: 'Hibikura' }], 2, 6, true, 'hoje'))
+      .toBe('A única loja com custos que anunciou no Meta, Hibikura, cobriu o gasto com anúncios hoje.')
+  })
+
+  it('says "Todas" only when every store with costs spent on Meta', () => {
+    const two = [{ name: 'MOKOO' }, { name: 'EPOCH ®️' }]
+    expect(allJudgedSentence(two, 2, 2, true, 'ontem')).toBe('Todas as 2 lojas com custos cobriram o gasto com anúncios ontem.')
+    expect(allJudgedSentence(two, 3, 6, true, 'ontem')).toBe('As 2 lojas com custos que anunciaram no Meta cobriram o gasto com anúncios ontem.')
+    expect(allJudgedSentence(two, 3, 6, false, 'ontem')).toBe('Nenhuma das 2 lojas com custos que anunciaram no Meta cobriu o gasto com anúncios ontem.')
+    expect(allJudgedSentence(two, 2, 2, false, 'ontem')).toBe('Nenhuma das 2 lojas com custos cobriu o gasto com anúncios ontem.')
   })
 })

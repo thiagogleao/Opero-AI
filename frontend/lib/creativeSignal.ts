@@ -45,6 +45,10 @@ export interface CreativeVerdictInput {
   /** Set when the ad's campaign may be another store's (shared ad account):
    *  the sentence to show instead of a verdict. */
   sharedNote?: string | null
+  /** The window the figures above cover, in words ("nos 7 dias fechados"),
+   *  when it is not the one the screen shows: the reason names it, so
+   *  "ROAS 3,01×" is never read against the row's own ROAS of the day. */
+  window?: string | null
 }
 
 export interface CreativeVerdict {
@@ -83,7 +87,10 @@ export function creativeVerdict(a: CreativeVerdictInput): CreativeVerdict {
 
 function judge(a: CreativeVerdictInput): Omit<CreativeVerdict, 'label'> {
   const spend = Math.max(0, Number(a.spend) || 0)
-  if (spend <= 0 || a.roas === null) return { signal: null, reason: 'Sem gasto no período' }
+  // " nos 7 dias fechados" after the figure it qualifies; nothing when the
+  // figures are the screen's own window.
+  const w = a.window ? ` ${a.window}` : ''
+  if (spend <= 0 || a.roas === null) return { signal: null, reason: a.window ? `Sem gasto${w}` : 'Sem gasto no período' }
   if (!a.running) return { signal: null, reason: 'Pausado — sem recomendação' }
   if (a.sharedNote) return { signal: null, reason: a.sharedNote }
   if (a.breakEven === null || !(a.breakEven > 0)) {
@@ -92,22 +99,41 @@ function judge(a: CreativeVerdictInput): Omit<CreativeVerdict, 'label'> {
       : 'Sem ponto de empate no período: a loja não vendeu, ou cada venda já perde dinheiro antes do anúncio' }
   }
   const be = a.breakEven
+  // With a window the row next to the reason shows another break-even (the
+  // screen period's, "empate do período" on the phone): the reason names its
+  // own as the window's, "o empate desses dias", after the window is said.
+  const beWord = a.window ? `empate ${windowDemonstrative(a.window)}` : 'empate'
   if (spend >= KILL_SPEND_FLOOR && a.roas < be * KILL_ROAS_FACTOR) {
-    return { signal: 'kill', reason: `ROAS ${x2(a.roas)} com ${money(spend)} gastos — abaixo de 80% do empate (${x2(be)})` }
+    return { signal: 'kill', reason: `ROAS ${x2(a.roas)} com ${money(spend)} gastos${w} — abaixo de 80% do ${beWord} (${x2(be)})` }
   }
   if (spend >= SCALE_SPEND_FLOOR && a.purchases >= SCALE_MIN_PURCHASES && a.roas >= be * SCALE_ROAS_FACTOR) {
-    return { signal: 'scale', reason: `ROAS ${x2(a.roas)} — 40% ou mais acima do empate (${x2(be)}) com ${formatCount(a.purchases)} vendas` }
+    return { signal: 'scale', reason: `ROAS ${x2(a.roas)}${w} — 40% ou mais acima do ${beWord} (${x2(be)}) com ${formatCount(a.purchases)} vendas` }
   }
   if (a.frequency !== null && a.frequency > FATIGUE_FREQUENCY) {
-    return { signal: 'refresh', reason: `Frequência ${formatNumber(a.frequency, 1)} no período — o público já viu demais` }
+    return { signal: 'refresh', reason: `Frequência ${formatNumber(a.frequency, 1)}${a.window ? w : ' no período'} — o público já viu demais` }
+  }
+  const cut = `linha de corte (${x2(be * KILL_ROAS_FACTOR)})`
+  const early = `ainda com pouco gasto para cortar (${money(spend)} de ${limit(KILL_SPEND_FLOOR)})`
+  if (a.window) {
+    // Led by the window's ROAS, like the two above: the row beside it shows
+    // the period's ROAS, which may sit on the other side of the break-even.
+    const lead = `ROAS ${x2(a.roas)}${w} — `
+    if (a.roas >= be) return { signal: 'ok', reason: `${lead}acima do ${beWord} (${x2(be)})` }
+    return { signal: 'ok', reason: `${lead}abaixo do ${beWord} (${x2(be)}), ${spend >= KILL_SPEND_FLOOR ? `mas acima da ${cut}` : early}` }
   }
   if (a.roas >= be) return { signal: 'ok', reason: `Acima do empate (${x2(be)})` }
   return {
     signal: 'ok',
     reason: spend >= KILL_SPEND_FLOOR
-      ? `Abaixo do empate (${x2(be)}), mas acima da linha de corte (${x2(be * KILL_ROAS_FACTOR)})`
-      : `Abaixo do empate (${x2(be)}), ainda com pouco gasto para cortar (${money(spend)} de ${limit(KILL_SPEND_FLOOR)})`,
+      ? `Abaixo do empate (${x2(be)}), mas acima da ${cut}`
+      : `Abaixo do empate (${x2(be)}), ${early}`,
   }
+}
+
+/** "desses dias" for a window of days, "desse dia" for one ("no último dia
+ *  fechado", data/creatives verdictWindowPhrase): the break-even it names. */
+function windowDemonstrative(window: string): string {
+  return /\bdia\b/.test(window) ? 'desse dia' : 'desses dias'
 }
 
 /** Ordering for a list that should lead with what needs a decision. */

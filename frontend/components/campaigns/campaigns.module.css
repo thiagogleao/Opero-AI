@@ -118,6 +118,10 @@
   .inlineVerdict { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 8px; max-width: 340px; }
   .th { white-space: normal; }
 }
+/* A header in two lines ("Lucro estimado" / "(sua parte)"): the column stays
+   as wide as without the split, which is all the 1440 layout has room for. */
+.thStack { display: inline-block; text-align: inherit; }
+.thSub { display: block; }
 .why { font-size: 11.5px; color: var(--tx-3); line-height: 1.35; white-space: normal; }
 .trendPos { color: var(--pos); }
 .trendNeg { color: var(--neg); }

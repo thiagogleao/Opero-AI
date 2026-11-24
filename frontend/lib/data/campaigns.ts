@@ -38,12 +38,46 @@ import {
   type SpendReconciliation, type StoreMargin, type StoreTz,
 } from './meta'
 import type { CreativeNotes, CreativeRow } from './creatives'
+import { query } from '../db'
 
 export const ESTIMATED_PROFIT_FORMULA =
   'Lucro estimado = receita atribuída pelo Meta × margem de contribuição da loja − gasto no Meta. ' +
   'A margem de contribuição é o que sobra de cada venda depois de produto, fornecedor, embalagem, frete, ' +
   'taxas da Shopify e do pagamento (no mesmo período, pelo motor de lucro). Anúncios da Shopify e custos ' +
   'fixos não entram: não crescem com o gasto no Meta.'
+
+/** An ad "with spend" spent at least half a cent: below that Meta rounds to
+ *  $0,00. The Resumo (lib/views/store), the phone (lib/views/mobileDetail)
+ *  and the Campanhas row count the unsynced bucket's ads this way. */
+export const SPENT_AD_FLOOR = 0.005
+
+/** The unsynced bucket's ads that spent in the window. Counting every ad, the
+ *  row read "59 anúncios" for the bucket the Resumo called 44 (Glooty: 15 of
+ *  them without spend). */
+export function spentAds<T extends { spend: number }>(ads: readonly T[]): T[] {
+  return ads.filter(a => a.spend >= SPENT_AD_FLOOR)
+}
+
+/**
+ * Estimated profit of a campaign, ad set or day row: Meta's purchase value ×
+ * the store's contribution rate − spend. Null for a store without cost
+ * settings and for a shared-account row (no margin of this store applies).
+ *
+ * Costs set but no sales in the window: there is no contribution rate
+ * (meta.ts loadStoreMargin is null at revenue 0), yet a row Meta credited
+ * nothing to is a certain loss, pv × rate − spend = −spend whatever the rate.
+ * Hibikura at 04h in Tokyo (0 orders, $58,78 on Meta) read "Lucro estimado —"
+ * and "sem margem" on every row. A row with purchase value stays null.
+ */
+export function estimateRow(
+  purchaseValue: number, spend: number,
+  margin: Pick<StoreMargin, 'configured' | 'contributionRate'>, shared: boolean,
+): number | null {
+  if (!margin.configured || shared) return null
+  if (margin.contributionRate !== null) return round2(estimateProfit(purchaseValue, spend, margin.contributionRate))
+  // `|| 0`: a fraction of a cent rounds to −0, which would print "−$0,00".
+  return purchaseValue > 0 ? null : round2(-spend) || 0
+}
 
 // ─── Windows ──────────────────────────────────────────────────────────────────
 
@@ -97,7 +131,8 @@ export interface CampaignRow extends MetaTotals {
   accountId: string | null
   /** True for the "Anúncios ainda não sincronizados" row. */
   unsynced: boolean
-  /** The ads of the unsynced row ("Anúncio sem nome (id …)"), biggest first. */
+  /** The ads of the unsynced row ("Anúncio sem nome (id …)"), biggest first.
+   *  Ads without spend in the window are here too; count with spentAds. */
   unsyncedAds: { adId: string; name: string; spend: number }[]
   /** Set when the campaign's sales may belong to another store: no margin,
    *  no estimated profit, no action. Its spend still counts in the totals —
@@ -217,7 +252,9 @@ export function metaTotals(a: Pick<Acc, 'spend' | 'purchaseValue' | 'purchases' 
     spend: round2(a.spend), purchaseValue: round2(a.purchaseValue), purchases: a.purchases,
     impressions: a.impressions, linkClicks: a.linkClicks,
     roas: ratio(a.purchaseValue, a.spend),
-    cpa: ratio(a.spend, a.purchases),
+    // No spend, no cost per purchase: a paused campaign's late conversions
+    // (2 purchases, $0) read "CPA $0", as if each sale had cost nothing.
+    cpa: a.spend > 0 ? ratio(a.spend, a.purchases) : null,
     ctr: a.impressions > 0 ? (a.linkClicks / a.impressions) * 100 : null,
     cpm: a.impressions > 0 ? (a.spend / a.impressions) * 1000 : null,
     cpc: ratio(a.spend, a.linkClicks),
@@ -305,6 +342,7 @@ export function buildCampaignRows(input: BuildCampaignInput): CampaignRow[] {
       input.storeId, accountId, g.campaignId ? input.journeys.get(g.campaignId) : undefined, input.storeNames,
     )
     const rate = input.margin.configured && !shared ? input.margin.contributionRate : null
+    const est = (pv: number, spend: number) => estimateRow(pv, spend, input.margin, !!shared)
 
     const decisionResult = decideCampaign({
       days: [...g.decisionDays.values()],
@@ -323,7 +361,7 @@ export function buildCampaignRows(input: BuildCampaignInput): CampaignRow[] {
       const active = d.spend > 0 || d.purchaseValue > 0
       return {
         date, spend: round2(d.spend), purchaseValue: round2(d.purchaseValue), purchases: d.purchases,
-        estimatedProfit: rate !== null && active ? round2(estimateProfit(d.purchaseValue, d.spend, rate)) : null,
+        estimatedProfit: active ? est(d.purchaseValue, d.spend) : null,
       }
     })
 
@@ -343,7 +381,7 @@ export function buildCampaignRows(input: BuildCampaignInput): CampaignRow[] {
       shared,
       ads: g.ads.size,
       adsets: g.adsets.size,
-      estimatedProfit: rate !== null ? round2(estimateProfit(g.win.purchaseValue, g.win.spend, rate)) : null,
+      estimatedProfit: est(g.win.purchaseValue, g.win.spend),
       margin: rate !== null ? marginPct(g.win.purchaseValue, g.win.spend, rate) : null,
       journeyOrders: g.campaignId ? input.firstTouch.get(g.campaignId) ?? 0 : 0,
       phantomValueDropped: round2(g.win.phantom),
@@ -451,6 +489,27 @@ export async function getCampaignReport(
       : null,
     billedElsewhere: visibleElsewhere.map(e => ({ ...e, billedStoreName: opts.storeNames?.get(e.billedStoreId) ?? 'outra loja' })),
   }
+}
+
+/**
+ * The name of a campaign a ?campanha= link names, when it is this store's:
+ * the store has had metrics for at least one of its ads, any date (the rule
+ * adBelongsToStore uses for one ad). Null for another store's campaign or an
+ * unknown id — its name is never read, so a partner never learns the name of
+ * a campaign of a store they cannot see.
+ */
+export async function getStoreCampaignName(storeId: string, campaignId: string): Promise<string | null> {
+  if (!storeId || !campaignId) return null
+  const rows = await query<{ ok: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM fb_ads a
+        WHERE a.campaign_id = $2
+          AND EXISTS (SELECT 1 FROM fb_ad_daily_metrics m WHERE m.tenant_id = $1 AND m.ad_id = a.ad_id)
+     ) AS ok`,
+    [storeId, campaignId],
+  )
+  if (rows[0]?.ok !== true) return null
+  return (await loadCampaignInfo([campaignId])).get(campaignId)?.name ?? `Campanha ${campaignId}`
 }
 
 // ─── Own vs shared-account campaigns, for several stores ──────────────────────
@@ -670,7 +729,7 @@ export async function getAdsetReport(
     name: key ? adsetName.get(key)?.name ?? `Conjunto ${key}` : 'Conjunto não sincronizado',
     status: key ? adsetName.get(key)?.status ?? null : null,
     ads: g.ads.size,
-    estimatedProfit: rate !== null ? round2(estimateProfit(g.acc.purchaseValue, g.acc.spend, rate)) : null,
+    estimatedProfit: estimateRow(g.acc.purchaseValue, g.acc.spend, margin, !!shared),
     margin: rate !== null ? marginPct(g.acc.purchaseValue, g.acc.spend, rate) : null,
   })).sort((a, b) => b.spend - a.spend)
 

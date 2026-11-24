@@ -107,6 +107,30 @@ export function metaBasis(stores: readonly PortfolioAdsStore[], pairs: readonly 
   return { stores: basis, viaShared, revenue, metaSpend, roas: metaSpend > 0 ? revenue / metaSpend : null }
 }
 
+/**
+ * The headline when every judged store landed on the same side, naming who
+ * was judged: the stores with costs that spent on Meta, not every store with
+ * costs. "Todas as lojas com custos cobriram" read over Hibikura alone at
+ * 00h12 (the only store whose day had spent) and over 4 of the 6 stores with
+ * costs on 30 dias, next to a chip saying "1 cobriu" / "4 cobriram".
+ */
+export function allJudgedSentence(
+  judged: readonly Pick<PortfolioAdsStore, 'name'>[], spenders: number, configured: number, covered: boolean, periodPhrase: string,
+): string {
+  const n = judged.length
+  if (n === 1) {
+    // "A única loja com gasto no Meta" only when no store without costs spent too.
+    const who = spenders === 1 ? 'A única loja com gasto no Meta' : 'A única loja com custos que anunciou no Meta'
+    return covered
+      ? `${who}, ${judged[0].name}, cobriu o gasto com anúncios ${periodPhrase}.`
+      : `${who}, ${judged[0].name}, não cobriu o gasto com anúncios ${periodPhrase}.`
+  }
+  // "Todas as N lojas com custos" only when every store with costs spent on Meta.
+  const group = n === configured ? `${n} lojas com custos` : `${n} lojas com custos que anunciaram no Meta`
+  if (covered) return `${n === configured ? 'Todas as' : 'As'} ${group} cobriram o gasto com anúncios ${periodPhrase}.`
+  return `Nenhuma das ${group} cobriu o gasto com anúncios ${periodPhrase}.`
+}
+
 export function buildPortfolioAdsVerdict(input: {
   stores: PortfolioAdsStore[]
   /** lib/data/campaigns getOwnAttribution; null when it failed to load (the
@@ -155,11 +179,9 @@ export function buildPortfolioAdsVerdict(input: {
 
   const headline = judged.length === 0
     ? `Suas lojas gastaram ${formatMoney(totals.metaSpend)} no Meta ${periodPhrase}, mas nenhuma delas tem custos para dizer se compensou.`
-    : below.length === 0
-      ? `Todas as lojas com custos cobriram o gasto com anúncios ${periodPhrase}.`
-      : covering.length === 0
-        ? `Nenhuma loja cobriu o gasto com anúncios ${periodPhrase}.`
-        : `${covering.length} de ${judged.length} lojas cobriram o gasto com anúncios ${periodPhrase} — ${joinNames(below.map(r => r.name))} ${below.length === 1 ? 'ficou' : 'ficaram'} abaixo do empate.`
+    : below.length === 0 || covering.length === 0
+      ? allJudgedSentence(judged, spenders.length, stores.filter(r => r.configured).length, below.length === 0, periodPhrase)
+      : `${covering.length} de ${judged.length} lojas cobriram o gasto com anúncios ${periodPhrase} — ${joinNames(below.map(r => r.name))} ${below.length === 1 ? 'ficou' : 'ficaram'} abaixo do empate.`
 
   // 1. What Meta credits, on the store pages' rule (own campaigns only).
   if (input.attribution) {
@@ -188,12 +210,26 @@ export function buildPortfolioAdsVerdict(input: {
     details.push(line(`${basis.stores.length === 1 ? 'A loja que anuncia' : 'As lojas que anunciam'} no Meta — ${joinNames(names)} — ${basis.stores.length === 1 ? 'vendeu' : 'venderam'} `,
       { text: formatMoney(basis.revenue), strong: true }, ` contra ${formatMoney(basis.metaSpend)} de Meta: ROAS das lojas ${formatRoas(basis.roas)}.`))
   }
-  const otherChannel = spenders.filter(r => {
-    const ch = row(r).channel
-    return ch === 'shop' || ch === 'both'
-  })
-  if (otherChannel.length) {
-    notes.push(line(`${joinNames(otherChannel.map(r => `${r.name} (${formatMoney(r.totals.shopSpend)} em Anúncios Shopify, ${formatMoney(r.totals.metaSpend)} no Meta)`))} ${otherChannel.length === 1 ? 'anuncia' : 'anunciam'} sobretudo fora do Meta: o ROAS da tabela é medido no canal de cada uma, como no Resumo, e fica fora do ROAS das lojas acima.`))
+  // The Meta spenders outside that basis, by channel. "Sobretudo fora do
+  // Meta" is only true of 'shop' (Meta under 10% of the ad spend): Dumpling
+  // 8jcp3a's $2.642 of Meta next to $1.031 of Shopify ads ('both', 72% Meta)
+  // read "sobretudo fora do Meta". Each note says the store's Meta spend is in
+  // the headline's total but not in "ROAS das lojas": its sales cannot be
+  // split by channel.
+  const outside = (ch: StoreAdsRow['channel']) => spenders.filter(r => row(r).channel === ch)
+  const shopFirst = outside('shop')
+  const both = outside('both')
+  const outOfBasis = (rs: PortfolioAdsStore[]) => {
+    if (basis.roas === null) return ''
+    const meta = rs.reduce((t, r) => t + r.totals.metaSpend, 0)
+    const one = rs.length === 1
+    return ` Por isso ${one ? 'ela fica' : 'elas ficam'} fora do ROAS das lojas acima: os ${formatMoney(meta)} de Meta ${one ? 'dela' : 'delas'} estão nos ${formatMoney(totals.metaSpend)} gastos no Meta, não nos ${formatMoney(basis.metaSpend)}.`
+  }
+  if (shopFirst.length) {
+    notes.push(line(`${joinNames(shopFirst.map(r => `${r.name} (${formatMoney(r.totals.shopSpend)} em Anúncios Shopify, ${formatMoney(r.totals.metaSpend)} no Meta)`))} ${shopFirst.length === 1 ? 'anuncia' : 'anunciam'} sobretudo fora do Meta: o ROAS da tabela é medido em Anúncios Shopify, como no Resumo.${outOfBasis(shopFirst)}`))
+  }
+  if (both.length) {
+    notes.push(line(`${joinNames(both.map(r => `${r.name} (${formatMoney(r.totals.metaSpend)} no Meta + ${formatMoney(r.totals.shopSpend)} em Anúncios Shopify)`))} ${both.length === 1 ? 'anuncia' : 'anunciam'} no Meta e em Anúncios Shopify: o ROAS da tabela soma os dois canais, como no Resumo, porque as vendas não se separam por canal.${outOfBasis(both)}`))
   }
 
   if (unconfigured.length) {

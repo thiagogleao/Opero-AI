@@ -300,10 +300,11 @@ export function buildAdsVerdict(input: AdsVerdictInput): { verdict: Verdict; rec
     : [` (${noEmpateWhy(report.configured, pnl)}).`]
   details.push(shared.spend > 0
     ? line(
-      'Gasto no Meta: ', strong(money(own.spend)), ` em ${plural(own.campaigns, 'campanha', 'campanhas')} desta loja (mais ${money(shared.spend)} em ${shared.campaigns} de conta compartilhada). O Meta credita às da loja `,
+      'Gasto no Meta: ', strong(money(own.spend)), ` em ${plural(own.campaigns, 'campanha', 'campanhas')} desta loja (mais ${money(shared.spend)} em ${shared.campaigns} de conta compartilhada). O Meta credita ${own.campaigns === 1 ? 'à' : 'às'} da loja `,
       strong(money(own.value)), ' em vendas — ROAS atribuído ', strong(roasLine(own.roas)), ...empate)
     : line(
-      'Gasto no Meta: ', strong(money(spend)), ` em ${plural(campaignsCount, 'campanha', 'campanhas')}. O Meta credita a elas `,
+      // The pronoun agrees with the count: "em 1 campanha. O Meta credita a ela".
+      'Gasto no Meta: ', strong(money(spend)), ` em ${plural(campaignsCount, 'campanha', 'campanhas')}. O Meta credita ${campaignsCount === 1 ? 'a ela' : 'a elas'} `,
       strong(money(own.value)), ' em vendas — ROAS atribuído ', strong(roasLine(own.roas)), ...empate))
   if (pnl.revenue > 0) {
     const share = (Math.abs(rec.uncredited) / pnl.revenue) * 100
@@ -365,15 +366,21 @@ export function buildAdsVerdict(input: AdsVerdictInput): { verdict: Verdict; rec
   }
 
   const estimated = report.totals.estimatedProfit
-  // ── Costs set but nothing to price with (no store revenue, or every
-  //    campaign in a shared account).
-  if (estimated === null || be === null) {
-    const noSales = pnl.revenue <= 0
+  const noSales = pnl.revenue <= 0
+  // ── Costs set but nothing to price with: no store revenue, every campaign
+  //    in a shared account, or sales that do not cover their own costs.
+  //    No sales is decided first. On such a day lib/data/campaigns prices a
+  //    row Meta credited nothing at −spend (a certain loss), so the estimate
+  //    is no longer null — read as "cada venda já sai no prejuízo" it told a
+  //    store with no sale that each sale lost money, and with one campaign
+  //    credited and the others not it would be only part of the spend.
+  if (noSales || estimated === null || be === null) {
     chips.push(noSales
       ? chip('prejuizo', 'Gasto sem vendas', 'neg', 'down')
       : chip('prejuizo', 'Sem margem para os anúncios', 'neg', 'down'))
     if (w.partialLabel) chips.push(chip('parcial', w.partialLabel, 'info', 'clock'))
     if (w.dayLabel) chips.push(chip('dia_fuso', w.dayLabel, 'info', 'clock'))
+    const lossPerSale = !noSales && estimated !== null
     const headline = noSales
       ? `A ${storeName} gastou ${money(spend)} no Meta ${w.periodPhrase} e não vendeu nada.`
       : estimated === null
@@ -382,8 +389,8 @@ export function buildAdsVerdict(input: AdsVerdictInput): { verdict: Verdict; rec
     return {
       verdict: {
         ...base, tone: early ? 'neu' : 'neg', chips, headline,
-        amount: (estimated ?? -spend) * k, amountTone: early ? 'neu' : 'neg',
-        amountCaption: estimated !== null
+        amount: (lossPerSale ? estimated : -spend) * k, amountTone: early ? 'neu' : 'neg',
+        amountCaption: lossPerSale
           ? `${split ? 'sua parte (50%) do ' : 'de '}lucro estimado das campanhas: cada venda já sai no prejuízo`
           : `${split ? 'sua parte do ' : ''}gasto no Meta sem margem para cobri-lo`,
         details, notes, basis: 'profit', roas: storeRoas, early, fewOrders: fewPurchases,

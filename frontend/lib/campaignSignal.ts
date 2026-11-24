@@ -185,7 +185,11 @@ const money = (n: number) => formatMoney(n)
 /** A threshold the owner set: a round amount, never "$50,00". */
 const limit = (n: number) => formatMoney(n, { cents: 'never' })
 const pct = (n: number) => formatPct(n, { digits: 0 })
-const orderCount = (n: number) => `${formatCount(n)} ${Math.round(n) === 1 ? 'pedido' : 'pedidos'}`
+// The volume counts Meta's attributed purchases, not Shopify orders, next to
+// the row's own 'Gasto' and 'compras': '2 pedidos e $602 em 7 dias' read the
+// spend as sales and Meta's purchases as the store's orders.
+const purchaseCount = (n: number) => `${formatCount(n)} ${Math.round(n) === 1 ? 'compra atribuída' : 'compras atribuídas'}`
+const purchasesShort = (n: number) => `${formatCount(n)} ${Math.round(n) === 1 ? 'compra' : 'compras'}`
 
 function totals(days: DecisionDay[]) {
   const spend = sum(days, d => d.spend)
@@ -282,7 +286,7 @@ export function decideCampaign(input: DecisionInput): CampaignDecision {
   const base = {
     trend, trendChange, window, previous, running,
     spend: w.spend, purchases: w.purchases, revenue: w.revenue, estimatedProfit, margin, roas,
-    cpa: w.purchases > 0 ? w.spend / w.purchases : null,
+    cpa: w.spend > 0 && w.purchases > 0 ? w.spend / w.purchases : null,
     previousSpend: p.spend, previousRoas, recentRoasChange, days, thresholds: t,
   }
   const evidence = (action: CampaignAction): string[] => {
@@ -315,7 +319,7 @@ export function decideCampaign(input: DecisionInput): CampaignDecision {
     return none('sem_margem', `A loja não teve vendas nos ${n} dias julgados — sem margem de contribuição para medir`)
   }
 
-  const volume = `${orderCount(w.purchases)} e ${money(w.spend)} em ${n} dias`
+  const volume = `${purchaseCount(w.purchases)} e ${money(w.spend)} de gasto em ${n} dias`
   const enough = w.purchases >= t.minOrders && w.spend >= t.minSpend
 
   if (enough && margin !== null) {
@@ -343,7 +347,7 @@ export function decideCampaign(input: DecisionInput): CampaignDecision {
         : `${money(w.spend)} em ${n} dias sem nenhuma venda atribuída pelo Meta`)
     }
   }
-  return act('observar', 'volume', `Pouco volume para julgar: ${volume} (mínimo ${orderCount(t.minOrders)} e ${limit(t.minSpend)})`)
+  return act('observar', 'volume', `Pouco volume para julgar: ${volume} (mínimo ${purchasesShort(t.minOrders)} e ${limit(t.minSpend)})`)
 }
 
 // ─── Labels and ordering ──────────────────────────────────────────────────────
@@ -368,10 +372,10 @@ export function actionRank(a: CampaignAction | null): number {
 /** The rule behind each badge, in plain words, for a legend or tooltip. */
 export function describeThresholds(t: ScaleThresholds = DEFAULT_THRESHOLDS): Record<CampaignAction, string> {
   return {
-    escalar: `Margem de ${pct(t.minMargin)} ou mais nos últimos ${t.windowDays} dias fechados, com pelo menos ${orderCount(t.minOrders)} e ${limit(t.minSpend)} de gasto, sem queda forte do ROAS nos últimos ${RECENT_DAYS} dias.`,
+    escalar: `Margem de ${pct(t.minMargin)} ou mais nos últimos ${t.windowDays} dias fechados, com pelo menos ${purchaseCount(t.minOrders)} e ${limit(t.minSpend)} de gasto, sem queda forte do ROAS nos últimos ${RECENT_DAYS} dias.`,
     manter: `Dá lucro, mas abaixo de ${pct(t.minMargin)} de margem — ou passaria para escalar, mas o ROAS caiu ${pct(COLLAPSE_DROP)} ou mais nos últimos ${RECENT_DAYS} dias.`,
     cortar: `Margem de ${pct(t.cutMargin)} ou pior com volume suficiente; ou ${limit(t.minSpend)} gastos e o prejuízo continuaria mesmo com 50% mais vendas.`,
-    observar: `Entre ${pct(t.cutMargin)} e 0% de margem, ou pouco volume para julgar (menos de ${orderCount(t.minOrders)} ou ${limit(t.minSpend)}).`,
+    observar: `Entre ${pct(t.cutMargin)} e 0% de margem, ou pouco volume para julgar (menos de ${purchaseCount(t.minOrders)} ou ${limit(t.minSpend)} de gasto).`,
   }
 }
 

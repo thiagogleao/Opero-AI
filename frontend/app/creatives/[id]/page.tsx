@@ -4,7 +4,7 @@ import { computeStorePnL } from '@/lib/engine/pnl'
 import { getViewer, listStores, resolveStore } from '@/lib/access'
 import { adBelongsToStore, getCreativeDetail, type CreativeDetail, type CreativeRow } from '@/lib/data/creatives'
 import { FREQUENCY_UNAVAILABLE, HOOK_RATE_UNAVAILABLE } from '@/lib/creativeSignal'
-import { formatDate, formatMoney, formatNumber, formatPct, formatRoas, formatWeekdayDate, plural } from '@/lib/format'
+import { formatMoney, formatNumber, formatPct, formatRoas, formatWeekdayDate, plural } from '@/lib/format'
 import { EARLY_DAY_MINUTES } from '@/lib/views/verdict'
 import { AppShell, PageHeader, periodName } from '@/components/shell'
 import {
@@ -12,7 +12,7 @@ import {
   VerdictCard, type DataColumn, type DataRow,
 } from '@/components/ui'
 import { DailyProfitBars } from '@/components/charts'
-import { buildCreativeVerdict } from '@/components/campaigns/creativeVerdict'
+import { buildCreativeVerdict, noSpendWhen } from '@/components/campaigns/creativeVerdict'
 import { storeMarginFromPnL } from '@/components/campaigns/margin'
 import { AdThumb } from '@/components/campaigns/AdThumb'
 import { RoasCell } from '@/components/campaigns/RoasCell'
@@ -124,16 +124,19 @@ export default async function CreativePage({ params, searchParams }: {
   })
   const be = detail.breakEvenRoas
   const single = ctx.range.from === ctx.range.to
+  // The ad's format over its whole history, not this window's plays: a video
+  // on a day without spend has none and read "imagem".
+  const isVideo = detail.format === 'video'
 
   const aside = (
     <div>
-      <AdThumb className={s.preview} sources={[c.creativeUrl, c.thumbnailUrl]} video={!!c.video} alt={`Imagem do anúncio ${c.name}`}
+      <AdThumb className={s.preview} sources={[c.creativeUrl, c.thumbnailUrl]} video={isVideo} alt={`Imagem do anúncio ${c.name}`}
         iconSize={20} expired={c.previewExpired} label compact />
       <dl className={`${s.meta} ${s.metaTop}`}>
         <dt>Status</dt><dd>{statusText(c)}</dd>
         <dt>Campanha</dt><dd>{c.campaignName ?? 'não sincronizada'}</dd>
         <dt>Conjunto</dt><dd>{c.adsetName ?? '—'}</dd>
-        <dt>Formato</dt><dd>{c.video ? 'vídeo' : 'imagem'}</dd>
+        <dt>Formato</dt><dd>{detail.format === null ? '—' : isVideo ? 'vídeo' : 'imagem'}</dd>
         {c.landingUrl && <><dt>Destino</dt><dd><a href={c.landingUrl} target="_blank" rel="noopener noreferrer">{c.landingUrl.replace(/^https?:\/\//, '')}</a></dd></>}
         <dt>ID</dt><dd className="num">{c.adId}</dd>
       </dl>
@@ -185,7 +188,7 @@ export default async function CreativePage({ params, searchParams }: {
             title="Sem gasto neste período"
             action={<ButtonLink href={ctx.hrefWith(`/creatives/${encodeURIComponent(c.adId)}`, { periodo: '30d' })} size="sm">Ver os últimos 30 dias</ButtonLink>}
           >
-            O anúncio é desta loja, mas não teve gasto entre {formatDate(ctx.range.from, ctx.today)} e {formatDate(ctx.range.to, ctx.today)}.
+            O anúncio é desta loja, mas não teve gasto {noSpendWhen(ctx.range, ctx.today)}.
           </EmptyState>
         </Card>
       ) : (
@@ -194,7 +197,9 @@ export default async function CreativePage({ params, searchParams }: {
             <KpiCard label="Gasto" swatch="meta" value={<Money value={c.spend} />} note={<>{plural(c.daysWithSpend, 'dia', 'dias')} com gasto · CPM <b>{formatMoney(c.cpm)}</b></>} />
             <KpiCard label="Vendas atribuídas" value={<Money value={c.purchaseValue} />} note={<><b>{c.purchases}</b> {c.purchases === 1 ? 'compra' : 'compras'} · CPA <b>{formatMoney(c.cpa)}</b></>}
               info="O que o Meta credita a este anúncio. Compras impossíveis (acima de $20.000 num dia de um anúncio) já foram descartadas." />
-            <KpiCard label="ROAS" value={<span>{formatRoas(c.roas)}</span>} note={<RoasCell roas={c.roas} breakEven={be} paused={!c.running} showValue={false} />}
+            <KpiCard label="ROAS" value={<span>{formatRoas(c.roas)}</span>} note={<RoasCell roas={c.roas} breakEven={be} paused={!c.running} showValue={false}
+                configured={detail.configured} revenue={pnl.totals.revenue} contribution={pnl.totals.contribution}
+                reason={c.shared ? 'other_store' : null} />}
               info="Vendas atribuídas ÷ gasto, contra o empate da loja no mesmo período (receita ÷ contribuição)." />
             <KpiCard label="Cliques" value={<span>{formatPct(c.ctr, { digits: 2 })}</span>} note={<><b>{formatNumber(c.linkClicks)}</b> cliques no link · CPC <b>{formatMoney(c.cpc)}</b></>}
               info="CTR = cliques no link ÷ impressões." />
@@ -202,7 +207,9 @@ export default async function CreativePage({ params, searchParams }: {
               value={c.frequency === null ? <span className={s.kpiNa}>indisponível</span> : <span>{c.frequency.toLocaleString('pt-BR', { maximumFractionDigits: 1 })}</span>}
               note={single ? 'impressões ÷ alcance do dia' : 'só existe para um dia de cada vez'} info={FREQUENCY_UNAVAILABLE} />
             <KpiCard label="Hook rate" tone="mut" value={<span className={s.kpiNa}>indisponível</span>}
-              note={c.video ? `vídeo: ${formatNumber(c.video.plays)} inícios de reprodução, não visualizações de 3 s` : 'anúncio de imagem'} info={HOOK_RATE_UNAVAILABLE} />
+              note={c.video ? `vídeo: ${formatNumber(c.video.plays)} inícios de reprodução, não visualizações de 3 s`
+                : isVideo ? 'vídeo: quase nenhum início de reprodução neste período'
+                  : detail.format === 'image' ? 'anúncio de imagem' : 'formato desconhecido'} info={HOOK_RATE_UNAVAILABLE} />
           </KpiGrid>
 
           {c.video && (

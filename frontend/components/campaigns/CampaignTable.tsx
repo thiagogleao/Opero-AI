@@ -17,7 +17,7 @@
 
 import type { ReactNode } from 'react'
 import Link from 'next/link'
-import type { CampaignReport, CampaignRow } from '@/lib/data/campaigns'
+import { spentAds, type CampaignReport, type CampaignRow } from '@/lib/data/campaigns'
 import type { CreativeRow } from '@/lib/data/creatives'
 import { Badge, Chip, Count, EmptyState, Money } from '@/components/ui'
 import { formatMoney, formatRoas, plural } from '@/lib/format'
@@ -25,7 +25,7 @@ import { SPLIT_SHARE } from '@/lib/views/verdict'
 import { RoasCell } from './RoasCell'
 import { ownAttributedRoas, sharedCampaigns } from './adsVerdict'
 import { ExpandableTable, type ExpandableColumn, type ExpandableRow } from './ExpandableTable'
-import { ACTION_CHIP, adSignalChip, phantomBadge, phantomNote, ptText, trendSpec } from './text'
+import { ACTION_CHIP, adVerdictChip, phantomBadge, phantomNote, ptText, trendSpec } from './text'
 import s from './campaigns.module.css'
 
 const TREND_CLASS = { pos: s.trendPos, neg: s.trendNeg, neu: s.trendNeu, mut: s.trendMut } as const
@@ -40,40 +40,66 @@ interface AdsetGroup {
   ads: CreativeRow[]
 }
 
-/** Ad sets of one campaign from its ads, biggest spend first. */
+/**
+ * Ad sets of one campaign from its ads, biggest spend first. An ad set's
+ * estimated profit is the sum of its ads', and null as soon as one of them
+ * is unpriced: on a day without sales an ad Meta credited is unpriced while
+ * the others are −spend, and their sum alone would pass for the ad set's
+ * estimate (the campaign row, priced on all of them, reads "—" then).
+ */
 export function groupAdsets(ads: CreativeRow[]): AdsetGroup[] {
-  const groups = new Map<string, AdsetGroup>()
+  const groups = new Map<string, AdsetGroup & { unpriced: boolean }>()
   for (const a of ads) {
     const key = a.adsetId ?? ''
     const g = groups.get(key) ?? {
       key, name: a.adsetName ?? (a.adsetId ? `Conjunto ${a.adsetId}` : 'Conjunto não sincronizado'),
-      spend: 0, purchaseValue: 0, purchases: 0, estimatedProfit: null, ads: [],
+      spend: 0, purchaseValue: 0, purchases: 0, estimatedProfit: null, ads: [], unpriced: false,
     }
     g.spend += a.spend
     g.purchaseValue += a.purchaseValue
     g.purchases += a.purchases
-    if (a.estimatedProfit !== null) g.estimatedProfit = (g.estimatedProfit ?? 0) + a.estimatedProfit
+    if (a.estimatedProfit === null) g.unpriced = true
+    else g.estimatedProfit = (g.estimatedProfit ?? 0) + a.estimatedProfit
     g.ads.push(a)
     groups.set(key, g)
   }
-  for (const g of groups.values()) g.ads.sort((x, y) => y.spend - x.spend)
-  return [...groups.values()].sort((a, b) => b.spend - a.spend)
+  return [...groups.values()]
+    .map(({ unpriced, ...g }) => ({ ...g, estimatedProfit: unpriced ? null : g.estimatedProfit, ads: g.ads.sort((x, y) => y.spend - x.spend) }))
+    .sort((a, b) => b.spend - a.spend)
 }
 
-function SignalCell({ ad, breakEven }: { ad: CreativeRow; breakEven: number | null }) {
-  const sig = ad.verdict.signal
-  if (!sig) return <span className={s.why} title={ptText(ad.verdict.reason)}>{ad.running ? 'sem veredito' : 'pausado'}</span>
-  const spec = adSignalChip(sig, ad.roas, breakEven)
+/** The ad's verdict, judged on the same closed days as the campaign's action
+ *  (lib/data/creatives): its word comes from the verdict, not the row's ROAS. */
+function SignalCell({ ad }: { ad: CreativeRow }) {
+  const spec = adVerdictChip(ad.verdict)
+  if (!spec) return <span className={s.why} title={ptText(ad.verdict.reason)}>{ad.running ? 'sem veredito' : 'pausado'}</span>
   return <span title={ptText(ad.verdict.reason)}><Chip tone={spec.tone} icon={spec.icon} size="sm">{spec.label}</Chip></span>
+}
+
+/** "Lucro estimado" with "(sua parte)" on a second line: one line, the split
+ *  label widened the column by ~75px and pushed the verdict column past the
+ *  table's box at 1440. */
+function ProfitLabel({ split }: { split: boolean }) {
+  if (!split) return <>Lucro estimado</>
+  return <span className={s.thStack}>Lucro estimado<span className={s.thSub}>(sua parte)</span></span>
+}
+
+/** "44 anúncios com gasto": the unsynced bucket counted as the Resumo counts
+ *  it (lib/data/campaigns spentAds); a bucket with no spend at all says so. */
+function unsyncedCount(ads: readonly { spend: number }[]): string {
+  const n = spentAds(ads).length
+  return n > 0 ? plural(n, 'anúncio com gasto', 'anúncios com gasto') : plural(ads.length, 'anúncio sem gasto', 'anúncios sem gasto')
 }
 
 /** The partner's half of an estimated profit (null stays null). */
 const share = (v: number | null, k: number) => (v === null ? null : v * k)
 
-function CampaignDetail({ row, ads, hrefWith, adsPerAdset, breakEven, k }: {
-  row: CampaignRow; ads: CreativeRow[]; hrefWith: (path: string) => string; adsPerAdset: number; breakEven: number | null
+function CampaignDetail({ row, ads, hrefWith, adsPerAdset, k, days }: {
+  row: CampaignRow; ads: CreativeRow[]; hrefWith: (path: string) => string; adsPerAdset: number
   /** SPLIT_SHARE in the partner view, else 1. */
   k: number
+  /** Closed days the campaign's action and its ads' verdicts are judged on. */
+  days: number
 }) {
   const notes: ReactNode[] = []
   if (row.shared) notes.push(<p key="shared" className={s.detailNote}><b>Conta compartilhada.</b> {row.shared.note} O gasto continua nesta loja.</p>)
@@ -82,7 +108,7 @@ function CampaignDetail({ row, ads, hrefWith, adsPerAdset, breakEven, k }: {
   if (row.unsynced) {
     // Ads that the catalog does not know often show up with a cent or nothing:
     // listing dozens of "$0" lines hides the few that carry the spend.
-    const spent = row.unsyncedAds.filter(a => a.spend >= 0.005)
+    const spent = spentAds(row.unsyncedAds)
     const idle = row.unsyncedAds.length - spent.length
     return (
       <div>
@@ -117,8 +143,8 @@ function CampaignDetail({ row, ads, hrefWith, adsPerAdset, breakEven, k }: {
             <th className={s.nr}>Gasto</th>
             <th className={s.nr}>Compras</th>
             <th className={s.nr}>ROAS</th>
-            <th className={s.nr}>{k !== 1 ? 'Lucro estimado (sua parte)' : 'Lucro estimado'}</th>
-            <th>Veredito do anúncio</th>
+            <th className={s.nr}><ProfitLabel split={k !== 1} /></th>
+            <th title={`Julgado nos últimos ${days} dias fechados, como a campanha, seja qual for o período da tabela.`}>Veredito do anúncio · {days} dias</th>
           </tr>
         </thead>
         <tbody>
@@ -142,7 +168,7 @@ function CampaignDetail({ row, ads, hrefWith, adsPerAdset, breakEven, k }: {
                   <td className={s.nr}>{a.purchases}</td>
                   <td className={s.nr}>{formatRoas(a.roas)}</td>
                   <td className={`${s.nr} ${a.estimatedProfit !== null && a.estimatedProfit < 0 ? s.neg : ''}`}>{formatMoney(share(a.estimatedProfit, k))}</td>
-                  <td><SignalCell ad={a} breakEven={breakEven} /></td>
+                  <td><SignalCell ad={a} /></td>
                 </tr>
               )),
               rest.length > 0 ? (
@@ -181,7 +207,7 @@ export function CampaignTable({ report, creatives, hrefWith, rangeLabel, split =
     { key: 'purchases', label: 'Compras', numeric: true, info: 'Compras que o Meta atribui à campanha (pixel), não pedidos da Shopify.' },
     { key: 'pv', label: 'Vendas atribuídas', numeric: true, info: 'O que o Meta credita à campanha. Compras impossíveis (acima de $20.000 num dia de um anúncio) já foram descartadas.' },
     { key: 'roas', label: be !== null ? `ROAS × empate ${formatRoas(be)}` : 'ROAS', info: 'Vendas atribuídas ÷ gasto, contra o empate da loja no mesmo período (receita ÷ contribuição). Abaixo do empate, cada dólar gasto vira prejuízo.' },
-    { key: 'est', label: split ? 'Lucro estimado (sua parte)' : 'Lucro estimado', numeric: true, info: split ? `${ptText(report.formula)} Na visão de sócio, cada valor é a sua parte (50%).` : ptText(report.formula) },
+    { key: 'est', label: <ProfitLabel split={split} />, numeric: true, info: split ? `${ptText(report.formula)} Na visão de sócio, cada valor é a sua parte (50%).` : ptText(report.formula) },
     // Under ~1100px of table box the column hides and the same verdict shows
     // under the campaign name (campaigns.module.css, container query): at
     // 1024 and 1280 it used to start off-screen behind a thin scrollbar.
@@ -197,7 +223,9 @@ export function CampaignTable({ report, creatives, hrefWith, rangeLabel, split =
       <span key="st"><i className={`${s.dot} ${c.running ? s.dotOn : ''}`} aria-hidden="true" /> {c.unsynced ? 'sem campanha' : c.running ? 'ativa' : 'pausada'}</span>,
     ]
     if (!c.unsynced) subParts.push(<span key="n">{plural(c.adsets, 'conjunto', 'conjuntos')} · {plural(c.ads, 'anúncio', 'anúncios')}</span>)
-    else subParts.push(<span key="n">{plural(c.unsyncedAds.length, 'anúncio', 'anúncios')}</span>)
+    // The ads that spent, as the Resumo counts this bucket; the ones without
+    // spend are named only inside it ("e mais 15 anúncios sem gasto").
+    else subParts.push(<span key="n">{unsyncedCount(c.unsyncedAds)}</span>)
     if (c.shared) subParts.push(<Badge key="sh" tone="warn" icon="alert" title={c.shared.note}>conta compartilhada</Badge>)
     // In words, no minus sign: next to the money columns "−$183.000" read as
     // a loss. The amount is what Meta reported and was thrown away.
@@ -212,7 +240,7 @@ export function CampaignTable({ report, creatives, hrefWith, rangeLabel, split =
       key: c.campaignId ?? `unsynced:${c.accountId ?? ''}`,
       tone: c.running ? undefined : 'mut',
       toggleLabel: c.unsynced ? 'os anúncios sem nome' : 'conjuntos e anúncios',
-      detail: <CampaignDetail row={c} ads={ads} hrefWith={hrefWith} adsPerAdset={adsPerAdset} breakEven={be} k={k} />,
+      detail: <CampaignDetail row={c} ads={ads} hrefWith={hrefWith} adsPerAdset={adsPerAdset} k={k} days={days} />,
       cells: {
         name: (
           <>
@@ -233,7 +261,8 @@ export function CampaignTable({ report, creatives, hrefWith, rangeLabel, split =
           ? <span className={s.why}>{formatRoas(c.roas)} · sem empate (conta compartilhada)</span>
           : c.unsynced
             ? <span className={s.why}>{formatRoas(c.roas)} · sem campanha para julgar</span>
-            : <RoasCell roas={c.roas} breakEven={be} paused={!c.running} />,
+            : <RoasCell roas={c.roas} breakEven={be} paused={!c.running}
+                configured={report.configured} revenue={report.storeRevenue} contribution={report.contributionRate} />,
         est: c.estimatedProfit === null ? <span className={s.muted}>—</span> : <Money value={c.estimatedProfit * k} />,
         verdict: (
           <span className={s.verdictCell}>

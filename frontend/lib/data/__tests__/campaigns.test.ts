@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildCampaignRows, campaignTotals, decisionWindows, splitOwnShared, type BuildCampaignInput } from '../campaigns'
+import { buildCampaignRows, campaignTotals, decisionWindows, estimateRow, metaTotals, splitOwnShared, type BuildCampaignInput } from '../campaigns'
 import { adRunning, buildCreativeRows } from '../creatives'
 import {
   mergeRanges, reconcile, sharedAccountFlag, ORPHAN_CAMPAIGN_NAME,
@@ -133,6 +133,65 @@ describe('buildCampaignRows', () => {
     expect(row.estimatedProfit).toBeNull()
     expect(row.decision.basis).toBe('sem_custos')
   })
+
+  // Hibikura at 04h in Tokyo: costs set, 0 orders (so no contribution rate),
+  // $58,78 on Meta. Every row read "sem margem" and the total "Lucro estimado —".
+  it('costs set but no sales: a row Meta credited nothing to loses its spend', () => {
+    const noRate = { configured: true, contributionRate: null }
+    const facts = [
+      fact({ campaignId: 'c1', date: '2026-11-15', spend: 20 }),
+      fact({ campaignId: 'c1', date: '2026-11-16', spend: 38.78 }),
+      fact({ campaignId: 'c2', spend: 12, purchaseValue: 40, purchases: 1 }),
+      fact({ campaignId: 'freddie', accountId: OLD_ACCOUNT, spend: 30 }),
+    ]
+    const rows = build({
+      facts, margin: noRate, decisionMargin: noRate,
+      campaigns: new Map([['c1', camp('c1', NEW_ACCOUNT)], ['c2', camp('c2', NEW_ACCOUNT)], ['freddie', camp('freddie', OLD_ACCOUNT)]]),
+      journeys: new Map([['freddie', new Map([[CAMP_HALLOW, 338]])]]),
+    })
+    const byId = (id: string) => rows.find(r => r.campaignId === id)!
+    expect(byId('c1').estimatedProfit).toBe(-58.78)
+    expect(byId('c1').margin).toBeNull()
+    // The days carry the same rule and add up to the row; a day without spend stays empty.
+    const days = byId('c1').days
+    expect(days.find(d => d.date === '2026-11-15')?.estimatedProfit).toBe(-20)
+    expect(days.find(d => d.date === '2026-11-16')?.estimatedProfit).toBe(-38.78)
+    expect(days.find(d => d.date === '2026-11-14')?.estimatedProfit).toBeNull()
+    // Purchase value with no rate: no estimate. A shared row: never this store's margin.
+    expect(byId('c2').estimatedProfit).toBeNull()
+    expect(byId('freddie').shared).not.toBeNull()
+    expect(byId('freddie').estimatedProfit).toBeNull()
+    expect(campaignTotals(rows, true).estimatedProfit).toBe(-58.78)
+  })
+})
+
+describe('metaTotals', () => {
+  it('has no CPA without spend: late purchases of a paused campaign did not cost $0 each', () => {
+    // MOKOO 7d, "CBO - CHRISTMAS CAPY — global": spend 0, 2 purchases, $108,59.
+    expect(metaTotals({ spend: 0, purchaseValue: 108.59, purchases: 2, impressions: 0, linkClicks: 0 }).cpa).toBeNull()
+    expect(metaTotals({ spend: 602, purchaseValue: 186.62, purchases: 2, impressions: 0, linkClicks: 0 }).cpa).toBe(301)
+    expect(metaTotals({ spend: 50, purchaseValue: 0, purchases: 0, impressions: 0, linkClicks: 0 }).cpa).toBeNull()
+  })
+})
+
+describe('estimateRow', () => {
+  const rate = { configured: true, contributionRate: 0.6 }
+  const noRate = { configured: true, contributionRate: null }
+  it('prices with the contribution rate when there is one', () => {
+    expect(estimateRow(300, 100, rate, false)).toBe(80)
+  })
+  it('without a rate, only a row with no purchase value is priced: −spend', () => {
+    expect(estimateRow(0, 58.78, noRate, false)).toBe(-58.78)
+    expect(estimateRow(10, 58.78, noRate, false)).toBeNull()
+  })
+  it('never prices a shared row or a store without cost settings', () => {
+    expect(estimateRow(0, 58.78, noRate, true)).toBeNull()
+    expect(estimateRow(300, 100, rate, true)).toBeNull()
+    expect(estimateRow(0, 58.78, { configured: false, contributionRate: null }, false)).toBeNull()
+  })
+  it('a fraction of a cent is $0, not −$0', () => {
+    expect(Object.is(estimateRow(0, 0.001, noRate, false), 0)).toBe(true)
+  })
 })
 
 describe('sharedAccountFlag', () => {
@@ -205,6 +264,73 @@ describe('buildCreativeRows', () => {
       margin: { configured: true, contributionRate: 0.6, breakEvenRoas: 1 / 0.6 },
     })
     expect(row.frequency).toBe(4)
+  })
+
+  it("judges an ad on the campaigns' closed days, not on today's running day", () => {
+    // MOKOO "Hoje" 23 nov at 16h: the catalog ad spent $79,46 with no Meta
+    // purchase yet today; over the 7 closed days it is the best ad (3,01×,
+    // 13 sales) and its campaign says "Escalar". Judged on the day it read
+    // "Desligar".
+    const today = { from: '2026-11-17', to: '2026-11-17' }
+    const facts = [
+      ...eachWindowDay(date => fact({ adId: 'cat', date, spend: 60, purchaseValue: 180.6, purchases: date === '2026-11-16' ? 13 : 0, impressions: 1000, reach: 900 })),
+      fact({ adId: 'cat', date: '2026-11-17', spend: 79.46, purchaseValue: 0, purchases: 0, impressions: 900, reach: 700 }),
+      // An ad that started today has nothing on the closed days.
+      fact({ adId: 'new', date: '2026-11-17', spend: 55, purchaseValue: 0, purchases: 0 }),
+    ]
+    const margin = { configured: true, contributionRate: 1 / 1.65, breakEvenRoas: 1.65 }
+    const rows = buildCreativeRows({
+      storeId: EPOCH, range: today, facts, journeys: new Map(),
+      info: new Map([['cat', info('cat')], ['new', info('new')]]),
+      margin, verdictWindow: { range: decision.window, margin },
+    })
+    const cat = rows.find(r => r.adId === 'cat')!
+    // The row's figures stay the day's ...
+    expect(cat.spend).toBe(79.46)
+    expect(cat.roas).toBe(0)
+    expect(cat.frequency).toBeCloseTo(900 / 700, 6)
+    // ... the verdict is the week's, and says so.
+    expect(cat.verdict.signal).toBe('scale')
+    expect(cat.verdict.label).toBe('Escalar')
+    expect(cat.verdict.reason).toBe('ROAS 3,01× nos 7 dias fechados — 40% ou mais acima do empate desses dias (1,65×) com 13 vendas')
+    const fresh = rows.find(r => r.adId === 'new')!
+    expect(fresh.verdict).toEqual({ signal: null, reason: 'Sem gasto nos 7 dias fechados' })
+
+    // Without a verdict window (or with the page's own), the row judges itself.
+    const alone = buildCreativeRows({ storeId: EPOCH, range: today, facts, journeys: new Map(), info: new Map([['cat', info('cat')]]), margin })
+    expect(alone.find(r => r.adId === 'cat')!.verdict.signal).toBe('kill')
+    const week = buildCreativeRows({
+      storeId: EPOCH, range: decision.window, facts, journeys: new Map(), info: new Map([['cat', info('cat')]]),
+      margin, verdictWindow: { range: decision.window, margin },
+    })
+    expect(week.find(r => r.adId === 'cat')!.verdict.reason).toBe('ROAS 3,01× — 40% ou mais acima do empate (1,65×) com 13 vendas')
+  })
+
+  it('prices ads like the campaign rows on a day without sales: −spend when Meta credited nothing', () => {
+    // MOKOO "Hoje" at 01h20 (no order yet, $32,55 on Meta): the campaign row
+    // read −$20,44 over ad sets and ads that all read "—".
+    const day = { from: '2026-11-17', to: '2026-11-17' }
+    const facts = [
+      fact({ adId: 'a', date: '2026-11-17', spend: 7.75 }),
+      fact({ adId: 'b', date: '2026-11-17', spend: 12.69 }),
+      fact({ adId: 'credited', date: '2026-11-17', spend: 5, purchaseValue: 40, purchases: 1 }),
+    ]
+    const noRate = { configured: true, contributionRate: null, breakEvenRoas: null }
+    const rows = buildCreativeRows({
+      storeId: EPOCH, range: day, facts, journeys: new Map(),
+      info: new Map([['a', info('a')], ['b', info('b')], ['credited', info('credited')]]), margin: noRate,
+    })
+    const by = (id: string) => rows.find(r => r.adId === id)!
+    expect(by('a').estimatedProfit).toBe(-7.75)
+    expect(by('b').estimatedProfit).toBe(-12.69)
+    // Credited value with no contribution rate: no estimate, as on the campaign row.
+    expect(by('credited').estimatedProfit).toBeNull()
+    // The campaign row of the uncredited ads alone carries the same −spend.
+    const camp = build({ range: day, facts: facts.slice(0, 2), margin: { configured: true, contributionRate: null } })
+    expect(camp[0].estimatedProfit).toBe(-20.44)
+    // Without cost settings nothing is priced.
+    expect(buildCreativeRows({ storeId: EPOCH, range: day, facts, journeys: new Map(), info: new Map(), margin: { configured: false, contributionRate: null, breakEvenRoas: null } })
+      .every(r => r.estimatedProfit === null)).toBe(true)
   })
 
   it('treats an ad as running only when ad, ad set and campaign are active', () => {
