@@ -18,16 +18,25 @@ const joinAnd = (xs: string[]) => (xs.length <= 1 ? xs.join('') : `${xs.slice(0,
  * Whole dollars by largest remainder, so parts of a total of $100 or more read
  * as adding up to it ($6.671 + $15.203 + $25.347 printed $47.221 against
  * $47.220). Below $100 the cents are shown and plain rounding is exact enough.
+ *
+ * `pinned` parts keep their own rounding (formatMoney's, as printed elsewhere
+ * on the page) and only the others absorb the difference: the linked spend
+ * read $2.875 in the sentence and the table's total row but $2.876 among the
+ * parts (MOKOO 7d, 2875.49 + 3739.17 = 6614.66 → $6.615).
  */
-export function partsSummingTo(parts: number[], total: number): string[] {
+export function partsSummingTo(parts: number[], total: number, pinned: readonly number[] = []): string[] {
   if (!(total >= 100)) return parts.map(p => formatMoney(p))
-  const floors = parts.map(p => Math.floor(Math.max(0, p)))
-  let left = Math.round(total) - floors.reduce((a, b) => a + b, 0)
-  parts
-    .map((p, i) => [Math.max(0, p) - floors[i], i] as const)
-    .sort((a, b) => b[0] - a[0])
-    .forEach(([, i]) => { if (left > 0) { floors[i] += 1; left -= 1 } })
-  return floors.map(v => formatMoney(v, { cents: 'never' }))
+  const isPinned = (i: number) => pinned.includes(i) && pinned.length < parts.length
+  const whole = parts.map((p, i) => (isPinned(i) ? Math.round(Math.max(0, p)) : Math.floor(Math.max(0, p))))
+  let left = Math.round(total) - whole.reduce((a, b) => a + b, 0)
+  const free = parts
+    .map((p, i) => [Math.max(0, p) - whole[i], i] as const)
+    .filter(([, i]) => !isPinned(i))
+  // Largest remainders take the missing dollars; if the pinned rounding went
+  // over, the smallest remainders give one back.
+  free.sort((a, b) => b[0] - a[0]).forEach(([, i]) => { if (left > 0) { whole[i] += 1; left -= 1 } })
+  free.sort((a, b) => a[0] - b[0]).forEach(([, i]) => { if (left < 0 && whole[i] > 0) { whole[i] -= 1; left += 1 } })
+  return whole.map(v => formatMoney(v, { cents: 'never' }))
 }
 
 export function metaSpendSplitText(
@@ -49,7 +58,12 @@ export function metaSpendSplitText(
   // The parts are the books' Meta spend split three ways; round them to the
   // total printed next to them (unless they do not add up, then to their sum).
   const sum = ownLinked + elsewhere + unlinked
-  const [linkedTxt, elsewhereTxt, unlinkedTxt] = partsSummingTo([ownLinked, elsewhere, unlinked], Math.abs(sum - metaSpend) < 1 ? metaSpend : sum)
+  // The linked part is pinned to its own rounding: with nothing billed
+  // elsewhere it is the "Meta ligado" figure of the first sentence and of
+  // the table's total row, which must read the same dollar.
+  const [linkedTxt, elsewhereTxt, unlinkedTxt] = partsSummingTo(
+    [ownLinked, elsewhere, unlinked], Math.abs(sum - metaSpend) < 1 ? metaSpend : sum, [0],
+  )
   // Only stores the viewer may see are named; the rest stay "outra loja".
   const names = [...new Set((a.ownSpendCreditedElsewhereByStore ?? []).map(s => nameOf(s.storeId)).filter((n): n is string => !!n))]
   const where = names.length ? ` (${joinAnd(names)})` : ''

@@ -10,6 +10,7 @@ import { HorizontalBars } from '@/components/charts'
 import { ProductTable, type SearchableRow } from '@/components/products/ProductTable'
 import { buildProductsVerdict, type ProductLike } from '@/components/products/productsVerdict'
 import { metaSpendSplitText } from '@/components/products/metaSpendSplit'
+import { restLine, topBars, unpricedLine } from '@/components/products/topBars'
 import { loadFirstSale } from '@/components/campaigns/firstSale'
 import s from '@/components/products/products.module.css'
 
@@ -45,7 +46,7 @@ const pct = (a: number, b: number) => (b > 0 ? (a / b) * 100 : null)
 export default async function ProductsPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
   const ctx = await getPageContext(searchParams)
   const title = ctx.scope === 'all' ? 'Produtos · todas as lojas' : `Produtos · ${ctx.store?.name ?? ''}`
-  const header = <PageHeader ctx={ctx} title={title} />
+  const header = <PageHeader ctx={ctx} title={title} halved={false} />
   if (ctx.scope === 'store' && !ctx.store) {
     return <AppShell ctx={ctx}>{header}<EmptyState icon="store" title="Nenhuma loja para mostrar" /></AppShell>
   }
@@ -62,9 +63,9 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
       </AppShell>
     )
   }
-  const { rows, totals, configured, attribution, contributionTotal, costsTotal, excludedStores } = loaded
+  const { rows, totals, configured, attribution, contributionTotal, costsTotal, excludedStores, pricedTotals } = loaded
   const all = ctx.scope === 'all'
-  const opt = ctx.store ? ctx.storeOptions.find(o => o.id === ctx.store?.id) : undefined
+  const opt = ctx.storeOption
   const verdict = buildProductsVerdict({
     subject: all ? 'suas lojas' : `a ${ctx.store?.name}`,
     subjectOf: all ? 'das suas lojas' : `da ${ctx.store?.name}`,
@@ -74,7 +75,12 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
   })
 
   const money = (p: Row) => (configured ? p.contribution ?? 0 : p.revenue)
-  const byMoney = [...rows].filter(p => !configured || p.contribution !== null).sort((a, b) => money(b) - money(a)).slice(0, 8)
+  // The bars, the rest line's count and its amount all come from one list:
+  // the products with a contribution (a store without costs has none). The
+  // count used every row, so "Os outros 184 produtos somam $19.948" counted
+  // Glooty's 5 unpriced products whose money is not in the $19.948.
+  const ranked = rows.filter(p => !configured || p.contribution !== null).sort((a, b) => money(b) - money(a))
+  const byMoney = topBars(ranked)
   const base = configured ? contributionTotal : totals.revenue
   const aside = rows.length ? (
     <div>
@@ -97,7 +103,8 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
         })}
       />
       <p className={`${s.small} ${s.asideFoot}`}>
-        {rows.length > byMoney.length ? `Os outros ${rows.length - byMoney.length} produtos somam ${formatMoney(base - byMoney.reduce((t, p) => t + money(p), 0))}.` : null}
+        {restLine(ranked.length - byMoney.length, base - byMoney.reduce((t, p) => t + money(p), 0))}
+        {ranked.length < rows.length ? ` ${unpricedLine(rows.length - ranked.length, excludedStores)}` : null}
       </p>
     </div>
   ) : undefined
@@ -154,17 +161,26 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
       costs: p.variableCosts, contribution: p.contribution, margin: p.contributionMargin, meta: p.attributedSpend,
     },
   }))
+  // The totals row adds up across its own columns (receita − custos =
+  // contribuição): with a store without costs in "Todas" it is the stores
+  // with costs, as on Países, and the store left out is named under the
+  // table. Mixing Glooty's $1.118 into the revenue next to costs and a
+  // contribution without it read $135.519 − $40.211 ≠ $94.191.
+  const foot = pricedTotals ?? totals
   const footer: Record<string, ReactNode> = {
-    product: <span>Total {all ? 'das lojas' : 'da loja'}</span>,
-    units: <span className={s.colUnits}><Count value={totals.units} /></span>,
-    orders: <><Count value={totals.orders} /><span className={s.inline}>{plural(totals.units, 'unidade', 'unidades')}</span></>,
-    revenue: <Money value={totals.revenue} />,
-    share: <span className={s.colShare}><Pct value={totals.revenue > 0 ? 100 : null} /></span>,
+    product: <span>Total {all ? (pricedTotals ? 'das lojas com custos' : 'das lojas') : 'da loja'}</span>,
+    units: <span className={s.colUnits}><Count value={foot.units} /></span>,
+    orders: <><Count value={foot.orders} /><span className={s.inline}>{plural(foot.units, 'unidade', 'unidades')}</span></>,
+    revenue: <Money value={foot.revenue} />,
+    share: <span className={s.colShare}><Pct value={pct(foot.revenue, totals.revenue)} /></span>,
     costs: <span className={s.colCosts}><Money value={costsTotal} tone="none" /></span>,
     contribution: <><Money value={contributionTotal} /><span className={s.inline}>custos {formatMoney(costsTotal)}</span></>,
-    margin: <Pct value={excludedStores.length ? null : totals.contributionMargin} tone="auto" />,
+    margin: <Pct value={pricedTotals ? pricedTotals.contributionMargin : excludedStores.length ? null : totals.contributionMargin} tone="auto" />,
     meta: attribution ? <Money value={attribution.attributedSpend} /> : null,
   }
+  const leftOut = pricedTotals
+    ? ` A linha de total fica com as lojas com custos: ${excludedStores.join(', ')} (${formatMoney(totals.revenue - pricedTotals.revenue)} em ${plural(totals.orders - pricedTotals.orders, 'pedido', 'pedidos')}) não ${excludedStores.length === 1 ? 'tem' : 'têm'} custos configurados.`
+    : ''
 
   return (
     <AppShell ctx={ctx}>
@@ -182,7 +198,7 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
         info={<>{REVENUE_NOTE} {COLUMNS_NOTE}</>}
         flush
         footer={<>
-          <span>Os produtos somam as vendas {all ? 'das lojas' : 'da loja'}: <b className="num">{formatMoney(totals.revenue)}</b> em <b className="num">{plural(totals.orders, 'pedido', 'pedidos')}</b>.</span>
+          <span>Os produtos somam as vendas {all ? 'das lojas' : 'da loja'}: <b className="num">{formatMoney(totals.revenue)}</b> em <b className="num">{plural(totals.orders, 'pedido', 'pedidos')}</b>.{leftOut}</span>
           {attribution && (
             // Linked here + credited in another store + linked to nothing = the
             // store's Meta spend in the books (EPOCH's October left $15.203 out).
@@ -219,6 +235,9 @@ interface Loaded {
   contributionTotal: number
   costsTotal: number
   excludedStores: string[]
+  /** "Todas" with a store left out of the costs: the stores with costs
+   *  summed, for the totals row. Null otherwise (the row is `totals`). */
+  pricedTotals: PnL | null
   attribution: ProductReport['attribution'] | null
 }
 
@@ -237,6 +256,7 @@ async function load(ctx: PageContext): Promise<Loaded> {
       contributionTotal: r.totals.contribution,
       costsTotal: r.totals.variableCosts,
       excludedStores: [],
+      pricedTotals: null,
       attribution: r.attribution,
     }
   }
@@ -257,10 +277,12 @@ async function load(ctx: PageContext): Promise<Loaded> {
     contributionMargin: p.configured ? pct(x.contribution, x.revenue) : null,
     attributedSpend: null,
   })))
+  const excludedStores = list.filter(p => !p.configured && p.totals.revenue > 0).map(p => name.get(p.store.id) ?? p.store.name)
   return {
     rows, totals, configured, attribution: null,
     contributionTotal: withCosts.reduce((s, p) => s + p.totals.contribution, 0),
     costsTotal: withCosts.reduce((s, p) => s + p.totals.variableCosts, 0),
-    excludedStores: list.filter(p => !p.configured && p.totals.revenue > 0).map(p => name.get(p.store.id) ?? p.store.name),
+    excludedStores,
+    pricedTotals: configured && excludedStores.length ? sumTotals(withCosts.map(p => p.totals)) : null,
   }
 }

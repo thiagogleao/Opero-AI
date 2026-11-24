@@ -48,3 +48,25 @@ describe('partsSummingTo', () => {
     expect(partsSummingTo([10.5, 20.25], 30.75)).toEqual(['$10,50', '$20,25'])
   })
 })
+
+describe('the linked spend reads one dollar everywhere', () => {
+  it('pins the linked part to its own rounding and lets the others absorb the remainder', () => {
+    // MOKOO 7d (getProductReport, read-only): attributedSpend 2875.49,
+    // unlinkedSpend 3739.17, Meta 6614.66. Largest remainder alone gave
+    // $2.876 + $3.739 while the sentence and the total row read $2.875.
+    expect(partsSummingTo([2875.49, 0, 3739.17], 6614.66, [0])).toEqual(['$2.875', '$0', '$3.740'])
+    const text = metaSpendSplitText({
+      attributedSpend: 2875.49, billedElsewhere: 0, ownSpendCreditedElsewhere: 0, ownSpendCreditedElsewhereByStore: [], unlinkedSpend: 3739.17,
+    }, 6614.66, names)
+    expect(text).toBe(
+      'Meta ligado = gasto dos anúncios que a jornada da Shopify liga aos pedidos de cada produto ($2.875). '
+      + 'Do gasto no Meta desta loja ($6.615): $2.875 ligado aos produtos daqui e $3.740 sem nenhum pedido do período ligado.',
+    )
+  })
+
+  it('gives a dollar back from the others when the pinned rounding went over', () => {
+    // The books' total ($199,40) is a few cents under the parts' sum: 110,6
+    // rounds to 111, so the free parts give one dollar back to read $199.
+    expect(partsSummingTo([110.6, 49, 40], 199.4, [0])).toEqual(['$111', '$48', '$40'])
+  })
+})

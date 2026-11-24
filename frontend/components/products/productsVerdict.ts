@@ -127,7 +127,8 @@ export function buildProductsVerdict(input: {
     }
     const giftCost = -gifts.reduce((s, p) => s + p.contribution, 0)
     const giftText = gifts.length
-      ? `${plural(gifts.length, 'brinde', 'brindes')} (dados de graça) ${gifts.length === 1 ? 'custou' : 'custaram'} ${formatMoney(giftCost)}`
+      // The participle agrees with the count: "1 brinde (dado de graça) custou".
+      ? `${plural(gifts.length, 'brinde', 'brindes')} (${gifts.length === 1 ? 'dado' : 'dados'} de graça) ${gifts.length === 1 ? 'custou' : 'custaram'} ${formatMoney(giftCost)}`
       : ''
     details.push(losers.length
       ? line({ text: plural(losers.length, 'produto vendido saiu', 'produtos vendidos saíram'), strong: true, tone: 'neg' },

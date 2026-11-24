@@ -24,7 +24,9 @@ describe('buildProductsVerdict', () => {
   it('keeps free gifts out of the "no prejuízo" chip and says what they cost', () => {
     const v = buildProductsVerdict({ ...base, products, totals })
     expect(v.chips.some(c => c.code === 'prejuizo')).toBe(false)
-    expect(v.details.map(d => d.text).join(' ')).toContain('1 brinde (dados de graça) custou $40,00')
+    expect(v.details.map(d => d.text).join(' ')).toContain('1 brinde (dado de graça) custou $40,00')
+    const two = buildProductsVerdict({ ...base, products: [...products, P('Brinde Capy', 2, 0, -12.5)], totals })
+    expect(two.details.map(d => d.text).join(' ')).toContain('2 brindes (dados de graça) custaram $52,50')
   })
 
   it('calls out products sold below cost, gifts apart', () => {
