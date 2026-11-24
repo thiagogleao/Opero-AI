@@ -15,6 +15,9 @@ import { AppShell, PageHeader } from '@/components/shell'
 import { Callout, EmptyState, ErrorState, SkeletonBlock } from '@/components/ui'
 import { CostsEditor } from '@/components/costs/CostsEditor'
 import { loadCatalogue, loadCurrency, loadSavedCosts, loadSavedPreview } from '@/components/costs/load'
+import { loadFirstSale } from '@/components/campaigns/firstSale'
+import { loadArchivedStore } from '@/components/dashboard/archivedStore'
+import { emptyPreviewWhy } from '@/components/costs/emptyPreview'
 import s from '@/components/costs/costs.module.css'
 import { storePageMetadata } from '@/components/settings/pageMetadata'
 
@@ -76,9 +79,13 @@ function EditorSkeleton() {
 
 async function Editor({ ctx }: { ctx: PageContext }) {
   const store = ctx.store!
-  let saved, catalogue, currency
+  let saved, catalogue, currency, firstSale, archivedStore
   try {
-    ;[saved, catalogue, currency] = await Promise.all([loadSavedCosts(store.id), loadCatalogue(store.id), loadCurrency(store)])
+    // loadFirstSale and loadArchivedStore never throw (a failed read is null:
+    // the plain wording, or "arquivada" without its day).
+    ;[saved, catalogue, currency, firstSale, archivedStore] = await Promise.all([
+      loadSavedCosts(store.id), loadCatalogue(store.id), loadCurrency(store), loadFirstSale(ctx), loadArchivedStore(ctx),
+    ])
   } catch (err) {
     console.error('[custos] load', err instanceof Error ? err.message : err)
     return (
@@ -104,7 +111,19 @@ async function Editor({ ctx }: { ctx: PageContext }) {
     <CostsEditor
       key={store.id}
       store={{ id: store.id, name: store.name, timezone: store.timezone, archived: store.archived, currency }}
-      window={{ period: ctx.period, from: ctx.range.from, to: ctx.range.to, periodLabel: ctx.periodLabel, partialLabel: ctx.partialLabel }}
+      window={{
+        period: ctx.period, from: ctx.range.from, to: ctx.range.to, periodLabel: ctx.periodLabel, partialLabel: ctx.partialLabel,
+        // A window that ends before the first sale (Hibikura 25 out – 5 nov,
+        // first sale 7 nov) or starts after an archived store's archive day
+        // (Squishy World 17–23 nov, archived 10 nov): no longer window ending
+        // there has data either, so the empty preview names the date, as the
+        // other pages do.
+        emptyWhy: emptyPreviewWhy({
+          range: ctx.range, today: ctx.today,
+          firstSale: firstSale?.firstOrderDate ?? null,
+          archived: store.archived, archivedOn: archivedStore?.archivedOn ?? null,
+        }),
+      }}
       today={ctx.today}
       saved={saved}
       initialPreview={preview}

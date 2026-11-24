@@ -26,6 +26,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Button, Callout } from '@/components/ui'
+import type { EmptyWindow } from '@/components/dashboard/emptyWindow'
 import {
   canonicalJson, isEmptyConfig, parseProfitConfig,
   type ConfigIssue, type ProfitApiError, type ProfitConfig, type ProfitPreviewResponse, type ProfitSaveResponse,
@@ -49,7 +50,14 @@ import s from './costs.module.css'
 
 export interface CostsEditorProps {
   store: { id: string; name: string; timezone: string; archived: boolean; currency: string | null }
-  window: { period: Period; from: string; to: string; periodLabel: string; /** "parcial · até 13h38" when the window includes today. */ partialLabel: string | null }
+  window: {
+    period: Period; from: string; to: string; periodLabel: string
+    /** "parcial · até 13h38" when the window includes today. */
+    partialLabel: string | null
+    /** Why this window would be empty (./emptyPreview emptyPreviewWhy):
+     *  before the first sale, or after an archived store's archive day. */
+    emptyWhy?: EmptyWindow | null
+  }
   today: string
   saved: { config: ProfitConfig; version: string; configured: boolean; issues: ConfigIssue[]; warnings: ConfigIssue[] }
   /** The saved settings priced for the window, by the server render. */
@@ -410,6 +418,8 @@ export function CostsEditor(props: CostsEditorProps) {
               ? win.periodLabel
               : displayed.period === 'custom' ? displayed.label : PERIODS.find(p => p.key === displayed.period)?.label ?? displayed.label}
             partialLabel={shownIsCurrent ? win.partialLabel : null}
+            emptyWhy={shownIsCurrent ? win.emptyWhy ?? null : null}
+            archived={readOnly}
             split={split}
             onFocusProduct={readOnly ? undefined : focusProduct}
           />

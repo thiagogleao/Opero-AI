@@ -9,17 +9,19 @@
  */
 
 import { BreakdownLedger, Button, Callout, Card, Chip, ErrorState, Money } from '@/components/ui'
+import type { EmptyWindow } from '@/components/dashboard/emptyWindow'
 import { costLines, type ProfitPreviewResponse } from '@/lib/data/profitConfig'
 import type { PnL } from '@/lib/engine/pnl'
 import { formatMoney, formatPct, formatRoas, plural } from '@/lib/format'
 import { SPLIT_SHARE } from '@/lib/views/verdict'
+import { emptyPreviewText } from './emptyPreview'
 import s from './costs.module.css'
 
 const cost = (t: PnL) => t.variableCosts + t.fixedCosts
 /** What the headline judges: profit with costs, revenue − ads without. */
 const headline = (t: PnL, configured: boolean) => (configured ? t.operatingProfit : t.revenue - t.adSpend)
 
-export function PreviewPanel({ preview, busy, error, onRetry, dirty, periodLabel, partialLabel, split, onFocusProduct }: {
+export function PreviewPanel({ preview, busy, error, onRetry, dirty, periodLabel, partialLabel, emptyWhy, archived, split, onFocusProduct }: {
   preview: ProfitPreviewResponse | null
   busy: boolean
   error: string | null
@@ -29,6 +31,14 @@ export function PreviewPanel({ preview, busy, error, onRetry, dirty, periodLabel
   periodLabel: string
   /** "parcial · até 13h38" (store clock) when the preview shown is the page's window. */
   partialLabel: string | null
+  /** Why the window shown would be empty (./emptyPreview emptyPreviewWhy):
+   *  before the first sale, or after an archived store's archive day — a
+   *  longer window ending there has no data either. Used only when the
+   *  window priced nothing; null when it is not the page's window. */
+  emptyWhy?: EmptyWindow | null
+  /** An archived store has no running day (lib/views/page drops `partial`):
+   *  nothing arrives before its "today" closes, so no "parcial" chip. */
+  archived?: boolean
   split: boolean
   /** "definir custo" beside an unpriced product; omitted on a read-only screen. */
   onFocusProduct?: (id: string) => void
@@ -63,7 +73,7 @@ export function PreviewPanel({ preview, busy, error, onRetry, dirty, periodLabel
                 : preview.configured
                   ? <Chip tone="neu" icon="check" size="sm">configuração salva</Chip>
                   : <Chip tone="mut" size="sm">nada salvo ainda</Chip>}
-              {preview.partial && <Chip tone="info" icon="clock" size="sm">{partialLabel ?? 'inclui hoje, parcial'}</Chip>}
+              {preview.partial && !archived && <Chip tone="info" icon="clock" size="sm">{partialLabel ?? 'inclui hoje, parcial'}</Chip>}
               {busy && <Chip tone="mut" size="sm">recalculando…</Chip>}
             </div>
           </div>
@@ -76,10 +86,7 @@ export function PreviewPanel({ preview, busy, error, onRetry, dirty, periodLabel
 
           <div className={busy ? s.pvBusy : undefined}>
             {empty ? (
-              <>
-                <div className={`${s.pvBig} mut`}>Sem vendas</div>
-                <div className={s.pvCap}>Nenhum pedido e nenhum anúncio neste período: não há o que precificar. Escolha um período maior no topo da página.</div>
-              </>
+              <EmptyPreview why={emptyWhy ?? null} />
             ) : (
               <>
                 {!preview.configured && <div style={{ marginBottom: 6 }}><Chip tone="cfg" icon="sliders" size="sm">Custos não configurados</Chip></div>}
@@ -145,6 +152,16 @@ export function PreviewPanel({ preview, busy, error, onRetry, dirty, periodLabel
         </Callout>
       )}
     </div>
+  )
+}
+
+function EmptyPreview({ why }: { why: EmptyWindow | null }) {
+  const t = emptyPreviewText(why)
+  return (
+    <>
+      <div className={`${s.pvBig} mut`}>{t.title}</div>
+      <div className={s.pvCap}>{t.parts.map((p, i) => (p.strong ? <b key={i} className="num">{p.text}</b> : <span key={i}>{p.text}</span>))}</div>
+    </>
   )
 }
 

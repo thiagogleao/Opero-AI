@@ -29,6 +29,7 @@ import { AnchorButton } from '@/components/settings/AnchorButton'
 import { ArchivedNote } from '@/components/settings/ArchivedNote'
 import s from '@/components/settings/settings.module.css'
 import { storePageMetadata } from '@/components/settings/pageMetadata'
+import { addStoreHref } from '@/components/settings/storeParam'
 
 export const dynamic = 'force-dynamic'
 export const generateMetadata = storePageMetadata('Ajustes')
@@ -108,14 +109,17 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
             <FacebookBlock store={store} today={ctx.today} now={ctx.now} returnTo={ctx.hrefWith('/settings')} />
           </Suspense>
           {/* Adding a store keeps the period but not the open store:
-              onboarding reads ?loja as the store being connected. */}
+              onboarding reads a store id in ?loja as the store being
+              connected. Todas is not a store (onboarding starts a new
+              connection on it) and is kept, so "Voltar para Ajustes" comes
+              back to Todas instead of pinning the remembered store. */}
           <Suspense key={`stores-${store.id}`} fallback={<SkeletonBlock lines={4} height={80} />}>
             <StoresBlock
               viewer={ctx.viewer}
               currentId={store.id}
               today={ctx.today}
               hrefFor={id => ctx.hrefWith('/settings', { loja: id })}
-              addHref={ctx.hrefWith('/onboarding?addStore=true', { loja: null })}
+              addHref={addStoreHref(ctx)}
             />
           </Suspense>
           {ctx.isOwner && <OwnerModeBlock />}
