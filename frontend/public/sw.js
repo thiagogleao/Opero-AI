@@ -60,9 +60,11 @@ self.addEventListener('push', event => {
 })
 
 /**
- * Where a tap goes. Older scale alerts pointed at /campaigns, which needs a
- * partner login and shows the cookie's store: they open the phone on the
- * alert's store, campaigns tab, instead. The phone keeps the period it was on.
+ * Where a tap goes. Every push carries the dates it is about
+ * (lib/period notificationHref). Older scale alerts pointed at /campaigns,
+ * which needs a partner login: they open the phone on the alert's store,
+ * campaigns tab, as a push (origem=push). They carry no date, so the phone
+ * opens them on its saved period and says so ("Notificação antiga, sem data").
  */
 function targetOf(data) {
   const home = new URL('/m', self.location.origin)
@@ -72,6 +74,7 @@ function targetOf(data) {
   if (u.pathname === '/campaigns' || u.pathname.startsWith('/campaigns/')) {
     if (data.tenantId) home.searchParams.set('loja', String(data.tenantId))
     home.searchParams.set('aba', 'campanhas')
+    home.searchParams.set('origem', 'push')
     return home.href
   }
   return u.href
@@ -96,18 +99,21 @@ self.addEventListener('notificationclick', event => {
       const p = pathOf(c.url)
       return p === '/m' || p.startsWith('/m/')
     })
-    if (!app) return self.clients.openWindow(target)
-    // Reuse the open app, but show what was tapped. navigate() only works on a
-    // window this worker controls; otherwise the page is asked to go there.
-    if (app.url !== target) {
-      try {
-        if ('navigate' in app) {
-          const navigated = await app.navigate(target)
+    if (!app) {
+      // A window of this app that is not on /m: take it there; else a new one.
+      const other = clients.find(c => { try { return new URL(c.url).origin === self.location.origin } catch { return false } })
+      if (other && 'navigate' in other) {
+        try {
+          const navigated = await other.navigate(target)
           if (navigated) return navigated.focus()
-        }
-      } catch { /* not controlled by this worker */ }
-      app.postMessage({ type: 'navigate', url: target })
+        } catch { /* not controlled by this worker */ }
+      }
+      return self.clients.openWindow(target)
     }
+    // An open /m: ALWAYS post the URL, even when the window already shows it
+    // (a re-tap of the same notification is a fresh open, lib/period R16/R17),
+    // never client.navigate (a reload would read as a restore).
+    app.postMessage({ type: 'navigate', url: target })
     return 'focus' in app ? app.focus() : undefined
   })())
 })

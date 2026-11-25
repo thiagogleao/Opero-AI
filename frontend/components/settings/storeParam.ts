@@ -1,4 +1,5 @@
 import { ALL_STORES, type PageContext, type SearchParams } from '@/lib/views/page'
+import { desktopHref } from '@/lib/period'
 
 const first = (v: string | string[] | undefined): string | null => {
   const s = (Array.isArray(v) ? v[0] : v)?.trim()
@@ -25,13 +26,11 @@ const ADD_STORE_PATH = '/onboarding?addStore=true'
 
 /**
  * Ajustes' "Adicionar loja" link: /onboarding?addStore=true with the page's
- * period (and parte). A store id never travels: onboarding reads ?loja=<id> as
- * the store being connected and would carry on with that store's setup. Todas
- * does, when Ajustes was opened from it (ctx.fromAll): onboarding reads it as no
- * store (askedStoreId) and its "Voltar para Ajustes" keeps it, so the round
- * trip comes back to Todas. Dropping it there sent the person back to the
- * remembered store, and the sidebar stopped carrying Todas.
+ * period (and parte), built by lib/period desktopHref. A store id never
+ * travels: onboarding reads ?loja=<id> as the store being connected, so the
+ * link names Todas (loja=todas), which onboarding reads as no store
+ * (askedStoreId).
  */
-export function addStoreHref(ctx: Pick<PageContext, 'fromAll' | 'hrefWith' | 'navHref'>): string {
-  return ctx.fromAll ? ctx.navHref(ADD_STORE_PATH) : ctx.hrefWith(ADD_STORE_PATH, { loja: null })
+export function addStoreHref(ctx: Pick<PageContext, 'selection'>): string {
+  return desktopHref(ADD_STORE_PATH, { ...ctx.selection, scope: { kind: 'all' } })
 }

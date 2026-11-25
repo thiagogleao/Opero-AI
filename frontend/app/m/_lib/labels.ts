@@ -156,7 +156,7 @@ export function ptNumbers(text: string): string {
  * before) — exactly the deadline an "até" line must not overstate. "hoje" and
  * "amanhã" when they apply. Null when the value does not parse.
  */
-export function dueByLabel(dueBy: string, tz: string, now: Date = new Date()): string | null {
+export function dueByLabel(dueBy: string, tz: string, now: Date = new Date()): string | null { // clock-ok: default for callers without a clock
   const iso = dueBy.trim().replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00')
   const at = new Date(iso)
   if (Number.isNaN(at.getTime())) return null
@@ -260,7 +260,9 @@ export function campaignGapNotes(notes: readonly {
  * "(17–23 nov (MOKOO, …); 18–24 nov (Hibikura))". The windows name only
  * stores with campaigns of their own (lib/views/mobileDetail mergeCampaigns).
  */
-export function judgedWindowsText(windows: readonly { label: string; stores: readonly string[] }[]): string {
+export function judgedWindowsText(windows: readonly { label: string; stores: readonly string[] }[], archived = false): string {
+  // An archived store is consultation only: no action is judged (R10).
+  if (archived) return 'Loja arquivada: só consulta, sem ação a julgar; o dinheiro, nos dias lidos até o arquivamento.'
   const tail = 'o dinheiro, no período escolhido.'
   if (windows.length === 0) return `A ação é julgada nos últimos 7 dias fechados; ${tail}`
   if (windows.length === 1) return `A ação é julgada nos últimos 7 dias fechados (${windows[0].label}); ${tail}`

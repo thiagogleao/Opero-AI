@@ -28,7 +28,7 @@ const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v)
 export default async function KeysPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
   const sp = await searchParams
   // The Shopify callback comes back with ?store=<id> (the store just reconnected).
-  const ctx = await getPageContext({ ...sp, loja: one(sp.loja) ?? one(sp.store) }, { scope: 'store' })
+  const ctx = await getPageContext({ ...sp, loja: one(sp.loja) ?? one(sp.store) }, { path: '/settings/chaves', scope: 'store' })
   const flags = { shopify_connected: one(sp.shopify_connected), shopify_error: one(sp.shopify_error) }
 
   return (

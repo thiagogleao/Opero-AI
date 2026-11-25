@@ -27,6 +27,7 @@
 
 import type { VerdictLine } from '@/lib/views/verdict'
 import { formatCount, formatMoney, formatPct, formatPp, formatRoas, pctChange, readablePctChange, type MoneyOptions } from '@/lib/format'
+import { LiveCountdown } from './LiveCountdown'
 import s from './Display.module.css'
 
 const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ')
@@ -117,6 +118,10 @@ export function Delta({ current, previous, label, kind = 'money', goodWhen = 'up
 }
 
 export function RichLine({ line, className }: { line: VerdictLine; className?: string }) {
+  // The countdown line ticks on the screen's clock (R8), not frozen at render.
+  if (line.countdown) {
+    return <span className={cx(s.rich, className)}><LiveCountdown tz={line.countdown.tz} suffix={line.countdown.suffix} initial={line.text} /></span>
+  }
   return (
     <span className={cx(s.rich, className)}>
       {line.parts.map((p, i) => p.strong

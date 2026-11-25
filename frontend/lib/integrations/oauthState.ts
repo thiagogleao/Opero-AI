@@ -1,6 +1,6 @@
 import crypto from 'node:crypto'
 import type { Viewer } from '../access'
-import { isIsoDate, isPeriod } from '../engine/dates'
+import { periodQuery } from '../period/url'
 import { sameString, signPayload, verifyPayload } from './keys'
 
 /**
@@ -93,17 +93,8 @@ export function safeReturnTo(raw: string | null | undefined, fallback: (typeof R
   let u: URL
   try { u = new URL(raw, LOCAL) } catch { return fallback }
   if (u.origin !== LOCAL || !(RETURN_PATHS as readonly string[]).includes(u.pathname)) return fallback
-  const out = new URLSearchParams()
-  const periodo = u.searchParams.get('periodo')
-  const de = u.searchParams.get('de')
-  const ate = u.searchParams.get('ate')
-  if (periodo === 'custom') {
-    if (isIsoDate(de) && isIsoDate(ate)) { out.set('periodo', periodo); out.set('de', de); out.set('ate', ate) }
-  } else if (isPeriod(periodo)) {
-    out.set('periodo', periodo)
-  }
-  if (u.searchParams.get('parte') === '50') out.set('parte', '50')
-  const qs = out.toString()
+  // lib/period's own parse (normalised dates, the split), never a copy (R3).
+  const qs = periodQuery(u.searchParams).toString()
   return qs ? `${u.pathname}?${qs}` : u.pathname
 }
 

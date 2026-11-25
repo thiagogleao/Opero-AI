@@ -53,7 +53,8 @@ describe('parseDetailQuery', () => {
   })
   it('a range wholly before 2000 is a 400 (as /api/mobile); a long or older one passes and is cut when priced', () => {
     expect(() => q('section=produtos&period=custom&from=1990-01-01&to=1995-01-01')).toThrow('Escolha datas a partir de 1 jan 2000')
-    expect(q('section=produtos&period=custom&from=1990-01-01&to=2026-11-17')).toMatchObject({ from: '1990-01-01', to: '2026-11-17' })
+    // Normalised by lib/period (R9): the last 366 days ending at the asked end.
+    expect(q('section=produtos&period=custom&from=1990-01-01&to=2026-11-17')).toMatchObject({ from: '2025-11-17', to: '2026-11-17' })
   })
 })
 

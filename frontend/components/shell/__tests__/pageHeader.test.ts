@@ -2,7 +2,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import type { PageContext } from '@/lib/views/page'
-import { PageHeader, PeriodNote, periodName, periodNoteText, splitChipText } from '../PageHeader'
+import { PageHeader, PeriodHeading, PeriodNote, periodName, periodNoteText, splitChipText } from '../PageHeader'
 
 // Regression: with ?parte=50 the header said "sua parte (50%)" on every page,
 // also right above Produtos' "$7.313 de contribuição dos produtos" — the
@@ -19,6 +19,8 @@ function ctx(split: boolean): PageContext {
     scope: 'store', split, rangeNote: null, rangeLabel: '16–22 nov', periodLabel: 'Últimos 7 dias',
     scopeName: 'MOKOO', selected: [], store: { id: MOKOO, name: 'MOKOO', archived: false },
     storeOption: MOKOO_OPTION, storeOptions: [MOKOO_OPTION],
+    resolution: { selection: { period: { kind: 'preset', preset: '7d' } }, label: { short: 'Últimos 7 dias', full: 'Últimos 7 dias · 16–22 nov' } },
+    noteLine: null,
   } as unknown as PageContext
 }
 
@@ -76,31 +78,19 @@ describe('PageHeader of an archived store', () => {
 // Dates a Todas row (or Atribuição's link) read on another clock carry the
 // preset they stand for (?volta, lib/views/page): the header said "Período
 // escolhido" for dates the owner never picked.
-describe('PageHeader on dates a link read on another clock (volta)', () => {
-  const base = {
-    period: 'custom', periodLabel: '24 nov', rangeLabel: '24 nov', partial: true, today: '2026-11-24',
-    timezone: 'Asia/Tokyo', selected: [],
-  }
-  it('names the preset and whose dates they are, for a store and for Todas', () => {
-    const store = { ...base, scope: 'store', params: { volta: 'today' } } as unknown as PageContext
-    expect(periodName(store)).toBe('Hoje de Todas as lojas')
-    expect(periodNoteText(store)).toBe('As datas de “Hoje” em Todas as lojas: 24 nov no horário de Tóquio; hoje entra parcial. Ao trocar de loja, o período volta para “Hoje”.')
-    const all = { ...base, scope: 'all', params: { volta: '7d' } } as unknown as PageContext
-    expect(periodName(all)).toBe('Últimos 7 dias da outra loja')
-    expect(periodNoteText(all)).toMatch(/^As datas de “Últimos 7 dias” da loja de onde você veio: 24 nov, com hoje parcial\. Ao escolher uma loja, o período volta para “Últimos 7 dias”\.$/)
+// The period's name is lib/period's one naming function (Resolution.label,
+// R7): no row dates exist any more, so no "Hoje de Todas as lojas".
+describe('periodName', () => {
+  const res = (period: unknown, short: string, full: string) =>
+    ({ resolution: { selection: { period }, label: { short, full } } }) as unknown as PageContext
+  it('a preset is named by its label; dates by themselves, as asked', () => {
+    expect(periodName(res({ kind: 'preset', preset: '7d' }, 'Últimos 7 dias', 'Últimos 7 dias · 16–22 nov'))).toBe('Últimos 7 dias')
+    expect(periodName(res({ kind: 'dates', from: '2026-11-24', to: '2026-11-24' }, '24 nov (hoje)', '24 nov (hoje)'))).toBe('24 nov (hoje)')
+    expect(periodName(res({ kind: 'dates', from: '2026-11-25', to: '2026-11-25' }, '25 nov', '25 nov · ainda não começou em Brasília'))).toBe('25 nov · ainda não começou em Brasília')
   })
-  // Todas opened on Hibikura's "Ontem" (Atribuição's link) said "da outra
-  // loja": getPageContext now names the store (ctx.rowDatesOf).
-  it('on Todas, names the store the dates came from when there is one', () => {
-    const all = { ...base, partial: false, scope: 'all', params: { volta: 'yesterday' }, rowDatesOf: 'Hibikura' } as unknown as PageContext
-    expect(periodName(all)).toBe('Ontem da Hibikura')
-    expect(periodNoteText(all)).toBe('As datas de “Ontem” da Hibikura: 24 nov. Ao escolher uma loja, o período volta para “Ontem”.')
-    // A store page only keeps Todas' row dates (lib/views/page rowDateClocks).
-    const store = { ...base, scope: 'store', params: { volta: 'today' }, rowDatesOf: 'Todas as lojas' } as unknown as PageContext
-    expect(periodName(store)).toBe('Hoje de Todas as lojas')
-  })
-  it('without volta a custom window is still "Período escolhido"', () => {
-    expect(periodName({ ...base, scope: 'store', params: {} } as unknown as PageContext)).toBe('Período escolhido')
+  it('the landing note reads under the header', () => {
+    const c = { ...ctx(false), noteLine: 'Hoje na Hibikura é 25 nov (dia de Tóquio). Em Todas as lojas, Hoje é 24 nov.' } as unknown as PageContext
+    expect(renderToStaticMarkup(createElement(PageHeader, { ctx: c }))).toContain('Hoje na Hibikura é 25 nov (dia de Tóquio).')
   })
 })
 
@@ -124,11 +114,11 @@ describe('PeriodNote of an archived store', () => {
   }
 
   it('Este mês past the archive day names the read days and, on the Resumo, what they are compared with', () => {
-    expect(note(mtd, true)).toBe('1–24 nov no horário de São Paulo. A loja foi arquivada em 10 nov e não sincroniza mais: só 1–10 nov foram lidos, e estes números não mudam. A comparação usa os mesmos dias do mês passado (1–10 out).')
+    expect(note(mtd, true)).toBe('1–24 nov no horário de São Paulo. A loja foi arquivada em 10 nov e não sincroniza mais: só 1–10 nov foram lidos, e estes números não mudam. A comparação usa os mesmos dias do mês passado: 1–10 out.')
     // Pages that compare nothing (Atribuição sets Meta against Shopify) say no comparison sentence.
     expect(note(mtd)).toBe('1–24 nov no horário de São Paulo. A loja foi arquivada em 10 nov e não sincroniza mais: só 1–10 nov foram lidos, e estes números não mudam.')
     const html = renderToStaticMarkup(createElement(PeriodNote, { ctx: { ...base, ...mtd } as unknown as PageContext, compared: true }))
-    expect(html).toContain('A comparação usa os mesmos dias do mês passado (1–10 out).')
+    expect(html).toContain('A comparação usa os mesmos dias do mês passado: 1–10 out.')
   })
 
   it('one read day agrees in the singular', () => {
@@ -137,7 +127,7 @@ describe('PeriodNote of an archived store', () => {
       readRange: { from: '2026-11-10', to: '2026-11-10' },
       comparison: { from: '2026-11-09', to: '2026-11-09', label: 'dia anterior', sameTimeOfDay: false },
       comparisonRangeLabel: '9 nov',
-    }, true)).toContain('só 10 nov foi lido, e estes números não mudam. A comparação usa o dia anterior (9 nov).')
+    }, true)).toContain('só 10 nov foi lido, e estes números não mudam. A comparação usa o dia anterior: 9 nov.')
   })
 
   it('a window wholly after the archive day: nothing read, no day in progress', () => {
@@ -167,5 +157,18 @@ describe('PeriodNote of an archived store', () => {
   it('an active store on 7 dias still says today is in progress', () => {
     expect(note({ store: { id: 'm', name: 'MOKOO', archived: false }, archivedOn: null, period: '7d', range: { from: '2026-11-17', to: '2026-11-23' }, rangeLabel: '17–23 nov' }))
       .toBe('São 7 dias fechados no horário de São Paulo. Hoje (24 nov) ainda está em andamento: fica fora da soma.')
+  })
+})
+
+describe('PeriodHeading (R7: one name)', () => {
+  it('r3 F7 · a custom range is said once ("Atribuição · 10–20 nov"), a preset with its dates', () => {
+    const custom = {
+      rangeLabel: '10–20 nov',
+      resolution: { selection: { period: { kind: 'dates', from: '2026-11-10', to: '2026-11-20' } }, label: { short: '10–20 nov', full: '10–20 nov' } },
+    } as unknown as PageContext
+    const html = renderToStaticMarkup(createElement(PeriodHeading, { ctx: custom })).replace(/<!-- -->/g, '')
+    expect(html.match(/10–20 nov/g)).toHaveLength(1)
+    const preset = renderToStaticMarkup(createElement(PeriodHeading, { ctx: ctx(false) })).replace(/<!-- -->/g, '')
+    expect(preset).toBe('<b>Últimos 7 dias</b> · <span class="num">16–22 nov</span>')
   })
 })

@@ -50,7 +50,7 @@ function ageOf(f: { storeId: string; shopify: LaneFreshness | null; facebook: La
   return { id: f.storeId, name, state, oldest: lanes.some(l => !l.lastSuccessAt) ? null : times[0] ?? null, orders: f.shopify, meta: f.facebook }
 }
 
-export async function Freshness({ stores, now = new Date() }: { stores: { id: string; name: string; archived?: boolean }[]; now?: Date }) {
+export async function Freshness({ stores, now = new Date() }: { stores: { id: string; name: string; archived?: boolean }[]; now?: Date }) { // clock-ok: server render instant default (AppShell passes ctx.now)
   const live = stores.filter(s => !s.archived)
   if (!live.length) return null
   let ages: StoreAge[]

@@ -46,7 +46,8 @@
  */
 
 import Link from 'next/link'
-import { useRouter } from 'next/navigation'
+import { relayed } from '@/components/shell/url'
+import { useShellNavigation } from '@/components/shell/useShellNavigation'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Icon } from './Icon'
 import { InfoTip } from './InfoTip'
@@ -117,7 +118,11 @@ function useHiddenEdges(active: boolean) {
 export function DataTable({
   columns, rows, caption, initialSort, empty, footer, maxHeight, dense, stickyHeader = true, stickyFooter = false, stickyFirstColumn = false,
 }: DataTableProps) {
-  const router = useRouter()
+  // A row click opens its link laid over the latest REQUESTED URL (R13), as
+  // the first cell's link does through the shell's LinkRelay: a period or
+  // store still loading is kept, and the row is registered as in flight so a
+  // pick made right after it lays over it instead of cancelling it.
+  const nav = useShellNavigation()
   const [sort, setSort] = useState(initialSort ?? null)
   const { ref: wrapRef, edges } = useHiddenEdges(rows.length > 0)
 
@@ -186,7 +191,7 @@ export function DataTable({
               // a click anywhere else on the row follows it too.
               onClick={r.href ? e => {
                 if ((e.target as Element).closest('a, button, input, select, textarea, label')) return
-                router.push(r.href!)
+                nav.push(relayed(r.href!))
               } : undefined}
             >
               {columns.map((c, i) => {

@@ -3,10 +3,13 @@
 /**
  * StorePicker — which store (or "Todas as lojas") the page shows.
  *
- * Changing it navigates to the same page with ?loja=<id> (every other state
- * key and the page's own keys kept, one-shot result flags dropped; a page of
- * one store's object, like /creatives/<ad>, opens that store's list instead —
- * see ./url storeSwitchHref), inside a transition so the button shows a
+ * Changing it is an R4 link (lib/period carry): the same page with the chosen
+ * store, the period kept AS ASKED (a preset stays a preset and resolves on the
+ * new store's clock; leaving an archived store opens the default period), the
+ * page keys that survive a store change, and `vem` so the landing page
+ * announces any change of dates. A page of one store's object (/creatives/<ad>)
+ * opens that store's list; Todas from a one-store page opens /overview. It
+ * navigates inside a transition so the button shows a
  * spinner until the new page is there — never a silent stale page, never a
  * stuck "Trocando…". Once the chosen store is on screen it POSTs
  * /api/active-store { storeId } so this browser opens on that store next time
@@ -16,8 +19,8 @@
  * accepts a store id only.
  *
  * A choice made while another navigation is still loading (a period picked
- * during "abrindo…") is laid on top of the URL being opened (./url
- * onTopOfInFlight), so both choices stick.
+ * during "abrindo…") is laid on top of the URL being opened (lib/period layer,
+ * R13), so both choices stick.
  *
  * Accessible listbox: Enter/Space/↓ opens, ↑/↓/Home/End move, Enter picks,
  * Esc closes and returns focus.
@@ -38,34 +41,25 @@
  * The listener must decide synchronously (no await before preventDefault).
  *
  * Props (built by AppShell from the page context):
- *   options   (StoreOption & { query: string; href?: string })[] — query = ctx.hrefWith('', { loja: id });
- *             href (optional) = a full path+query to open instead of the same page
- *             (AppShell sets it on /overview, which cannot show one store)
- *   all       { query: string; count: number; href?: string } | null — the "Todas as lojas"
- *             entry (href set on one-store pages: it opens /overview)
- *   currentId the store id shown, or 'todas'
- *   carriedId the URL's ?loja when it is not the store shown ('todas' on a one-store
- *             page opened from Todas): picking the shown store then pins it (./url pickIsNoop)
+ *   options     StoreOption[] — the viewer's active stores (plus an archived one on screen)
+ *   all         { count: number } | null — the "Todas as lojas" entry
+ *   currentId   the store id shown, or 'todas'
+ *   archivedIds the viewer's archived stores (leaving one does not carry its period)
  */
 
-import { usePathname } from 'next/navigation'
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 import type { StoreOption } from '@/lib/views/page'
 import { Avatar } from '@/components/ui/Card'
 import { Icon } from '@/components/ui/Icon'
-import { navigationInFlight, NAV_LAYER, onTopOfInFlight, pickIsNoop, storeSwitchHref } from './url'
+import { layered, navigationInFlight, pickIsNoop } from './url'
 import { useShellNavigation } from './useShellNavigation'
 import s from './shell.module.css'
 
 export interface StorePickerProps {
-  options: (StoreOption & { query: string; href?: string })[]
-  all: { query: string; count: number; href?: string } | null
+  options: StoreOption[]
+  all: { count: number } | null
   currentId: string
-  /** The ?loja the URL carries when it is not the store shown: 'todas' on a
-   *  one-store page opened from Todas (it shows the remembered store). Picking
-   *  that very store then still navigates, to ?loja=<id>, so the choice sticks
-   *  and the sidebar stops carrying Todas. */
-  carriedId?: string
+  archivedIds?: readonly string[]
 }
 
 /** Cancelable window event sent before the picker opens another store. */
@@ -85,7 +79,7 @@ function mayLeave(detail: BeforeStoreChangeDetail): boolean {
   return window.dispatchEvent(new CustomEvent<BeforeStoreChangeDetail>(BEFORE_STORE_CHANGE, { detail, cancelable: true }))
 }
 
-interface Entry { id: string; name: string; meta: string; query: string; href?: string }
+interface Entry { id: string; name: string; meta: string }
 
 /**
  * The store picked last, to save as this browser's default once it is the
@@ -97,8 +91,7 @@ const rememberWhenShown = (storeId: string | null) => { rememberOnArrival = stor
 
 const NOT_SAVED = 'A loja abriu, mas não ficou salva como padrão neste navegador.'
 
-export function StorePicker({ options, all, currentId, carriedId }: StorePickerProps) {
-  const pathname = usePathname() || '/'
+export function StorePicker({ options, all, currentId, archivedIds = [] }: StorePickerProps) {
   const listId = useId()
   const [open, setOpen] = useState(false)
   const [active, setActive] = useState(0)
@@ -109,9 +102,9 @@ export function StorePicker({ options, all, currentId, carriedId }: StorePickerP
   const list = useRef<HTMLUListElement>(null)
 
   const entries: Entry[] = [
-    ...(all ? [{ id: 'todas', name: 'Todas as lojas', meta: `${all.count} lojas · Brasília`, query: all.query, href: all.href }] : []),
+    ...(all ? [{ id: 'todas', name: 'Todas as lojas', meta: `${all.count} lojas · Brasília` }] : []),
     ...options.map(o => ({
-      id: o.id, name: o.name, query: o.query, href: o.href,
+      id: o.id, name: o.name,
       // A disambiguated name already ends with the code ("Dumpling Squishy · 8jcp3a").
       meta: [o.code && !o.name.endsWith(o.code) ? o.code : null, o.city, o.archived ? 'arquivada' : null].filter(Boolean).join(' · '),
     })),
@@ -165,20 +158,16 @@ export function StorePicker({ options, all, currentId, carriedId }: StorePickerP
   function pick(e: Entry) {
     setOpen(false)
     btn.current?.focus()
-    // While another choice is loading, the store that counts is the one being
-    // opened: picking the store still on screen then takes the choice back.
-    // On a one-store page opened from Todas, the store on screen is not yet a
-    // choice (pickIsNoop): picking it pins it — and the same holds for such a
-    // page still loading (a period picked there carries loja=todas).
-    if (pickIsNoop(e.id, currentId, carriedId, navigationInFlight())) return
-    // Another page (href) starts clean; the same page keeps its own keys,
-    // except on a page of one store's object (an ad), which opens that list
-    // of the chosen store instead (./url DETAIL_ROUTES). A period or split
-    // still loading is kept (onTopOfInFlight).
-    const href = onTopOfInFlight(e.href ?? storeSwitchHref(pathname, e.query), NAV_LAYER.store)
+    // A no-op only when both the latest requested scope and the page shown
+    // agree with the pick (R13); "Todas" on a one-store page always opens
+    // /overview (L53). Picking the store shown is not leaving (L59).
+    const scope = e.id === 'todas' ? { kind: 'all' as const } : { kind: 'store' as const, id: e.id }
+    if (pickIsNoop(scope)) return
+    const href = layered({ kind: 'store', scope }, archivedIds)
     if (!mayLeave({ from: currentId || current?.id || '', to: e.id, href })) return
     nav.push(href)
-    rememberWhenShown(e.id === 'todas' ? null : e.id)
+    // Never Todas, never an archived store (R5).
+    rememberWhenShown(e.id === 'todas' || archivedIds.includes(e.id) ? null : e.id)
   }
 
   function onButtonKey(e: KeyboardEvent<HTMLButtonElement>) {

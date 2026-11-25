@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { sumPnL, type CountryPnL, type DayPnL, type PnL, type PnLLines, type ProductPnL } from '../../engine/pnl'
-import { comparisonRange, shiftDate } from '../../engine/dates'
+import { shiftDate } from '../../engine/dates'
 import {
-  adChannelOf, archivedComparison, campaignHighlights, channelRoas, chargebackLevel, chartSeries, chartValue, comparisonPlan, daysRead, dueInTz, empateGap, kpiDays, ledgerAdCents, readUntil, seriesIdle, storeKpis, topCountries, topProducts, trailRanges, windowDaysSinceStart,
+  adChannelOf, campaignHighlights, channelRoas, chargebackLevel, chartSeries, chartValue, daysRead, dueInTz, empateGap, kpiDays, ledgerAdCents, readUntil, seriesIdle, storeKpis, topCountries, topProducts, trailRanges, windowDaysSinceStart,
   CHARGEBACK_LIMIT_PCT, TRAIL_DAYS,
 } from '../store'
 import type { CampaignRow } from '../../data/campaigns'
@@ -11,39 +11,10 @@ import type { CampaignAction, CampaignDecision } from '../../campaignSignal'
 const pnl = (over: Partial<PnLLines> = {}): PnL => sumPnL([{ ...sumPnL([]), ...over }])
 const day = (date: string, over: Partial<PnLLines> = {}): DayPnL => ({ date, ...pnl(over) })
 
-// 2026-11-17 22:30 in Belém = 2026-11-18 01:30 UTC.
-const NOW = new Date('2026-11-18T01:30:00Z')
-const TZ = 'America/Belem'
 
-describe('comparisonPlan', () => {
-  it('prices a closed window whole', () => {
-    const range = { from: '2026-11-10', to: '2026-11-16' }
-    const cmp = comparisonRange('7d', range, TZ, NOW)
-    expect(comparisonPlan(range, cmp, '2026-11-17', 1350)).toEqual({ kind: 'whole', range: { from: '2026-11-03', to: '2026-11-09' } })
-  })
-
-  it('cuts yesterday at this minute when the window is today', () => {
-    const range = { from: '2026-11-17', to: '2026-11-17' }
-    const cmp = comparisonRange('today', range, TZ, NOW)
-    expect(comparisonPlan(range, cmp, '2026-11-17', 1350)).toEqual({ kind: 'same_time', day: '2026-11-17' })
-  })
-
-  it('cuts only the last day of a month still running, run-up whole', () => {
-    const range = { from: '2026-11-01', to: '2026-11-17' }
-    const cmp = comparisonRange('mtd', range, TZ, NOW)
-    expect(comparisonPlan(range, cmp, '2026-11-17', 1350)).toEqual({
-      kind: 'cut_last', lastDay: '2026-10-17', runUp: { from: '2026-10-01', to: '2026-10-16' }, cutMinutes: 1350,
-    })
-  })
-
-  it('a custom range ending today is cut too (the engine does not flag it as same-time)', () => {
-    const range = { from: '2026-11-15', to: '2026-11-17' }
-    const cmp = comparisonRange('custom', range, TZ, NOW)
-    expect(cmp.sameTimeOfDay).toBe(false)
-    const plan = comparisonPlan(range, cmp, '2026-11-17', 600)
-    expect(plan).toEqual({ kind: 'cut_last', lastDay: '2026-11-14', runUp: { from: '2026-11-12', to: '2026-11-13' }, cutMinutes: 600 })
-  })
-})
+// The comparison plan and the archived comparison moved to lib/period (R6,
+// R10: members[].compare, one rule for every page), tested in
+// lib/period/__tests__/rules.test.ts.
 
 describe('storeKpis', () => {
   const range = { from: '2026-11-10', to: '2026-11-16' }
@@ -264,37 +235,6 @@ describe('readUntil / daysRead', () => {
     const days = [{ date: '2026-11-09' }, { date: '2026-11-10' }, { date: '2026-11-11' }]
     expect(daysRead(days, '2026-11-10').map(d => d.date)).toEqual(['2026-11-09', '2026-11-10'])
     expect(daysRead(days, null)).toHaveLength(3)
-  })
-})
-
-describe('archivedComparison (an archived store has no running day)', () => {
-  const SP = 'America/Sao_Paulo'
-  // 24 nov 2026, 14h23 in São Paulo.
-  const AT = new Date('2026-11-24T17:23:00Z')
-  const sw = { archived: true }
-  it('REGRESSION: Este mês, read up to 10 nov, is compared with 1–10 out, whole days', () => {
-    // It read "caiu 100% vs 1–24 out até 14h23 ($953)" for 10 read days.
-    const range = { from: '2026-11-01', to: '2026-11-24' }
-    const c = archivedComparison(sw, '2026-11-10', range, comparisonRange('mtd', range, SP, AT), SP, AT)
-    expect(c).toMatchObject({ from: '2026-10-01', to: '2026-10-10', label: 'mesmos dias do mês passado', sameTimeOfDay: false })
-    expect(comparisonPlan(range, c, '2026-11-24', 863, true)).toEqual({ kind: 'whole', range: { from: '2026-10-01', to: '2026-10-10' } })
-  })
-  it('30 dias read up to 10 nov: the 17 days right before those read', () => {
-    const range = { from: '2026-10-25', to: '2026-11-23' }
-    const c = archivedComparison(sw, '2026-11-10', range, comparisonRange('30d', range, SP, AT), SP, AT)
-    expect(c).toMatchObject({ from: '2026-10-08', to: '2026-10-24', label: '17 dias anteriores', sameTimeOfDay: false })
-  })
-  it('Hoje is compared with the whole day before, never "até esta hora"', () => {
-    const range = { from: '2026-11-24', to: '2026-11-24' }
-    const c = archivedComparison(sw, '2026-11-10', range, comparisonRange('today', range, SP, AT), SP, AT)
-    expect(c).toMatchObject({ from: '2026-11-23', to: '2026-11-23', label: 'dia anterior', sameTimeOfDay: false })
-    expect(comparisonPlan(range, c, '2026-11-24', 863, true)).toEqual({ kind: 'whole', range: { from: '2026-11-23', to: '2026-11-23' } })
-  })
-  it('a store that is not archived keeps its comparison, cut as before', () => {
-    const range = { from: '2026-11-01', to: '2026-11-24' }
-    const cmp = comparisonRange('mtd', range, SP, AT)
-    expect(archivedComparison({ archived: false }, null, range, cmp, SP, AT)).toBe(cmp)
-    expect(comparisonPlan(range, cmp, '2026-11-24', 863).kind).toBe('cut_last')
   })
 })
 

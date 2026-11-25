@@ -5,7 +5,8 @@
  * this one's. Server component.
  *
  * Props: { rows: BilledElsewhereRow[]; storeName: string; rangeLabel: string;
- *          hrefFor: (storeId) => string }
+ *          hrefFor: (storeId) => string | null — null when the viewer cannot
+ *          see that store (lib/period carry): the name renders without a link }
  */
 
 import Link from 'next/link'
@@ -25,7 +26,7 @@ export const ORDERS_HERE_INFO =
   + 'A campanha entra nesta lista porque a maior parte dos pedidos rastreados dela, desde sempre, caiu nesta loja.'
 
 export function BilledElsewhere({ rows, storeName, rangeLabel, hrefFor }: {
-  rows: BilledElsewhereRow[]; storeName: string; rangeLabel: string; hrefFor: (storeId: string) => string
+  rows: BilledElsewhereRow[]; storeName: string; rangeLabel: string; hrefFor: (storeId: string) => string | null
 }) {
   if (!rows.length) return null
   const columns: DataColumn[] = [
@@ -40,7 +41,10 @@ export function BilledElsewhere({ rows, storeName, rangeLabel, hrefFor }: {
     key: r.campaignId,
     cells: {
       name: <span className={s.cName}>{r.name}</span>,
-      billed: <Link className={s.adLink} href={hrefFor(r.billedStoreId)}>{r.billedStoreName}</Link>,
+      billed: (() => {
+        const href = hrefFor(r.billedStoreId)
+        return href ? <Link className={s.adLink} href={href}>{r.billedStoreName}</Link> : <span>{r.billedStoreName}</span>
+      })(),
       spend: <Money value={r.spend} />,
       pv: <Money value={r.purchaseValue} />,
       roas: <span>{formatRoas(r.spend > 0 ? r.purchaseValue / r.spend : null)}</span>,

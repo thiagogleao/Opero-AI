@@ -1,3 +1,5 @@
+import { defaultPeriod, desktopHref, layer, parsePeriod, sameScope, selectionFromUrl, vemFor } from '@/lib/period'
+
 /**
  * Which links an AI answer may carry: only pages of this app.
  *
@@ -40,41 +42,49 @@ export function internalHref(url: string | null | undefined): string | null {
 }
 
 /**
- * The desktop site's page state in the URL (lib/views/page.ts). `volta` rides
- * with row dates (PageParams.volta): without it an answer link opened a
- * store row's "Hoje" as a frozen "Período escolhido" that kept those dates the
- * next day; with it settleRowDates brings the preset back once the dates are
- * no longer it.
- */
-const PAGE_STATE = ['loja', 'periodo', 'de', 'ate', 'volta', 'parte'] as const
-/** The keys `volta` belongs to: a link that sets any of them has its own
- *  window, and the address's volta would turn its dates into that preset. */
-const WINDOW_KEYS = ['periodo', 'de', 'ate'] as const
-
-/**
  * An app link from an answer, carrying the store the conversation is about
- * and the period on screen: a bare "/campaigns" would open the campaigns of
- * the browser's default store. The store is `storeId` (the conversation's),
- * not the address's `loja`: on "Todas" the conversation is about the store
- * picked in the drawer, while the address says loja=todas — or, after the
- * sidebar link from a store's Resumo, that previous store's id — so an answer
- * about Glooty linked to MOKOO's campaigns. Keys the link already has win; the
- * phone (/m) has its own state and is left alone.
+ * and the period on screen (lib/period desktopHref, R3): a bare "/campaigns"
+ * would open the campaigns of the browser's default store. The store is
+ * `storeId` (the conversation's), not the address's `loja`: on "Todas" the
+ * conversation is about the store picked in the drawer. The period travels
+ * as asked (a preset stays a preset) unless the link names its own; legacy and
+ * unknown keys of the address never reach the link. The phone (/m) has its own
+ * state and is left alone.
+ *
+ * Same scope as the address → an R3 link (no vem). Another scope → an R4
+ * link through lib/period `layer` (carry): it writes `vem`, so the landing
+ * page announces other dates, and leaving an archived store does not carry
+ * its archive-tail dates (`archivedIds`: the viewer's archived stores).
  */
-export function withPageState(href: string, currentSearch: string, storeId: string | null = null): string {
+export function withPageState(href: string, currentSearch: string, storeId: string | null = null, archivedIds: readonly string[] = []): string {
   const hashAt = href.indexOf('#')
-  const hash = hashAt >= 0 ? href.slice(hashAt) : ''
   const noHash = hashAt >= 0 ? href.slice(0, hashAt) : href
   const [path, query = ''] = noHash.split('?', 2)
   if (path === '/m' || path.startsWith('/m/')) return href
-  const out = new URLSearchParams(query)
-  const current = new URLSearchParams(currentSearch)
-  const ownWindow = WINDOW_KEYS.some(k => out.has(k))
-  for (const k of PAGE_STATE) {
-    if (k === 'volta' && ownWindow) continue
-    const v = k === 'loja' && storeId ? storeId : current.get(k)
-    if (v !== null && !out.has(k)) out.set(k, v)
+  const own = new URLSearchParams(query)
+  const cur = selectionFromUrl(`/?${currentSearch.replace(/^\?/, '')}`).selection
+  const ownPeriod = parsePeriod({ periodo: own.get('periodo'), de: own.get('de'), ate: own.get('ate') }).value
+  // A store the link names itself wins; else the conversation's store; else
+  // the address's scope.
+  const ownLoja = own.get('loja')
+  const scope = ownLoja === 'todas' ? { kind: 'all' as const }
+    : ownLoja && /^[A-Za-z0-9_-]{1,64}$/.test(ownLoja) ? { kind: 'store' as const, id: ownLoja }
+      : storeId && /^[A-Za-z0-9_-]{1,64}$/.test(storeId) ? { kind: 'store' as const, id: storeId }
+        : cur?.scope ?? { kind: 'all' as const }
+  const sel = {
+    scope,
+    period: ownPeriod ?? cur?.period ?? defaultPeriod('desktop'),
+    split: own.has('parte') ? own.get('parte') === '50' : cur?.split ?? false,
   }
-  const qs = out.toString()
-  return `${path}${qs ? `?${qs}` : ''}${hash}`
+  // Nothing names a store (no address state, no conversation store): the
+  // bare link, which opens the remembered store.
+  if (!cur && !storeId && !ownLoja && !ownPeriod) return href
+  const otherScope = !!cur && !sameScope(cur.scope, scope)
+  // The link names its own period: the owner's explicit choice (R3), with vem
+  // when it changes the scope.
+  if (ownPeriod) return desktopHref(href, sel, {}, { vem: vemFor(cur, sel, id => archivedIds.includes(id)) })
+  // Another scope: R4, the same path every store link takes (R13 layer).
+  if (otherScope) return layer(`/?${currentSearch.replace(/^\?/, '')}`, { kind: 'page', path: href, scope }, { archivedIds })
+  // An R3 link (spec R3: the AI's links keep the selection): no vem.
+  return desktopHref(href, sel)
 }

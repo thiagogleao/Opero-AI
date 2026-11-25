@@ -16,7 +16,8 @@ import { notFound, redirect } from 'next/navigation'
 import Link from 'next/link'
 import { AccessError, getViewer, listStores, requireStore } from '@/lib/access'
 import { isIsoDate } from '@/lib/engine/dates'
-import { buildHref, parsePageParams, type SearchParams } from '@/lib/views/page'
+import { type SearchParams } from '@/lib/views/page'
+import { desktopHref, keepPeriodHref, selectionFromUrl } from '@/lib/period'
 import { Logo } from '@/components/shell'
 import { ButtonLink } from '@/components/ui'
 import { ArchivedNote } from '@/components/settings/ArchivedNote'
@@ -61,10 +62,17 @@ export default async function OnboardingPage({ searchParams }: { searchParams: P
   // Links out keep the site's URL state (loja, periodo, de/ate, parte), like
   // every other page; the flow's own keys (addStore, fb_connected…) stay here.
   // Todas stays in them: "Voltar para Ajustes" goes back to where the person was.
-  const state = parsePageParams({ ...sp, loja: one(sp.loja) ?? one(sp.store) })
-  const href = (path: string) => buildHref(path, state)
+  // lib/period keepPeriodHref: the period and split only, never a stray key.
+  const q = new URLSearchParams(Object.entries(sp).flatMap(([k, v]) => (typeof one(v) === 'string' ? [[k, one(v)!]] : [])))
+  const loja = one(sp.loja) ?? one(sp.store)
+  // The one link builder (lib/period desktopHref, R3) on the selection the
+  // address names; without a usable store, the period alone.
+  const named = new URLSearchParams(q)
+  if (loja) named.set('loja', loja)
+  const sel = selectionFromUrl(`/?${named.toString()}`).selection
+  const href = (path: string) => (sel ? desktopHref(path, sel) : keepPeriodHref(path, q))
   // The period alone, for the wizard's own links (their store is the one it connects).
-  const keep = buildHref('/', { ...state, loja: null }).split('?')[1] ?? ''
+  const keep = keepPeriodHref('/', q).split('?')[1] ?? ''
 
   return (
     <div className={s.wizard}>

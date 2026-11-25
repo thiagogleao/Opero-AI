@@ -14,7 +14,7 @@ import {
 } from '@/components/ui'
 import { DailyProfitBars, DailyProfitLegend, IntradayCurve, IntradayLegend } from '@/components/charts'
 import {
-  dayOfLabel, formatClock, formatCount, formatDate, formatMoney, formatPct, formatRangeLabel, formatRelativeTime,
+  dayOfLabel, formatClock, formatCount, formatDate, formatMoney, formatPct, formatRelativeTime,
   formatTimeInTz, formatWeekdayDate, partialLabel, plural, tzCity,
 } from '@/lib/format'
 import { minutesIntoDay, todayInTz } from '@/lib/engine/dates'
@@ -26,11 +26,16 @@ import type { MobileResponse } from '@/lib/views/mobile'
 import type { IntradayAside, LiveOrderItem, PortfolioStoreRow } from '@/lib/views/portfolio'
 import { LIVE_FEED_SIZE } from '@/lib/views/portfolioLimits'
 import { dateBeside } from '@/components/campaigns/storeStart'
-import { clockDiffers, rowOpensDates, storeRowSelection, tzOffsetMinutes, type Selection } from '../_lib/selection'
+import { feedAheadText, feedSplit, offsetMinutes } from '@/lib/period'
+
+/** The store's clock reads differently from the phone's right now (UTC
+ *  offsets compared, not zone names: Belém and São Paulo are both UTC−3). */
+const clockDiffers = (tz: string, deviceTz: string, at: Date) => offsetMinutes(tz, at) !== offsetMinutes(deviceTz, at)
 import { noSpendLine, pairNotes, type SharedAds } from '../_lib/sharedAds'
 import { dueByLabel, feedLine, liveFeedSpeed } from '../_lib/labels'
 import { NetBars, NetBarsLegend } from './NetBars'
 import s from '../m.module.css'
+import { rangeBeside } from '@/lib/period'
 
 type Data = MobileResponse
 
@@ -54,7 +59,7 @@ export function ClockBanner({ tz, deviceTz, now }: { tz: string; deviceTz: strin
   if (!now) return null
   const at = new Date(now)
   if (!clockDiffers(tz, deviceTz, at)) return null
-  const diff = tzOffsetMinutes(tz, at) - tzOffsetMinutes(deviceTz, at)
+  const diff = offsetMinutes(tz, at) - offsetMinutes(deviceTz, at)
   const hours = Math.round(Math.abs(diff) / 60)
   const turnedAt = ((-diff % 1440) + 1440) % 1440
   const city = tzCity(tz)
@@ -80,9 +85,15 @@ export function VerdictBlock({ data, v }: { data: Data; v: Verdict }) {
   // A window of several days ending today is compared with the earlier days
   // whole and the last one cut at this hour: the cell says where it stops
   // ("10 dias anteriores · até 04h16 de 9 nov"), as the verdict does.
-  const cut = comparisonCut(data.comparison, data.anchorToday)
-  const cmpLabel = (data.comparison.label === 'ontem até esta hora' ? 'Ontem até esta hora' : data.comparison.label.replace(/^./, c => c.toUpperCase()))
-    + (cut ? ` · ${cut}` : '')
+  // lib/period's words (R6/R7): the cut said once ("Mesmos dias do mês
+  // passado · até 18h11"); no comparison at all says why, never "Dia anterior".
+  const c = data.comparison
+  const none = c.none ?? null
+  const cut = c.cutText !== undefined ? (c.label === 'ontem até esta hora' ? null : c.cutText) : comparisonCut(c, data.anchorToday)
+  const cmpLabel = none !== null
+    ? 'Comparação'
+    : (c.label === 'ontem até esta hora' ? 'Ontem até esta hora' : c.label.replace(/^./, ch => ch.toUpperCase())) + (cut ? ` · ${cut}` : '')
+  const cmpEmpty = none !== null ? (none || 'sem comparação') : c.partialBase ?? 'sem vendas para comparar'
   // The whole window is before the first sale: no "$0 · 0 pedidos" beside a
   // verdict that says the store (or every store) was not selling yet.
   const notYet = v.beforeStart ?? null
@@ -109,7 +120,8 @@ export function VerdictBlock({ data, v }: { data: Data; v: Verdict }) {
               </>
             )}
           </div>
-          <div className={s.pairCell}>
+          {/* A frozen archived window has no comparison at all (R10): no cell. */}
+          {none !== '' && <div className={s.pairCell}>
             <small>{cmpLabel}</small>
             {cmp && (cmp.orders > 0 || cmp.adSpend > 0) ? (
               <>
@@ -118,9 +130,9 @@ export function VerdictBlock({ data, v }: { data: Data; v: Verdict }) {
                 <em>{v.basis === 'revenue_minus_ads' ? 'vendas − anúncios' : cmp.operatingProfit < 0 ? 'de prejuízo' : 'de lucro'} · {formatMoney(cmp.revenue)} em vendas</em>
               </>
             ) : (
-              <><b className="mut">—</b><em>sem vendas para comparar</em></>
+              <><b className="mut">—</b><em>{cmpEmpty}</em></>
             )}
-          </div>
+          </div>}
         </div>
       }
       aside={
@@ -448,7 +460,7 @@ function frozenTailOf(data: Data): string | null {
  *  archive day, else the window's own label: only the days read had nothing. */
 function readSpan(data: Data): string {
   const tail = frozenTailOf(data)
-  return tail ? `${formatRangeLabel({ from: data.range.from, to: tail }, data.anchorToday)}, até a loja ser arquivada` : data.rangeLabel
+  return tail ? `${rangeBeside({ from: data.range.from, to: tail }, { window: data.range, comparison: data.comparison, clockToday: data.anchorToday })}, até a loja ser arquivada` : data.rangeLabel
 }
 
 /** "MOKOO e Glooty", "MOKOO, EPOCH e Glooty". */
@@ -515,7 +527,17 @@ export function Attention({ data }: { data: Data }) {
 
 // ─── Store list ───────────────────────────────────────────────────────────────
 
-export function StoreList({ data, shared, onPick }: { data: Data; shared: SharedAds; onPick: (patch: Partial<Selection>) => void }) {
+export function StoreList({ data, shared, onPick, opensOther, help = 'Toque numa loja para fixá-la.' }: {
+  data: Data; shared: SharedAds
+  /** A row tap (lib/period phone 'row': a pin outside a visit, a drill-down inside one). */
+  onPick: (storeId: string) => void
+  /** The announcement of a row (lib/period announce, R4): what its store opens
+   *  when that differs from the row; null otherwise. */
+  opensOther: (storeId: string) => string | null
+  /** What a tap does, from lib/period/phone rowHelp: it pins only outside a
+   *  visit; inside one it opens the store on the visit's days (R5/R16). */
+  help?: string
+}) {
   if (data.stores.length < 2) return null
   const singleDay = data.range.from === data.range.to
   const running = singleDay && data.range.to === data.anchorToday
@@ -523,16 +545,14 @@ export function StoreList({ data, shared, onPick }: { data: Data; shared: Shared
   // not an idle store: it ranks above the ones where nothing happened.
   const rank = (r: PortfolioStoreRow) => (active(r) ? 2 : noSalesCashHit(r.totals) ? 1 : 0)
   const rows = [...data.stores].sort((a, b) => rank(b) - rank(a) || b.totals.operatingProfit - a.totals.operatingProfit)
-  // Stores already on another date (Hibikura from 12h in Brasília) open the
-  // dates their row shows when their own clock would read the preset as other
-  // dates (storeRowSelection), and the line says so.
-  const shifted = rows.filter(r => rowOpensDates(r, data))
+  // A row keeps the period (a preset stays a preset, R4); stores whose own
+  // clock reads it as other days (Hibikura after 12h in Brasília) are named
+  // with what they open, by the same function the landing strip uses.
+  const lines = rows.map(r => opensOther(r.id)).filter((x): x is string => !!x)
   return (
     <Block
       title={running ? 'Lojas hoje' : `Lojas · ${data.rangeLabel}`}
-      howTo={`Cada loja no seu dia e no seu fuso. Toque numa loja para fixá-la${shifted.length
-        ? ` (${joinNames(shifted.map(r => r.name))} ${shifted.length > 1 ? 'abrem' : 'abre'} nas mesmas datas, ${data.rangeLabel})`
-        : ''}.`}
+      howTo={`Cada loja no seu dia e no seu fuso. ${help.replace(/\.$/, '')}${lines.length ? ` (${lines.join('; ')})` : ''}.`}
       flush
     >
       <ul className={s.list}>
@@ -554,8 +574,8 @@ export function StoreList({ data, shared, onPick }: { data: Data; shared: Shared
           const pairBadges = shared.badges[r.id] ?? []
           return (
             <li key={r.id}>
-              <button type="button" className={`${s.row} ${s.rowBtn}`} onClick={() => onPick(storeRowSelection(r, data))}
-                aria-label={`Abrir ${r.name}${shifted.includes(r) ? ` em ${data.rangeLabel}` : ''}`}>
+              <button type="button" className={`${s.row} ${s.rowBtn}`} onClick={() => onPick(r.id)}
+                aria-label={`Abrir ${r.name}`}>
                 <Avatar name={r.name} size="sm" />
                 <span>
                   <span className={s.rowName}><StoreName name={r.name} /></span>
@@ -828,7 +848,16 @@ export function LiveFeed({ data, now, deviceTz }: { data: Data; now: number; dev
   // An archived store is not synced and has no feed: no promise of new sales.
   if (data.stores.length > 0 && data.stores.every(r => r.archived)) return null
   const several = data.stores.length > 1
-  const items = all ? data.liveFeed : data.liveFeed.slice(0, 12)
+  // R2: on Todas · Hoje a store whose own day has moved past the window
+  // (Hibikura on Tokyo's 25 nov) has its new sales on a dim line, never among
+  // today's (lib/period feedSplit).
+  const tzOf = (id: string) => data.stores.find(r => r.id === id)?.timezone ?? null
+  const split = feedSplit(data.liveFeed, data.resolution, tzOf)
+  const feed = split.inRead
+  const aheadLines = data.resolution
+    ? split.ahead.map(a => feedAheadText(a, data.stores.find(r => r.id === a.storeId)?.name ?? '', tzOf(a.storeId) ?? 'UTC', data.resolution!))
+    : []
+  const items = all ? feed : feed.slice(0, 12)
   const speed = liveFeedSpeed(data.stores, data.freshness.storesWithoutLiveFeed)
   // One store on another clock: the whole screen (banner, "parcial · até",
   // the curve) is on the store's clock, so the sale times are too, and the
@@ -844,6 +873,7 @@ export function LiveFeed({ data, now, deviceTz }: { data: Data; now: number; dev
       flush={items.length > 0}
       footer={speed.footer ?? undefined}
     >
+      {aheadLines.map(l => <p key={l} className={s.note} style={{ opacity: 0.7, margin: '8px 12px' }}>{l}</p>)}
       {items.length === 0 ? (
         <EmptyState compact icon="clock" title={several ? 'Nenhuma venda recente' : 'Nenhuma venda recente nesta loja'} />
       ) : (
@@ -869,11 +899,11 @@ export function LiveFeed({ data, now, deviceTz }: { data: Data; now: number; dev
               )
             })}
           </ul>
-          {data.liveFeed.length > 12 && (
+          {feed.length > 12 && (
             <button type="button" className={s.moreBtn} onClick={() => setAll(v => !v)}>
               {/* The feed stops at LIVE_FEED_SIZE sales: "todas (40)" claimed a
                   completeness the server never sends. */}
-              {all ? 'Mostrar menos' : data.liveFeed.length >= LIVE_FEED_SIZE ? `Mostrar as ${data.liveFeed.length} mais recentes` : `Mostrar mais ${data.liveFeed.length - 12}`}
+              {all ? 'Mostrar menos' : data.liveFeed.length >= LIVE_FEED_SIZE ? `Mostrar as ${feed.length} mais recentes` : `Mostrar mais ${feed.length - 12}`}
             </button>
           )}
         </>

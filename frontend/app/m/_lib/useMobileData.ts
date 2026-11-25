@@ -12,14 +12,20 @@
  *  - polling every 45 s only while the page is visible (never for an archived
  *    store, which is not synced);
  *  - callbacks read the selection from a ref, never from a stale closure (the
- *    old "Atualizar" re-applied the store of the moment it was tapped for 70 s).
+ *    old "Atualizar" re-applied the store of the moment it was tapped for 70 s);
+ *  - every answer adopts the server's clock (lib/period/client/clock, R19) and
+ *    its store facts (onFacts); the day turning refetches through the turn
+ *    watcher on the answer's nextTurnAt (R8), not only on the next poll.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { MobileResponse } from '@/lib/views/mobile'
 import type { DetailSection, MobileDetailResponse } from '@/lib/views/mobileDetail'
 import type { RefreshResponse, RefreshStatusResponse } from '@/lib/views/refresh'
-import { apiQuery, echoMatches, selectionKey, type Selection } from './selection'
+import type { Selection, ViewerStores } from '@/lib/period'
+import { adoptServerNow, clientNowMs } from '@/lib/period/client/clock'
+import { useTurnWatcher } from '@/lib/period/client/turn'
+import { apiQuery, echoMatches, selectionKey } from './request'
 import { afterFailedStatus, STATUS_GIVE_UP_MS } from './refreshProgress'
 
 export const POLL_MS = 45_000
@@ -30,7 +36,7 @@ export interface LoadError { kind: LoadErrorKind; message: string; at: number }
 /** Turn a failed response into something the screen can say. The auth guard
  *  answers a plain-text 404 ("Not found"); a JSON 404 is an unknown store. */
 async function errorOf(res: Response): Promise<LoadError> {
-  const at = Date.now()
+  const at = Date.now() // clock-ok: when the error arrived (not a period)
   const body = await res.json().catch(() => null) as { error?: unknown } | null
   const msg = typeof body?.error === 'string' ? body.error : null
   if (res.status === 404 && !msg) return { kind: 'session', message: 'Sessão expirada neste aparelho', at }
@@ -60,8 +66,12 @@ export function useMobileData(sel: Selection | null, opts: {
   /** False: fetch on a new selection or on demand only, never on a timer (an
    *  archived store is not synced: nothing new can arrive). */
   poll?: boolean
+  /** The server's store facts of every answer (R19). */
+  onFacts?: (facts: ViewerStores) => void
 } = {}) {
   const poll = opts.poll ?? true
+  const onFacts = useRef(opts.onFacts)
+  useEffect(() => { onFacts.current = opts.onFacts })
   const [state, setState] = useState<HomeState>({ data: null, dataKey: null, fetchedAt: null, error: null, errorKey: null })
   const [loadingKey, setLoadingKey] = useState<string | null>(null)
   const selRef = useRef<Selection | null>(sel)
@@ -81,7 +91,8 @@ export function useMobileData(sel: Selection | null, opts: {
     }
     const ctrl = new AbortController()
     inflight.current = { key, ctrl }
-    lastStart.current = Date.now()
+    lastStart.current = Date.now() // clock-ok: poll spacing (device time is enough)
+    const sentAt = Date.now() // clock-ok: the server-clock sample needs the device clock
     setLoadingKey(key)
     const stillWanted = () => !ctrl.signal.aborted && !!selRef.current && selectionKey(selRef.current) === key
 
@@ -93,13 +104,17 @@ export function useMobileData(sel: Selection | null, opts: {
           return
         }
         const body = await res.json() as MobileResponse
-        // Dropped unless it answers exactly what is on screen now.
+        const receivedAt = Date.now() // clock-ok: the server-clock sample needs the device clock
+        if (body.serverNow) adoptServerNow(body.serverNow, sentAt, receivedAt)
+        if (body.facts) onFacts.current?.(body.facts)
+        // Dropped only when it answers another selection than the one on
+        // screen (R19); its window is the server's and is shown as it is.
         if (!stillWanted() || !echoMatches(body.request, selRef.current!)) return
-        setState({ data: body, dataKey: key, fetchedAt: Date.now(), error: null, errorKey: null })
+        setState({ data: body, dataKey: key, fetchedAt: receivedAt, error: null, errorKey: null })
       })
       .catch(err => {
         if (isAbort(err) || !stillWanted()) return
-        setState(prev => ({ ...prev, error: { kind: 'network', message: 'Sem conexão com o servidor', at: Date.now() }, errorKey: key }))
+        setState(prev => ({ ...prev, error: { kind: 'network', message: 'Sem conexão com o servidor', at: Date.now() /* clock-ok: error timestamp, not a period */ }, errorKey: key }))
       })
       .finally(() => {
         if (inflight.current?.ctrl === ctrl) {
@@ -126,7 +141,7 @@ export function useMobileData(sel: Selection | null, opts: {
     const stop = () => { if (timer !== null) { clearInterval(timer); timer = null } }
     const onVisibility = () => {
       if (document.visibilityState === 'visible') {
-        if (Date.now() - lastStart.current >= POLL_MS) load('poll')
+        if (Date.now() - lastStart.current >= POLL_MS) load('poll') // clock-ok: poll spacing
         start()
       } else stop()
     }
@@ -142,6 +157,12 @@ export function useMobileData(sel: Selection | null, opts: {
   }, [load, poll])
 
   useEffect(() => () => inflight.current?.ctrl.abort(), [])
+
+  // The day turning (R8): the answer on screen says when its day turns; at
+  // that instant (server time, guarded against loops) the same selection is
+  // fetched again and the server re-resolves it. Also on resume and bfcache.
+  const shown = state.dataKey === key ? state.data : null
+  useTurnWatcher({ nextTurnAt: shown?.resolution?.nextTurnAt ?? null, onTurn: () => load('poll') })
 
   return { ...state, loadingKey, load }
 }
@@ -196,7 +217,7 @@ export function useDetail(
       if (inflightKey.current === key) return
       const prev = fetchedRef.current
       const sameWindow = !homeRange || prev?.range === homeRange
-      if (prev && prev.key === key && sameWindow && Date.now() - prev.at < DETAIL_STALE_MS) return
+      if (prev && prev.key === key && sameWindow && Date.now() - prev.at < DETAIL_STALE_MS) return // clock-ok: staleness
     }
     ctrlRef.current?.abort()
     const ctrl = new AbortController()
@@ -217,12 +238,13 @@ export function useDetail(
         }
         const body = await res.json() as MobileDetailResponse
         if (!wanted() || body.request.section !== section || !echoMatches(body.request, sel)) { settle({}); return }
-        fetchedRef.current = { key, at: Date.now(), range: `${body.range.from}|${body.range.to}` }
-        settle({ data: body, dataKey: key, fetchedAt: Date.now(), error: null, errorKey: null })
+        const at = Date.now() // clock-ok: staleness
+        fetchedRef.current = { key, at, range: `${body.range.from}|${body.range.to}` }
+        settle({ data: body, dataKey: key, fetchedAt: at, error: null, errorKey: null })
       })
       .catch(err => {
         if (isAbort(err)) { if (ctrlRef.current === ctrl) settle({}); return }
-        settle(wanted() ? { error: { kind: 'network', message: 'Sem conexão com o servidor', at: Date.now() }, errorKey: key } : {})
+        settle(wanted() ? { error: { kind: 'network', message: 'Sem conexão com o servidor', at: Date.now() /* clock-ok: error timestamp, not a period */ }, errorKey: key } : {})
       })
     // `sel` and `section` are represented by `key`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -271,7 +293,7 @@ export function useRefresh(onFinished: () => void) {
     ctrlRef.current?.abort()
     const ctrl = new AbortController()
     ctrlRef.current = ctrl
-    const startedAt = Date.now()
+    const startedAt = Date.now() // clock-ok: refresh progress timing
     setRun({ ...IDLE_RUN, phase: 'starting', startedAt })
     try {
       const res = await fetch('/api/mobile/refresh', {
@@ -308,7 +330,7 @@ export function useRefresh(onFinished: () => void) {
           // `continue` here spun forever with "Atualizar" disabled.
           failures += 1
           const e = await errorOf(st)
-          const step = afterFailedStatus(e.kind === 'network' ? 'server' : e.kind, e.message, failures, Date.now() - startedAt)
+          const step = afterFailedStatus(e.kind === 'network' ? 'server' : e.kind, e.message, failures, Date.now() - startedAt) // clock-ok: refresh progress timing
           if (step.do === 'wait') continue
           if (step.do === 'giveUp') {
             setRun(r => ({ ...r, phase: 'done', gaveUpAfterMin }))
@@ -330,7 +352,7 @@ export function useRefresh(onFinished: () => void) {
           doneRef.current()
           return
         }
-        if (Date.now() - startedAt > STATUS_GIVE_UP_MS) {
+        if (Date.now() - startedAt > STATUS_GIVE_UP_MS) { // clock-ok: refresh progress timing
           // Say how far the runs got (refreshOutcome); reload the numbers only
           // if something actually finished.
           setRun(r => ({ ...r, phase: 'done', status, gaveUpAfterMin }))
@@ -350,11 +372,12 @@ export function useRefresh(onFinished: () => void) {
 
 // ─── Clock ────────────────────────────────────────────────────────────────────
 
-/** "Now" for relative times, refreshed every 30 s (render stays pure). */
+/** "Now" on the server-corrected clock (lib/period/client/clock clientNow,
+ *  R19), refreshed every 30 s (render stays pure). */
 export function useNow(intervalMs = 30_000): number {
   const [now, setNow] = useState(0)
   useEffect(() => {
-    const tick = () => setNow(Date.now())
+    const tick = () => setNow(clientNowMs())
     const first = setTimeout(tick, 0)
     const t = setInterval(tick, intervalMs)
     return () => { clearTimeout(first); clearInterval(t) }

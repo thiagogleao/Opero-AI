@@ -39,14 +39,15 @@ export async function loadSavedCosts(storeId: string): Promise<SavedCosts> {
 
 /** The saved settings priced over `range` — exactly what the dashboard shows
  *  (the engine reads the stored row itself, no override). */
-export async function loadSavedPreview(store: StoreRef, period: Period, range: DateRange, saved: SavedCosts): Promise<ProfitPreviewResponse> {
-  const run = await computeStorePnL(store.id, range, { products: true })
+export async function loadSavedPreview(store: StoreRef, period: Period, range: DateRange, saved: SavedCosts, now: Date): Promise<ProfitPreviewResponse> {
+  // The page's own instant (ctx.now): the preview prices what the header names.
+  const run = await computeStorePnL(store.id, range, { products: true }, now)
   if (!run) throw new Error('store not priced')
   return {
     store: { id: store.id, name: store.name, timezone: store.timezone, archived: store.archived },
     period,
     range,
-    label: formatRange(range, todayInTz(store.timezone)),
+    label: formatRange(range, todayInTz(store.timezone, now)),
     partial: run.partial,
     source: 'saved',
     configured: run.configured,

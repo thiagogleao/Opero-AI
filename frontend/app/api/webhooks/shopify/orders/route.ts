@@ -1,7 +1,8 @@
 import { query } from '@/lib/db'
-import { computeStorePnL, todayInTz } from '@/lib/engine'
+import { computeStorePnL } from '@/lib/engine'
 import { sendPushToAll } from '@/lib/push'
 import { localDay } from '@/lib/sync/orderMapping'
+import { dayPhrase, newNonce, notificationHref, todayIn } from '@/lib/period'
 import { adminUrl, isOrderTopic, webhookAuthMethod } from '@/lib/sync/shopifyApi'
 import { usdRate } from '@/lib/sync/fx'
 import { salePushText } from '@/lib/sync/salePush'
@@ -40,13 +41,14 @@ async function findTenant(shopDomain: string): Promise<Tenant | null> {
   return rows[0] ?? null
 }
 
-/** This store's profit so far today (the engine's "lucro"), or null when the
- *  store has no cost settings or the lookup is slow. */
-async function todayProfit(tenantId: string, tz: string): Promise<number | null> {
-  const today = todayInTz(tz)
+/** This store's profit on `day` (the engine's "lucro") priced at `now`, or
+ *  null when the store has no cost settings or the lookup is slow. `day` is
+ *  the sale's own day, the one the push link opens (R17): pricing the
+ *  webhook's run day split the two across midnight. */
+async function dayProfit(tenantId: string, day: string, now: Date): Promise<number | null> {
   try {
     const pnl = await Promise.race([
-      computeStorePnL(tenantId, { from: today, to: today }),
+      computeStorePnL(tenantId, { from: day, to: day }, {}, now),
       new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 2000)),
     ])
     return pnl && pnl.configured ? pnl.totals.operatingProfit : null
@@ -154,7 +156,7 @@ export async function POST(req: Request) {
     [
       tenant.id, orderId, order.name ? String(order.name) : null, total, currency, country, custName,
       JSON.stringify(lineItems.map(item => ({ title: item.title, quantity: item.quantity, price: item.price }))),
-      order.created_at ? new Date(String(order.created_at)) : new Date(),
+      order.created_at ? new Date(String(order.created_at)) : new Date(), // clock-ok: a live-feed row's fallback timestamp, not a period
     ],
   )
   if (inserted.length === 0) return new Response('OK', { status: 200 })
@@ -169,22 +171,26 @@ export async function POST(req: Request) {
     usdTotal = rate ? total * rate : null
   }
 
-  const profit = await todayProfit(tenant.id, tenant.timezone)
+  // One instant for the whole push (P6): the sale's day, the profit priced on
+  // it and the word for it ("hoje" only while it still is today there).
+  const now = new Date() // clock-ok: the webhook's arrival instant
+  const created = order.created_at ? new Date(String(order.created_at)) : null
+  const saleDay = todayIn(tenant.timezone, created && !Number.isNaN(created.getTime()) ? created : now)
+  const profit = await dayProfit(tenant.id, saleDay, now)
   const { title, body } = salePushText({
-    storeName, orderLabel, total, currency, usdTotal, profitToday: profit, lineItems, country,
+    storeName, orderLabel, total, currency, usdTotal, profitToday: profit, profitDay: dayPhrase(saleDay, todayIn(tenant.timezone, now)), lineItems, country,
   })
   try {
     await sendPushToAll({
       kind: 'sale',
       title,
       body,
-      // The push says "Lucro hoje": open that day — the store's today at the
-      // sale (`dia`), so a tap the next morning opens that day, not the new
-      // one (app/m/_lib/selection notificationDay). Without a period the phone
-      // restores the last one used (a tap could land on "7 dias"). Same URL as
-      // lib/alerts storeUrl, inlined so the webhook does not load the alerts
-      // module graph.
-      url: `/m?loja=${encodeURIComponent(tenant.id)}&periodo=today&dia=${todayInTz(tenant.timezone)}`,
+      // The day the SALE is in, on the store's calendar (the order's
+      // created_at, not the webhook's run time: an order at 23:59:50 delivered
+      // after midnight belongs to the day before). One producer for every push
+      // link (lib/period notificationHref, R17): a visit on those dates, never
+      // saved, never rolling.
+      url: notificationHref({ loja: tenant.id, from: saleDay, to: saleDay, nonce: newNonce() }),
       tag: `order-${tenant.id}-${orderId}`,
       data: { tenantId: tenant.id, orderId, total, currency, totalUsd: usdTotal, profitToday: profit },
     })

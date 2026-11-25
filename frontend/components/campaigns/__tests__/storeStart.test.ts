@@ -77,9 +77,11 @@ describe('the per-page verdicts before the first sale', () => {
       .toBe('Sem vendas no período')
   })
 
-  it('Países e clientes, with the cost-settings chip of a store without costs', () => {
+  it('r3 F2 · Países e clientes of a store without costs shows only the before-first-sale state (R11 precedence, §9.7)', () => {
     const v = buildCountriesVerdict({ ...common, subjectOf: 'da Glooty', subjectIn: 'na Glooty', rows: [], counts: { withOrders: 0, small: 0 }, totals: empty, configured: false, customers: null, firstSale: { ...HIB, storeName: 'Glooty', firstOrderDate: '2026-11-06' } })
-    expect(v.chips.map(c => c.label)).toEqual(['Vende desde 6 nov', 'Custos não configurados', 'dia de Tóquio'])
+    expect(v.chips.map(c => c.label)).toEqual(['Vende desde 6 nov', 'dia de Tóquio'])
+    const p = buildProductsVerdict({ ...common, subject: 'a Glooty', subjectOf: 'da Glooty', subjectIn: 'na Glooty', products: [], totals: empty, configured: false, firstSale: { ...HIB, storeName: 'Glooty', firstOrderDate: '2026-11-06' } })
+    expect(p.chips.map(c => c.code)).not.toContain('sem_custos')
     expect(v.headline).toBe('A Glooty começou a vender em 6 nov — não há dados de 28 out – 3 nov.')
   })
 

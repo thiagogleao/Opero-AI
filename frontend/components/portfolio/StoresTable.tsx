@@ -13,6 +13,7 @@
  */
 
 import type { PageContext } from '@/lib/views/page'
+import { rangeBeside } from '@/lib/period'
 import type { PortfolioStoreRow, PortfolioView } from '@/lib/views/portfolio'
 import { storeStatusChips, type Verdict } from '@/lib/views/verdict'
 import { formatDate, formatMoney, formatPct, formatRangeLabel, plural } from '@/lib/format'
@@ -27,7 +28,7 @@ import { dateBeside } from '@/components/campaigns/storeStart'
 import type { SharedAdAccount } from '@/lib/attributionModels'
 import { loadRowExtras, type RowExtras } from './data'
 import {
-  adChannels, freshnessCell, lastSaleDate, linkOpensDates, noSalesCashHit, notSellingYet, pairOrdersIn, resultSortValue, resumoLinkOverrides,
+  adChannels, freshnessCell, lastSaleDate, noSalesCashHit, notSellingYet, pairOrdersIn, resultSortValue,
   rowBeforeFirstSale, rowResult, sharedAccountBadges, sumMembers, totalRowIdle, trailGap, trailProfitCount, trailSinceStart, type TrailGap,
 } from './model'
 import s from './portfolio.module.css'
@@ -177,7 +178,9 @@ function TrailCell({ ctx, row, extras, inline = false }: { ctx: PageContext; row
   // Hibikura's bars began 19 days before its first sale and read "8 de 30".
   const { days: pts, startedOn } = trailSinceStart(all, row.firstOrderDate)
   const shown = startedOn ? { from: pts[0].date, to: pts[pts.length - 1].date } : extras.trailRange
-  const shownLabel = `${formatRangeLabel(shown, ctx.today)}${startedOn ? ' (desde que a loja começou)' : ''}`
+  // A range that starts at the store's start is a store-fact range beside
+  // the window (R11 rangeBeside): with its year when the window carries one.
+  const shownLabel = `${rangeBeside(shown, { window: ctx.range, comparison: ctx.comparison, clockToday: ctx.today })}${startedOn ? ' (desde que a loja começou)' : ''}`
   // Drawn as the viewer's share, like the Resumo chart (DailyProfitBars); the
   // tooltip names it and gives the store's whole sum next to it — a bare
   // "soma $809" under ?parte=50 read as Hibikura's whole profit ($1.617).
@@ -258,14 +261,18 @@ export async function StoresTable({ ctx, view, verdict, shared, sharedNow }: {
   sharedNow: SharedAdAccount[] | null
 }) {
   const extras = await loadRowExtras(ctx.selected, ctx.range, ctx.now, shared, sharedNow)
-  // Each row's link to its store, on the dates the row shows (model resumoLinkOverrides).
-  const links = new Map(view.stores.map(row => [row.id, resumoLinkOverrides(row, ctx)]))
+  // Each row is an R4 link (lib/period carry): the period travels as asked
+  // (a preset stays a preset), the store's Resumo resolves it on its own
+  // clock, and `vem=todas` makes it announce other dates on landing. The
+  // help line names, with the same function, the stores whose page opens
+  // other dates than their row shows (L32, L575).
+  const store = (id: string) => ({ kind: 'store' as const, id })
   const rows: DataRow[] = view.stores.map(row => {
     const r = rowResult(row)
     const t = row.totals
     return {
       key: row.id,
-      href: ctx.hrefWith('/', links.get(row.id)),
+      href: ctx.scopeHref('/', store(row.id)) ?? ctx.hrefWith('/'),
       // Greyed only when nothing happened: a row whose chargebacks took money
       // out (noSalesCashHit) is news, not an idle store.
       tone: r.kind === 'none' && !noSalesCashHit(t) ? 'mut' : undefined,
@@ -290,10 +297,8 @@ export async function StoresTable({ ctx, view, verdict, shared, sharedNow }: {
     }
   })
 
-  // Stores whose link carries the row's dates instead of the preset (model
-  // linkOpensDates): a store whose clock is ahead but names the same dates
-  // ("Mês passado" in Tokyo) opens the preset and is not named.
-  const shifted = view.stores.filter(r => linkOpensDates(ctx, links.get(r.id) ?? {})).map(r => r.name)
+  // R4 on the link's help line (lib/period rowsAnnouncement, shared with Campanhas · Todas).
+  const opensOther = ctx.rowsAnnouncement(view.stores.map(r => r.id))
   const vt = verdict.totals
   // Counted like the verdict ("4 lojas na soma"): stores with costs that had
   // something in the window; the rest are named, not counted.
@@ -346,7 +351,7 @@ export async function StoresTable({ ctx, view, verdict, shared, sharedNow }: {
   return (
     <Block
       title="Lojas"
-      howTo={`Cada loja em ${ctx.rangeLabel}, no calendário do próprio fuso, ordenadas por lucro. Clique numa loja para abrir o Resumo dela no mesmo período${shifted.length ? ` (${shifted.join(', ')}: nas mesmas datas, ${formatRangeLabel(ctx.range, ctx.today)})` : ''}.`}
+      howTo={`Cada loja em ${ctx.rangeLabel}, no calendário do próprio fuso, ordenadas por lucro. Clique numa loja para abrir o Resumo dela no mesmo período${opensOther ? ` ${opensOther}` : ''}.`}
       info={<>Lucro real = receita − produto − frete − taxas − Anúncios Meta − Anúncios Shopify − custos fixos, pelo mesmo motor de todas as telas.
         Uma loja sem custos configurados mostra receita − anúncios e fica fora do total. O ROAS de cada loja é comparado com o empate dela
         (receita ÷ contribuição). Ao lado da cidade de cada loja, a leitura mais antiga das fontes dela: pedidos ou Meta.</>}

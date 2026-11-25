@@ -44,7 +44,9 @@ export async function SharedAccountNote({ ctx, store }: { ctx: PageContext; stor
   // failure keeps the plain wording.
   const firstSales = await loadFirstOrderDates([...new Set(pairs.map(p => p.salesStoreId))])
     .catch(err => { console.error('[resumo] shared pair first sale', err); return new Map<string, string>() })
-  const all = <ButtonLink href={ctx.hrefWith('/overview', { loja: null })} size="sm" icon="arrowRight">Ver as lojas juntas</ButtonLink>
+  // R4 (lib/period carry): no button when the viewer cannot open Todas.
+  const allHref = ctx.scopeHref('/overview', { kind: 'all' })
+  const all = allHref ? <ButtonLink href={allHref} size="sm" icon="arrowRight">Ver as lojas juntas</ButtonLink> : null
   const history = (p: SharedAdAccount) => `Nos últimos ${SHARED_LOOKBACK_DAYS} dias, ${plural(p.orders, 'pedido', 'pedidos')} da ${p.salesStoreName} (${formatMoney(p.revenue)}) vieram de anúncios pagos pela ${p.adStoreName}.`
   return (
     <>

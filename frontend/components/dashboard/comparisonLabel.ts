@@ -21,6 +21,9 @@ export interface KpiComparisonLabel {
 }
 
 export function kpiComparisonLabel(cmp: ComparisonWindow, today: string): KpiComparisonLabel {
+  // lib/period's own two labels (R6/R7) whenever the comparison carries them:
+  // the header, the verdict and the pills then say the same cut, once.
+  if (cmp.short && cmp.full) return { short: cmp.short, full: cmp.full }
   const full = comparisonText(cmp, today)
   if (cmp.label === 'ontem até esta hora') return { short: 'vs ontem até esta hora', full }
   const range = formatRangeLabel({ from: cmp.from, to: cmp.to }, today)

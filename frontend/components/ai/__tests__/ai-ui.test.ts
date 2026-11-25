@@ -118,8 +118,9 @@ describe('internalHref (AI18)', () => {
   it('keeps the store and period on screen on an app link', () => {
     const on = '?loja=mokoo&periodo=custom&de=2026-11-01&ate=2026-11-12&parte=50&x=1'
     expect(withPageState('/campaigns', on)).toBe('/campaigns?loja=mokoo&periodo=custom&de=2026-11-01&ate=2026-11-12&parte=50')
-    // The link's own keys win; the hash stays at the end.
-    expect(withPageState('/products?loja=glooty#top', on)).toBe('/products?loja=glooty&periodo=custom&de=2026-11-01&ate=2026-11-12&parte=50#top')
+    // The link's own store wins — another scope, so an R4 link with vem
+    // (period-fix-r1 F32); the hash stays at the end.
+    expect(withPageState('/products?loja=glooty#top', on)).toBe('/products?loja=glooty&periodo=custom&de=2026-11-01&ate=2026-11-12&parte=50&vem=mokoo#top')
     expect(withPageState('/m', on)).toBe('/m')
     expect(withPageState('/campaigns', '')).toBe('/campaigns')
   })
@@ -129,10 +130,12 @@ describe('internalHref (AI18)', () => {
     // address; the drawer's conversation is about Glooty.
     const todas = '?loja=user_3CVoVQYfnj1Ljnm3tf0iHP40fxX&periodo=yesterday'
     const glooty = '5071bfb6-0000-0000-0000-000000000000'
-    expect(withPageState('/campaigns', todas, glooty)).toBe(`/campaigns?loja=${glooty}&periodo=yesterday`)
-    expect(withPageState('/products', '?loja=todas&periodo=7d', glooty)).toBe(`/products?loja=${glooty}&periodo=7d`)
+    // Another scope than the address: R4 (vem), so the landing page announces other dates.
+    expect(withPageState('/campaigns', todas, glooty)).toBe(`/campaigns?loja=${glooty}&periodo=yesterday&vem=user_3CVoVQYfnj1Ljnm3tf0iHP40fxX`)
+    // 7 dias is the desktop default, left out of URLs (lib/period desktopHref).
+    expect(withPageState('/products', '?loja=todas&periodo=7d', glooty)).toBe(`/products?loja=${glooty}&vem=todas`)
     // A link that names its store keeps it; no conversation store: the address.
-    expect(withPageState('/campaigns?loja=other', todas, glooty)).toBe('/campaigns?loja=other&periodo=yesterday')
+    expect(withPageState('/campaigns?loja=other', todas, glooty)).toBe('/campaigns?loja=other&periodo=yesterday&vem=user_3CVoVQYfnj1Ljnm3tf0iHP40fxX')
     expect(withPageState('/campaigns', todas, null)).toBe(`/campaigns${todas}`)
     expect(withPageState('/m', todas, glooty)).toBe('/m')
   })

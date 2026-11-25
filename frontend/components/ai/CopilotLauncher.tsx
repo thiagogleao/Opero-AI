@@ -33,6 +33,8 @@ export interface CopilotLauncherProps {
   from: string
   to: string
   split: boolean
+  /** The viewer's archived stores (answer links leaving one keep no period, R4). */
+  archivedIds?: readonly string[]
 }
 
 const OPEN_KEY = 'opero.copilot.open'
@@ -49,7 +51,7 @@ function writeOpen(open: boolean) {
   } catch { /* storage unavailable: the drawer just won't reopen on the next page */ }
 }
 
-export function CopilotLauncher({ storeId, from, to, split }: CopilotLauncherProps) {
+export function CopilotLauncher({ storeId, from, to, split, archivedIds }: CopilotLauncherProps) {
   // Read on the client only; the drawer itself renders after hydration
   // (useIsClient), so the server HTML never depends on it.
   const [open, setOpen] = useState(readOpen)
@@ -90,7 +92,7 @@ export function CopilotLauncher({ storeId, from, to, split }: CopilotLauncherPro
         {chat.busy && !shown && <span className={s.busyDot} role="status" aria-label="respondendo" />}
       </Button>
       {shown && createPortal(
-        <CopilotDrawer id={drawerId} chat={chat} pageStoreId={storeId} from={from} to={to} split={split} onClose={close} autoFocus={byClick} />,
+        <CopilotDrawer id={drawerId} chat={chat} pageStoreId={storeId} from={from} to={to} split={split} onClose={close} autoFocus={byClick} archivedIds={archivedIds} />,
         document.body,
       )}
     </>

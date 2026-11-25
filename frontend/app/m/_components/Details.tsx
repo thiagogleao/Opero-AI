@@ -20,7 +20,8 @@ import { sharedLeftOutText } from '@/components/countries/sharedText'
 import type {
   CampaignsDetail, CountriesDetail, CreativesDetail, CustomersDetail, DetailSection, MobileDetailResponse, ProductsDetail,
 } from '@/lib/views/mobileDetail'
-import { TABS, type Selection } from '../_lib/selection'
+import type { Selection } from '@/lib/period'
+import { TABS } from '../_lib/request'
 import { useDetail } from '../_lib/useMobileData'
 import { campaignChip, campaignGapNotes, countriesLeftOutLine, countriesMetaSide, creativeChip, judgedWindowsText, shopAdsLine } from '../_lib/labels'
 import { adsElsewhere, type SharedAds } from '../_lib/sharedAds'
@@ -278,7 +279,7 @@ function Campaigns({ d, ctx }: { d: CampaignsDetail; ctx: SectionCtx }) {
   return (
     <Block
       title={`Campanhas · ${formatCount(d.totalCampaigns)}`}
-      howTo={judgedWindowsText(d.decisionWindows)}
+      howTo={judgedWindowsText(d.decisionWindows, !!d.archived)}
       info={<><p>{d.formula}</p>{(['cortar', 'escalar', 'manter', 'observar'] as CampaignAction[]).map(a => <p key={a} style={{ marginTop: 6 }}><b>{a[0].toUpperCase() + a.slice(1)}:</b> {d.rules[a]}</p>)}</>}
       infoLabel="Como cada ação é decidida"
       flush={d.campaigns.length > 0}

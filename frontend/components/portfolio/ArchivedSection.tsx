@@ -2,8 +2,9 @@
  * ArchivedSection — "Lojas arquivadas", collapsed by default. Archived stores
  * are out of "Todas", the pickers and sync (owner's rule); their history is
  * read only when this section is opened (?arquivadas=1), so the overview never
- * pays for it otherwise. Each store links to its Resumo over its whole selling
- * span (an archived store opens by id).
+ * pays for it otherwise. Each store opens its Resumo on the 30 days ending on
+ * its archive day, as dates (R10, lib/period archiveOpening), labelled there
+ * "últimos 30 dias até o arquivamento"; another period is one pick away.
  *
  * ArchivedToggle is the closed state (synchronous); ArchivedList loads.
  */
@@ -11,11 +12,12 @@
 import Link from 'next/link'
 import type { PageContext } from '@/lib/views/page'
 import type { StoreRef } from '@/lib/access'
-import { formatDate, formatMoney, formatRangeLabel, plural } from '@/lib/format'
+import { formatMoney, formatRangeLabel, plural } from '@/lib/format'
 import { Block, ButtonLink, EmptyState, ErrorState, Icon, Money, Pct } from '@/components/ui'
 import { loadArchived } from './data'
 import { storeDayOf } from './model'
 import s from './portfolio.module.css'
+import { archiveOpening, dateBeside } from '@/lib/period'
 
 export const ARCHIVED_PARAM = 'arquivadas'
 
@@ -35,7 +37,7 @@ export async function ArchivedList({ ctx }: { ctx: PageContext }) {
   const hide = <ButtonLink href={ctx.hrefWith('/overview#arquivadas')} size="sm" icon="chevUp">Esconder</ButtonLink>
   let list
   try {
-    list = await loadArchived(ctx.viewer, ctx.now)
+    list = await loadArchived(ctx.viewer, ctx.now, ctx.viewerStores)
   } catch (err) {
     console.error('[overview] archived', err)
     return <Block id="arquivadas" title="Lojas arquivadas" actions={hide}><ErrorState compact /></Block>
@@ -53,8 +55,12 @@ export async function ArchivedList({ ctx }: { ctx: PageContext }) {
         <div className={s.archList}>
           {list.map(a => {
             const t = a.totals
-            const href = a.span
-              ? ctx.hrefWith('/', { loja: a.store.id, periodo: 'custom', de: a.span.from, ate: a.span.to })
+            // R10: the 30 days ending on the archive day, the same opening as
+            // the phone's Ajustes list.
+            const facts = ctx.viewerStores.archived.find(x => x.id === a.store.id)
+            const open = facts ? archiveOpening(facts) : null
+            const href = open
+              ? ctx.hrefWith('/', { loja: a.store.id, periodo: 'custom', de: open.from, ate: open.to })
               : ctx.hrefWith('/', { loja: a.store.id })
             const result = t ? (a.configured ? t.operatingProfit : t.revenue - t.adSpend) : null
             // The store's own day, as Ajustes → Lojas prints it (archivedAt is a UTC instant).
@@ -64,7 +70,7 @@ export async function ArchivedList({ ctx }: { ctx: PageContext }) {
                 <div className={s.archCell}>
                   <b>{a.store.name}</b>
                   <small>
-                    {archivedOn ? `arquivada em ${formatDate(archivedOn, ctx.today)}` : 'arquivada'}
+                    {archivedOn ? `arquivada em ${dateBeside(archivedOn, { window: { from: archivedOn, to: archivedOn }, clockToday: ctx.today })}` : 'arquivada'}
                     {a.span ? ` · histórico de ${formatRangeLabel(a.span, ctx.today)}` : ' · sem vendas registradas'}
                   </small>
                 </div>
@@ -86,7 +92,7 @@ export async function ArchivedList({ ctx }: { ctx: PageContext }) {
                   {t ? <Money value={t.adSpend} /> : <span className="num mut">—</span>}
                   {t && t.adSpend > 0 && <small>Meta {formatMoney(t.metaSpend)}{t.shopSpend > 0 ? ` · Shopify ${formatMoney(t.shopSpend)}` : ''}</small>}
                 </div>
-                <Link href={href} className={s.archLink}>
+                <Link href={href} className={s.archLink} title={open ? 'Abre os últimos 30 dias até o arquivamento' : undefined}>
                   Abrir histórico <Icon name="arrowRight" size={12} />
                 </Link>
               </div>

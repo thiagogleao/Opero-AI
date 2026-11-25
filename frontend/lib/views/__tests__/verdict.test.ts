@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { sumPnL, type PnL, type PnLLines } from '../../engine/pnl'
 import {
-  buildVerdict, comparisonCut, comparisonPhrase, comparisonText, dayLeftMinutes, dayLeftVerb, disputeReasonText, isIdle, judgedStores, noSalesCashHit, perDollarLine, periodPhrase, roasSummary, storeStatus, storeStatusChips, sumTotals,
+  buildVerdict, comparisonCut, comparisonPhrase, comparisonText, disputeReasonText, isIdle, judgedStores, noSalesCashHit, perDollarLine, periodPhrase, roasSummary, storeStatus, storeStatusChips, sumTotals,
   type ComparisonWindow, type VerdictInput, type VerdictStore,
 } from '../verdict'
 import { formatRoas } from '../../format'
@@ -834,17 +834,8 @@ describe('the per-dollar line of a window still running is in the present', () =
 // Todas · Hoje read 'Faltam 1 min para o dia fechar.' at 23h59 and 'Faltam
 // 24h00 para o dia fechar.' at 00h00.
 describe('day countdown', () => {
-  it('is floored, never a whole day, and agrees with its count', () => {
-    expect(dayLeftMinutes(0)).toBe(1439)
-    expect(dayLeftMinutes(0.5)).toBe(1439)
-    expect(dayLeftMinutes(1439)).toBe(1)
-    expect(dayLeftMinutes(1440)).toBe(0)
-    expect(dayLeftVerb(1)).toBe('Falta')
-    expect(dayLeftVerb(2)).toBe('Faltam')
-    expect(dayLeftVerb(80)).toBe('Falta')
-    expect(dayLeftVerb(125)).toBe('Faltam')
-    expect(dayLeftVerb(1439)).toBe('Faltam')
-  })
+  // The count itself is lib/period's (minutesLeft / countdownText, R8),
+  // tested in lib/period/__tests__/rules.test.ts at 00:00:00–00:00:59 and 23:59.
   const at = (anchorMinutes: number) => {
     const running = { partial: true, minutesCovered: Math.max(1, anchorMinutes), dayState: 'running' as const }
     return buildVerdict({
@@ -1118,7 +1109,7 @@ describe('a store of the sum that did not sell yet in the comparison window', ()
       totals: pnl({ revenue: 2000, orders: 25, cogs: 900, metaSpend: 900 }),
       comparison: { included: true, totals: pnl({ revenue: 300, orders: 4, cogs: 150, metaSpend: 278 }) } })
     const v = buildVerdict({ ...week, stores: [one] })
-    expect(v.notes.map(n => n.text)).toContain('A Hibikura só começou a vender em 7 nov: a comparação (3–9 nov) tem dias antes disso.')
+    expect(v.notes.map(n => n.text)).toContain('A Hibikura só começou a vender em 7 nov: a comparação, 3–9 nov, tem dias antes disso.')
   })
 })
 

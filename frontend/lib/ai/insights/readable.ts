@@ -1,8 +1,9 @@
-import { comparisonRange, computeStorePnL, formatRange, todayInTz, type DateRange } from '@/lib/engine'
+import { computeStorePnL, formatRange, todayInTz, type DateRange } from '@/lib/engine'
 import type { PnL } from '@/lib/engine/pnl'
 import { totalsView } from '../views'
 import { insightsWindow, type InsightsWindow } from '../window'
 import { nothingToRead } from './facts'
+import { daysBefore } from '../../period'
 
 /**
  * Whether the AI reading of a window would be refused for having nothing in
@@ -56,7 +57,7 @@ export async function quietInsightsWindow(
   const w = insightsWindow(store.timezone, 'custom', range.from, range.to, now)
   if (!w.ok) return null
   if (activeDayIn(daily, w.window)) return null
-  const prevRange = comparisonRange('custom', w.window, store.timezone, now)
+  const prevRange = daysBefore(w.window)
   const [cur, prev] = await Promise.all([
     computeStorePnL(store.id, w.window, {}, now),
     computeStorePnL(store.id, prevRange, {}, now),

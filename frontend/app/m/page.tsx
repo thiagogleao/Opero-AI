@@ -5,6 +5,7 @@ import { REFERENCE_TZ } from '@/lib/engine/dates'
 import { loadSharedPairs, SHARED_LOOKBACK_DAYS } from '@/components/portfolio/data'
 import { sharedAccountBadges } from '@/components/portfolio/model'
 import { loadFirstOrderDates } from '@/lib/views/portfolio'
+import { viewerStoresOf } from '@/lib/views/periodFacts'
 import MobileApp from './MobileApp'
 import type { SharedAds } from './_lib/sharedAds'
 import s from './m.module.css'
@@ -22,10 +23,15 @@ export default async function MobilePage() {
   if (!(await hasMobileSession())) return <Denied />
   const all = await listStores({ kind: 'owner' }, { includeArchived: true })
   const active = all.filter(x => !x.archived)
+  // The store facts the period rules resolve with (archive instants, first
+  // dates): the phone labels a pick while it loads and schedules its turns
+  // with them (lib/period R19). The page reads no searchParams.
+  const facts = await viewerStoresOf(all)
   return (
     <MobileApp
       stores={active.map(toOption)}
       archived={all.filter(x => x.archived).map(toOption)}
+      facts={facts}
       // Not awaited: the chips draw at once and the pairing arrives after.
       sharedAds={loadSharedAds(active)}
     />
@@ -40,7 +46,7 @@ export default async function MobilePage() {
  * is no pair (loadSharedPairs logs it).
  */
 async function loadSharedAds(active: StoreRef[]): Promise<SharedAds> {
-  const pairs = await loadSharedPairs(active, REFERENCE_TZ, new Date())
+  const pairs = await loadSharedPairs(active, REFERENCE_TZ, new Date()) // clock-ok: server render instant
   const lookback = `Nos últimos ${SHARED_LOOKBACK_DAYS} dias`
   const badges = Object.fromEntries(active
     .map(st => [st.id, sharedAccountBadges(st.id, pairs, lookback)] as const)

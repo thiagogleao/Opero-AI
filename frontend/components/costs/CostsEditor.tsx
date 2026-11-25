@@ -46,6 +46,7 @@ import { ProductCostsSection, ZeroCostSection, type ProductFocus } from './Produ
 import { ExtrasSection, FeesSection, PackagingSection, ShippingSection } from './SimpleSections'
 import { SupplierTablesSection } from './SupplierTables'
 import { leaveWithoutAsking, useLeaveGuard } from './useLeaveGuard'
+import { registerDirty } from '@/lib/period/client/dirty'
 import s from './costs.module.css'
 
 export interface CostsEditorProps {
@@ -137,6 +138,11 @@ export function CostsEditor(props: CostsEditorProps) {
   const savedPayload = useMemo(() => toPayload(baseForm, catalogueNames).config, [baseForm, catalogueNames])
   const savedJson = useMemo(() => canonicalJson(savedPayload), [savedPayload])
   const dirty = payloadJson !== savedJson
+  // Unsaved edits defer the day-turn refresh (lib/period R8): the page says
+  // "O dia virou" with an Atualizar button instead of dropping them.
+  const dirtyRef = useRef(dirty)
+  useEffect(() => { dirtyRef.current = dirty }, [dirty])
+  useEffect(() => registerDirty(() => dirtyRef.current), [])
   const changed = useMemo(() => (dirty ? changedSections(payload.config, savedPayload) : []), [dirty, payload, savedPayload])
 
   // The same checks the server runs, in the browser, for instant messages.
@@ -160,7 +166,7 @@ export function CostsEditor(props: CostsEditorProps) {
     if (edits === null) return
     const t = setTimeout(() => {
       if (canonicalJson(toPayload(edits, catalogueNames).config) === savedJson) clearDraft(store.id)
-      else writeDraft(store.id, { version: saved.version, form: edits, at: new Date().toISOString() })
+      else writeDraft(store.id, { version: saved.version, form: edits, at: new Date().toISOString() /* clock-ok: draft timestamp */ })
     }, 300)
     return () => clearTimeout(t)
   }, [edits, savedJson, saved.version, store.id, catalogueNames])
@@ -181,11 +187,15 @@ export function CostsEditor(props: CostsEditorProps) {
     const mine = ++seq.current
     const key = `${payloadJson}|${periodKey}`
     const t = setTimeout(async () => {
+      // The page's resolved window as dates (lib/period R19): the API fits
+      // them but never re-resolves a preset at its own instant, so a preview
+      // after Tokyo midnight prices the same days as the header.
       const body = JSON.stringify({
         storeId: store.id,
         config: JSON.parse(payloadJson),
-        period: win.period,
-        ...(win.period === 'custom' ? { from: win.from, to: win.to } : {}),
+        period: 'custom',
+        from: win.from,
+        to: win.to,
       })
       try {
         const res = await fetch('/api/profit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: ctrl.signal })
@@ -237,7 +247,7 @@ export function CostsEditor(props: CostsEditorProps) {
         setServerIssues(null)
         clearDraft(store.id)
         setNotice(body.changed
-          ? { tone: 'pos', title: `Salvo às ${formatTimeInTz(new Date(), store.timezone)} (horário da loja)`, body: 'O servidor confirmou a gravação. Todas as telas já usam estes custos.' }
+          ? { tone: 'pos', title: `Salvo às ${formatTimeInTz(new Date() /* clock-ok: save confirmation time */, store.timezone)} (horário da loja)`, body: 'O servidor confirmou a gravação. Todas as telas já usam estes custos.' }
           : { tone: 'pos', title: 'Nada mudou', body: 'A configuração salva já era exatamente esta; nada foi gravado.' })
         router.refresh()
         return
@@ -284,7 +294,7 @@ export function CostsEditor(props: CostsEditorProps) {
     ? current?.data ?? lastGood ?? initial
     : justSaved && initial?.version !== saved.version ? justSaved : initial
 
-  const shownIsCurrent = !!displayed && displayed.period === win.period && displayed.range.from === win.from && displayed.range.to === win.to
+  const shownIsCurrent = !!displayed && displayed.range.from === win.from && displayed.range.to === win.to
 
   const unpricedUnits = useMemo(() => {
     const m = new Map<string, number>()

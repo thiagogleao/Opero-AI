@@ -32,7 +32,7 @@ function pillCode(store: { name: string; domain: string | null } | null): string
 
 export default async function CostsPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
   const sp = await searchParams
-  const ctx = await getPageContext(sp, { scope: 'store' })
+  const ctx = await getPageContext(sp, { path: '/profit', scope: 'store' })
   const store = ctx.store
   // Arrived from "Todas as lojas": costs are per store, so say which one opened.
   const askedAll = (Array.isArray(sp.loja) ? sp.loja[0] : sp.loja) === 'todas'
@@ -101,7 +101,7 @@ async function Editor({ ctx }: { ctx: PageContext }) {
   let preview = null
   let previewError: string | null = null
   try {
-    preview = await loadSavedPreview(store, ctx.period, ctx.range, saved)
+    preview = await loadSavedPreview(store, ctx.period, ctx.range, saved, ctx.now)
   } catch (err) {
     console.error('[custos] preview', err instanceof Error ? err.message : err)
     previewError = 'O cálculo do período não respondeu. A configuração pode ser editada e salva normalmente.'

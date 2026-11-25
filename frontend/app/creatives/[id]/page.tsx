@@ -87,7 +87,7 @@ export default async function CreativePage({ params, searchParams }: {
   params: Promise<{ id: string }>; searchParams: Promise<SearchParams>
 }) {
   const [{ id }, sp] = await Promise.all([params, searchParams])
-  const ctx = await getPageContext(sp, { scope: 'store' })
+  const ctx = await getPageContext(sp, { path: `/creatives/${encodeURIComponent(id)}`, scope: 'store' })
   const store = ctx.store
   const adId = adIdOf(id)
   if (!store || !adId) notFound()

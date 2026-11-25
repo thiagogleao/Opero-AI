@@ -3,7 +3,8 @@ import { derive, sumPnL, type CountryPnL, type DayPnL, type PnLLines, type Produ
 import { adRunning as screenAdRunning } from '@/lib/data/creatives'
 import type { AdDayFact, AdInfo } from '@/lib/data/meta'
 import { DEFAULT_THRESHOLDS } from '@/lib/campaignSignal'
-import { adLists, adRunning, campaignViews, decisionWindow, localDay, sharedNoteOf, type AdAggregate, type AdData } from '../ads'
+import { decisionWindow } from '../../period/decision'
+import { adLists, adRunning, campaignViews, judgedDays, localDay, sharedNoteOf, type AdAggregate, type AdData } from '../ads'
 import { countriesView, partnerShareView, productsView, seriesView, totalsView } from '../views'
 
 function lines(over: Partial<PnLLines>): PnLLines {
@@ -118,10 +119,12 @@ describe('ad verdicts', () => {
 })
 
 describe('campaigns', () => {
-  it('judges on the last 7 closed days', () => {
-    expect(decisionWindow({ from: '2026-10-18', to: '2026-11-17' }, '2026-11-17')).toEqual({ from: '2026-11-10', to: '2026-11-16' })
-    expect(decisionWindow({ from: '2026-11-17', to: '2026-11-17' }, '2026-11-17')).toBeNull()
-    expect(decisionWindow({ from: '2026-11-14', to: '2026-11-16' }, '2026-11-17')).toEqual({ from: '2026-11-14', to: '2026-11-16' })
+  it('r3 F17 · judges on the last 7 closed days of the store (lib/period decisionWindow), whatever the window', () => {
+    // The same 7 closed days as Campanhas and the scale push: never clipped
+    // to the window the conversation or the insights card reads (R12).
+    expect(judgedDays('2026-11-17').window).toEqual({ from: '2026-11-10', to: '2026-11-16' })
+    expect(judgedDays('2026-11-17').previous).toEqual({ from: '2026-11-03', to: '2026-11-09' })
+    expect(judgedDays('2026-11-24')).toEqual(decisionWindow('America/Belem', new Date('2026-11-24T19:00:00Z')))
   })
   it('sums campaigns from every ad-day and flags shared accounts and unsynced spend', () => {
     const f = (date: string, adId: string, campaignId: string | null, spend: number, pv: number, accountId: string | null = 'act_1'): AdDayFact => ({
@@ -184,7 +187,7 @@ describe("shared ad accounts (the screens' rule)", () => {
     const window = { from: '2026-11-10', to: '2026-11-16' }
     const v = campaignViews(d, {
       contributionRate: 0.5, storeToday: '2026-11-17', limit: 5,
-      decision: { window, contributionRate: 0.5, costsConfigured: true, thresholds: DEFAULT_THRESHOLDS },
+      decision: { window, previous: { from: '2026-11-03', to: '2026-11-09' }, facts, contributionRate: 0.5, costsConfigured: true, thresholds: DEFAULT_THRESHOLDS },
     })
     const own = v.rows.find(r => r.campaignId === 'own')!
     const camp = v.rows.find(r => r.campaignId === 'camp')!
@@ -197,7 +200,7 @@ describe("shared ad accounts (the screens' rule)", () => {
     // The basis decides, not the window rate: a loss-making margin over the judged days cuts.
     const cut = campaignViews(d, {
       contributionRate: 0.5, storeToday: '2026-11-17', limit: 5,
-      decision: { window, contributionRate: 0.1, costsConfigured: true, thresholds: DEFAULT_THRESHOLDS },
+      decision: { window, previous: { from: '2026-11-03', to: '2026-11-09' }, facts, contributionRate: 0.1, costsConfigured: true, thresholds: DEFAULT_THRESHOLDS },
     })
     expect(cut.rows.find(r => r.campaignId === 'own')?.decision?.action).toBe('cortar')
   })

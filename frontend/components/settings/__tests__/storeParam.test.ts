@@ -1,61 +1,26 @@
 import { describe, expect, it } from 'vitest'
 import { addStoreHref, askedStoreId } from '../storeParam'
-import { ALL_STORES, buildHref, carriedLoja, parsePageParams, type HrefOverrides, type SearchParams } from '@/lib/views/page'
+import { ALL_STORES, type SearchParams } from '@/lib/views/page'
+import { dates, preset, type Selection } from '@/lib/period'
 
 const MOKOO = 'user_3CVoVQYfnj1Ljnm3tf0iHP40fxX'
+const q = (href: string) => Object.fromEntries(new URLSearchParams(href.split('?')[1] ?? '')) as SearchParams
 
-/** Ajustes' context as getPageContext builds it for an owner (scope 'store'):
- *  the store on screen in `params`, the carried loja in `navParams`. */
-function settingsCtx(sp: SearchParams, shown = MOKOO) {
-  const raw = parsePageParams(sp)
-  const params = { ...raw, loja: shown }
-  const navParams = { ...params, loja: carriedLoja(raw.loja, 'store', true, shown) }
-  return {
-    fromAll: navParams.loja === ALL_STORES,
-    hrefWith: (p: string, o?: HrefOverrides) => buildHref(p, params, o),
-    navHref: (p: string, o?: HrefOverrides) => buildHref(p, navParams, o),
-  }
-}
-
-/** Onboarding's "Voltar para Ajustes" for a URL (app/onboarding/page.tsx). */
-function onboardingBack(href: string): string {
-  const sp = Object.fromEntries(new URLSearchParams(href.split('?')[1] ?? ''))
-  return buildHref('/settings', parsePageParams({ ...sp, loja: sp.loja ?? sp.store }))
-}
-
-describe('addStoreHref — Ajustes → Adicionar loja → Voltar para Ajustes', () => {
-  it('opened from Todas, keeps loja=todas so the round trip comes back to Todas', () => {
-    const href = addStoreHref(settingsCtx({ loja: 'todas', periodo: '30d', parte: '50' }))
-    expect(href).toBe('/onboarding?loja=todas&periodo=30d&parte=50&addStore=true')
-    // Onboarding reads Todas as no store: a new connection starts.
-    expect(askedStoreId(Object.fromEntries(new URLSearchParams(href.split('?')[1])), { legacyStoreKey: true })).toBeNull()
-    expect(onboardingBack(href)).toBe('/settings?loja=todas&periodo=30d&parte=50')
-  })
-
-  it('opened from Todas with dates read on another clock, keeps them and their preset', () => {
-    const href = addStoreHref(settingsCtx({ loja: 'todas', periodo: 'custom', de: '2026-11-24', ate: '2026-11-24', volta: 'today' }))
-    expect(href).toBe('/onboarding?loja=todas&periodo=custom&de=2026-11-24&ate=2026-11-24&volta=today&addStore=true')
-    expect(onboardingBack(href)).toBe('/settings?loja=todas&periodo=custom&de=2026-11-24&ate=2026-11-24&volta=today')
-  })
-
-  it('opened on a store, never carries its id: onboarding would continue that store\'s setup', () => {
-    for (const sp of [{ loja: MOKOO, periodo: '30d' }, { periodo: '30d' }] as SearchParams[]) {
-      const href = addStoreHref(settingsCtx(sp))
-      expect(href).toBe('/onboarding?periodo=30d&addStore=true')
-      expect(askedStoreId(Object.fromEntries(new URLSearchParams(href.split('?')[1])), { legacyStoreKey: true })).toBeNull()
+// Ajustes' "Adicionar loja": /onboarding?addStore=true with the page's period
+// (lib/period desktopHref). It names Todas (loja=todas), which onboarding reads
+// as no store, so a store id never continues that store's setup.
+describe('addStoreHref — Ajustes → Adicionar loja', () => {
+  it('keeps the period and the split, names Todas, never a store id', () => {
+    for (const scope of [{ kind: 'store', id: MOKOO }, { kind: 'all' }] as Selection['scope'][]) {
+      const href = addStoreHref({ selection: { scope, period: preset('30d'), split: true } })
+      expect(href).toBe('/onboarding?loja=todas&periodo=30d&parte=50&addStore=true')
+      expect(askedStoreId(q(href), { legacyStoreKey: true })).toBeNull()
     }
   })
-
-  it('a one-store viewer asking for Todas carries no Todas (carriedLoja gives the store)', () => {
-    const raw = parsePageParams({ loja: 'todas' })
-    const params = { ...raw, loja: MOKOO }
-    const navParams = { ...params, loja: carriedLoja(raw.loja, 'store', false, MOKOO) }
-    const href = addStoreHref({
-      fromAll: navParams.loja === ALL_STORES,
-      hrefWith: (p, o) => buildHref(p, params, o),
-      navHref: (p, o) => buildHref(p, navParams, o),
-    })
-    expect(href).toBe('/onboarding?addStore=true')
+  it('dates travel as dates; the default period is left out', () => {
+    expect(addStoreHref({ selection: { scope: { kind: 'all' }, period: dates('2026-11-01', '2026-11-10'), split: false } }))
+      .toBe('/onboarding?loja=todas&periodo=custom&de=2026-11-01&ate=2026-11-10&addStore=true')
+    expect(addStoreHref({ selection: { scope: { kind: 'all' }, period: preset('7d'), split: false } })).toBe(`/onboarding?loja=${ALL_STORES}&addStore=true`)
   })
 })
 

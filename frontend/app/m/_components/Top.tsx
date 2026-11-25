@@ -6,7 +6,8 @@ import { useEffect, useRef } from 'react'
 import { Icon, StatusDot } from '@/components/ui'
 import { formatRelativeTime } from '@/lib/format'
 import type { MobileResponse, MobileStoreOption } from '@/lib/views/mobile'
-import { ALL, PERIOD_MAIN, periodButtonFull, periodButtonLabel, periodButtonYear, periodShort, type Selection } from '../_lib/selection'
+import { MENU, presetInfo, preset, samePeriod, type PeriodLabel, type PeriodValue, type Preset } from '@/lib/period'
+import { ALL } from '@/lib/period/phone'
 import { refreshOutcome, refreshProgress, skippedText, SOURCE_LABEL } from '../_lib/refreshProgress'
 import type { RefreshRun } from '../_lib/useMobileData'
 import { SoundIcon } from './Sheet'
@@ -67,17 +68,21 @@ export function Header({ data, now, soundOn, onSound, onRefresh, refreshing, ref
 
 // ─── Store chips ──────────────────────────────────────────────────────────────
 
-export function StoreChips({ stores, archived, sel, pendingKey, onPick }: {
+export function StoreChips({ stores, archived, shown, saved, pendingKey, onPick }: {
   stores: MobileStoreOption[]
   archived: MobileStoreOption[]
-  sel: Selection | null
+  /** The store on screen ('todas' or an id): a visit's or the saved one. */
+  shown: string | null
+  /** The saved store: the pin text always names it, never a store a push or
+   *  link opened (R5). */
+  saved: string | null
   /** The store being loaded right now (spinner in its chip). */
   pendingKey: string | null
   onPick: (loja: string) => void
 }) {
-  const archivedSel = sel ? archived.find(a => a.id === sel.loja) : undefined
+  const archivedSel = shown ? archived.find(a => a.id === shown) : undefined
   const row = useRef<HTMLDivElement>(null)
-  const selected = sel?.loja ?? null
+  const selected = shown
   // Keep the pinned store's chip in view: opened from storage or a
   // notification, Hibikura sits past the right edge and nothing looked pinned.
   // Only the row scrolls (scrollIntoView would also move the page).
@@ -91,7 +96,7 @@ export function StoreChips({ stores, archived, sel, pendingKey, onPick }: {
     }
   }, [selected])
   const chip = (id: string, label: React.ReactNode, extra = '') => {
-    const on = sel?.loja === id
+    const on = shown === id
     return (
       <button key={id} type="button" className={`${s.chip}${on ? ` ${s.chipOn}` : ''}${extra}`} aria-pressed={on} onClick={() => onPick(id)}>
         {on && pendingKey === id && <span className={s.spin} aria-hidden="true" style={{ width: 11, height: 11 }} />}
@@ -99,7 +104,7 @@ export function StoreChips({ stores, archived, sel, pendingKey, onPick }: {
       </button>
     )
   }
-  const name = sel ? (sel.loja === ALL ? 'Todas' : [...stores, ...archived].find(x => x.id === sel.loja)?.name) : null
+  const name = saved ? (saved === ALL ? 'Todas' : [...stores, ...archived].find(x => x.id === saved)?.name) : null
   return (
     <>
       <div ref={row} className={s.chips} role="group" aria-label="Loja">
@@ -120,30 +125,33 @@ export function StoreChips({ stores, archived, sel, pendingKey, onPick }: {
 
 // ─── Period bar ───────────────────────────────────────────────────────────────
 
-export function PeriodBar({ sel, today, shown, onPick, onMore }: {
-  sel: Selection | null
-  today: string | undefined
-  /** The range of the answer on screen when it answers this selection: the
-   *  button then names exactly the dates the numbers use. */
-  shown?: { from: string; to: string } | null
-  onPick: (p: Selection['periodo']) => void
+export function PeriodBar({ period, label, onPick, onMore }: {
+  /** The period shown (a visit's or the saved one), as asked. */
+  period: PeriodValue | null
+  /** Its names (lib/period Resolution.label, R7): the server's once it
+   *  answers, a local resolution while it loads. */
+  label: PeriodLabel | null
+  onPick: (p: Preset) => void
   onMore: () => void
 }) {
-  const inMain = !!sel && (PERIOD_MAIN as string[]).includes(sel.periodo)
-  const chosen = !!sel && !inMain
-  const moreLabel = chosen ? periodButtonLabel(sel, shown) : 'Mais'
+  // One menu for both platforms (lib/period MENU): the four main buttons,
+  // and "Mais" pressed for any other preset or for dates. A visit's dates
+  // press "Mais" with the dates: a push's day never looks like a preset.
+  const inMain = !!period && period.kind === 'preset' && MENU.main.includes(period.preset)
+  const chosen = !!period && !inMain
+  const moreLabel = chosen ? label?.button ?? (period.kind === 'preset' ? presetInfo(period.preset).button : 'Datas') : 'Mais'
   // Dates of another year: the year on a line of its own, under the dates.
-  const moreYear = chosen ? periodButtonYear(sel, shown, today) : null
+  const moreYear = chosen ? label?.buttonYear ?? null : null
   return (
     <div className={s.periods} role="group" aria-label="Período">
-      {PERIOD_MAIN.map(p => (
-        <button key={p} type="button" className={s.periodBtn} aria-pressed={sel?.periodo === p} onClick={() => onPick(p)}>
-          {periodShort(p)}
+      {MENU.main.map(p => (
+        <button key={p} type="button" className={s.periodBtn} aria-pressed={!!period && samePeriod(period, preset(p))} onClick={() => onPick(p)}>
+          {presetInfo(p).button}
         </button>
       ))}
       <button type="button" className={`${s.periodBtn} ${s.periodMore}${chosen ? ` ${s.periodMoreWide}` : ''}`}
         aria-pressed={chosen} aria-haspopup="dialog" onClick={onMore}
-        title={chosen ? periodButtonFull(sel, shown, today) : undefined}>
+        title={chosen ? label?.full : undefined}>
         {moreYear
           ? <span className={`${s.periodLabel} ${s.periodLabel2}`}><span>{moreLabel}</span>{/* read as "25/12–3/1 2025–26"; no box in a flex column */}{" "}<small className={s.periodYear}>{moreYear}</small></span>
           : <span className={s.periodLabel}>{moreLabel}</span>}

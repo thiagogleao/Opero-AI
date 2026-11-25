@@ -24,35 +24,40 @@
  *   comparison (the Resumo); an archived store's note then also says what its
  *   read days are compared with. Pages that compare nothing leave it out.
  * periodNoteText(ctx, { compared }) returns the same sentence as a string (or null).
- * periodName(ctx) is the bold name before the range ("Últimos 7 dias", or
- * "Período escolhido" for a custom range; row dates name their preset and
- * whose they are: "Hoje de Todas as lojas", "Ontem da Hibikura"): use it in a
- * custom sub so the range is not printed twice.
+ * periodName(ctx) is the bold name of the period, from lib/period's one naming
+ * function (Resolution.label, R7): "Últimos 7 dias" for a preset (the range
+ * follows), the dates themselves for a dates value ("1–15 nov", "24 nov
+ * (hoje)", "25 nov · ainda não começou em Brasília"). Under the sub, the
+ * landing notes (R4 scope change, R5 remembered store gone, R11 starts
+ * inside…) read as one line.
  */
 
 import type { ReactNode } from 'react'
 import type { PageContext } from '@/lib/views/page'
-import { PERIODS, type Period } from '@/lib/engine/dates'
-import { formatDate, formatRangeLabel, tzCity, dayOfLabel } from '@/lib/format'
+import { formatDate, formatRangeLabel, tzCity } from '@/lib/format'
+import { offsetDiffers } from '@/lib/period'
 import { Callout } from '@/components/ui/Card'
 import { Chip, CodePill } from '@/components/ui/Chip'
 import s from './shell.module.css'
 
-/** "Últimos 7 dias"; a custom period, whose label IS its range ("1–10 nov"),
- *  is named "Período escolhido" so a header never prints the range twice. */
-export function periodName(
-  ctx: Pick<PageContext, 'periodLabel' | 'rangeLabel'> & { params?: { volta?: Period }; scope?: 'store' | 'all'; rowDatesOf?: string | null },
-): string {
-  // Dates a link read on another clock (lib/views/page PageParams.volta) are
-  // not a period the owner chose: name the preset they stand for, and whose
-  // (ctx.rowDatesOf: Todas on a store page, the store they came from on Todas).
-  const volta = ctx.params?.volta
-  if (volta) return `${presetLabel(volta)} ${ctx.scope === 'all' ? `da ${ctx.rowDatesOf ?? 'outra loja'}` : 'de Todas as lojas'}`
-  return ctx.periodLabel === ctx.rangeLabel ? 'Período escolhido' : ctx.periodLabel
+/** The period's name (R7): the preset's label, or the dates as asked. */
+export function periodName(ctx: Pick<PageContext, 'resolution'>): string {
+  const r = ctx.resolution
+  return r.selection.period.kind === 'preset' ? r.label.short : r.label.full
 }
 
-/** "Hoje", "Últimos 7 dias": a preset's name. */
-const presetLabel = (p: Period) => PERIODS.find(x => x.key === p)?.label ?? p
+/**
+ * The period as a header names it (R7, one name from Resolution.label): a
+ * preset's label and then its dates ("Últimos 7 dias · 17–23 nov"); a dates
+ * value its range once ("10–20 nov") — never "10–20 nov · 10–20 nov". Every
+ * header that prints the period (the default sub, Atribuição's) uses this.
+ */
+export function PeriodHeading({ ctx }: { ctx: Pick<PageContext, 'resolution' | 'rangeLabel'> }) {
+  return <>
+    <b>{periodName(ctx)}</b>
+    {ctx.resolution.selection.period.kind === 'preset' && <> · <span className="num">{ctx.rangeLabel}</span></>}
+  </>
+}
 
 /** The partner-view chip's words: what the page halves, and what it never does. */
 export function splitChipText(halved: boolean): { label: string; title: string } {
@@ -94,10 +99,11 @@ export function PageHeader({ ctx, title, sub, badges, actions, code, halved = tr
         </div>
         <div className={s.pageSub}>
           {sub ?? <>
-            <b>{periodName(ctx)}</b> · <span className="num">{ctx.rangeLabel}</span>
+            <PeriodHeading ctx={ctx} />
             {ctx.scope === 'all' ? ` · ${ctx.selected.length} lojas` : ''}
           </>}
         </div>
+        {ctx.noteLine && <div className={s.noteLine} role="note">{ctx.noteLine}</div>}
       </div>
       {actions && <div className={s.pageActions}>{actions}</div>}
     </div>
@@ -112,19 +118,11 @@ export function periodNoteText(ctx: PageContext, opts: { compared?: boolean } = 
   const city = ctx.scope === 'all' ? 'Brasília' : tzCity(ctx.timezone)
   const today = formatDate(ctx.today)
   const others = ctx.scope === 'all'
-    ? ctx.selected.filter(st => dayOfLabel(st.timezone)).map(st => `${st.name} (${tzCity(st.timezone)})`)
+    ? ctx.selected.filter(st => offsetDiffers(st.timezone, ctx.now)).map(st => `${st.name} (${tzCity(st.timezone)})`)
     : []
   const tail = others.length
     ? ` Cada loja fecha o dia no próprio fuso: ${joinPt(others)} ${others.length === 1 ? 'conta' : 'contam'} as mesmas datas no relógio de lá.`
     : ''
-  // Dates a store row (or Atribuição's link) read on another clock: whose
-  // they are, and that leaving brings the owner's preset back.
-  if (ctx.period === 'custom' && ctx.params.volta) {
-    const preset = presetLabel(ctx.params.volta)
-    return ctx.scope === 'all'
-      ? `As datas de “${preset}” ${ctx.rowDatesOf ? `da ${ctx.rowDatesOf}` : 'da loja de onde você veio'}: ${ctx.rangeLabel}${ctx.partial ? ', com hoje parcial' : ''}. Ao escolher uma loja, o período volta para “${preset}”.${tail}`
-      : `As datas de “${preset}” em Todas as lojas: ${ctx.rangeLabel} no horário de ${city}${ctx.partial ? '; hoje entra parcial' : ''}. Ao trocar de loja, o período volta para “${preset}”.`
-  }
   // An archived store reads nothing after its archive day: no day "em
   // andamento", no "hoje entra parcial" (Squishy World on Hoje said both).
   const archived = ctx.scope === 'store' && !!ctx.store?.archived
@@ -147,7 +145,8 @@ export function periodNoteText(ctx: PageContext, opts: { compared?: boolean } = 
     case 'lastmonth':
       return `O mês passado inteiro, no horário de ${city}.${tail}`
     case 'custom':
-      return `${ctx.rangeLabel} no horário de ${city}${ctx.partial ? '; hoje entra parcial' : ''}.${ctx.rangeNote ? ` ${ctx.rangeNote}` : ''}${tail}`
+      // The fit note (R9) is the header's own line (ctx.noteLine), not repeated here.
+      return `${ctx.rangeLabel} no horário de ${city}${ctx.partial ? '; hoje entra parcial' : ''}.${tail}`
     default:
       return tail.trim() || null
   }
@@ -172,7 +171,8 @@ const withArticle = (label: string) => (label === 'dia anterior' ? `o ${label}` 
  */
 function archivedNoteText(ctx: PageContext, city: string, compared: boolean): string | null {
   const head = `${ctx.rangeLabel} no horário de ${city}.`
-  const tail = ctx.rangeNote ? ` ${ctx.rangeNote}` : ''
+  // The fit note (R9) is the header's own line (ctx.noteLine).
+  const tail = ''
   const on = ctx.archivedOn
   if (!on) {
     return ctx.range.to >= ctx.today
@@ -190,7 +190,7 @@ function archivedNoteText(ctx: PageContext, city: string, compared: boolean): st
     return `${head} A loja foi arquivada em ${day}, o último dia lido, e estes números não mudam.${tail}`
   }
   const readLabel = formatRangeLabel(read, ctx.today)
-  return `${head} A loja foi arquivada em ${day} e não sincroniza mais: só ${readDays(read.from, read.to, readLabel)}, e estes números não mudam.${compared ? ` A comparação usa ${withArticle(ctx.comparison.label)} (${ctx.comparisonRangeLabel}).` : ''}${tail}`
+  return `${head} A loja foi arquivada em ${day} e não sincroniza mais: só ${readDays(read.from, read.to, readLabel)}, e estes números não mudam.${compared ? ` A comparação usa ${withArticle(ctx.comparison.label)}: ${ctx.comparisonRangeLabel}.` : ''}${tail}`
 }
 
 export function PeriodNote({ ctx, compared }: { ctx: PageContext; compared?: boolean }) {

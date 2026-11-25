@@ -159,7 +159,7 @@ let counter = 0
 /** An id for a row added in the browser. Never called during a render. */
 export function newId(prefix: string): string {
   counter += 1
-  return `${prefix}n${Date.now().toString(36)}${counter.toString(36)}`
+  return `${prefix}n${Date.now().toString(36)}${counter.toString(36)}` // clock-ok: row id, not a period
 }
 
 // ─── Form → request body ──────────────────────────────────────────────────────

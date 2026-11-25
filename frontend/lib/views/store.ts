@@ -24,7 +24,7 @@
  * Everything here is the window the page context resolved (lib/views/page),
  * passed in, never re-derived.
  *
- * Pure helpers (comparisonPlan, archivedComparison, trailRanges, chartSeries, windowDaysSinceStart,
+ * Pure helpers (trailRanges, chartSeries, windowDaysSinceStart,
  * kpiDays, readUntil, daysRead, storeKpis,
  * topProducts, topCountries, campaignHighlights, chargebackLevel) are tested in
  * __tests__/store.test.ts.
@@ -33,88 +33,73 @@
 import { query } from '../db'
 import { centsOfDollar } from '../format'
 import {
-  computePnL, computeSameTimeComparison, sumPnL,
+  computePnL, sumPnL,
   type CountryPnL, type DayPnL, type HourPoint, type PnL, type ProductPnL, type StorePnL,
 } from '../engine/pnl'
 import { daysBetween, minutesIntoDay, safeTz, shiftDate, todayInTz, type Comparison, type DateRange, type Period } from '../engine/dates'
+import { pricedWindow, type Resolution, type ViewerStores } from '../period'
 import { getChargebackHealth, type ChargebackHealth } from '../adjustments'
 import { getCampaignReport, spentAds, type CampaignReport, type CampaignRow } from '../data/campaigns'
 import type { CampaignAction } from '../campaignSignal'
 import { adChannelOf, channelRoas, type AdChannel } from './adChannel'
 import {
-  archivedComparison, assemblePortfolio, loadArchiveDates, loadFirstOrderDates,
-  type PortfolioStoreInput, type PortfolioStoreRow, type PortfolioView, type StoreComparison,
+  assemblePortfolio, factDates, factsFor,
+  type ComparisonWords, type PortfolioStoreInput, type PortfolioStoreRow, type PortfolioView, type StoreComparison,
 } from './portfolio'
 
 // ─── Comparison (one store) ──────────────────────────────────────────────────
 
 /**
- * How the comparison window must be priced for ONE store, mirroring
- * lib/views/portfolio loadComparison (which is not exported):
- *  - whole       a closed window: the earlier window, whole days;
- *  - same_time   the window is today: yesterday cut at this minute of the
- *                store's clock (engine computeSameTimeComparison);
- *  - cut_last    several days ending today ("Este mês", a custom range): the
- *                earlier days whole plus the last one cut at this minute.
- * With one store the anchor clock is the store's own, so its window has always
- * started and the comparison is always included.
- *
- * An archived store (`archived`) is always compared on whole days: it is not
- * synced, so its day is not running and "até esta hora" means nothing for it
- * (Squishy World's Este mês read "caiu 100% vs 1–24 out até 14h23").
+ * The store's comparison, priced exactly as lib/period resolved it
+ * (members[0].compare, R6): its range, its last day cut at lastDayCut (a
+ * running day: this minute on the store's clock; a clamped archived store:
+ * the archive minute) or whole. No comparison (frozen, before the first
+ * activity) → not included; a partial base is priced but left out of deltas.
  */
-export type ComparisonPlan =
-  | { kind: 'whole'; range: DateRange }
-  | { kind: 'same_time'; day: string }
-  | { kind: 'cut_last'; lastDay: string; runUp: DateRange | null; cutMinutes: number | null }
-
-export function comparisonPlan(range: DateRange, cmp: Comparison, storeToday: string, minutesNow: number, archived = false): ComparisonPlan {
-  const cutLast = !archived && (cmp.sameTimeOfDay || range.to >= storeToday)
-  if (!cutLast) return { kind: 'whole', range: { from: cmp.from, to: cmp.to } }
-  if (range.from === range.to && cmp.from === cmp.to && cmp.to === shiftDate(range.to, -1)) {
-    return { kind: 'same_time', day: range.to }
-  }
-  return {
-    kind: 'cut_last',
-    lastDay: cmp.to,
-    runUp: cmp.from < cmp.to ? { from: cmp.from, to: shiftDate(cmp.to, -1) } : null,
-    cutMinutes: range.to === storeToday ? minutesNow : null,
-  }
+async function loadStoreComparison(store: PortfolioStoreInput, r: Resolution, now: Date): Promise<StoreComparison> {
+  const id = store.id
+  const m = r.members.find(x => x.storeId === id)
+  const c = m?.compare ?? null
+  if (!c) return { included: false, range: r.comparison?.range ?? r.window, cutoffMinutes: null, totals: sumPnL([]) }
+  const included = c.base === 'full'
+  const p = await priceComparison(id, c.range, c.cutAtMinute, now)
+  return { included, range: c.range, cutoffMinutes: c.cutAtMinute, totals: p?.totals ?? sumPnL([]) }
 }
 
 /**
- * What an archived store's window is compared with (the read days, whole) —
- * defined in lib/views/portfolio, which buildPortfolio shares with the phone;
- * re-exported here for the Resumo's callers. The page context
- * (lib/views/page archivedWindow) already applies the same rule to
- * ctx.comparison; applying it again is a no-op. The hour cut itself is left
- * out by comparisonPlan(…, archived).
+ * One store's comparison window priced by R6's cut rule: its last day cut at
+ * `cutAtMinute` (a running window: this minute on the store's clock), or
+ * whole. The engine only cuts single-day windows, so the run-up and the cut
+ * last day are priced apart and added. The pages and the AI tools price a
+ * comparison through here, so "vs 1–24 out (até 16h00)" means the same
+ * money everywhere. Null when the engine does not know the store.
  */
-export { archivedComparison }
-
-async function loadStoreComparison(
-  store: PortfolioStoreInput, range: DateRange, cmp: Comparison, now: Date,
-): Promise<StoreComparison> {
-  const tz = safeTz(store.timezone)
-  const plan = comparisonPlan(range, cmp, todayInTz(tz, now), minutesIntoDay(tz, now), !!store.archived)
-  const whole: DateRange = { from: cmp.from, to: cmp.to }
-  const id = store.id
-  if (plan.kind === 'whole') {
-    const p = (await computePnL([id], plan.range, {}, now)).get(id)
-    return { included: true, range: whole, cutoffMinutes: null, totals: p?.totals ?? sumPnL([]) }
+export async function priceComparison(
+  id: string, range: DateRange, cutAtMinute: number | null, now: Date,
+): Promise<{ totals: PnL; configured: boolean } | null> {
+  if (cutAtMinute === null) {
+    const p = (await computePnL([id], range, {}, now)).get(id)
+    return p ? { totals: p.totals, configured: p.configured } : null
   }
-  if (plan.kind === 'same_time') {
-    const p = (await computeSameTimeComparison([id], plan.day, now)).get(id)
-    return { included: true, range: whole, cutoffMinutes: p?.cutoffMinutes ?? null, totals: p?.totals ?? sumPnL([]) }
-  }
-  // The engine only cuts single-day windows: the run-up and the cut last day
-  // are priced apart and added.
   const [last, runUp] = await Promise.all([
-    computePnL([id], { from: plan.lastDay, to: plan.lastDay }, { cutoffMinutes: { [id]: plan.cutMinutes } }, now),
-    plan.runUp ? computePnL([id], plan.runUp, {}, now) : Promise.resolve(new Map<string, StorePnL>()),
+    computePnL([id], { from: range.to, to: range.to }, { cutoffMinutes: { [id]: cutAtMinute } }, now),
+    range.from < range.to ? computePnL([id], { from: range.from, to: shiftDate(range.to, -1) }, {}, now) : Promise.resolve(new Map<string, StorePnL>()),
   ])
-  const parts = [runUp.get(id)?.totals, last.get(id)?.totals].filter((x): x is PnL => !!x)
-  return { included: true, range: whole, cutoffMinutes: plan.cutMinutes, totals: sumPnL(parts) }
+  const l = last.get(id)
+  if (!l) return null
+  const parts = [runUp.get(id)?.totals, l.totals].filter((x): x is PnL => !!x)
+  return { totals: sumPnL(parts), configured: l.configured }
+}
+
+/**
+ * The base every KPI delta compares with, or null (no delta at all). A
+ * partial base (R6: the comparison starts before the store's first activity)
+ * is not a base: no %, no p.p. — Hibikura · 14 dias read "caiu 26%" and
+ * "subiu 17,8 p.p." against sales from 7 nov only. An empty base says "sem
+ * comparação" rather than "era $0".
+ */
+export function comparisonPrevious(c: Pick<StoreComparison, 'included' | 'totals'>): PnL | null {
+  return c.included && (c.totals.orders > 0 || c.totals.adSpend > 0) ? c.totals : null
 }
 
 // ─── The summary (verdict, ledger, KPIs, products, countries) ────────────────
@@ -123,7 +108,12 @@ export interface StoreWindow {
   period: Period
   /** The window as the page context resolved it (store's own timezone). */
   range: DateRange
-  comparison: Comparison
+  comparison: Comparison & ComparisonWords & { cutoffMinutes?: number | null }
+  /** The page context's resolution: the comparison is priced from it. */
+  resolution: Resolution
+  /** The facts that resolution was made with (page context): the first sale
+   *  and archive day come from them (R19, §9.7). */
+  facts?: ViewerStores | null
 }
 
 export interface StoreSummary {
@@ -151,24 +141,18 @@ export interface StoreSummary {
  * window plus the comparison. `win` must be the page context's window.
  */
 export async function loadStoreSummary(store: PortfolioStoreInput, win: StoreWindow, now: Date): Promise<StoreSummary> {
-  // The first sale, so the verdict reads a window before the store existed
-  // as such (and the chart line and the KPI averages count days from it).
-  // Optional: a failed read leaves the row's firstOrderDate null, as before.
-  const firstOrders = loadFirstOrderDates([store.id])
-    .catch(err => { console.error('[resumo] first order', err); return new Map<string, string>() })
-  // An archived store's archive day, so the verdict says "arquivada desde
-  // 10 nov … não há dados" instead of "não teve vendas nos últimos 7 dias"
-  // (Squishy World), as buildPortfolio's rows already do. Optional too. The
-  // comparison waits for it (archivedComparison); any other store resolves it
-  // at once.
-  const archives = store.archived
-    ? loadArchiveDates([store.id]).catch(err => { console.error('[resumo] archive date', err); return new Map<string, string>() })
-    : Promise.resolve(new Map<string, string>())
-  const comparisonOf = (m: Map<string, string>) =>
-    archivedComparison(store, m.get(store.id) ?? null, win.range, win.comparison, safeTz(store.timezone), now)
+  // The first sale (the verdict reads a window before the store existed as
+  // such; the chart line and the KPI averages count days from it) and the
+  // archive day, both from the period facts the resolution was made with
+  // (R19, §9.7): a failed read is unknown (MIN_DATE), never "never sold".
+  const dates = factsFor([store], win.facts).then(vs => factDates(vs, [store.id]))
+  const firstOrders = dates.then(d => d.firstOrderDates)
+  const archives = dates.then(d => d.archiveDates)
   const [current, compared, sellsIn, firstOrderDates, daysBefore, archiveDates] = await Promise.all([
-    computePnL([store.id], win.range, { products: true, countries: true }, now),
-    archives.then(m => loadStoreComparison(store, win.range, comparisonOf(m), now)),
+    // An archived (clamped) store is priced on the days it read, as its
+    // comparison is (R10): fixed costs never accrue after the archive day.
+    computePnL([store.id], pricedWindow(win.resolution, store.id), { products: true, countries: true }, now),
+    loadStoreComparison(store, win.resolution, now),
     loadSaleCurrency(store.id).catch(() => null),
     firstOrders,
     // Alongside the window's pass, not after it: only a store that started
@@ -180,15 +164,14 @@ export async function loadStoreSummary(store: PortfolioStoreInput, win: StoreWin
   if (!pnl) throw new Error(`Loja ${store.id} não encontrada no motor`)
   const archivedOn = store.archived ? archiveDates.get(store.id) ?? null : null
   const view = assemblePortfolio({
-    stores: [store], period: win.period, range: win.range, comparison: comparisonOf(archiveDates),
+    stores: [store], period: win.period, range: win.range, comparison: win.comparison, resolution: win.resolution,
     anchorTimezone: safeTz(store.timezone), now,
     current, compared: new Map([[store.id, compared]]),
     chargebackHealth: null, liveFeed: [], liveCovered: new Set([store.id]), syncRows: null,
     firstOrderDates, archiveDates,
   })
   const row = view.stores[0]
-  const prev = compared.totals
-  const previous = prev.orders > 0 || prev.adSpend > 0 ? prev : null
+  const previous = comparisonPrevious(compared)
   const days = kpiDays(win.range, pnl.daily, {
     firstOrderDate: firstOrderDates.get(store.id) ?? null,
     before: daysBefore,

@@ -22,18 +22,19 @@
 
 import { query } from '../db'
 import {
-  computePnL, computeSameTimeComparison, sumPnL, KEPT_ORDER_SQL,
+  computePnL, sumPnL, KEPT_ORDER_SQL,
   type HourPoint, type PnL, type StorePnL,
 } from '../engine/pnl'
 import {
-  anchorTz, comparisonRange, eachDay, formatRange, minutesIntoDay, safeTz, shiftDate,
-  todayInTz, isIsoDate,
+  eachDay, formatRange, isIsoDate, safeTz, shiftDate, todayInTz,
   type Comparison, type DateRange, type Period,
 } from '../engine/dates'
+import { notesText, pricedWindow, resolve, screenComparison, type MemberState, type PeriodValue, type Resolution, type ScreenComparison, type ViewerStores } from '../period'
 import { getChargebackHealth, type ChargebackHealth } from '../adjustments'
 import type { StoreRef } from '../access'
 import { STALE_AFTER_MIN, staleness } from '../sync/plan'
-import { LIVE_FEED_SIZE, resolvePortfolioWindow } from './portfolioLimits'
+import { LIVE_FEED_SIZE } from './portfolioLimits'
+import { viewerStoresOf } from './periodFacts'
 // verdict imports only types from this module, so this is no import cycle.
 import { judgedStores } from './verdict'
 
@@ -142,7 +143,11 @@ export interface PortfolioStoreRow {
   archivedOn?: string | null
 }
 
-export interface PortfolioComparison extends DateRange {
+/** The comparison words of lib/period (screenComparison): optional so an
+ *  older answer (a phone holding a cached response) still reads. */
+export type ComparisonWords = Partial<Pick<ScreenComparison, 'full' | 'short' | 'phrase' | 'rangeText' | 'cutText' | 'none' | 'partialBase' | 'leftOut' | 'fullBase' | 'leftOutWhy'>>
+
+export interface PortfolioComparison extends DateRange, ComparisonWords {
   label: string
   /** True when at least one store's comparison was cut at its own current time. */
   sameTimeOfDay: boolean
@@ -324,6 +329,9 @@ export interface PortfolioFreshness {
 
 export interface PortfolioView {
   generatedAt: string
+  /** What the window means (lib/period resolve): labels, members' states and
+   *  comparisons, notes, nextTurnAt. Every other window field derives from it. */
+  resolution: Resolution
   period: Period
   /** The window, as dates on the anchor clock; each store reads the same dates
    *  in its own timezone. */
@@ -367,17 +375,7 @@ export interface PortfolioIncludes {
   liveFeed?: boolean
   chargebackHealth?: boolean
   freshness?: boolean
-  /**
-   * A custom window compared by a preset's rule (only 'mtd' or 'lastmonth',
-   * COMPARE_AS; anything else is ignored): the phone sends it for the dates a
-   * store row of "Todas · Este mês" opened, so Hibikura's 1–23 nov is compared
-   * with "mesmos dias do mês passado" as Todas is, not "23 dias anteriores".
-   */
-  compareAs?: Period
 }
-
-/** Presets whose comparison rule a custom window may borrow (compareAs). */
-export const COMPARE_AS: readonly Period[] = ['mtd', 'lastmonth']
 
 export class PortfolioInputError extends Error {}
 
@@ -408,6 +406,17 @@ export function dayStateOf(range: DateRange, storeToday: string, anchorToday: st
   if (range.from > storeToday) return 'not_started'
   if (range.to >= storeToday) return 'running'
   return range.to === anchorToday ? 'closed' : 'complete'
+}
+
+/** A row's DayState from lib/period's member state (R2, R10): an archived
+ *  store is never 'running'. */
+export function dayStateOfMember(state: MemberState, range: DateRange, anchorToday: string): DayState {
+  switch (state) {
+    case 'running': return 'running'
+    case 'not_started': return 'not_started'
+    case 'closed': return range.to === anchorToday ? 'closed' : 'complete'
+    default: return 'complete'
+  }
 }
 
 export interface SyncRow {
@@ -618,7 +627,7 @@ export interface PortfolioInputs {
   stores: readonly PortfolioStoreInput[]
   period: Period
   range: DateRange
-  comparison: Comparison
+  comparison: Comparison & ComparisonWords & { cutoffMinutes?: number | null }
   anchorTimezone: string
   now: Date
   current: Map<string, StorePnL>
@@ -637,8 +646,11 @@ export interface PortfolioInputs {
   /** Archived stores' archive day on their own calendar (loadArchiveDates).
    *  Optional: without it a window after the archive date reads "sem vendas". */
   archiveDates?: ReadonlyMap<string, string>
-  /** rangeCutNote of the window, when buildPortfolio had to cut it. */
+  /** The fit notes of the window as one sentence (lib/period R9). */
   rangeNote?: string | null
+  /** The resolution the window comes from; its member states win over
+   *  dayStateOf when given. */
+  resolution?: Resolution
 }
 
 const presentOnly = <T>(x: T | undefined): x is T => x !== undefined
@@ -655,7 +667,8 @@ export function assemblePortfolio(i: PortfolioInputs): PortfolioView {
     pnlOf.set(s.id, p)
     const tz = safeTz(p.store.timezone || s.timezone)
     const storeToday = todayInTz(tz, i.now)
-    const dayState = dayStateOf(i.range, storeToday, anchorToday)
+    const member = i.resolution?.members.find(m => m.storeId === s.id)
+    const dayState = member ? dayStateOfMember(member.state, i.range, anchorToday) : dayStateOf(i.range, storeToday, anchorToday)
     const freshness = i.syncRows
       ? storeFreshness(s.id, i.syncRows, i.liveCovered.has(s.id), i.now)
       : unknownFreshness(i.liveCovered.has(s.id))
@@ -741,6 +754,7 @@ export function assemblePortfolio(i: PortfolioInputs): PortfolioView {
 
   return {
     generatedAt,
+    resolution: i.resolution!,
     period: i.period,
     range: i.range,
     rangeLabel: formatRange(i.range, anchorToday),
@@ -752,6 +766,7 @@ export function assemblePortfolio(i: PortfolioInputs): PortfolioView {
     configured: rows.every(r => r.configured),
     unconfiguredStoreIds: rows.filter(r => !r.configured).map(r => r.id),
     comparison: {
+      ...wordsOf(i.comparison),
       from: i.comparison.from, to: i.comparison.to, label: i.comparison.label,
       sameTimeOfDay: cutMinutes.length > 0,
       cutoffMinutes: cutMinutes.length > 0 && cutMinutes.every(m => m === cutMinutes[0]) ? cutMinutes[0] : null,
@@ -778,104 +793,66 @@ export function assemblePortfolio(i: PortfolioInputs): PortfolioView {
   }
 }
 
-// ─── Comparison of an archived store (pure) ──────────────────────────────────
-
-/** comparisonRange's label for "Este mês" (and row dates compared like it). */
-export const MTD_LABEL = 'mesmos dias do mês passado'
-
-/**
- * What an archived store's window is compared with. Nothing is read after its
- * archive day (`archivedOn`, null when unknown) and its day never runs:
- *  - a window that runs past the archive day is compared on the days that
- *    were read (the verdict's frozenTail: "não teve vendas em 1–10 nov"):
- *    "Este mês" 1–24 nov, archived on 10 nov, with 1–10 out — the same days
- *    of the month before, as for "Mês passado" cut by the archive — and any
- *    other window with as many days right before them. It compared 10 read
- *    days with 24 ("caiu 100% vs 1–24 out até 14h23");
- *  - otherwise the same window, whole: "ontem até esta hora" is the day before.
- * The same rule as the desktop page context (lib/views/page archivedWindow),
- * and idempotent: a comparison it already moved maps to itself. Here so that
- * buildPortfolio (the phone, /api/mobile) and lib/views/store (the Resumo,
- * which re-exports it) compare an archived store alike; store.ts imports this
- * module, so it cannot live there without an import cycle. The hour cut itself
- * is left out by the pricing (store comparisonPlan, loadComparison below). A
- * store that is not archived keeps `cmp`.
- */
-export function archivedComparison(
-  store: { archived?: boolean }, archivedOn: string | null, range: DateRange, cmp: Comparison, tz: string, now: Date,
-): Comparison {
-  if (!store.archived) return cmp
-  if (archivedOn && range.from <= archivedOn && archivedOn < range.to) {
-    const read = { from: range.from, to: archivedOn }
-    const sameDays = cmp.label === MTD_LABEL || cmp.label === 'mês anterior'
-    return { ...comparisonRange(sameDays ? 'mtd' : 'custom', read, tz, now), sameTimeOfDay: false }
-  }
-  return { ...cmp, sameTimeOfDay: false, label: cmp.label === 'ontem até esta hora' ? 'dia anterior' : cmp.label }
+/** The lib/period words of a comparison, when it carries them. */
+function wordsOf(c: ComparisonWords): ComparisonWords {
+  const out: ComparisonWords = {}
+  if (c.full !== undefined) out.full = c.full
+  if (c.short !== undefined) out.short = c.short
+  if (c.phrase !== undefined) out.phrase = c.phrase
+  if (c.rangeText !== undefined) out.rangeText = c.rangeText
+  if (c.cutText !== undefined) out.cutText = c.cutText
+  if (c.none !== undefined) out.none = c.none
+  if (c.partialBase !== undefined) out.partialBase = c.partialBase
+  if (c.leftOut !== undefined) out.leftOut = c.leftOut
+  if (c.fullBase !== undefined) out.fullBase = c.fullBase
+  if (c.leftOutWhy !== undefined) out.leftOutWhy = c.leftOutWhy
+  return out
 }
+
+/** comparisonRange's label for "Este mês". */
+export const MTD_LABEL = 'mesmos dias do mês passado'
 
 // ─── Loading ──────────────────────────────────────────────────────────────────
 
 /**
- * The comparison window, priced per store on its own clock.
- *  - One day that is today: yesterday cut at each store's current minute
- *    (computeSameTimeComparison). A store whose day already closed is
- *    compared whole day against whole day.
- *  - Several days ending today ("Este mês", a custom range): the earlier
- *    window with its last day cut the same way.
- *  - Anything else: whole days.
- * An archived store is never cut: it is not synced, so its day does not run
- * and "até esta hora" means nothing for it (Squishy World's Este mês on the
- * phone read "vs 1–24 out, até 15h11 de 24 out", the hour following the
- * clock). Same rule as lib/views/store comparisonPlan(…, archived).
+ * The comparison of every member, priced on its own range and cut exactly as
+ * lib/period resolved it (R6): a member's last comparison day is cut at its
+ * lastDayCut (a running store: the minute it is now on its clock; a clamped
+ * archived store: the archive minute), never otherwise. Members without a
+ * comparison (frozen, not started, no base) are left out; a partial base is
+ * priced but left out of the delta (included false).
  */
-async function loadComparison(
-  stores: readonly PortfolioStoreInput[], range: DateRange, cmp: Comparison, anchorToday: string, now: Date,
-): Promise<Map<string, StoreComparison>> {
-  const ids = stores.map(s => s.id)
+async function loadComparison(r: Resolution, now: Date): Promise<Map<string, StoreComparison>> {
   const out = new Map<string, StoreComparison>()
-  const tzOf = new Map(stores.map(s => [s.id, safeTz(s.timezone)]))
-  const archived = new Set(stores.filter(s => s.archived).map(s => s.id))
-  // A store whose window has not begun has no "same time" to compare with.
-  const notStarted = (id: string) => range.from > todayInTz(tzOf.get(id) ?? 'UTC', now)
-  const whole: DateRange = { from: cmp.from, to: cmp.to }
-  const put = (id: string, included: boolean, cutoffMinutes: number | null, totals: PnL) =>
-    out.set(id, { included, range: whole, cutoffMinutes: included ? cutoffMinutes : null, totals: included ? totals : sumPnL([]) })
-
-  const cutLast = !stores.every(s => s.archived) && (cmp.sameTimeOfDay || range.to >= anchorToday)
-  if (!cutLast) {
-    for (const [id, p] of await computePnL(ids, whole, {}, now)) put(id, true, null, p.totals)
-    return out
+  const groups = new Map<string, { range: DateRange; whole: string[]; cut: Record<string, number> }>()
+  for (const m of r.members) {
+    if (!m.compare) {
+      out.set(m.storeId, { included: false, range: r.comparison?.range ?? r.window, cutoffMinutes: null, totals: sumPnL([]) })
+      continue
+    }
+    const k = `${m.compare.range.from}|${m.compare.range.to}`
+    const g = groups.get(k) ?? { range: m.compare.range, whole: [], cut: {} }
+    if (m.compare.cutAtMinute === null) g.whole.push(m.storeId)
+    else g.cut[m.storeId] = m.compare.cutAtMinute
+    groups.set(k, g)
   }
-
-  if (range.from === range.to && cmp.from === cmp.to && cmp.to === shiftDate(range.to, -1)) {
-    // Archived stores beside running ones: yesterday whole, never cut.
-    const liveIds = ids.filter(id => !archived.has(id))
-    const archivedIds = ids.filter(id => archived.has(id))
-    const [sameTime, wholeDay] = await Promise.all([
-      computeSameTimeComparison(liveIds, range.to, now),
-      archivedIds.length ? computePnL(archivedIds, whole, {}, now) : Promise.resolve(new Map<string, StorePnL>()),
+  const included = (id: string) => r.members.find(m => m.storeId === id)?.compare?.base === 'full'
+  await Promise.all([...groups.values()].map(async g => {
+    const cutIds = Object.keys(g.cut)
+    const last: DateRange = { from: g.range.to, to: g.range.to }
+    const runUp: DateRange | null = g.range.from < g.range.to ? { from: g.range.from, to: shiftDate(g.range.to, -1) } : null
+    const [whole, lastDay, before] = await Promise.all([
+      g.whole.length ? computePnL(g.whole, g.range, {}, now) : Promise.resolve(new Map<string, StorePnL>()),
+      cutIds.length ? computePnL(cutIds, last, { cutoffMinutes: g.cut }, now) : Promise.resolve(new Map<string, StorePnL>()),
+      cutIds.length && runUp ? computePnL(cutIds, runUp, {}, now) : Promise.resolve(new Map<string, StorePnL>()),
     ])
-    for (const [id, p] of sameTime) put(id, !notStarted(id), p.cutoffMinutes, p.totals)
-    for (const [id, p] of wholeDay) put(id, !notStarted(id), null, p.totals)
-    return out
-  }
-
-  // Several days, the last one cut: the engine only cuts single-day windows, so
-  // the run-up and the last day are priced apart and added. An archived
-  // store's last day is priced whole (no cut).
-  const cut: Record<string, number | null> = {}
-  for (const [id, tz] of tzOf) cut[id] = !archived.has(id) && todayInTz(tz, now) === range.to ? minutesIntoDay(tz, now) : null
-  const [lastDay, runUp] = await Promise.all([
-    computePnL(ids, { from: cmp.to, to: cmp.to }, { cutoffMinutes: cut }, now),
-    cmp.from < cmp.to
-      ? computePnL(ids, { from: cmp.from, to: shiftDate(cmp.to, -1) }, {}, now)
-      : Promise.resolve(new Map<string, StorePnL>()),
-  ])
-  for (const id of ids) {
-    if (!runUp.has(id) && !lastDay.has(id)) continue
-    const parts = [runUp.get(id)?.totals, lastDay.get(id)?.totals].filter(presentOnly)
-    put(id, !notStarted(id), cut[id] ?? null, sumPnL(parts))
-  }
+    for (const [id, p] of whole) out.set(id, { included: included(id), range: g.range, cutoffMinutes: null, totals: p.totals })
+    for (const id of cutIds) {
+      const parts = [before.get(id)?.totals, lastDay.get(id)?.totals].filter(presentOnly)
+      if (!parts.length) continue
+      out.set(id, { included: included(id), range: g.range, cutoffMinutes: g.cut[id], totals: sumPnL(parts) })
+    }
+  }))
   return out
 }
 
@@ -979,6 +956,32 @@ async function loadSyncRows(ids: string[]): Promise<SyncRow[]> {
 }
 
 /**
+ * Row facts from the period facts (R19, §9.7): each store's first kept order
+ * and archive day, as the resolution's StoreFacts say them. A null first
+ * order (never sold) is absent from the map, as before; a failed facts read
+ * gives MIN_DATE there (unknown: before every window), never null, so a row
+ * can no longer read "ainda não vendeu" because a query failed while the
+ * resolution, from the same facts, compared it as a normal window.
+ */
+export function factDates(vs: ViewerStores, ids: readonly string[]): { firstOrderDates: Map<string, string>; archiveDates: Map<string, string> } {
+  const firstOrderDates = new Map<string, string>()
+  const archiveDates = new Map<string, string>()
+  for (const id of ids) {
+    const f = vs.active.find(s => s.id === id) ?? vs.archived.find(s => s.id === id)
+    if (f?.firstOrderDate) firstOrderDates.set(id, f.firstOrderDate)
+    if (f?.archivedOn) archiveDates.set(id, f.archivedOn)
+  }
+  return { firstOrderDates, archiveDates }
+}
+
+/** The facts of `stores`: the caller's (the page context's) when given, else
+ *  the one facts loader (lib/views/periodFacts), never a read of its own. */
+export async function factsFor(stores: readonly PortfolioStoreInput[], facts?: ViewerStores | null): Promise<ViewerStores> {
+  const covered = facts && stores.every(s => facts.active.some(f => f.id === s.id) || facts.archived.some(f => f.id === s.id))
+  return covered ? facts! : viewerStoresOf(stores.map(s => ({ ...s, archived: !!s.archived })))
+}
+
+/**
  * The day each archived store was archived, on its own calendar (timestamptz
  * converted once, in the store's timezone). Active stores are absent. Exported
  * for one-store callers that assemble the view themselves (lib/views/store).
@@ -1073,47 +1076,63 @@ async function loadHealth(stores: readonly PortfolioStoreInput[]): Promise<Portf
  *
  * @throws PortfolioInputError for a custom period without two valid dates.
  */
+/** Every member priced on its own priced window (lib/period pricedWindow):
+ *  the window, or a clamped archived store's read days (R10). */
+async function priceMembers(ids: readonly string[], r: Resolution, now: Date): Promise<Map<string, StorePnL>> {
+  const groups = new Map<string, { range: DateRange; ids: string[] }>()
+  for (const id of ids) {
+    const range = pricedWindow(r, id)
+    const k = `${range.from}|${range.to}`
+    const g = groups.get(k) ?? { range, ids: [] }
+    g.ids.push(id)
+    groups.set(k, g)
+  }
+  const out = new Map<string, StorePnL>()
+  for (const m of await Promise.all([...groups.values()].map(g => computePnL(g.ids, g.range, {}, now)))) {
+    for (const [id, p] of m) out.set(id, p)
+  }
+  return out
+}
+
+/** The comparison of a resolution as every screen names it (lib/period
+ *  screenComparison, R6/R7). Without one it carries `none` (R6's words), never
+ *  an invented "vs dia anterior (window.from − 1)". */
+export function comparisonOf(r: Resolution): ScreenComparison {
+  return screenComparison(r)
+}
+
+const FIT_NOTES = new Set(['future_start', 'future_end', 'too_long', 'floor', 'too_early'])
+
+/**
+ * The portfolio of `stores` for a resolution (lib/period resolve). It never
+ * re-resolves the window (I-19): the window, every member's state and
+ * comparison cut come from `resolution`. `stores` are the resolution's
+ * members, resolved by the caller through lib/access.
+ */
 export async function buildPortfolio(
   stores: readonly PortfolioStoreInput[],
-  period: Period,
-  from?: string | null,
-  to?: string | null,
-  now: Date = new Date(),
+  resolution: Resolution,
   include: PortfolioIncludes = {},
+  /** The facts the resolution was made with (page context): rows take their
+   *  first-order and archive dates from them (factDates). */
+  facts?: ViewerStores | null,
 ): Promise<PortfolioView> {
-  if (period === 'custom' && !(isIsoDate(from) && isIsoDate(to))) {
-    throw new PortfolioInputError('Escolha a data inicial e a final')
-  }
+  const now = new Date(resolution.asOf)
   const want = { liveFeed: true, chargebackHealth: true, freshness: true, ...include }
   const unique = [...new Map(stores.map(s => [s.id, s])).values()]
   const ids = unique.map(s => s.id)
-  const anchor = anchorTz(unique.map(s => s.timezone))
-  const anchorToday = todayInTz(anchor, now)
-  // A custom range is cut the way the desktop pages cut it (portfolioLimits):
-  // ?from=1990-01-01 priced 13.470 days per store, plus a 1953–1989 comparison.
-  const { range, note: rangeNote } = resolvePortfolioWindow(period, anchor, from, to, now)
-  // Dates a store row opened from "Este mês" or "Mês passado" are compared by
-  // that preset's rule (PortfolioIncludes.compareAs), not as "N dias anteriores".
-  const cmpPeriod = period === 'custom' && include.compareAs && COMPARE_AS.includes(include.compareAs) ? include.compareAs : period
-  const cmp = comparisonRange(cmpPeriod, range, anchor, now)
+  const range = resolution.window
+  const fit = resolution.notes.filter(n => FIT_NOTES.has(n.code))
+  const rangeNote = fit.length ? notesText(fit) : null
+  const comparison = comparisonOf(resolution)
+  const period: Period = resolution.effective.kind === 'preset' ? resolution.effective.preset : 'custom'
   const nameOf = new Map(unique.map(s => [s.id, s.name]))
   // Archived stores are not selling: no feed, and no "missing webhook" noise.
   const feedIds = unique.filter(s => !s.archived).map(s => s.id)
-
   const noFeed = { items: [] as LiveOrderItem[], covered: new Set<string>(ids) }
-  const archivedIds = unique.filter(s => s.archived).map(s => s.id)
-  // Wording only ("arquivada desde 10 nov"): only archived stores ask. A lone
-  // archived store's comparison also waits for it (archivedComparison): its
-  // Este mês is compared on the days read (1–10 out), as on the desktop
-  // Resumo, not "1–24 out, até 15h11". Any other view resolves it at once.
-  const archiveP = archivedIds.length
-    ? loadArchiveDates(archivedIds).catch(err => { console.error('[portfolio] archive dates', err); return new Map<string, string>() })
-    : Promise.resolve(new Map<string, string>())
-  const lone = unique.length === 1 && unique[0].archived ? unique[0] : null
-  const cmpP = lone ? archiveP.then(m => archivedComparison(lone, m.get(lone.id) ?? null, range, cmp, anchor, now)) : Promise.resolve(cmp)
-  const [current, compared, chargebackHealth, feed, syncRows, firstOrderDates, archiveDates, comparison] = await Promise.all([
-    computePnL(ids, range, {}, now),
-    ids.length ? cmpP.then(c => loadComparison(unique, range, c, anchorToday, now)) : Promise.resolve(new Map<string, StoreComparison>()),
+  const [current, compared, chargebackHealth, feed, syncRows, vs] = await Promise.all([
+    priceMembers(ids, resolution, now),
+    ids.length ? loadComparison(resolution, now) : Promise.resolve(new Map<string, StoreComparison>()),
     // These blocks are context, not the P&L: a failure must not blank the screen.
     want.chargebackHealth && ids.length
       ? loadHealth(unique).catch(err => { console.error('[portfolio] chargeback health', err); return null })
@@ -1126,16 +1145,27 @@ export async function buildPortfolio(
     want.freshness
       ? loadSyncRows(ids).catch(err => { console.error('[portfolio] sync runs', err); return null })
       : Promise.resolve(null),
-    // Wording only ("começou a vender em 7 nov"): without it the verdict
-    // falls back to "sem vendas", never to wrong numbers.
-    loadFirstOrderDates(ids).catch(err => { console.error('[portfolio] first orders', err); return new Map<string, string>() }),
-    archiveP,
-    cmpP,
+    factsFor(unique, facts),
   ])
+  const { firstOrderDates, archiveDates } = factDates(vs, ids)
 
   return assemblePortfolio({
-    stores: unique, period, range, comparison, anchorTimezone: anchor, now,
+    stores: unique, period, range, comparison, anchorTimezone: resolution.clockTz, now,
     current, compared, chargebackHealth,
-    liveFeed: feed.items, liveCovered: feed.covered, syncRows, firstOrderDates, archiveDates, rangeNote,
+    liveFeed: feed.items, liveCovered: feed.covered, syncRows, firstOrderDates, archiveDates, rangeNote, resolution,
   })
+}
+
+/**
+ * The portfolio of `stores` for a period, resolved here at `now` (one store:
+ * its clock; several: Todas' rule). For callers without a page context (the
+ * daily summary push, the styleguide); `viewer` defaults to the facts of
+ * these stores.
+ */
+export async function buildPortfolioFor(
+  stores: readonly PortfolioStoreInput[], period: PeriodValue, now: Date, include: PortfolioIncludes = {}, viewer?: ViewerStores,
+): Promise<PortfolioView> {
+  const vs = viewer ?? await viewerStoresOf(stores.map(s => ({ ...s, archived: !!s.archived })))
+  const scope = stores.length === 1 ? { kind: 'store' as const, id: stores[0].id } : { kind: 'all' as const }
+  return buildPortfolio(stores, resolve({ scope, period, split: false }, vs, now), include, vs)
 }

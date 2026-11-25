@@ -2,33 +2,35 @@
  * getPageContext: what every desktop page means by "store" and "period".
  *
  * The URL is the state: ?loja=<storeId|todas>&periodo=<7d|today|…>&de=YYYY-MM-DD
- * &ate=YYYY-MM-DD&parte=50. Every server page resolves it here, once, so the
- * same link shows the same store and the same dates on every page, and links
- * between pages keep them (ctx.hrefWith). Pages never read searchParams for
- * these keys themselves.
+ * &ate=YYYY-MM-DD&parte=50. Every server page resolves it here, once, through
+ * lib/period (the single source of the period rules, desktop and phone alike):
  *
- *   const ctx = await getPageContext(searchParams)            // store or Todas
- *   const ctx = await getPageContext(searchParams, { scope: 'store' })  // one store
- *   const ctx = await getPageContext(searchParams, { scope: 'all' })    // Todas
+ *   parseDesktop (R15) → redirect once to the canonical URL → resolve (R1–R11)
+ *
+ * A URL always names what is on screen (R2): a one-store page opened with
+ * ?loja=todas or no store is redirected to the concrete store, with `vem`
+ * saying where it came from so the page announces any change of dates (R4).
+ * Links between pages are built with ctx.hrefWith (lib/period desktopHref),
+ * never by hand.
  *
  * Who may see what is decided by lib/access only: an id the viewer cannot see
  * is a 404, no viewer redirects to /sign-in. Archived stores open by id (their
- * history) but never enter "Todas" or the picker.
- *
- * Dates are resolved on the server with lib/engine/dates in the store's own
- * timezone (one store) or on the reference clock, Brasília (Todas) — the same
- * rule buildPortfolio uses, so a page and the portfolio view agree.
+ * history, consultation only) but never enter "Todas" or the picker.
  */
 
 import { notFound, redirect } from 'next/navigation'
-import { getViewer, listStores, resolveStore, type StoreRef, type Viewer } from '../access'
+import { cookies } from 'next/headers'
 import type { Metadata } from 'next'
+import { ACTIVE_STORE_COOKIE, getViewer, listStores, type StoreRef, type Viewer } from '../access'
+import type { Comparison, DateRange, Period } from '../engine/dates'
+import { formatRangeLabel, tzCity } from '../format'
 import {
-  anchorTz, comparisonRange, daysBetween, isIsoDate, isPeriod, minutesIntoDay, PERIODS, resolveRange, shiftDate,
-  todayInTz, type Comparison, type DateRange, type Period,
-} from '../engine/dates'
-import { dayOfLabel, formatClock, formatDate, formatRangeLabel, tzCity } from '../format'
-import { comparisonText, periodPhrase, SPLIT_SHARE } from './verdict'
+  carry, desktopHref, findStore, landingNotes, MAX_WINDOW_DAYS as PERIOD_MAX_DAYS, MIN_DATE, notesText,
+  offsetDiffers, parseDesktop, parsePeriod, resolve, rowsAnnouncement, sameScope, scopeHref, screenComparison, announce, dateBeside, preset, vemFor,
+  type Announcement, type Note, type PeriodValue, type Resolution, type ScopeRef, type ScreenComparison, type Selection, type ViewerStores,
+} from '../period'
+import { viewerStoresOf } from './periodFacts'
+import { SPLIT_SHARE } from './verdict'
 
 export type SearchParams = Record<string, string | string[] | undefined>
 
@@ -36,386 +38,19 @@ export type SearchParams = Record<string, string | string[] | undefined>
 export const ALL_STORES = 'todas'
 /** Desktop default: 7 complete days ending yesterday. */
 export const DEFAULT_PERIOD: Period = '7d'
+/** Longest window a page prices (lib/period MAX_WINDOW_DAYS). */
+export const MAX_WINDOW_DAYS = PERIOD_MAX_DAYS
+/** No page date before this one (lib/period MIN_DATE). */
+export const MIN_PAGE_DATE = MIN_DATE
 
-/**
- * Longest window a page prices: the same cap as the API routes
- * (app/api/campaigns/window.ts MAX_WINDOW_DAYS). A longer custom range keeps
- * its LAST 366 days and the page says so (PeriodWindow.rangeNote). Without it,
- * ?de=1990-01-01 built a 30 MB Resumo in 18 s: 13,470 daily bars plus a
- * 13,470-day comparison.
- */
-export const MAX_WINDOW_DAYS = 366
-
-/**
- * No page date before this one. No order of these stores is older (Shopify
- * itself opened in 2006), and older years break plain-date arithmetic: Date.UTC
- * reads years 0–99 as 19xx, and the comparison of a range starting in year 100
- * began in year −1827 ('-001827-02', which SQL rejects; the text read
- * "2 undefined 0"). A range that ends before it is ignored like a malformed
- * date; one that starts before it starts here.
- */
-export const MIN_PAGE_DATE = '2000-01-01'
-
-// ─── Pure parts (tested) ─────────────────────────────────────────────────────
-
-/** The URL state, normalised. `loja` is the raw value (an id, 'todas' or null). */
+/** The URL state of the page shown, in the URL's own words (for the few
+ *  readers that still want the strings). */
 export interface PageParams {
   loja: string | null
   periodo: Period
   de: string | null
   ate: string | null
   parte: boolean
-  /**
-   * Only with periodo=custom, and only on dates a link read on another clock
-   * (?volta=<preset>): a store row of "Todas" for a store whose day is not
-   * Brasília's (Hibikura after noon, components/portfolio/model
-   * resumoLinkOverrides), Atribuição's link from such a store to Todas. It is
-   * the preset the owner had chosen ("Hoje", "7 dias"…); the phone keeps the
-   * same thing as rowPreset (app/m/_lib/selection). Absent otherwise.
-   * The dates belong to the store (or Todas) they were opened on: buildHref
-   * brings the preset back on a link to another store or scope and drops them
-   * for a period the owner picks, and getPageContext (settleRowDates) brings it
-   * back once they are no longer that preset on the clock they were read on —
-   * the next day (rowDateClocks). Without it "Hoje" became "24 nov" on every
-   * page and store visited next, and a reload the next morning still opened
-   * 24 nov. Row dates of "Este mês" and "Mês passado" are compared by that
-   * preset's rule (resolvePeriodWindow compareAs), as the phone does.
-   */
-  volta?: Period
-}
-
-const first = (v: string | string[] | undefined): string | null => {
-  const s = Array.isArray(v) ? v[0] : v
-  const t = typeof s === 'string' ? s.trim() : ''
-  return t ? t : null
-}
-
-/**
- * Read the URL keys. Rules:
- *  - unknown or missing periodo → the default;
- *  - de + ate (both real dates) without periodo → a custom range;
- *  - periodo=custom without both dates → the default (never a silent "today");
- *  - a range wholly before MIN_PAGE_DATE counts as no dates (→ the default);
- *    the length cap needs today, so resolvePeriodWindow applies it;
- *  - parte=50 → the partner split; anything else → off;
- *  - volta=<preset> (not custom) only next to custom dates; anything else is
- *    ignored.
- */
-export function parsePageParams(sp: SearchParams, defaultPeriod: Period = DEFAULT_PERIOD): PageParams {
-  const loja = first(sp.loja)
-  const rawPeriod = first(sp.periodo)
-  const de = first(sp.de)
-  const ate = first(sp.ate)
-  const rawVolta = first(sp.volta)
-  const dates = isIsoDate(de) && isIsoDate(ate) && (de >= MIN_PAGE_DATE || ate >= MIN_PAGE_DATE)
-  let periodo: Period = isPeriod(rawPeriod) ? rawPeriod : defaultPeriod
-  if (!rawPeriod && dates) periodo = 'custom'
-  if (periodo === 'custom' && !dates) periodo = defaultPeriod
-  const volta = periodo === 'custom' && isPeriod(rawVolta) && rawVolta !== 'custom' ? rawVolta : null
-  return {
-    loja,
-    periodo,
-    de: periodo === 'custom' ? de : null,
-    ate: periodo === 'custom' ? ate : null,
-    parte: first(sp.parte) === '50',
-    ...(volta ? { volta } : {}),
-  }
-}
-
-/**
- * Dates a link read on another clock (PageParams.volta), checked against now:
- *  - still that preset on one of the clocks they may come from (`clocks`,
- *    rowDateClocks), and not on this page's own (`ownTz`) → kept;
- *  - the same as the preset on this page's own clock (Todas reading a
- *    Hibikura row's dates: they ARE Todas' "Hoje") → the preset, by name;
- *  - no clock reads the preset as those dates any more (midnight passed, a
- *    link reopened days later) → the preset, which rolls on with the clock.
- * Returns `p` itself when nothing changes.
- */
-export function settleRowDates(p: PageParams, ownTz: string, clocks: readonly string[], now: Date): PageParams {
-  if (!p.volta) return p
-  const volta = p.volta
-  const preset: PageParams = { loja: p.loja, periodo: volta, de: null, ate: null, parte: p.parte }
-  if (p.periodo !== 'custom' || !p.de || !p.ate) return preset
-  const names = (tz: string) => {
-    const r = resolveRange(volta, tz, null, null, now)
-    return r.from === p.de && r.to === p.ate
-  }
-  return names(ownTz) || !clocks.some(names) ? preset : p
-}
-
-/**
- * The clocks a page keeps row dates for (settleRowDates `clocks`): the clocks
- * those dates can have been read on.
- *  - One store: Todas' clock only (anchorTz of the viewer's stores), the
- *    phone's rule (app/m/_lib/selection expireRowDates). Row dates reach a
- *    store from Todas' rows (components/portfolio/model resumoLinkOverrides)
- *    and Campanhas' links between stores; dates read on another store's clock
- *    are not this store's and give way to the preset. Kept, Hibikura's "Ontem"
- *    (24 nov in Tokyo), carried from Atribuição through Todas to the MOKOO,
- *    opened MOKOO's running 24 nov as "Ontem de Todas as lojas", while Todas'
- *    own Ontem was 23 nov.
- *  - Todas: every store's clock (Atribuição's link from one store to Todas
- *    carries that store's days, components/attribution/allStoresLink).
- */
-export function rowDateClocks(scope: 'store' | 'all', storeTimezones: readonly string[]): string[] {
-  return scope === 'all' ? [...storeTimezones] : [anchorTz([...storeTimezones])]
-}
-
-/**
- * Whose dates a page on row dates shows (PageContext.rowDatesOf): 'Todas as
- * lojas' on a store page (rowDateClocks keeps none other there); on Todas, the
- * one store whose clock reads the preset as those dates ("Hibikura"), or null
- * when none or several do. Null without row dates.
- */
-export function rowDatesOf(
-  p: Pick<PageParams, 'periodo' | 'de' | 'ate' | 'volta'>, scope: 'store' | 'all',
-  stores: readonly { name: string; timezone: string }[], now: Date,
-): string | null {
-  const volta = p.volta
-  if (!volta || p.periodo !== 'custom' || !p.de || !p.ate) return null
-  if (scope === 'store') return 'Todas as lojas'
-  const readers = stores.filter(st => {
-    const r = resolveRange(volta, st.timezone, null, null, now)
-    return r.from === p.de && r.to === p.ate
-  })
-  return readers.length === 1 ? readers[0].name : null
-}
-
-/**
- * Presets whose comparison rule row dates keep (resolvePeriodWindow
- * compareAs): the same list as lib/views/portfolio COMPARE_AS and the phone's
- * COMPARE_AS_PRESET (app/m/_lib/selection), which a test checks. Not imported:
- * lib/views/portfolio loads the database pool.
- */
-export const COMPARE_AS_PRESETS: readonly Period[] = ['mtd', 'lastmonth']
-
-/** Everything a page says about its window. */
-export interface PeriodWindow {
-  period: Period
-  range: DateRange
-  /** "10–16 nov" / "17 nov". */
-  rangeLabel: string
-  /** "Últimos 7 dias", "Hoje", or the range for custom. */
-  periodLabel: string
-  /** For sentences: "nos últimos 7 dias", "hoje". */
-  periodPhrase: string
-  comparison: Comparison
-  /** The period whose rule `comparison` follows: `period`, or for row dates
-   *  of "Este mês" or "Mês passado" that preset (COMPARE_AS_PRESETS). Pass it to
-   *  buildPortfolio as compareAs so its numbers are compared the same way. */
-  comparePeriod: Period
-  /** "3–9 nov". */
-  comparisonRangeLabel: string
-  /** "vs 7 dias anteriores (3–9 nov)" / "vs ontem até esta hora". */
-  comparisonText: string
-  /** Timezone the window was resolved in. */
-  timezone: string
-  /** Today in that timezone. */
-  today: string
-  /** The window includes today (numbers still moving). */
-  partial: boolean
-  /** Minutes into today in `timezone` (always set; meaningful when partial). */
-  minutesIntoDay: number
-  /** "parcial · até 13h38" when partial, else null. */
-  partialLabel: string | null
-  /** Set when the asked range was cut to fit (longer than MAX_WINDOW_DAYS, or
-   *  starting before MIN_PAGE_DATE): one sentence saying what is shown. */
-  rangeNote: string | null
-}
-
-/**
- * The window a page shows. A custom range is cut to fit: it never starts
- * before MIN_PAGE_DATE nor ends after today (resolveRange), and it keeps its
- * last MAX_WINDOW_DAYS days — so a page never prices decades, and never sends
- * SQL a date it cannot read. `rangeNote` says when that happened.
- *
- * `compareAs` (PageParams.volta): custom dates that stand for "Este mês" or
- * "Mês passado" are compared by that preset's rule, as the phone compares
- * them (buildPortfolio compareAs). Hibikura's row of Todas · Este mês after
- * noon (1–24 nov, Tokyo already on the 25th) opened compared with "24 dias
- * anteriores" (8–31 out), while the row, Todas and the phone said "mesmos dias
- * do mês passado" (1–24 out). Any other preset compares custom dates as
- * custom: "7 dias" and "Ontem" use the same rule either way.
- */
-export function resolvePeriodWindow(
-  period: Period, de: string | null, ate: string | null, tz: string, now: Date = new Date(), compareAs?: Period | null,
-): PeriodWindow {
-  const floor = (d: string | null) => (d !== null && d < MIN_PAGE_DATE ? MIN_PAGE_DATE : d)
-  const floored = period === 'custom' && ((de !== null && de < MIN_PAGE_DATE) || (ate !== null && ate < MIN_PAGE_DATE))
-  let range = resolveRange(period, tz, floor(de), floor(ate), now)
-  const today = todayInTz(tz, now)
-  let rangeNote: string | null = null
-  if (daysBetween(range.from, range.to) > MAX_WINDOW_DAYS) {
-    range = { from: shiftDate(range.to, -(MAX_WINDOW_DAYS - 1)), to: range.to }
-    rangeNote = `O período pedido passa de ${MAX_WINDOW_DAYS} dias, o máximo por página: aqui estão os últimos ${MAX_WINDOW_DAYS}, ${formatRangeLabel(range, today)}.`
-  } else if (floored) {
-    rangeNote = `Datas antes de ${formatDate(MIN_PAGE_DATE, today)} não entram: o período começa em ${formatDate(range.from, today)}.`
-  }
-  const comparePeriod = period === 'custom' && compareAs && COMPARE_AS_PRESETS.includes(compareAs) ? compareAs : period
-  const comparison = comparisonRange(comparePeriod, range, tz, now)
-  const partial = range.to >= today && range.from <= today
-  const minutes = minutesIntoDay(tz, now)
-  const rangeLabel = formatRangeLabel(range, today)
-  const preset = PERIODS.find(p => p.key === period)
-  return {
-    period, range, rangeLabel,
-    periodLabel: period === 'custom' || !preset ? rangeLabel : preset.label,
-    periodPhrase: periodPhrase(period, range, today),
-    comparison,
-    comparePeriod,
-    comparisonRangeLabel: formatRangeLabel({ from: comparison.from, to: comparison.to }, today),
-    // A window ending today is compared with its last day cut at this hour
-    // (lib/views/store comparisonPlan, portfolio loadComparison: cutLast =
-    // sameTimeOfDay || range.to >= today), even when comparisonRange says
-    // sameTimeOfDay false (a custom range): the text must name that cut.
-    comparisonText: comparisonText({ ...comparison, sameTimeOfDay: comparison.sameTimeOfDay || range.to >= today }, today),
-    timezone: tz, today, partial, minutesIntoDay: minutes,
-    partialLabel: partial ? `parcial · até ${formatClock(minutes)}` : null,
-    rangeNote,
-  }
-}
-
-/** What an archived store's window adds (archivedWindow); both null for any
- *  other window. */
-export interface ArchiveFacts {
-  /** The archive day on the store's own calendar (lib/views/portfolio
-   *  loadArchiveDates); null when the store is not archived or the read failed. */
-  archivedOn: string | null
-  /** The days of a window that runs past the archive day that were read
-   *  (window start → archive day), the days its comparison mirrors; null
-   *  otherwise. */
-  readRange: DateRange | null
-}
-
-/**
- * The window of an ARCHIVED store, on top of resolvePeriodWindow. Nothing is
- * read after its archive day, so:
- *  - it has no running day: not partial, no "parcial · até 09h41";
- *  - its comparison is whole days, never cut at this hour — its numbers do not
- *    move, and neither may the figure they are compared with. Squishy World ·
- *    Este mês read "vs mesmos dias do mês passado (1–24 out, até 14h07 de 24
- *    out)", the hour following the clock on every reload, under a note saying
- *    "estes números não mudam". "Ontem até esta hora" becomes "dia anterior";
- *  - a window that runs past the archive day is compared on the days that were
- *    read (`readRange`): that Este mês holds 1–10 nov and is compared with
- *    1–10 out, not 1–24 out ("caiu 100%" against 14 days it never read). Mês
- *    passado cut short that way takes the same-days rule (the whole month
- *    before would set 30 days against 10); any other period, the days just
- *    before (30 dias, 25 out – 23 nov, read up to 10 nov: 17 days against
- *    8–24 out).
- * A window wholly after the archive day keeps its comparison, whole: the page
- * reads that window as "sem dados" anyway. Without the archive day (the read
- * failed) only the hour cut and the running day go.
- *
- * lib/views/store comparisonPlan prices this comparison: it must not cut the
- * last day of an archived store's window either (it cuts any window ending
- * today).
- */
-export function archivedWindow(win: PeriodWindow, archivedOn: string | null, now: Date): PeriodWindow & ArchiveFacts {
-  const { range, today } = win
-  const readRange = archivedOn && range.from <= archivedOn && archivedOn < range.to
-    ? { from: range.from, to: archivedOn } : null
-  let comparison: Comparison
-  if (readRange) {
-    const rule: Period = win.comparePeriod === 'lastmonth' ? 'mtd' : win.comparePeriod
-    comparison = { ...comparisonRange(rule, readRange, win.timezone, now), sameTimeOfDay: false }
-  } else if (win.comparison.label === 'ontem até esta hora') {
-    comparison = { ...win.comparison, label: 'dia anterior', sameTimeOfDay: false }
-  } else {
-    comparison = { ...win.comparison, sameTimeOfDay: false }
-  }
-  return {
-    ...win,
-    partial: false,
-    partialLabel: null,
-    comparison,
-    comparisonRangeLabel: formatRangeLabel({ from: comparison.from, to: comparison.to }, today),
-    comparisonText: comparisonText(comparison, today),
-    archivedOn,
-    readRange,
-  }
-}
-
-/** The archive day of one store, or null (also when the read fails: the page
- *  still opens, without the days it can name). */
-async function archiveDayOf(storeId: string): Promise<string | null> {
-  try {
-    // Loaded on demand: lib/views/portfolio pulls the engine and the pool,
-    // which no other page context needs, and only an archived store asks.
-    const { loadArchiveDates } = await import('./portfolio')
-    return (await loadArchiveDates([storeId])).get(storeId) ?? null
-  } catch (err) {
-    console.error('[page] archive day', storeId, err)
-    return null
-  }
-}
-
-/** Keys hrefWith can override; null removes a key. */
-export interface HrefOverrides {
-  loja?: string | null
-  periodo?: Period | null
-  de?: string | null
-  ate?: string | null
-  parte?: boolean
-  /** With periodo/de/ate: the preset those dates stand for (PageParams.volta). */
-  volta?: Period | null
-}
-
-/**
- * A link to `path` that keeps the page state (loja, periodo, de, ate, parte).
- * The default period is left out of the URL; de/ate only travel with
- * periodo=custom. Query keys already in `path` win over the kept state, and a
- * #hash is preserved.
- *
- * Dates a link read on another clock (state.volta) travel only with the store
- * (or Todas) they were opened on: a link to another one brings back the
- * owner's preset (the store picker, "Todas as lojas", a link to another
- * store's page), and a period or dates given here replace them (the period
- * picker; `volta` is then only what the overrides say).
- */
-export function buildHref(path: string, state: PageParams, overrides: HrefOverrides = {}, defaultPeriod: Period = DEFAULT_PERIOD): string {
-  const [beforeHash, hash] = path.split('#', 2) as [string, string | undefined]
-  const [pathname, query] = beforeHash.split('?', 2) as [string, string | undefined]
-  const loja = 'loja' in overrides ? overrides.loja ?? null : state.loja
-  const datesGiven = 'periodo' in overrides || 'de' in overrides || 'ate' in overrides
-  let periodo = 'periodo' in overrides ? overrides.periodo ?? defaultPeriod : state.periodo
-  let de = 'de' in overrides ? overrides.de ?? null : state.de
-  let ate = 'ate' in overrides ? overrides.ate ?? null : state.ate
-  let volta = datesGiven ? overrides.volta ?? null : state.volta ?? null
-  const parte = 'parte' in overrides ? !!overrides.parte : state.parte
-  if (volta && !datesGiven && loja !== state.loja) { periodo = volta; de = null; ate = null; volta = null }
-  if (periodo === 'custom' && !(isIsoDate(de) && isIsoDate(ate))) periodo = defaultPeriod
-  if (periodo !== 'custom') { de = null; ate = null; volta = null }
-
-  const out = new URLSearchParams()
-  if (loja) out.set('loja', loja)
-  if (periodo !== defaultPeriod) out.set('periodo', periodo)
-  if (de && ate) { out.set('de', de); out.set('ate', ate) }
-  if (de && ate && volta && volta !== 'custom') out.set('volta', volta)
-  if (parte) out.set('parte', '50')
-  // The path's own query keys (e.g. ?aba=x) are kept and win.
-  if (query) for (const [k, v] of new URLSearchParams(query)) out.set(k, v)
-  const qs = out.toString()
-  return `${pathname}${qs ? `?${qs}` : ''}${hash ? `#${hash}` : ''}`
-}
-
-/**
- * The ?loja the shell's navigation carries (sidebar links, the period picker,
- * the split toggle). Normally the store or Todas on screen. The exception: a
- * one-store page (Resumo, Atribuição, Custos, Ajustes) opened with
- * ?loja=todas shows the remembered store with a note, but the viewer chose
- * Todas, so the navigation keeps 'todas' until a store is picked in the
- * picker: Todas → Resumo → Campanhas landed on MOKOO's Campanhas when the
- * links carried the store on screen. A viewer without Todas (one store)
- * carries the store.
- */
-export function carriedLoja(
-  asked: string | null, scope: 'store' | 'all', allowAll: boolean, shownStoreId: string | null,
-): string | null {
-  if (scope === 'all') return ALL_STORES
-  if (asked === ALL_STORES && allowAll && shownStoreId) return ALL_STORES
-  return shownStoreId
 }
 
 /** A store as the shell's pickers need it (serialisable for client props). */
@@ -429,167 +64,285 @@ export interface StoreOption {
   timezone: string
   /** "Belém", "Tóquio". */
   city: string
-  /** "dia de Tóquio" when the store's day is not Brazil's. */
+  /** "dia de Tóquio" when the store's clock is not Brasília's offset (R7). */
   dayLabel: string | null
   archived: boolean
 }
 
-export function toStoreOption(s: StoreRef): StoreOption {
+export function toStoreOption(s: StoreRef, now: Date): StoreOption {
   return {
     id: s.id, name: s.name, shopName: s.shopName,
     code: s.domain ? s.domain.split('.')[0].split('-')[0] : null,
-    timezone: s.timezone, city: tzCity(s.timezone), dayLabel: dayOfLabel(s.timezone), archived: s.archived,
+    timezone: s.timezone, city: tzCity(s.timezone),
+    dayLabel: offsetDiffers(s.timezone, now) ? `dia de ${tzCity(s.timezone)}` : null,
+    archived: s.archived,
   }
+}
+
+/** Keys hrefWith can override; null removes a key (loja null = Todas). */
+export interface HrefOverrides {
+  loja?: string | null
+  periodo?: Period | null
+  de?: string | null
+  ate?: string | null
+  parte?: boolean
+}
+
+/** The engine-style period of a resolution: the preset, or 'custom'. */
+function enginePeriod(v: PeriodValue): Period {
+  return v.kind === 'preset' ? v.preset : 'custom'
+}
+
+/** The comparison as every page names it: lib/period screenComparison (R6,
+ *  R7), the same object the verdict and the KPI pills read. `noBase` marks a
+ *  screen with no comparison at all (`none` holds R6's words). */
+export interface PageComparison extends Comparison, ScreenComparison {
+  noBase: boolean
+}
+
+function pageComparison(r: Resolution): PageComparison {
+  const c = screenComparison(r)
+  return { ...c, noBase: c.none !== null }
 }
 
 // ─── The server helper ───────────────────────────────────────────────────────
 
-export interface PageContext extends PeriodWindow, ArchiveFacts {
+export interface PageContext {
   viewer: Viewer
   isOwner: boolean
-  /** Active stores the viewer may see, oldest first (the picker). */
+  /** The period facts of every store the viewer may see. */
+  viewerStores: ViewerStores
+  /** What was asked (scope is always what is shown). */
+  selection: Selection
+  /** What it means now (lib/period resolve). */
+  resolution: Resolution
+  /** One-shot `vem`: the scope an R4 link came from. */
+  cameFrom: ScopeRef | null
+  /** Every note to show (resolution + landing), already deduplicated. */
+  notes: Note[]
+  /** The notes that describe how the window was adjusted, as one sentence
+   *  (R9, R15): the header's "período ajustado" chip. Null when none. */
+  rangeNote: string | null
+  /** The landing announcement and other notes for the line under the header. */
+  noteLine: string | null
+
+  // ── the window, for pages (all derived from `resolution`) ──
+  period: Period
+  range: DateRange
+  rangeLabel: string
+  periodLabel: string
+  periodPhrase: string
+  comparison: PageComparison
+  comparisonRangeLabel: string
+  comparisonText: string
+  timezone: string
+  today: string
+  partial: boolean
+  minutesIntoDay: number
+  partialLabel: string | null
+  /** An archived store's archive day (store calendar), else null. */
+  archivedOn: string | null
+  /** The days of a window that runs past the archive day that were read. */
+  readRange: DateRange | null
+
+  // ── stores and scope ──
+  /** Active stores the viewer may see, in the picker's order. */
   stores: StoreRef[]
   storeOptions: StoreOption[]
-  /** "Todas as lojas" is offered (owner, or a partner with 2+ stores). */
+  /** "Todas as lojas" is offered (two active stores or more). */
   allowAll: boolean
-  /** 'store': one store; 'all': every active store of the viewer. */
   scope: 'store' | 'all'
-  /** What the page asked for (opts.scope). The shell uses it so that picking
-   *  "Todas" on a one-store page opens /overview, and picking a store on an
-   *  all-stores page opens that store's Resumo, instead of doing nothing. */
   mode: 'either' | 'store' | 'all'
-  /** The store shown, or null for Todas (and when the viewer has no store). */
   store: StoreRef | null
-  /** `store` as the shell shows it (code pill, city, "dia de Tóquio"), null
-   *  for Todas. Built from the store itself, never looked up in storeOptions:
-   *  an archived store opened for its history is not there, and the lookup
-   *  left its sidebar reading "Fuso —" under a header that names its clock. */
   storeOption: StoreOption | null
-  /** The stores in scope: [store] or every active store. */
   selected: StoreRef[]
   storeIds: string[]
-  /** What the shell shows as the current choice ("MOKOO", "Todas as lojas"). */
   scopeName: string
-  /** The normalised URL state, with loja resolved to what is shown (store id or 'todas'). */
+  /** The store a link from Todas to a one-store page opens: the remembered
+   *  store when valid, else the first active store (R5). Null without stores. */
+  rememberedStoreId: string | null
   params: PageParams
-  /** The state the shell's navigation carries: `params`, except that a
-   *  one-store page opened from Todas keeps loja='todas' (carriedLoja). */
-  navParams: PageParams
-  /** The URL asked for Todas and this one-store page shows the remembered
-   *  store instead: the page says which (and its navigation keeps Todas). */
-  fromAll: boolean
-  /** On row dates (params.volta), whose preset they are, for the header:
-   *  'Todas as lojas' on a store page, the store they came from on Todas
-   *  ("Hibikura"), null when that is not one store. Null without row dates. */
-  rowDatesOf: string | null
-  /** Partner view (?parte=50): money results are halved. */
+  /** The validated page keys of this URL (R14). */
+  pageKeys: Record<string, string>
   split: boolean
   splitFactor: number
-  /** v × splitFactor — for profit, profit/order, cash result, refunds only. */
   part: (v: number) => number
-  /** Link to another page (or this one) keeping loja/periodo/de/ate/parte,
-   *  loja = the store on screen: for links about what the page shows ("Ver as
-   *  6 campanhas" of this store's block, "Configurar custos"). */
+  /** A link keeping the selection (R3). An override of `loja` that changes the
+   *  scope is an R4 link (lib/period carry): the period travels as asked,
+   *  resolved on the target's clock, and `vem` lets the target announce it. */
   hrefWith: (path: string, overrides?: HrefOverrides) => string
-  /** The same from `navParams`: for the shell's navigation (sidebar, period
-   *  picker, split toggle), which must not turn Todas into one store. */
-  navHref: (path: string, overrides?: HrefOverrides) => string
+  /** R4: a link to another store or Todas, or null when the viewer cannot see
+   *  it (render the text without a link). */
+  scopeHref: (path: string, target: ScopeRef) => string | null
+  /** R4's announcement for a link from this page to `target`. */
+  announceTo: (target: ScopeRef) => Announcement | null
+  /** The help-line clause of a table of store rows (R4): the rows whose
+   *  dates differ, or null (lib/period rowsAnnouncement). */
+  rowsAnnouncement: (storeIds: readonly string[]) => string | null
+  /** A store-fact date beside this window (R11 dateBeside). */
+  dateBeside: (date: string) => string
   now: Date
 }
 
 export interface PageContextOptions {
+  /** The page's path ('/', '/campaigns', '/creatives/123'): the canonical URL
+   *  is built on it. */
+  path: string
   /** 'either' (default): ?loja=todas shows Todas, anything else one store.
-   *  'store': always one store (Todas falls back to the remembered store).
-   *  'all': always Todas, whatever ?loja says (the overview page). */
+   *  'store': always one store. 'all': always Todas (the overview page). */
   scope?: 'either' | 'store' | 'all'
-  defaultPeriod?: Period
   now?: Date
+}
+
+function sameUrlQuery(sp: SearchParams, url: string): boolean {
+  const q = new URLSearchParams(url.split('?')[1]?.split('#')[0] ?? '')
+  const keys = Object.keys(sp).filter(k => sp[k] !== undefined)
+  if (keys.length !== [...q.keys()].length) return false
+  return keys.every(k => {
+    const v = sp[k]
+    if (Array.isArray(v) && v.length !== 1) return false
+    return q.get(k) === (Array.isArray(v) ? v[0] : v)
+  })
 }
 
 /**
  * Resolve the page's viewer, store(s) and window from the URL.
- * Redirects to /sign-in without a viewer; 404 for a store the viewer cannot see.
+ * Redirects to /sign-in without a viewer, to the canonical URL when the URL
+ * is spelled otherwise (R15); 404 for a store the viewer cannot see.
  */
 export async function getPageContext(
-  searchParams: SearchParams | Promise<SearchParams>, opts: PageContextOptions = {},
+  searchParams: SearchParams | Promise<SearchParams>, opts: PageContextOptions,
 ): Promise<PageContext> {
   const sp = await searchParams
-  const now = opts.now ?? new Date()
-  const defaultPeriod = opts.defaultPeriod ?? DEFAULT_PERIOD
+  const now = opts.now ?? new Date() // clock-ok: request instant (injectable through opts.now)
   const viewer = await getViewer()
   if (!viewer) redirect('/sign-in')
-
-  const raw = parsePageParams(sp, defaultPeriod)
   const isOwner = viewer.kind === 'owner'
   const mode = opts.scope ?? 'either'
 
-  let stores: StoreRef[]
-  let store: StoreRef | null = null
-  const wantsAll = mode === 'all' || (mode === 'either' && raw.loja === ALL_STORES)
-  if (wantsAll) {
-    stores = await listStores(viewer)
-  } else {
-    const urlId = raw.loja && raw.loja !== ALL_STORES ? raw.loja : null
-    const r = await resolveStore(viewer, urlId)
-    stores = r.stores
-    // A specific id the viewer cannot see is a 404, never another store.
-    if (urlId && r.store?.id !== urlId) notFound()
-    store = r.store
+  const all = await listStores(viewer, { includeArchived: true })
+  const vs = await viewerStoresOf(all)
+  const jar = await cookies()
+  const remembered = jar.get(ACTIVE_STORE_COOKIE)?.value ?? null
+  const parsed = parseDesktop(sp, { pathname: opts.path, viewer: vs, remembered, now })
+  if (parsed.notFound) notFound()
+  if (parsed.selection) {
+    // The canonical URL holds exactly the state, the page's declared keys
+    // (its OAuth flags included, lib/period PAGE_KEYS) and the one-shot keys:
+    // an unknown aba or key is dropped, never kept as typed (R15).
+    const target = parsed.canonical
+    const path = target.split('?')[0]
+    if (path !== opts.path || !sameUrlQuery(sp, target)) {
+      // An invalid remembered store is cleared by a route handler (a page
+      // cannot set cookies) that then lands on the canonical URL.
+      if (parsed.forgetRemembered) redirect(`/api/active-store/forget?to=${encodeURIComponent(target)}`)
+      redirect(target)
+    }
   }
-  const allowAll = isOwner || stores.length > 1
-  const scope: 'store' | 'all' = wantsAll && (allowAll || mode === 'all') ? 'all' : 'store'
-  if (scope === 'store' && !store) {
-    // ?loja=todas for a one-store partner, or scope 'store' after Todas.
-    store = stores[0] ?? null
-  }
-  const selected = scope === 'all' ? stores : store ? [store] : []
-  const tz = anchorTz(selected.map(s => s.timezone))
-  // Dates a link read on another clock hold while the clock they came from
-  // still reads the preset as them (settleRowDates, rowDateClocks).
-  const asked = settleRowDates(raw, tz, rowDateClocks(scope, stores.map(s => s.timezone)), now)
-  const resolved = resolvePeriodWindow(asked.periodo, asked.de, asked.ate, tz, now, asked.volta)
-  // An archived store reads nothing after its archive day: no running day,
-  // and a comparison of whole days over the days that were read.
-  const win: PeriodWindow & ArchiveFacts = scope === 'store' && store?.archived
-    ? archivedWindow(resolved, await archiveDayOf(store.id), now)
-    : { ...resolved, archivedOn: null, readRange: null }
+  const sel: Selection = parsed.selection ?? { scope: { kind: 'all' }, period: preset('7d'), split: false }
 
+  const scopeAll = sel.scope.kind === 'all'
+  const byId = new Map(all.map(s => [s.id, s]))
+  const stores = vs.active.map(f => byId.get(f.id)).filter((s): s is StoreRef => !!s)
+  const store = sel.scope.kind === 'store' ? byId.get(sel.scope.id) ?? null : null
+  const selected = scopeAll ? stores : store ? [store] : []
+
+  const base = resolve(sel, vs, now)
+  const landed = landingNotes(parsed.notes, parsed.cameFrom, base, vs, now)
+  const resolution = landed.length ? resolve(sel, vs, now, { notes: landed }) : base
+
+  const fitCodes = new Set(['future_start', 'future_end', 'too_long', 'floor', 'too_early', 'bad_param', 'incomplete'])
+  const fit = resolution.notes.filter(n => fitCodes.has(n.code))
+  const lineCodes = new Set(['scope_dates_differ', 'left_archive', 'remembered_gone', 'single_store', 'starts_inside', 'partial_base'])
+  // R9: the header shows the "período ajustado" chip AND the note line, so a
+  // fit ("28–30 nov ainda não começou em Brasília: mostrando Hoje (24 nov).")
+  // is read, not hidden in the chip's title.
+  const line = resolution.notes.filter(n => fitCodes.has(n.code) || lineCodes.has(n.code))
+  const member = resolution.members[0] ?? null
+  const storeFacts = store ? findStore(vs, store.id) : null
+  const comparison = pageComparison(resolution)
+  const today = resolution.clockToday
+  const splitFactor = sel.split ? SPLIT_SHARE : 1
   const params: PageParams = {
-    ...asked,
-    loja: scope === 'all' ? ALL_STORES : store?.id ?? null,
-    de: asked.periodo === 'custom' ? win.range.from : null,
-    ate: asked.periodo === 'custom' ? win.range.to : null,
+    loja: scopeAll ? ALL_STORES : store?.id ?? null,
+    periodo: enginePeriod(sel.period),
+    de: sel.period.kind === 'dates' ? sel.period.from : null,
+    ate: sel.period.kind === 'dates' ? sel.period.to : null,
+    parte: sel.split,
   }
-  const navParams: PageParams = { ...params, loja: carriedLoja(raw.loja, scope, allowAll, store?.id ?? null) }
-  const splitFactor = raw.parte ? SPLIT_SHARE : 1
+  const dateCtx = { window: resolution.window, comparison: resolution.comparison?.range ?? null, clockToday: today }
+
+  const hrefWith = (path: string, o: HrefOverrides = {}): string => {
+    let next: Selection = sel
+    if ('loja' in o) {
+      const target: ScopeRef = !o.loja || o.loja === ALL_STORES ? { kind: 'all' } : { kind: 'store', id: o.loja }
+      if (!sameScope(target, sel.scope)) {
+        const c = carry(sel, target, vs, 'desktop')
+        next = c ? c.selection : { ...sel, scope: target }
+      }
+    }
+    if ('periodo' in o || 'de' in o || 'ate' in o) {
+      // The URL's own parser (validated, normalised dates): never a second
+      // spelling of the period (R3).
+      const parsed = parsePeriod({ periodo: o.periodo ?? null, de: o.de ?? null, ate: o.ate ?? null })
+      next = { ...next, period: parsed.value ?? preset('7d') }
+    }
+    if ('parte' in o) next = { ...next, split: !!o.parte }
+    // lib/period vemFor: a link that sets its own period (the archived list's
+    // "Abrir histórico") carries no vem — Todas never showed those dates.
+    return desktopHref(path, next, {}, { vem: vemFor(sel, next, id => !!findStore(vs, id)?.archivedOn) })
+  }
 
   return {
-    ...win,
-    viewer, isOwner,
+    viewer, isOwner, viewerStores: vs, selection: sel, resolution, cameFrom: parsed.cameFrom,
+    notes: resolution.notes,
+    rangeNote: fit.length ? notesText(fit) : null,
+    noteLine: line.length ? notesText(line) : null,
+
+    period: enginePeriod(resolution.effective),
+    range: resolution.window,
+    rangeLabel: resolution.label.range,
+    periodLabel: sel.period.kind === 'preset' ? resolution.label.short : resolution.label.range,
+    periodPhrase: resolution.label.phrase,
+    comparison,
+    comparisonRangeLabel: comparison.rangeText || formatRangeLabel({ from: comparison.from, to: comparison.to }, today),
+    comparisonText: comparison.none ?? comparison.full,
+    timezone: resolution.clockTz,
+    today,
+    partial: resolution.partial,
+    minutesIntoDay: resolution.minutesIntoDay,
+    partialLabel: resolution.partialUntil ? `parcial · até ${resolution.partialUntil}` : null,
+    archivedOn: storeFacts?.archivedOn ?? null,
+    readRange: member?.state === 'clamped' && member.read && member.read.to < resolution.window.to ? member.read : null,
+
     stores,
-    storeOptions: stores.map(toStoreOption),
-    allowAll,
-    scope, mode, store, selected,
-    storeOption: store ? toStoreOption(store) : null,
+    storeOptions: stores.map(s => toStoreOption(s, now)),
+    allowAll: vs.allowsAll,
+    scope: scopeAll ? 'all' : 'store',
+    mode,
+    store,
+    storeOption: store ? toStoreOption(store, now) : null,
+    selected,
     storeIds: selected.map(s => s.id),
-    scopeName: scope === 'all' ? 'Todas as lojas' : store?.name ?? 'Nenhuma loja',
+    scopeName: scopeAll ? 'Todas as lojas' : store?.name ?? 'Nenhuma loja',
+    rememberedStoreId: vs.active.find(s => s.id === remembered)?.id ?? vs.active[0]?.id ?? null,
     params,
-    navParams,
-    fromAll: scope === 'store' && navParams.loja === ALL_STORES,
-    rowDatesOf: rowDatesOf(params, scope, stores, now),
-    split: raw.parte,
+    pageKeys: parsed.pageKeys,
+    split: sel.split,
     splitFactor,
     part: (v: number) => v * splitFactor,
-    hrefWith: (path, overrides) => buildHref(path, params, overrides, defaultPeriod),
-    navHref: (path, overrides) => buildHref(path, navParams, overrides, defaultPeriod),
+    hrefWith,
+    scopeHref: (path, target) => scopeHref(path, sel, target, vs),
+    announceTo: target => announce(sel, sel.scope, target, vs, now),
+    rowsAnnouncement: ids => rowsAnnouncement(sel, ids, vs, now),
+    dateBeside: (date: string) => dateBeside(date, dateCtx),
     now,
   }
 }
 
-/** The sidebar footer's "Fuso": the clock the page counts days in — the
- *  store's city, or Todas' rule (each store closes its day in its own zone). */
-export function clockLabel(ctx: Pick<PageContext, 'scope' | 'storeOption'>): string {
-  return ctx.scope === 'all' ? 'Brasília · cada loja no seu fuso' : ctx.storeOption?.city ?? '—'
+/** The sidebar footer's "Fuso": the clock the page counts days in. */
+export function clockLabel(ctx: Pick<PageContext, 'resolution'>): string {
+  return ctx.resolution.clockNote
 }
 
 // ─── The tab title (and the 404 title) ───────────────────────────────────────
@@ -603,29 +356,24 @@ export interface PageMetadataOptions {
   exists?: (params: RouteParams, searchParams: SearchParams) => Promise<boolean>
 }
 
+const firstOf = (v: string | string[] | undefined): string | null => {
+  const s = Array.isArray(v) ? v[0] : v
+  const t = typeof s === 'string' ? s.trim() : ''
+  return t ? t : null
+}
+
 /**
- * generateMetadata for a page built on getPageContext:
- *
- *   export const generateMetadata = pageMetadata('Campanhas')
- *   export const generateMetadata = pageMetadata({ absolute: 'Resumo · Opero' })
- *   export const generateMetadata = pageMetadata('Criativo', { exists: async p => … })
- *
- * Why the 404 rule is repeated here: the root loading.tsx starts streaming
- * before the page runs, so the page's own notFound() comes after its static
- * <title> is out — "/?loja=bogus" kept "Resumo · Opero" over the "não
- * encontramos" card. Next swaps in app/not-found's metadata ("Página não
- * encontrada · Opero") only when generateMetadata itself throws notFound()
- * (next/dist/lib/metadata/metadata.js, getNotFoundMetadata). The rule is the
- * same as getPageContext's: a ?loja id the viewer cannot see (archived ones
- * included, as there) is a 404; 'todas', no ?loja and no viewer (the page
- * redirects to /sign-in) are not.
+ * generateMetadata for a page built on getPageContext. The 404 rule is
+ * repeated here because the root loading.tsx starts streaming before the page
+ * runs, so the page's own notFound() comes after its static <title> is out.
+ * Same rule as getPageContext: a ?loja id the viewer cannot see is a 404.
  */
 export function pageMetadata(title: Metadata['title'], opts: PageMetadataOptions = {}) {
   return async function generateMetadata(
     { params, searchParams }: { params?: Promise<RouteParams>; searchParams: Promise<SearchParams> },
   ): Promise<Metadata> {
     const sp = await searchParams
-    const loja = first(sp.loja)
+    const loja = firstOf(sp.loja)
     if ((opts.scope ?? 'either') !== 'all' && loja && loja !== ALL_STORES) {
       const viewer = await getViewer()
       if (viewer) {

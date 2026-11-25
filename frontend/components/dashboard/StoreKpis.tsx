@@ -17,7 +17,7 @@ import type { DateRange } from '@/lib/engine/dates'
 import type { PageContext } from '@/lib/views/page'
 import { CHANNEL_LABEL, daysRead, empateGap, ledgerAdCents, MINOR_CHANNEL_SHARE, type StoreSummary } from '@/lib/views/store'
 import type { ComparisonWindow } from '@/lib/views/verdict'
-import { formatCents, formatCount, formatDate, formatMoney, formatNumber, formatPct, formatRangeLabel, formatRoas, plural } from '@/lib/format'
+import { formatCents, formatCount, formatMoney, formatNumber, formatPct, formatRangeLabel, formatRoas, plural } from '@/lib/format'
 import { Count, Delta, Icon, KpiCard, Money, Pct, Roas, type DeltaProps } from '@/components/ui'
 import { MiniBars, Sparkline } from '@/components/charts'
 import { RoasVsEmpate } from './RoasVsEmpate'
@@ -223,7 +223,7 @@ export function StoreKpis({ ctx, summary, empty = null }: {
         label="Anúncios Shopify"
         value={<Money value={k.shopSpend} />}
         note={k.shopSpend > 0
-          ? <span className={s.kpiNote}><SpendShare cents={k.shopCents} ledgerCents={lc.shop} />{k.spanDays > 1 && <> · <b>{k.shopDays}</b> de {k.spanDays} dias com gasto{k.startedOn && <> desde <span className="num">{formatDate(k.startedOn, ctx.today)}</span></>}</>}</span>
+          ? <span className={s.kpiNote}><SpendShare cents={k.shopCents} ledgerCents={lc.shop} />{k.spanDays > 1 && <> · <b>{k.shopDays}</b> de {k.spanDays} dias com gasto{k.startedOn && <> desde <span className="num">{ctx.dateBeside(k.startedOn)}</span></>}</>}</span>
           : 'nenhum gasto com Shop Campaigns'}
         spark={multiDay && k.shopSpend > 0 ? <MiniBars values={daily.map(d => d.shopSpend)} color="shop" width={0} height={30} ariaLabel="Anúncios Shopify por dia" /> : undefined}
         delta={!p || underADollar(k.shopSpend, p.shopSpend) ? undefined : <KpiDelta current={k.shopSpend} previous={p?.shopSpend ?? null} vs={vs} goodWhen="neutral" showPrevious />}

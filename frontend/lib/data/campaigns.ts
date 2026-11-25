@@ -29,7 +29,8 @@ import {
   DEFAULT_THRESHOLDS,
   type CampaignAction, type CampaignDecision, type DecisionDay, type ScaleThresholds,
 } from '../campaignSignal'
-import { eachDay, shiftDate, todayInTz, type DateRange, type Period } from '../engine/dates'
+import { eachDay, type DateRange, type Period } from '../engine/dates'
+import { decisionWindow } from '../period/decision'
 import {
   inRange, loadAdInfo, loadCampaignInfo, loadCampaignJourneyStores, loadCampaignsBilledElsewhere,
   loadFactsCovering, loadFirstTouchOrders, loadStoreMargin, orphanAdName, reconcile, round2,
@@ -81,13 +82,12 @@ export function estimateRow(
 
 // ─── Windows ──────────────────────────────────────────────────────────────────
 
-/** The judged window (the last `days` closed days in `tz`) and the one before. */
-export function decisionWindows(tz: string, now: Date = new Date(), days = DEFAULT_THRESHOLDS.windowDays): {
+/** The judged window (the last `days` closed days in `tz`) and the one
+ *  before: lib/period decisionWindow (R12), the one place of that arithmetic. */
+export function decisionWindows(tz: string, now: Date = new Date(), days = DEFAULT_THRESHOLDS.windowDays): { // clock-ok: default for callers without a clock
   window: DateRange; previous: DateRange
 } {
-  const to = shiftDate(todayInTz(tz, now), -1)
-  const window = { from: shiftDate(to, -(days - 1)), to }
-  return { window, previous: { from: shiftDate(window.from, -days), to: shiftDate(window.from, -1) } }
+  return decisionWindow(tz, now, days)
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────

@@ -28,72 +28,63 @@ vi.mock('../../engine/pnl', async importOriginal => {
   }
 })
 
-import { computePnL, computeSameTimeComparison } from '../../engine/pnl'
-import { comparisonRange } from '../../engine/dates'
-import { archivedComparison, buildPortfolio, type PortfolioStoreInput } from '../portfolio'
-import { archivedComparison as fromStore } from '../store'
 
-// 2026-11-24 15:11 in São Paulo and Belém.
+import { computePnL, computeSameTimeComparison } from '../../engine/pnl'
+import { buildPortfolio, type PortfolioStoreInput } from '../portfolio'
+import { preset, resolve, viewerStores, type PeriodValue } from '../../period'
+
+// 2026-11-24 15:11 in São Paulo and Belém. Squishy World archived 10 nov 10:00.
 const NOW = new Date('2026-11-24T18:11:00Z')
 const SW: PortfolioStoreInput = { id: 'sw', name: 'Squishy World', timezone: 'America/Sao_Paulo', archived: true }
 const MK: PortfolioStoreInput = { id: 'mk', name: 'MOKOO', timezone: 'America/Belem' }
+const VS = viewerStores([
+  { id: 'sw', name: 'Squishy World', timezone: 'America/Sao_Paulo', archived: true, archivedAt: '2026-11-10T13:00:00.000Z', firstOrderDate: '2025-01-01' },
+  { id: 'mk', name: 'MOKOO', timezone: 'America/Belem', archived: false, firstOrderDate: '2026-04-11' },
+  { id: 'ep', name: 'EPOCH', timezone: 'America/Sao_Paulo', archived: false, firstOrderDate: '2025-06-01' },
+])
 const BARE = { liveFeed: false, chargebackHealth: false, freshness: false }
+// The facts the resolution was made with: rows take their archive day from them (R19, §9.7).
+const lone = (p: PeriodValue) => buildPortfolio([SW], resolve({ scope: { kind: 'store', id: 'sw' }, period: p, split: false }, VS, NOW), BARE, VS)
 
 /** Every computePnL call: [ids, range, cutoffMinutes]. */
 const pnlCalls = () => vi.mocked(computePnL).mock.calls.map(([ids, range, opts]) => [ids, range, opts?.cutoffMinutes ?? null])
 
 beforeEach(() => { vi.mocked(computePnL).mockClear(); vi.mocked(computeSameTimeComparison).mockClear() })
 
+// buildPortfolio takes lib/period's resolution and never re-resolves (I-19):
+// the archived store's state and comparison cut are the resolution's (R10).
 describe('buildPortfolio of a lone archived store (the phone, /api/mobile)', () => {
-  it('Este mês is compared on the days read (1–10 out), whole — not 1–24 out cut at 15h11', async () => {
-    const v = await buildPortfolio([SW], 'mtd', null, null, NOW, BARE)
-    expect(v.comparison).toMatchObject({ from: '2026-10-01', to: '2026-10-10', label: 'mesmos dias do mês passado', sameTimeOfDay: false, cutoffMinutes: null })
-    expect(v.stores[0].comparison).toMatchObject({ included: true, range: { from: '2026-10-01', to: '2026-10-10' }, cutoffMinutes: null })
-    expect(pnlCalls()).toContainEqual([['sw'], { from: '2026-10-01', to: '2026-10-10' }, null])
+  it('Este mês is compared on the days read (1–10 out), the last cut at the archive minute (10h00) — never at 15h11', async () => {
+    const v = await lone(preset('mtd'))
+    expect(v.comparison).toMatchObject({ from: '2026-10-01', to: '2026-10-10', label: 'mesmos dias do mês passado' })
+    expect(v.stores[0].comparison).toMatchObject({ included: true, range: { from: '2026-10-01', to: '2026-10-10' }, cutoffMinutes: 600 })
+    expect(pnlCalls()).toContainEqual([['sw'], { from: '2026-10-10', to: '2026-10-10' }, { sw: 600 }])
     expect(computeSameTimeComparison).not.toHaveBeenCalled()
     expect(v.stores[0].archivedOn).toBe('2026-11-10')
+    expect(v.stores[0].dayState).toBe('complete')
   })
 
   it('30 dias (25 out – 23 nov) is compared with the 17 days before the 17 read', async () => {
-    const v = await buildPortfolio([SW], '30d', null, null, NOW, BARE)
+    const v = await lone(preset('30d'))
     expect(v.range).toEqual({ from: '2026-10-25', to: '2026-11-23' })
-    expect(v.comparison).toMatchObject({ from: '2026-10-08', to: '2026-10-24', label: '17 dias anteriores', sameTimeOfDay: false })
+    expect(v.comparison).toMatchObject({ from: '2026-10-08', to: '2026-10-24', label: '17 dias anteriores' })
   })
 
-  it('Hoje is the day before, whole', async () => {
-    const v = await buildPortfolio([SW], 'today', null, null, NOW, BARE)
-    expect(v.comparison).toMatchObject({ from: '2026-11-23', to: '2026-11-23', label: 'dia anterior', sameTimeOfDay: false, cutoffMinutes: null })
+  it('Hoje is frozen: nothing compared, never "até esta hora"', async () => {
+    const v = await lone(preset('today'))
+    expect(v.resolution.members[0].state).toBe('frozen')
+    expect(v.stores[0].comparison.included).toBe(false)
     expect(computeSameTimeComparison).not.toHaveBeenCalled()
   })
 })
 
-describe('buildPortfolio with an archived store beside a running one', () => {
-  it('Hoje: only the running store is compared until this hour', async () => {
-    const v = await buildPortfolio([MK, SW], 'today', null, null, NOW, BARE)
-    expect(vi.mocked(computeSameTimeComparison).mock.calls.map(c => c[0])).toEqual([['mk']])
-    expect(pnlCalls()).toContainEqual([['sw'], { from: '2026-11-23', to: '2026-11-23' }, null])
-    const byId = new Map(v.stores.map(r => [r.id, r]))
+describe('buildPortfolio on Todas', () => {
+  it('Hoje: every running store is cut at its own minute; an archived store is never a member', async () => {
+    const r = resolve({ scope: { kind: 'all' }, period: preset('today'), split: false }, VS, NOW)
+    expect(r.members.map(m => m.storeId)).toEqual(['ep', 'mk'])
+    const v = await buildPortfolio([MK, { id: 'ep', name: 'EPOCH', timezone: 'America/Sao_Paulo' }], r, BARE)
+    const byId = new Map(v.stores.map(x => [x.id, x]))
     expect(byId.get('mk')!.comparison.cutoffMinutes).toBe(911)
-    expect(byId.get('sw')!.comparison.cutoffMinutes).toBeNull()
-  })
-
-  it('Este mês: the archived store\'s last comparison day is not cut', async () => {
-    await buildPortfolio([MK, SW], 'mtd', null, null, NOW, BARE)
-    const lastDay = pnlCalls().find(([, r]) => (r as { from: string }).from === '2026-10-24' && (r as { to: string }).to === '2026-10-24')
-    expect(lastDay?.[2]).toEqual({ mk: 911, sw: null })
-  })
-})
-
-describe('archivedComparison lives in portfolio and is the one the Resumo uses', () => {
-  it('is the same function from lib/views/store', () => {
-    expect(fromStore).toBe(archivedComparison)
-  })
-
-  it('maps a comparison it already moved to itself (the page context moved it first)', () => {
-    const range = { from: '2026-11-01', to: '2026-11-24' }
-    for (const period of ['mtd', '30d', 'custom'] as const) {
-      const once = archivedComparison(SW, '2026-11-10', range, comparisonRange(period, range, SW.timezone, NOW), SW.timezone, NOW)
-      expect(archivedComparison(SW, '2026-11-10', range, once, SW.timezone, NOW)).toEqual(once)
-    }
+    expect(pnlCalls()).toContainEqual([['ep', 'mk'], { from: '2026-11-23', to: '2026-11-23' }, { ep: 911, mk: 911 }])
   })
 })

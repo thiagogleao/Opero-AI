@@ -6,26 +6,24 @@
  * the page uses ctx.part(); margins, ROAS and break-even never change.
  * A real toggle button (aria-pressed) that navigates in a transition, so it
  * never locks itself after the first click. Used while a store or period
- * choice is still loading, it is laid on top of that choice (./url
- * onTopOfInFlight) instead of undoing it.
+ * choice is still loading, it is laid on top of that choice (lib/period
+ * layer, R13) instead of undoing it. A view toggle: it never changes the
+ * period and is never remembered.
  *
- * Props: { on: boolean; onQuery: string; offQuery: string } — the two URLs'
- * queries, from ctx.hrefWith('', { parte: true|false }).
+ * Props: { on: boolean }
  */
 
-import { usePathname } from 'next/navigation'
-import { hrefFor, inFlightParam, NAV_LAYER, onTopOfInFlight } from './url'
+import { inFlightParam, layered } from './url'
 import { useShellNavigation } from './useShellNavigation'
 import s from './shell.module.css'
 
-export function SplitToggle({ on, onQuery, offQuery }: { on: boolean; onQuery: string; offQuery: string }) {
-  const pathname = usePathname() || '/'
+export function SplitToggle({ on }: { on: boolean }) {
   const nav = useShellNavigation()
   const toggle = () => {
     // While another choice loads, flip the split of the URL being opened.
     const opening = inFlightParam('parte')
     const isOn = opening === undefined ? on : opening === '50'
-    nav.push(onTopOfInFlight(hrefFor(pathname, isOn ? offQuery : onQuery), NAV_LAYER.split))
+    nav.push(layered({ kind: 'split', on: !isOn }))
   }
   return (
     <button

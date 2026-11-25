@@ -17,7 +17,8 @@
 import type { DateRange, Period } from '@/lib/engine/dates'
 import type { PnL } from '@/lib/engine/pnl'
 import { notSellingYet, type Verdict, type VerdictChip, type VerdictLine } from '@/lib/views/verdict'
-import { formatDate, formatRangeLabel, monthLong } from '@/lib/format'
+import { formatRangeLabel, monthLong } from '@/lib/format'
+import { beforeFirstSale, dateBeside as periodDateBeside } from '@/lib/period'
 
 const CENT = 0.005
 
@@ -26,11 +27,16 @@ export interface WindowActivity {
   revenue: number
   /** Every ad spend the page knows of (Meta, and Shopify when it has it). */
   spend: number
+  /** Refunds and chargebacks that arrived in the window (PnL.adjustments),
+   *  when the page has them: a window with a chargeback is not idle (R11). */
+  adjustments?: number
 }
 
 /** True when the window ends before the store's first sale and has nothing in it. */
 export function isBeforeStart(firstOrderDate: string | null | undefined, range: DateRange, a: WindowActivity): boolean {
-  return !!firstOrderDate && range.to < firstOrderDate && a.orders === 0 && a.revenue <= CENT && a.spend <= CENT
+  // lib/period beforeFirstSale (R11) is the rule; a date is required here
+  // because every caller names it ("1ª venda em …").
+  return !!firstOrderDate && a.revenue <= CENT && beforeFirstSale(range.to, { orders: a.orders, adSpend: a.spend, adjustments: a.adjustments }, { firstOrderDate })
 }
 
 export interface BeforeStartInput {
@@ -66,15 +72,19 @@ export interface BeforeStartText {
  * Otherwise formatDate's own rule (a year only when not this year).
  */
 export function dateBeside(iso: string, shown: readonly (string | null | undefined)[], today: string): string {
-  const thisYear = today.slice(0, 4)
-  return shown.some(d => !!d && d.slice(0, 4) !== thisYear) ? `${formatDate(iso)} ${iso.slice(0, 4)}` : formatDate(iso, today)
+  // lib/period dateBeside (R11): the rule lives there; this keeps the list
+  // form its callers pass (window bounds, then comparison bounds).
+  const ds = shown.filter((d): d is string => !!d)
+  const window = { from: ds[0] ?? iso, to: ds[1] ?? ds[0] ?? iso }
+  const rest = ds.slice(2)
+  return periodDateBeside(iso, { window, comparison: rest.length ? { from: rest[0], to: rest[rest.length - 1] } : null, clockToday: today })
 }
 
 /** The Resumo's sentences for a window before the first sale. */
 export function beforeStartText(i: BeforeStartInput): BeforeStartText {
   const first = dateBeside(i.firstOrderDate, [i.range.from, i.range.to, ...(i.alsoShown ?? [])], i.today)
   const span = i.period === 'lastmonth' ? monthLong(i.range.from)
-    : i.range.from === i.range.to ? formatDate(i.range.from, i.today)
+    : i.range.from === i.range.to ? periodDateBeside(i.range.from, { window: i.range, clockToday: i.today })
       : formatRangeLabel(i.range, i.today)
   const parts = [{ text: 'Escolha um período a partir de ' }, { text: first, strong: true }, { text: ' para ver o resultado.' }]
   return {
@@ -100,13 +110,13 @@ export function beforeStartVerdict(i: BeforeStartInput & {
   /** "dia de Tóquio" or null. */
   dayLabel: string | null
   totals: PnL
-  /** False adds the "Custos não configurados" chip, as the Resumo does. */
-  configured?: boolean
   split?: boolean
 }): Verdict {
   const text = beforeStartText(i)
+  // R11 precedence (§9.7): before the first sale the verdict shows only that
+  // state, on every page — no "Custos não configurados" chip beside it (the
+  // Resumo already left it out; Campanhas, Produtos and Países still added it).
   const chips: VerdictChip[] = [beforeStartChip(text)]
-  if (i.configured === false) chips.push({ code: 'sem_custos', label: 'Custos não configurados', tone: 'cfg', icon: 'sliders' })
   if (i.dayLabel) chips.push({ code: 'dia_fuso', label: i.dayLabel, tone: 'info', icon: 'clock' })
   return {
     tone: 'neu', chips, when: i.rangeLabel, headline: text.headline,
@@ -133,7 +143,8 @@ export function firstSaleOfAll(
   stores: readonly { totals: Pick<PnL, 'orders' | 'revenue' | 'adSpend' | 'adjustments' | 'fixedCosts'>; firstOrderDate?: string | null }[],
   range: DateRange,
 ): string | null {
-  if (!stores.length || !stores.every(s => notSellingYet(s, range))) return null
+  // A store with no known first sale gives no date to print.
+  if (!stores.length || stores.some(s => !s.firstOrderDate) || !stores.every(s => notSellingYet(s, range))) return null
   return stores.map(s => s.firstOrderDate!).reduce((a, b) => (b < a ? b : a))
 }
 

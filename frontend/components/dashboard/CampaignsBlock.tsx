@@ -14,12 +14,13 @@ import type { StoreSummary } from '@/lib/views/store'
 import { empateGap, loadCampaignSummary } from '@/lib/views/store'
 import type { CampaignRow } from '@/lib/data/campaigns'
 import { ACTION_LABEL, type CampaignAction, type CampaignDecision } from '@/lib/campaignSignal'
-import { formatCount, formatDate, formatMoney, formatPct, formatRangeLabel, formatRoas, plural } from '@/lib/format'
+import { formatCount, formatMoney, formatPct, formatRangeLabel, formatRoas, plural } from '@/lib/format'
 import { Badge, Block, DataTable, EmptyState, ErrorState, Icon, Money, type ChipTone, type IconName } from '@/components/ui'
 import { RoasVsEmpate } from './RoasVsEmpate'
 import { creditedWithoutSalesText, ownAttributedRoas } from '@/components/campaigns/adsVerdict'
 import { emptyWindowText, type EmptyWindow } from './emptyWindow'
 import s from './dashboard.module.css'
+
 
 const ACTION_STYLE: Record<CampaignAction, { tone: ChipTone; icon: IconName }> = {
   escalar: { tone: 'pos', icon: 'up' },
@@ -79,7 +80,7 @@ export async function CampaignsBlock({ ctx, summary, storeNames, empty = null }:
   const archivedOn = summary.row.archived ? summary.row.archivedOn ?? null : null
   const unjudged = summary.row.archived && (!archivedOn || report.decisionWindow.to > archivedOn)
   const judgedText = unjudged
-    ? <>Sem ação: ela é julgada nos últimos 7 dias fechados ({decided}), e a loja foi arquivada{archivedOn ? <> em {formatDate(archivedOn, ctx.today)}</> : ''} — esses dias não foram lidos.</>
+    ? <>Sem ação: ela é julgada nos últimos 7 dias fechados ({decided}), e a loja foi arquivada{archivedOn ? <> em {ctx.dateBeside(archivedOn)}</> : ''} — esses dias não foram lidos.</>
     : <>A ação é julgada nos últimos 7 dias fechados ({decided}), como na página Campanhas.</>
 
   // Ads the sync has not tied to a campaign: their spend is named apart, so

@@ -1,15 +1,14 @@
 'use client'
 
 /**
- * PeriodPicker — Hoje · Ontem · 7 dias · 30 dias, a "Mais" menu (14 dias, Este
- * mês, Mês passado, Escolher datas) and the resolved range ("10–16 nov",
- * "parcial · até 13h38"). It writes ?periodo= (and ?de/?ate for custom) and
- * navigates in a transition with a spinner. Dates are never computed here:
- * every preset's URL and the range label come from the server
- * (lib/views/page.ts, resolved in the store's timezone), so the browser's clock
- * cannot shift a Tokyo store's "hoje". A period picked while another choice is
- * still loading (a store picked a moment before) is laid on top of the URL
- * being opened (./url onTopOfInFlight), so both choices stick.
+ * PeriodPicker — the one menu of lib/period (MENU, R7): Hoje · Ontem · 7 dias ·
+ * 30 dias, and "Mais" with 14 dias, 90 dias, Este mês, Mês passado and
+ * Escolher datas, plus the resolved range ("10–16 nov", "parcial · até
+ * 13h38"). A preset travels as a preset: no dates are computed here, the
+ * server resolves them on the screen's clock. A pick is laid over the latest
+ * requested URL at click time (lib/period layer, R13), so a store picked a
+ * moment before is kept. The date form refuses invalid input with the same
+ * check as the phone (lib/period checkPickedDates).
  *
  * A custom period names its range once, on the "Mais" button (the range text
  * beside it is then only for screen readers).
@@ -22,74 +21,67 @@
  * the page can ask and open detail.href itself. Same contract as StorePicker's
  * 'opero:before-store-change'.
  *
- * Props (built by AppShell):
- *   main       { key: Period; label: string; query: string }[]  — the four buttons
- *   more       { key: Period; label: string; query: string }[]  — menu items
- *   current    Period
- *   customBase string — ctx.hrefWith('', { periodo: null }); the client adds periodo=custom&de&ate
- *   today      'YYYY-MM-DD' in the anchor timezone (max date of the custom inputs)
- *   minDate    'YYYY-MM-DD' — earliest date a page accepts (lib/views/page MIN_PAGE_DATE)
- *   maxDays    longest custom window in days (lib/views/page MAX_WINDOW_DAYS); the
- *              server cuts longer ranges anyway, this only says so before leaving
- *   range      { from; to } — the resolved window (custom inputs' defaults)
+ * Props (built by AppShell from ctx.resolution):
+ *   current    PeriodValue — the selection's period, AS ASKED (a fitted dates
+ *              value still presses "Mais" with its own dates, R7)
+ *   today      'YYYY-MM-DD' — the shown clock's today (max of the date inputs)
+ *   range      { from; to } — the window shown (date inputs' defaults)
  *   rangeLabel "10–16 nov"
  *   partialLabel "parcial · até 13h38" | null
- *   tzNote     "dia de Tóquio" | null — shown when the window is on another calendar
+ *   tzNote     "dia de Tóquio" | null
+ *   archivedIds the viewer's archived stores (lib/period layer)
  */
 
-import { usePathname } from 'next/navigation'
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
-import { PERIODS, type Period } from '@/lib/engine/dates'
+import { checkPickedDates, datesButton, datesButtonYear, MENU, periodKey, pickerDates, presetInfo, preset, samePeriod, selectionFromUrl, type PeriodValue, type Preset } from '@/lib/period'
 import { Icon } from '@/components/ui/Icon'
 import { Chip } from '@/components/ui/Chip'
-import { formatDate } from '@/lib/format'
-import { hrefFor, inFlightParam, mergeQuery, NAV_LAYER, onTopOfInFlight } from './url'
+import { inFlightParam, latestHref, layered } from './url'
 import { useShellNavigation } from './useShellNavigation'
 import s from './shell.module.css'
-
-export interface PeriodOption { key: Period; label: string; query: string }
 
 /** Cancelable window event sent before the picker opens another period. */
 export const BEFORE_PERIOD_CHANGE = 'opero:before-period-change'
 
 export interface BeforePeriodChangeDetail {
-  /** The period shown now. */
-  from: Period
+  /** The period shown now ('custom' for dates). */
+  from: string
   /** The period about to open ('custom' for picked dates). */
-  to: Period
+  to: string
   /** The path + query the picker would open. */
   href: string
 }
 
 export interface PeriodPickerProps {
-  main: PeriodOption[]
-  more: PeriodOption[]
-  current: Period
-  customBase: string
+  current: PeriodValue
   today: string
-  minDate: string
-  maxDays: number
   range: { from: string; to: string }
   rangeLabel: string
   partialLabel: string | null
   tzNote?: string | null
+  archivedIds?: readonly string[]
 }
 
-export function PeriodPicker({ main, more, current, customBase, today, minDate, maxDays, range, rangeLabel, partialLabel, tzNote }: PeriodPickerProps) {
-  const pathname = usePathname() || '/'
+const keyOf = (v: PeriodValue) => (v.kind === 'preset' ? v.preset : 'custom')
+export function PeriodPicker({ current, today, range, rangeLabel, partialLabel, tzNote, archivedIds = [] }: PeriodPickerProps) {
   const nav = useShellNavigation()
   const pending = nav.pending
   const [open, setOpen] = useState(false)
-  const [from, setFrom] = useState(range.from)
-  const [to, setTo] = useState(range.to)
+  // The form starts from what was ASKED (R7: header, picker and note never
+  // disagree): a dates value keeps its own end even when the screen shows it
+  // cut to today (future_end); a preset starts from the window shown.
+  const start = pickerDates(current, range, today)
+  const [from, setFrom] = useState(start.from)
+  const [to, setTo] = useState(start.to)
   const [err, setErr] = useState<string | null>(null)
   const menuId = useId()
   const moreBtn = useRef<HTMLButtonElement>(null)
   const menu = useRef<HTMLDivElement>(null)
 
-  // A new window from the server resets the custom inputs (derived during render).
-  const [shownRange, setShownRange] = useState(`${range.from}|${range.to}`)
-  if (shownRange !== `${range.from}|${range.to}`) { setShownRange(`${range.from}|${range.to}`); setFrom(range.from); setTo(range.to) }
+  // A new selection or window from the server resets the custom inputs (derived during render).
+  const shownKey = `${periodKey(current)}|${range.from}|${range.to}|${today}`
+  const [shownRange, setShownRange] = useState(shownKey)
+  if (shownRange !== shownKey) { setShownRange(shownKey); setFrom(start.from); setTo(start.to) }
 
   useEffect(() => {
     if (!open) return
@@ -104,81 +96,73 @@ export function PeriodPicker({ main, more, current, customBase, today, minDate, 
     return () => { document.removeEventListener('pointerdown', onDown); document.removeEventListener('keydown', onKey) }
   }, [open])
 
-  const go = (to: Period, query: string) => {
+  // Laid over the latest REQUESTED URL at click time (R13).
+  const go = (period: PeriodValue) => {
     setOpen(false)
-    const href = onTopOfInFlight(hrefFor(pathname, query), NAV_LAYER.period)
-    const detail: BeforePeriodChangeDetail = { from: current, to, href }
+    const href = layered({ kind: 'period', period }, archivedIds)
+    const detail: BeforePeriodChangeDetail = { from: keyOf(current), to: keyOf(period), href }
     if (!window.dispatchEvent(new CustomEvent(BEFORE_PERIOD_CHANGE, { detail, cancelable: true }))) return
     nav.push(href)
   }
 
   // The period already chosen: the one on screen or, while another choice is
-  // loading, the one being opened (clicking the period still on screen then
-  // takes the choice back). Compared on the server-built query's periodo
-  // (absent = the default period, as in the URL).
-  const isChosen = (p: PeriodOption) => {
-    const opening = inFlightParam('periodo')
-    if (opening === undefined) return p.key === current
-    return new URLSearchParams(p.query.startsWith('?') ? p.query.slice(1) : p.query).get('periodo') === opening
-  }
+  // loading, the one being opened (clicking the period on screen then takes
+  // the choice back).
+  const chosen = (): PeriodValue => (inFlightParam('loja') === undefined ? current : selectionFromUrl(latestHref()).selection?.period ?? current)
+  const isChosen = (p: Preset) => samePeriod(chosen(), preset(p))
 
   function applyCustom(e: FormEvent) {
     e.preventDefault()
-    if (!from || !to) { setErr('Escolha as duas datas.'); return }
-    const [a, b] = from <= to ? [from, to] : [to, from]
-    if (b > today) { setErr('A data final não pode passar de hoje.'); return }
-    if (a < minDate) { setErr(`Escolha uma data a partir de ${formatDate(minDate, today)}.`); return }
-    // Same day count as lib/engine/dates daysBetween (inclusive, UTC dates).
-    const days = Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86400000) + 1
-    if (days > maxDays) { setErr(`No máximo ${maxDays} dias por vez.`); return }
+    const r = checkPickedDates(from, to, start.max)
+    if (!r.ok) { setErr(r.error); return }
     setErr(null)
-    const base = new URLSearchParams(customBase.startsWith('?') ? customBase.slice(1) : customBase)
-    base.set('periodo', 'custom'); base.set('de', a); base.set('ate', b)
-    go('custom', mergeQuery(`?${base.toString()}`, ''))
+    go(r.value)
   }
 
-  const inMore = more.find(m => m.key === current)
-  // A period only a link can carry (?periodo=90d) still names itself here.
-  const offMenu = !inMore && current !== 'custom' && !main.some(m => m.key === current)
-    ? PERIODS.find(p => p.key === current)?.short ?? null
-    : null
-  const moreLabel = current === 'custom' ? rangeLabel : inMore ? inMore.label : offMenu ?? 'Mais'
+  const inMore = current.kind === 'preset' && MENU.more.includes(current.preset)
+  const isMain = (p: Preset) => current.kind === 'preset' && current.preset === p
+  const moreLabel = current.kind === 'dates' ? datesButton(current) : inMore ? presetInfo((current as { preset: Preset }).preset).label : 'Mais'
+  // R7: the year of a dates value, when needed, on a second line (the same
+  // function resolve() names buttonYear with): "30/12–30/12" over "2025–26".
+  const moreYear = current.kind === 'dates' ? datesButtonYear(current, today) : null
 
   return (
     <div className={s.period}>
       <div className={s.periodSeg} role="group" aria-label="Período">
-        {main.map(p => (
-          <button key={p.key} type="button" className={s.pBtn} aria-pressed={p.key === current} onClick={() => !isChosen(p) && go(p.key, p.query)}>
-            {p.label}
+        {MENU.main.map(p => (
+          <button key={p} type="button" className={s.pBtn} aria-pressed={isMain(p)} onClick={() => !isChosen(p) && go(preset(p))}>
+            {presetInfo(p).button}
           </button>
         ))}
         <button
           ref={moreBtn}
           type="button"
           className={s.pBtn}
-          aria-pressed={!!inMore || !!offMenu || current === 'custom'}
+          aria-pressed={inMore || current.kind === 'dates'}
           aria-haspopup="dialog"
           aria-expanded={open}
           aria-controls={menuId}
           onClick={() => setOpen(o => !o)}
         >
-          {current === 'custom' && <Icon name="calendar" size={13} />}
-          {moreLabel}
+          {current.kind === 'dates' && <Icon name="calendar" size={13} />}
+          {moreYear
+            ? <span className={s.pBtnStack}><span>{moreLabel}</span><span className={s.pBtnYear}>{moreYear}</span></span>
+            : moreLabel}
           <Icon name="chev" size={12} />
         </button>
       </div>
       {open && (
         // A dialog, not role=menu: it holds a date form, which a menu may not.
         <div ref={menu} id={menuId} role="dialog" aria-label="Mais períodos" className={s.menu}>
-          {more.map(p => (
-            <button key={p.key} type="button" aria-pressed={p.key === current} className={s.menuItem} onClick={() => go(p.key, p.query)}>
-              {p.label}
-              {p.key === current && <Icon name="check" size={13} />}
+          {MENU.more.map(p => (
+            <button key={p} type="button" aria-pressed={isMain(p)} className={s.menuItem} onClick={() => go(preset(p))}>
+              {presetInfo(p).label}
+              {isMain(p) && <Icon name="check" size={13} />}
             </button>
           ))}
           <form className={s.custom} onSubmit={applyCustom} aria-label="Escolher datas">
-            <label>De<input className={s.dateInput} type="date" value={from} min={minDate} max={today} onChange={e => setFrom(e.target.value)} required /></label>
-            <label>Até<input className={s.dateInput} type="date" value={to} min={minDate} max={today} onChange={e => setTo(e.target.value)} required /></label>
+            <label>De<input className={s.dateInput} type="date" value={from} min="2000-01-01" max={start.max} onChange={e => setFrom(e.target.value)} required /></label>
+            <label>Até<input className={s.dateInput} type="date" value={to} min="2000-01-01" max={start.max} onChange={e => setTo(e.target.value)} required /></label>
             {err && <span className={s.customErr} role="alert">{err}</span>}
             <button type="submit" className={s.apply}>
               Aplicar datas
@@ -186,9 +170,8 @@ export function PeriodPicker({ main, more, current, customBase, today, minDate, 
           </form>
         </div>
       )}
-      {/* A custom period's label IS its range, already on the "Mais" button:
-          printing it again beside it read "[28 out – 3 nov] 28 out – 3 nov". */}
-      <span className={current === 'custom' && !pending ? `${s.rangeText} sr-only` : s.rangeText} aria-live="polite">{pending ? 'carregando…' : rangeLabel}</span>
+      {/* A dates period names its range on the "Mais" button already. */}
+      <span className={current.kind === 'dates' && !pending ? `${s.rangeText} sr-only` : s.rangeText} aria-live="polite">{pending ? 'carregando…' : rangeLabel}</span>
       {pending && <span className={s.spin} aria-hidden="true" />}
       {!pending && partialLabel && <Chip tone="info" icon="clock" size="sm">{partialLabel}</Chip>}
       {!pending && tzNote && <Chip tone="info" size="sm">{tzNote}</Chip>}

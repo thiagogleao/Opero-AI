@@ -15,6 +15,7 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Badge, Button, Callout, Chip } from '@/components/ui'
 import type { FacebookPicker as Picker, PickerAdAccount } from '@/lib/integrations/types'
+import { periodQuery } from '@/lib/period'
 import { startBackfill } from './backfill'
 import { FACEBOOK_ERROR, FB_RETURN_KEY, accountStatusText, callApi, nothingChanged } from './messages'
 import { storeDateLabel } from './storeDay'
@@ -30,11 +31,9 @@ function returnPath(storeId: string, fallback: string): string {
     if (raw?.startsWith('/onboarding') && !raw.startsWith('//')) {
       const hint = new URL(raw, window.location.origin)
       if (hint.origin === window.location.origin && hint.pathname === '/onboarding') {
-        const q = new URLSearchParams()
-        for (const k of ['periodo', 'de', 'ate', 'parte']) {
-          const v = hint.searchParams.get(k)
-          if (v) q.set(k, v)
-        }
+        // The hint's period through lib/period's own parse (validated,
+        // normalised), never copied raw (R3).
+        const q = periodQuery(hint.searchParams)
         q.set('loja', storeId)
         q.set('fb_connected', 'true')
         return `/onboarding?${q}`

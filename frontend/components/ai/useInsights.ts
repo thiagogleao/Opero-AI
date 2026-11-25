@@ -133,7 +133,7 @@ export function useInsights({ storeId, from, to, split }: InsightsRequest) {
       if (!live()) return
       setState(!error.retry && !previous ? { kind: 'unavailable', error } : { kind: 'failed', window: win, error, previous })
     }
-    setState({ kind: 'generating', window: win, phase: 'starting', startedAt: Date.now(), previous })
+    setState({ kind: 'generating', window: win, phase: 'starting', startedAt: Date.now(), previous }) // clock-ok: progress timing, not a period
     let ended = false
     try {
       const res = await fetch('/api/ai', {

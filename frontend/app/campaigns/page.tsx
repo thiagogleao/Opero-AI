@@ -1,8 +1,7 @@
 import { Suspense } from 'react'
 import { getPageContext, pageMetadata, type PageContext, type SearchParams } from '@/lib/views/page'
 import { buildPortfolio } from '@/lib/views/portfolio'
-import { shiftDate, todayInTz } from '@/lib/engine/dates'
-import { resumoLinkOverrides } from '@/components/portfolio/model'
+import { shiftDate } from '@/lib/engine/dates'
 import { computeStorePnL, type StorePnL } from '@/lib/engine/pnl'
 import { formatRangeLabel, formatMoney } from '@/lib/format'
 import { listStores, type StoreRef } from '@/lib/access'
@@ -55,7 +54,7 @@ async function thresholds(): Promise<Partial<ScaleThresholds>> {
 
 export default async function CampaignsPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
   const sp = await searchParams
-  const ctx = await getPageContext(sp)
+  const ctx = await getPageContext(sp, { path: '/campaigns' })
   if (ctx.scope === 'all') return <AllStores ctx={ctx} />
   const store = ctx.store
   if (!store) {
@@ -81,6 +80,11 @@ async function StoreCampaigns({ ctx, store, tab, campaignId, showAll }: {
   ctx: PageContext; store: StoreRef; tab: 'campanhas' | 'criativos'; campaignId: string | null; showAll: boolean
 }) {
   const decision = decisionWindows(store.timezone, ctx.now)
+  // R10/R12: an archived store is consultation only, never given a decision
+  // block ("Onde há folga para escalar" over days it never read).
+  const consultOnly = store.archived
+  // The days actually read: an archived store's window stops at its archive day.
+  const readLabel = ctx.readRange ? formatRangeLabel(ctx.readRange, ctx.today) : ctx.rangeLabel
   const sameWindow = ctx.range.from === decision.window.from && ctx.range.to === decision.window.to
   const header = <PageHeader ctx={ctx} title={`Campanhas · ${store.name}`} />
 
@@ -97,7 +101,7 @@ async function StoreCampaigns({ ctx, store, tab, campaignId, showAll }: {
     const [p, r, d, f, a] = await Promise.all([
       computeStorePnL(store.id, ctx.range, {}, ctx.now),
       getCampaignReport(store, ctx.range, opts),
-      sameWindow ? Promise.resolve(null) : getCampaignReport(store, decision.window, opts),
+      sameWindow || consultOnly ? Promise.resolve(null) : getCampaignReport(store, decision.window, opts),
       loadFirstSale(ctx),
       loadArchivedStore(ctx),
     ])
@@ -170,7 +174,7 @@ async function StoreCampaigns({ ctx, store, tab, campaignId, showAll }: {
       <VerdictCard
         verdict={verdict}
         headingLevel="h2"
-        aside={<ReconciliationLedger rec={reconciliation} rangeLabel={ctx.rangeLabel} split={ctx.split} elsewhere={billedElsewhere} why={why} />}
+        aside={<ReconciliationLedger rec={reconciliation} rangeLabel={readLabel} split={ctx.split} elsewhere={billedElsewhere} why={why} />}
         footer={report.totals.spend > 0 ? (
           <div>
             <RoasGauge roas={ownSpend > 0 ? ownValue / ownSpend : null} breakEven={report.breakEvenRoas} configured={report.configured}
@@ -180,7 +184,7 @@ async function StoreCampaigns({ ctx, store, tab, campaignId, showAll }: {
         ) : undefined}
       />
       <BilledElsewhere rows={report.billedElsewhere} storeName={store.name} rangeLabel={ctx.rangeLabel} hrefFor={id => otherStoreHref(ctx, id)} />
-      <ScaleRoom report={decisionReport} windowLabel={decisionLabel} costsHref={ctx.hrefWith('/profit')} split={ctx.split} tableHasRows={report.campaigns.length > 0} why={decisionWhy} />
+      {!consultOnly && <ScaleRoom report={decisionReport} windowLabel={decisionLabel} costsHref={ctx.hrefWith('/profit')} split={ctx.split} tableHasRows={report.campaigns.length > 0} why={decisionWhy} />}
       <Tabs
         ariaLabel="Campanhas ou criativos"
         active={tab}
@@ -295,21 +299,19 @@ async function loadMetaHistory(ctx: PageContext, store: StoreRef): Promise<MetaH
 }
 
 /**
- * A link to another store's Campanhas on the dates this page shows. The same
- * `periodo` resolves on that store's own clock, which can be a day ahead
- * (Tokyo after noon in Brasília); then the exact dates travel instead.
+ * A link to the campaigns of another store of the viewer (the account a
+ * campaign is billed in): an R4 link (lib/period carry), null when the viewer
+ * cannot see that store (the text then renders without a link).
  */
-function otherStoreHref(ctx: PageContext, storeId: string): string {
-  const other = ctx.stores.find(x => x.id === storeId)
-  const storeToday = other ? todayInTz(other.timezone, ctx.now) : ctx.today
-  return ctx.hrefWith('/campaigns', resumoLinkOverrides({ id: storeId, storeToday, timezone: other?.timezone }, ctx))
+function otherStoreHref(ctx: PageContext, storeId: string): string | null {
+  return ctx.scopeHref('/campaigns', { kind: 'store', id: storeId })
 }
 
 async function AllStores({ ctx }: { ctx: PageContext }) {
   const header = <PageHeader ctx={ctx} title="Campanhas · todas as lojas" halved={false} />
   const names = new Map(ctx.selected.map(x => [x.id, x.name]))
   const loaded = await Promise.all([
-    buildPortfolio(ctx.selected, ctx.period, ctx.params.de, ctx.params.ate, ctx.now, { liveFeed: false, chargebackHealth: false, freshness: false, compareAs: ctx.comparePeriod }),
+    buildPortfolio(ctx.selected, ctx.resolution, { liveFeed: false, chargebackHealth: false, freshness: false }, ctx.viewerStores),
     getSharedAdAccounts(ctx.storeIds, ctx.range, names).catch(err => { console.error('[campaigns] shared accounts', err); return [] }),
     // Own vs shared-account campaigns per store, so ROAS atribuído follows
     // the store pages' rule; on failure those columns say "—" instead of
@@ -325,6 +327,8 @@ async function AllStores({ ctx }: { ctx: PageContext }) {
     )
   }
   const [view, pairs, attribution] = loaded
+  // R4 on the link's help line: the same clause as the Overview table.
+  const opensOther = ctx.rowsAnnouncement(view.stores.map(r => r.id))
   const verdict = buildPortfolioAdsVerdict({
     stores: view.stores, attribution, pairs, rangeLabel: ctx.rangeLabel, periodPhrase: ctx.periodPhrase, partialLabel: ctx.partialLabel, split: ctx.split,
     range: ctx.range,
@@ -337,16 +341,16 @@ async function AllStores({ ctx }: { ctx: PageContext }) {
       <SharedAccountsCallout pairs={pairs} />
       <Block
         title="Anúncios por loja"
-        howTo="Cada loja contra o próprio empate, no canal em que anuncia (como no Resumo). Clique numa loja para ver as campanhas, os conjuntos e os anúncios dela."
+        howTo={`Cada loja contra o próprio empate, no canal em que anuncia (como no Resumo). Clique numa loja para ver as campanhas, os conjuntos e os anúncios dela${opensOther ? ` ${opensOther}` : ''}.`}
         info="Campanhas, margens e vereditos são por loja: cada uma tem a sua conta de anúncio e o seu custo de produto."
         flush
       >
         <PortfolioAdsTable
           stores={view.stores} attribution={attribution} pairs={pairs} rangeLabel={ctx.rangeLabel}
-          // Each row is priced on Brasília's calendar dates; Hibikura's own
-          // "ontem" turns a day later at noon here. The link carries the exact
-          // dates then, so the page opened shows the row that was clicked.
-          hrefFor={row => ctx.hrefWith('/campaigns', resumoLinkOverrides(row, ctx))}
+          // An R4 link (lib/period carry): the period travels as asked and
+          // the store's page resolves it on its own clock, announcing other
+          // dates on landing (vem=todas).
+          hrefFor={row => ctx.scopeHref('/campaigns', { kind: 'store', id: row.id }) ?? ctx.hrefWith('/campaigns')}
         />
       </Block>
     </AppShell>

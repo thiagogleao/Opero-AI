@@ -39,7 +39,7 @@ const CAVEAT_LINE =
   'Divisão feita pelo próprio Meta: na EPOCH ela captou de 17% a 140% dos pedidos reais conforme o país — compare com os pedidos da Shopify, não decida geografia por ela.'
 
 export default async function CountriesPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
-  const ctx = await getPageContext(searchParams)
+  const ctx = await getPageContext(searchParams, { path: '/countries' })
   if (ctx.scope === 'all') return <AllStores ctx={ctx} />
   const store = ctx.store
   const header = <PageHeader ctx={ctx} title={`Países e clientes · ${store?.name ?? ''}`} halved={false} />

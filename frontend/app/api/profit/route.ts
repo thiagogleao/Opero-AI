@@ -139,7 +139,9 @@ export async function POST(req: Request) {
     if (body.action === 'save') return fail(400, 'Para salvar, use PUT /api/profit com storeId, baseVersion e config.')
 
     const store = await pickStore(viewer, body.storeId)
-    const win = parseWindow(body, store.timezone)
+    // One instant for the window, the pricing and the label (P6).
+    const now = new Date() // clock-ok: the request instant
+    const win = parseWindow(body, store.timezone, '30d', now)
     if (!win.ok) return fail(400, win.issue.message, { issues: [win.issue] })
 
     const saved = await loadSaved(store.id)
@@ -170,8 +172,8 @@ export async function POST(req: Request) {
     // "saved" on this screen differ from the dashboard.
     const draft = hasDraft && cfg ? { configOverride: { [store.id]: cfg } } : {}
     const [run, before] = await Promise.all([
-      computeStorePnL(store.id, win.range, { products: true, ...draft }),
-      changed ? computeStorePnL(store.id, win.range) : Promise.resolve(null),
+      computeStorePnL(store.id, win.range, { products: true, ...draft }, now),
+      changed ? computeStorePnL(store.id, win.range, {}, now) : Promise.resolve(null),
     ])
     if (!run) throw new AccessError(404)
 
@@ -179,7 +181,7 @@ export async function POST(req: Request) {
       store: summary(store),
       period: win.period,
       range: win.range,
-      label: formatRange(win.range, todayInTz(store.timezone)),
+      label: formatRange(win.range, todayInTz(store.timezone, now)),
       partial: run.partial,
       source: hasDraft ? 'draft' : 'saved',
       configured: run.configured,

@@ -1,6 +1,6 @@
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages'
 import {
-  comparisonRange, computeSameTimeComparison, computeStorePnL, PERIODS, type Period,
+  computeSameTimeComparison, computeStorePnL, PERIODS, type Period,
 } from '@/lib/engine'
 import { BREAKDOWN_TYPES, getMetaBreakdown, type BreakdownType } from '@/lib/data/meta'
 import {
@@ -12,6 +12,9 @@ import { r1, r2, safeDiv } from './format'
 import { readInventory, ShopifyReadError } from './shopifyRead'
 import { countriesView, partnerShareView, productsView, seriesView, totalsView, type ProductSort } from './views'
 import { toolRange, type ToolRange } from './window'
+import { previousFor } from '../period'
+import { viewerStoresOf } from '../views/periodFacts'
+import { priceComparison } from '../views/store'
 
 /**
  * The Copilot's tools. Read-only, every one of them: the old write tools
@@ -189,13 +192,22 @@ const HANDLERS: Record<string, (input: Input, env: ToolEnv) => Promise<unknown>>
     if (split) out.partnerShare = { label: 'sua parte (50%)', ...partnerShareView(pnl.totals) }
     if (bool(input.daily)) out.daily = seriesView(pnl.daily)
     if (bool(input.compare)) {
-      if (r.from === r.to && r.to === ctx.today) {
+      // R6's base rule from the store's facts (the one facts loader), as the
+      // page: Hibikura · Este mês on 24 nov is "sem base", never a comparison
+      // of zeros with an October before it existed.
+      const facts = await viewerStoresOf([{ id: ctx.id, name: ctx.name, timezone: ctx.timezone, archived: ctx.archived }])
+      const first = (facts.active[0] ?? facts.archived[0])?.firstActivityDate ?? null
+      const cr = previousFor(r.period, r, ctx.timezone, now, first)
+      if (cr.base === 'none') {
+        out.comparison = { from: cr.from, to: cr.to, label: cr.label, none: cr.baseNote }
+      } else if (r.from === r.to && r.to === ctx.today) {
         const c = (await computeSameTimeComparison([ctx.id], r.from, now)).get(ctx.id)
-        if (c) out.comparison = { from: c.range.from, to: c.range.to, label: 'ontem até a mesma hora', totals: totalsView(c.totals, c.configured) }
+        if (c) out.comparison = { from: c.range.from, to: c.range.to, label: 'ontem até a mesma hora', totals: totalsView(c.totals, c.configured), ...(cr.baseNote ? { baseNote: `${cr.baseNote}: não calcule variação percentual` } : {}) }
       } else {
-        const cr = comparisonRange(r.period, r, ctx.timezone, now)
-        const c = await computeStorePnL(ctx.id, cr, {}, now)
-        if (c) out.comparison = { from: cr.from, to: cr.to, label: cr.label, totals: totalsView(c.totals, c.configured) }
+        // R6: a running window (Este mês, dates ending today) is compared up
+        // to this minute, priced as the pages price it (priceComparison).
+        const c = await priceComparison(ctx.id, cr, cr.cutAtMinute, now)
+        if (c) out.comparison = { from: cr.from, to: cr.to, label: cr.label, totals: totalsView(c.totals, c.configured), ...(cr.baseNote ? { baseNote: `${cr.baseNote}: não calcule variação percentual` } : {}) }
       }
     }
     return out
@@ -268,7 +280,7 @@ const HANDLERS: Record<string, (input: Input, env: ToolEnv) => Promise<unknown>>
   async get_campaigns(input, { ctx, now }) {
     const r = toolRange(ctx.timezone, input, '7d', now)
     const [pnl, data, decision] = await Promise.all([
-      pnlOrThrow(ctx, r, {}, now), loadAdData(ctx.id, r, ctx.timezone, 7), loadDecisionBasis(ctx.id, r, ctx.today, now),
+      pnlOrThrow(ctx, r, {}, now), loadAdData(ctx.id, r, ctx.timezone, 7), loadDecisionBasis(ctx.id, ctx.today, now, { archived: !!ctx.archived }),
     ])
     const rate = contributionRateOf(pnl.configured, pnl.totals.revenue, pnl.totals.contribution)
     return {
@@ -277,7 +289,10 @@ const HANDLERS: Record<string, (input: Input, env: ToolEnv) => Promise<unknown>>
       configuredNote: notConfiguredNote(pnl.configured),
       allAds: adTotals(data.ads),
       ...campaignViews(data, { contributionRate: rate, storeToday: ctx.today, limit: intIn(input.limit, 1, 25, 12), decision }),
-      note: 'Valor e compras são a atribuição do Meta (pedidos da Shopify não trazem campanha). O veredito usa os últimos 7 dias fechados do período, com a margem desses mesmos dias, como a tela de campanhas.',
+      decisionWindow: decision.window ? { ...decision.window, label: 'últimos 7 dias fechados da loja' } : null,
+      note: decision.window
+        ? `Valor e compras são a atribuição do Meta (pedidos da Shopify não trazem campanha). O veredito usa os últimos 7 dias fechados da loja (${decision.window.from} a ${decision.window.to}), com a margem desses mesmos dias, como a tela de campanhas — não os dias do período pedido.`
+        : 'Valor e compras são a atribuição do Meta (pedidos da Shopify não trazem campanha). Loja arquivada: sem veredito de campanha.',
     }
   },
 

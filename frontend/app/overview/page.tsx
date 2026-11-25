@@ -16,13 +16,13 @@
 
 import { Suspense } from 'react'
 import type { Metadata } from 'next'
-import { getPageContext, type PageContext, type SearchParams } from '@/lib/views/page'
+import { getPageContext, type SearchParams } from '@/lib/views/page'
 import { buildPortfolio, type PortfolioView } from '@/lib/views/portfolio'
 import { buildVerdict, verdictInputFromPortfolio } from '@/lib/views/verdict'
 import { listStores } from '@/lib/access'
 import { formatMoney, plural } from '@/lib/format'
 import type { SharedAdAccount } from '@/lib/attributionModels'
-import { AppShell, PageHeader, PeriodNote, periodName } from '@/components/shell'
+import { AppShell, PageHeader, PeriodNote } from '@/components/shell'
 import { BreakdownLedger, ButtonLink, Callout, Card, EmptyState, ErrorState, SkeletonBlock, VerdictCard } from '@/components/ui'
 import { StoresTable } from '@/components/portfolio/StoresTable'
 import { ProfitShare } from '@/components/portfolio/ProfitShare'
@@ -37,21 +37,17 @@ export const dynamic = 'force-dynamic'
 
 /** For a custom window the default sub line repeated the range ("1–12 nov ·
  *  1–12 nov"): name it once. */
-function customSub(ctx: PageContext) {
-  if (ctx.period !== 'custom') return undefined
-  return <><b>{periodName(ctx)}</b> · <span className="num">{ctx.rangeLabel}</span> · {ctx.selected.length} lojas</>
-}
 
 export default async function OverviewPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
   const sp = await searchParams
-  const ctx = await getPageContext(sp, { scope: 'all' })
+  const ctx = await getPageContext(sp, { path: '/overview', scope: 'all' })
   const showArchived = sp[ARCHIVED_PARAM] === '1'
   const archived = (await listStores(ctx.viewer, { includeArchived: true }).catch(() => [])).filter(st => st.archived)
 
   if (!ctx.selected.length) {
     return (
       <AppShell ctx={ctx}>
-        <PageHeader ctx={ctx} title="Todas as lojas" code={null} sub={customSub(ctx)} />
+        <PageHeader ctx={ctx} title="Todas as lojas" code={null} />
         <Card>
           <EmptyState icon="store" title="Nenhuma loja ativa nesta conta"
             action={<ButtonLink href="/onboarding" variant="primary" icon="arrowRight">Conectar uma loja Shopify</ButtonLink>}>
@@ -68,8 +64,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: Pro
   let sharedNow: SharedAdAccount[] | null
   try {
     ;[view, shared, sharedNow] = await Promise.all([
-      buildPortfolio(ctx.selected, ctx.period, ctx.params.de, ctx.params.ate, ctx.now,
-        { liveFeed: false, chargebackHealth: false, freshness: false, compareAs: ctx.comparePeriod }),
+      buildPortfolio(ctx.selected, ctx.resolution, { liveFeed: false, chargebackHealth: false, freshness: false }, ctx.viewerStores),
       loadSharedPairs(ctx.selected, ctx.timezone, ctx.now),
       loadSharedInWindow(ctx.selected, ctx.range),
     ])
@@ -77,7 +72,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: Pro
     console.error('[overview] portfolio', err)
     return (
       <AppShell ctx={ctx}>
-        <PageHeader ctx={ctx} title="Todas as lojas" code={null} sub={customSub(ctx)} />
+        <PageHeader ctx={ctx} title="Todas as lojas" code={null} />
         <Card>
           <ErrorState title="Os números das lojas não carregaram"
             action={<ButtonLink href={ctx.hrefWith('/overview')} icon="refresh">Tentar de novo</ButtonLink>}>
@@ -109,7 +104,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: Pro
   return (
     <AppShell ctx={ctx}>
       <div className={s.page}>
-        <PageHeader ctx={ctx} title="Todas as lojas" code={null} sub={customSub(ctx)} />
+        <PageHeader ctx={ctx} title="Todas as lojas" code={null} />
         <PeriodNote ctx={ctx} />
 
         <VerdictCard

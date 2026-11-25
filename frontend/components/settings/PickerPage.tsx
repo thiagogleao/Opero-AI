@@ -29,7 +29,7 @@ const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v)
 export async function PickerPage({ searchParams, role }: { searchParams: Promise<SearchParams>; role: 'main' | 'extra' }) {
   const sp = await searchParams
   // ?loja= is the site's key; ?store= only from older links.
-  const ctx = await getPageContext({ ...sp, loja: one(sp.loja) ?? one(sp.store) }, { scope: 'store' })
+  const ctx = await getPageContext({ ...sp, loja: one(sp.loja) ?? one(sp.store) }, { path: role === 'main' ? '/facebook/accounts' : '/facebook/extra-accounts', scope: 'store' })
   const store = ctx.store
   const title = role === 'main' ? 'Escolher a conta principal de anúncios' : 'Adicionar conta extra de anúncios'
   const settings = ctx.hrefWith('/settings')

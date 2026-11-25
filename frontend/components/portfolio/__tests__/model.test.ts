@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { sumPnL, type PnL, type PnLLines } from '@/lib/engine/pnl'
 import type { SharedAdAccount } from '@/lib/attributionModels'
-import { adChannels, freshnessCell, idleReasons, laneState, lastSaleDate, linkOpensDates, noSalesCashHit, notSellingYet, pairOrdersIn, pairsMixedIn, quietNote, resultSortValue, rowBeforeFirstSale, sumMembers, resumoLinkOverrides, totalRowIdle, rowResult, sharedAccountBadges, storeDayOf, trailGap, trailProfitCount, trailRange, trailSinceStart, type QuietInput, type TrailDay } from '../model'
+import { adChannels, freshnessCell, idleReasons, laneState, lastSaleDate, noSalesCashHit, notSellingYet, pairOrdersIn, pairsMixedIn, quietNote, resultSortValue, rowBeforeFirstSale, sumMembers, totalRowIdle, rowResult, sharedAccountBadges, storeDayOf, trailGap, trailProfitCount, trailRange, trailSinceStart, type QuietInput, type TrailDay } from '../model'
 
 const pnl = (over: Partial<PnLLines> = {}): PnL => sumPnL([{ ...sumPnL([]), ...over }])
 const NOW = new Date('2026-11-18T01:30:00Z')
@@ -225,9 +225,14 @@ describe('trailGap', () => {
 
   it('keeps "sem movimento" for a store that existed, counting the days since it started', () => {
     expect(trailGap(october(), { configured: true, firstOrderDate: '2026-04-11' })).toEqual({ kind: 'idle', days: 31 })
-    expect(trailGap(october(), { configured: true, firstOrderDate: null })).toEqual({ kind: 'idle', days: 31 })
     // First kept sale on 20 out, nothing kept since (refunded): 12 days, not 31.
     expect(trailGap(october(), { configured: true, firstOrderDate: '2026-10-20' })).toEqual({ kind: 'idle', days: 12 })
+  })
+
+  it('r3 F16 · a store that never sold (null first sale) is "ainda não vendeu", as lib/period reads null (R11)', () => {
+    expect(trailGap(october(), { configured: true, firstOrderDate: null })).toEqual({ kind: 'not_yet' })
+    // An unknown first sale (failed facts read → MIN_DATE) is before every window: "sem movimento".
+    expect(trailGap(october(), { configured: true, firstOrderDate: '2000-01-01' })).toEqual({ kind: 'idle', days: 31 })
   })
 
   it('has nothing to say when there are no days or the bars have something to draw', () => {
@@ -239,93 +244,9 @@ describe('trailGap', () => {
   })
 })
 
-describe('resumoLinkOverrides', () => {
-  const week = { from: '2026-11-10', to: '2026-11-16' }
-  it('keeps the period when the store is on the same date as Brasília', () => {
-    expect(resumoLinkOverrides({ id: 'mokoo', storeToday: '2026-11-17' }, { today: '2026-11-17', period: '7d', range: week }))
-      .toEqual({ loja: 'mokoo' })
-  })
-  it('opens a store a day ahead (Tóquio after noon) on the exact dates of the row, with the preset they stand for', () => {
-    expect(resumoLinkOverrides({ id: 'hib', storeToday: '2026-11-18' }, { today: '2026-11-17', period: 'today', range: { from: '2026-11-17', to: '2026-11-17' } }))
-      .toEqual({ loja: 'hib', periodo: 'custom', de: '2026-11-17', ate: '2026-11-17', volta: 'today' })
-    expect(resumoLinkOverrides({ id: 'hib', storeToday: '2026-11-18' }, { today: '2026-11-17', period: '7d', range: week }))
-      .toEqual({ loja: 'hib', periodo: 'custom', de: '2026-11-10', ate: '2026-11-16', volta: '7d' })
-  })
-  it('a custom window the owner picked already has explicit dates', () => {
-    expect(resumoLinkOverrides({ id: 'hib', storeToday: '2026-11-18' }, { today: '2026-11-17', period: 'custom', range: week }))
-      .toEqual({ loja: 'hib' })
-    expect(resumoLinkOverrides({ id: 'hib', storeToday: '2026-11-18' }, { today: '2026-11-17', period: 'custom', range: week, params: { periodo: 'custom' } }))
-      .toEqual({ loja: 'hib' })
-  })
-  it('a preset that names the same dates on the store clock stays the preset (Mês passado, Tóquio after noon)', () => {
-    // 24 nov 17:00 UTC: 14h in Brasília, 02h of 25 nov in Tokyo.
-    const now = new Date('2026-11-24T17:00:00Z')
-    const hib = { id: 'hib', storeToday: '2026-11-25', timezone: 'Asia/Tokyo' }
-    expect(resumoLinkOverrides(hib, { today: '2026-11-24', period: 'lastmonth', range: { from: '2026-10-01', to: '2026-10-31' }, now }))
-      .toEqual({ loja: 'hib' })
-    // "Este mês" is 1–25 nov out there: the row's 1–24 travels.
-    expect(resumoLinkOverrides(hib, { today: '2026-11-24', period: 'mtd', range: { from: '2026-11-01', to: '2026-11-24' }, now }))
-      .toEqual({ loja: 'hib', periodo: 'custom', de: '2026-11-01', ate: '2026-11-24', volta: 'mtd' })
-    expect(resumoLinkOverrides(hib, { today: '2026-11-24', period: 'today', range: { from: '2026-11-24', to: '2026-11-24' }, now }))
-      .toEqual({ loja: 'hib', periodo: 'custom', de: '2026-11-24', ate: '2026-11-24', volta: 'today' })
-  })
-  // 24 nov 17:47 UTC: 14h47 in Brasília, 02h47 of 25 nov in Tokyo.
-  const AFTERNOON = new Date('2026-11-24T17:47:00Z')
-  const STORES = [{ timezone: 'America/Belem' }, { timezone: 'America/Sao_Paulo' }, { timezone: 'Asia/Tokyo' }]
-  const mokoo = { id: 'mokoo', storeToday: '2026-11-24', timezone: 'America/Belem' }
-  const hib = { id: 'hib', storeToday: '2026-11-25', timezone: 'Asia/Tokyo' }
-
-  it('REGRESSION: Todas on Hibikura\'s days opens every row on the days it shows', () => {
-    // Todas opened on Tokyo's "Ontem" (24 nov) from Hibikura's Atribuição: its
-    // rows were priced on 24 nov. With volta, the MOKOO row opened MOKOO's own
-    // Ontem, 23 nov (the store page reads the preset on Todas' clock): plain
-    // dates now. The Hibikura row keeps the preset: it IS its Ontem.
-    const page = {
-      today: '2026-11-24', period: 'custom' as const, range: { from: '2026-11-24', to: '2026-11-24' }, now: AFTERNOON, stores: STORES,
-      params: { periodo: 'custom' as const, volta: 'yesterday' as const },
-    }
-    expect(resumoLinkOverrides(mokoo, page)).toEqual({ loja: 'mokoo', periodo: 'custom', de: '2026-11-24', ate: '2026-11-24' })
-    expect(resumoLinkOverrides(hib, page)).toEqual({ loja: 'hib', periodo: 'custom', de: '2026-11-24', ate: '2026-11-24', volta: 'yesterday' })
-    // Últimos 7 dias da Hibikura (18–24 nov): the MOKOO row opened 17–23 nov.
-    const week = { ...page, range: { from: '2026-11-18', to: '2026-11-24' }, params: { periodo: 'custom' as const, volta: '7d' as const } }
-    expect(resumoLinkOverrides(mokoo, week)).toEqual({ loja: 'mokoo', periodo: 'custom', de: '2026-11-18', ate: '2026-11-24' })
-    expect(resumoLinkOverrides(hib, week)).toEqual({ loja: 'hib', periodo: 'custom', de: '2026-11-18', ate: '2026-11-24', volta: '7d' })
-  })
-
-  it('a store page on Todas\' row dates hands them on, preset included (Campanhas between stores)', () => {
-    // Hibikura opened from Todas · Hoje (24 nov): those dates are Todas'
-    // "Hoje", which a store page keeps, so another store's link keeps them too.
-    const page = {
-      today: '2026-11-25', period: 'custom' as const, range: { from: '2026-11-24', to: '2026-11-24' }, now: AFTERNOON, stores: STORES,
-      params: { periodo: 'custom' as const, volta: 'today' as const },
-    }
-    expect(resumoLinkOverrides(mokoo, page)).toEqual({ loja: 'mokoo', periodo: 'custom', de: '2026-11-24', ate: '2026-11-24', volta: 'today' })
-  })
-
-  it('without the clocks, row dates travel without the preset (always the dates shown)', () => {
-    const page = { today: '2026-11-17', period: 'custom' as const, range: { from: '2026-11-18', to: '2026-11-18' }, params: { periodo: 'custom' as const, volta: 'yesterday' as const } }
-    expect(resumoLinkOverrides({ id: 'hib', storeToday: '2026-11-18' }, page))
-      .toEqual({ loja: 'hib', periodo: 'custom', de: '2026-11-18', ate: '2026-11-18' })
-  })
-})
-
-describe('linkOpensDates', () => {
-  // The Lojas help line names a store "nas mesmas datas" only when its link
-  // really carries them: Mês passado keeps the preset for Hibikura too.
-  it('is a preset page whose row link is custom', () => {
-    expect(linkOpensDates({ period: 'today' }, { periodo: 'custom' })).toBe(true)
-    expect(linkOpensDates({ period: 'lastmonth' }, {})).toBe(false)
-    expect(linkOpensDates({ period: 'custom' }, { periodo: 'custom' })).toBe(false)
-  })
-  it('REGRESSION: Todas · Mês passado after noon names no store', () => {
-    const now = new Date('2026-11-24T17:00:00Z')
-    const page = { today: '2026-11-24', period: 'lastmonth' as const, range: { from: '2026-10-01', to: '2026-10-31' }, now }
-    const link = resumoLinkOverrides({ id: 'hib', storeToday: '2026-11-25', timezone: 'Asia/Tokyo' }, page)
-    expect(linkOpensDates(page, link)).toBe(false)
-    const today = { ...page, period: 'today' as const, range: { from: '2026-11-24', to: '2026-11-24' } }
-    expect(linkOpensDates(today, resumoLinkOverrides({ id: 'hib', storeToday: '2026-11-25', timezone: 'Asia/Tokyo' }, today))).toBe(true)
-  })
-})
+// resumoLinkOverrides / linkOpensDates are gone: a row is an R4 link that
+// carries the preset (lib/period carry), its help line is lib/period announce
+// (lib/period/__tests__/rules.test.ts R4, bugs.test.ts #5 #13 #40 #66 #78).
 
 describe('lastSaleDate', () => {
   it('is the date on the store calendar, not the UTC date', () => {
@@ -442,8 +363,9 @@ describe('idleReasons', () => {
       { name: 'Nova', dayState: 'complete', firstOrderDate: null },
     ]
     const r = idleReasons(idle, lastMonth)
-    expect(r.notYet.map(s => s.name)).toEqual(['Hibikura'])
-    expect(r.quiet.map(s => s.name)).toEqual(['CAMP HALLOW', 'Nova'])
+    // r3 F16: 'Nova' never sold (null): "ainda não vendeu", the verdict's reading.
+    expect(r.notYet.map(s => s.name)).toEqual(['Hibikura', 'Nova'])
+    expect(r.quiet.map(s => s.name)).toEqual(['CAMP HALLOW'])
     expect(r.notStarted).toEqual([])
   })
 

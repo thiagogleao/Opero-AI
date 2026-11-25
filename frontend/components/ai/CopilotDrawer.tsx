@@ -41,6 +41,8 @@ interface Props {
   /** Opened by a click (focus the question box); false when it reopens by
    *  itself after a page change (focus stays where the page put it). */
   autoFocus: boolean
+  /** The viewer's archived stores, for answer links (R4). */
+  archivedIds?: readonly string[]
 }
 
 function suggestions(from: string, to: string): string[] {
@@ -64,7 +66,7 @@ function resetText(r: ChatReset, fromName: string | null, toName: string | null,
 
 const NEAR_BOTTOM_PX = 48
 
-export function CopilotDrawer({ id, chat, pageStoreId, from, to, split, onClose, autoFocus }: Props) {
+export function CopilotDrawer({ id, chat, pageStoreId, from, to, split, onClose, autoFocus, archivedIds }: Props) {
   const titleId = useId()
   const inputId = useId()
   const listRef = useRef<HTMLDivElement>(null)
@@ -209,7 +211,7 @@ export function CopilotDrawer({ id, chat, pageStoreId, from, to, split, onClose,
 
         {turns.map((t, i) => t.role === 'user'
           ? <div key={t.id} className={s.user}><p>{t.text}</p></div>
-          : <Answer key={t.id} turn={t} storeId={chat.storeId} canRetry={i === turns.length - 1 && !chat.busy} onRetry={() => { stick.current = true; chat.retry(t.id) }} />)}
+          : <Answer key={t.id} turn={t} storeId={chat.storeId} archivedIds={archivedIds} canRetry={i === turns.length - 1 && !chat.busy} onRetry={() => { stick.current = true; chat.retry(t.id) }} />)}
       </div>
 
       <form className={s.composer} onSubmit={onSubmit}>
@@ -303,14 +305,14 @@ function Tools({ tools }: { tools: ToolActivity[] }) {
   )
 }
 
-function Answer({ turn, storeId, canRetry, onRetry }: { turn: AssistantTurn; storeId: string | null; canRetry: boolean; onRetry: () => void }) {
+function Answer({ turn, storeId, archivedIds, canRetry, onRetry }: { turn: AssistantTurn; storeId: string | null; archivedIds?: readonly string[]; canRetry: boolean; onRetry: () => void }) {
   const open = turn.status === 'waiting' || turn.status === 'streaming'
   const runningTool = turn.tools.find(t => t.status === 'running')
   return (
     <div className={s.answer}>
       {turn.tools.length > 0 && <Tools tools={turn.tools} />}
       {turn.text
-        ? <SafeMarkdown storeId={storeId}>{turn.text}</SafeMarkdown>
+        ? <SafeMarkdown storeId={storeId} archivedIds={archivedIds}>{turn.text}</SafeMarkdown>
         : open && (
             <p className={s.thinking}>
               <span className={s.spin} aria-hidden="true" />

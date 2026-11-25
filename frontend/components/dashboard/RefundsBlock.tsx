@@ -23,7 +23,8 @@ import { getWindowDisputeStatuses, type ChargebackHealth } from '@/lib/adjustmen
 import { formatClock, formatCount, formatDate, formatMoney, formatNumber, formatPct, plural } from '@/lib/format'
 import { Block, Callout, Chip, ErrorState, Money, Skeleton } from '@/components/ui'
 import { disputeReasonText } from '@/lib/views/verdict'
-import { healthParts, rateWithoutPrevented, windowStatusText } from './disputes'
+import { archiveMoment, findStore } from '@/lib/period'
+import { healthParts, rateWithoutPrevented, windowStatusText, type ArchivedAt } from './disputes'
 import { emptyWindowText, type EmptyWindow } from './emptyWindow'
 import s from './dashboard.module.css'
 
@@ -34,6 +35,11 @@ export function RefundsBlock({ ctx, summary, empty = null }: {
 }) {
   const t = summary.pnl.totals
   const configured = summary.pnl.configured
+  // R10: the "as of" of an archived store is its archive instant (day beside
+  // this window, time on its clock), from the store facts.
+  const facts = summary.row.archived ? findStore(ctx.viewerStores, summary.store.id) : null
+  const moment = facts ? archiveMoment(facts, { window: ctx.range, comparison: ctx.comparison, clockToday: ctx.today }) : null
+  const archivedAt: ArchivedAt | null = summary.row.archived ? { day: moment?.day ?? null, time: moment?.time ?? null } : null
   const none = t.refundCount === 0 && t.chargebackCount === 0
   // Before the first sale nothing can be refunded, and after an archived
   // store's archive day nothing is read: "nenhum reembolso chegou" would
@@ -75,7 +81,7 @@ export function RefundsBlock({ ctx, summary, empty = null }: {
           </span>
           <Suspense fallback={null}>
             <WindowDisputes storeId={summary.store.id} from={ctx.range.from} to={ctx.range.to}
-              archived={summary.row.archived ? { on: summary.row.archivedOn ?? null, today: ctx.today } : null} />
+              archived={archivedAt} />
           </Suspense>
         </div>
         <div className={s.adjItem}>
@@ -96,7 +102,7 @@ export function RefundsBlock({ ctx, summary, empty = null }: {
       </div>
       <Suspense fallback={<div className={s.health}><Skeleton width={220} height={14} /><Skeleton height={6} /><Skeleton width="60%" height={11} /></div>}>
         <ChargebackHealthPart storeId={summary.store.id} today={ctx.today} timezone={ctx.timezone}
-          archived={summary.row.archived ? { on: summary.row.archivedOn ?? null } : null} />
+          archived={archivedAt} />
       </Suspense>
     </Block>
   )
@@ -111,7 +117,7 @@ export function RefundsBlock({ ctx, summary, empty = null }: {
 async function WindowDisputes({ storeId, from, to, archived }: {
   storeId: string; from: string; to: string
   /** An archived store: the status is the one read when it was archived. */
-  archived: { on: string | null; today: string } | null
+  archived: ArchivedAt | null
 }) {
   let text: string | null
   try {
@@ -154,9 +160,9 @@ function DueRow({ d, today, timezone }: { d: ChargebackHealth['dueSoon'][number]
 
 async function ChargebackHealthPart({ storeId, today, timezone, archived }: {
   storeId: string; today: string; timezone: string
-  /** An archived store (its archive day when known): it is not read any more,
-   *  so nothing about its disputes is "agora". */
-  archived: { on: string | null } | null
+  /** An archived store (its archive instant when known): it is not read any
+   *  more, so nothing about its disputes is "agora". */
+  archived: ArchivedAt | null
 }) {
   let data
   try {
@@ -228,7 +234,7 @@ async function ChargebackHealthPart({ storeId, today, timezone, archived }: {
       {h.open > 0 && due.length === 0 && overdue === 0 && (
         <span className={s.adjNote}>
           {archived
-            ? `${archived.on ? `Até ${formatDate(archived.on, today)}, quando` : 'Quando'} a loja foi arquivada, nenhuma das abertas esperava resposta da loja.`
+            ? `${archived.day ? `Até ${archived.day}${archived.time ? ` às ${archived.time}` : ''}, quando` : 'Quando'} a loja foi arquivada, nenhuma das abertas esperava resposta da loja.`
             : 'Nenhuma das abertas espera resposta da loja agora: estão em análise.'}
         </span>
       )}

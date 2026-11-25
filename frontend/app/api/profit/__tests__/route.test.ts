@@ -309,7 +309,8 @@ describe('POST (preview)', () => {
   it('rejects bad windows and the old save action', async () => {
     expect((await post({ storeId: 'store-a', period: 'custom', from: '2026-11-10', to: '2026-11-01' })).status).toBe(400)
     expect((await post({ storeId: 'store-a', period: 'week' })).status).toBe(400)
-    expect((await post({ storeId: 'store-a', period: 'custom', from: '2024-01-01', to: '2026-11-01' })).status).toBe(400)
+    // A long range is cut (lib/period R9), not refused.
+    expect((await post({ storeId: 'store-a', period: 'custom', from: '2024-01-01', to: '2026-11-01' })).status).toBe(200)
     expect((await post({ action: 'save', config: {} })).status).toBe(400)
   })
 

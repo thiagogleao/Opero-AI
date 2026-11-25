@@ -27,8 +27,9 @@ import {
   buildCogsLookups, fixedCostForDay, isConfigured, tiersForDate,
   type CogsPriceTier, type CountryPriceList, type ExtraCost, type ProfitConfig, type SupplierOrderFee,
 } from '../engine/costs'
-import { daysBetween, isIsoDate, isPeriod, resolveRange, type DateRange, type Period } from '../engine/dates'
+import { daysBetween, isIsoDate, isPeriod, type DateRange, type Period } from '../engine/dates'
 import type { DayPnL, PnL, PnLLines, ProductPnL } from '../engine/pnl'
+import { windowFor } from '../period/windows'
 
 export type { ProfitConfig }
 
@@ -792,7 +793,7 @@ export function parseWindow(
     if (!isIsoDate(to)) return { ok: false, issue: { path: 'to', message: MSG.date } }
     if (from > to) return { ok: false, issue: { path: 'from', message: 'A data inicial é depois da final.' } }
   }
-  const range = resolveRange(period, tz, from as string | undefined, to as string | undefined, now)
+  const range = windowFor(period, tz, from as string | undefined, to as string | undefined, now)
   if (daysBetween(range.from, range.to) > MAX_WINDOW_DAYS) {
     return { ok: false, issue: { path: 'from', message: `Escolha um período de até ${MAX_WINDOW_DAYS} dias.` } }
   }

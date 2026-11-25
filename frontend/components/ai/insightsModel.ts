@@ -48,11 +48,11 @@ export function resultMatches(result: InsightsResult, r: InsightsRequest, window
  * windows that start today-ish pay for the store lookup. The server stays the
  * judge for everything else; this only skips a request that must fail.
  */
-export function mayLackClosedDay(from: string, now: Date = new Date()): boolean {
+export function mayLackClosedDay(from: string, now: Date = new Date()): boolean { // clock-ok: default for callers without a clock
   return from >= todayInTz('Etc/GMT+12', now)
 }
 
-export function lacksClosedDay(from: string, storeTz: string, now: Date = new Date()): boolean {
+export function lacksClosedDay(from: string, storeTz: string, now: Date = new Date()): boolean { // clock-ok: default for callers without a clock
   return from >= todayInTz(storeTz, now)
 }
 

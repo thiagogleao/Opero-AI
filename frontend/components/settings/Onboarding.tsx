@@ -312,7 +312,7 @@ function ImportStep({ store, startDate, fbConnected, now, keep }: {
 
   async function start() {
     setPhase('starting')
-    const at = new Date().toISOString()
+    const at = new Date().toISOString() // clock-ok: import progress timestamp, not a period
     const r = await callApi<{ started: boolean; jobs: Job[] }>('/api/refresh', {
       method: 'POST', body: JSON.stringify({ storeId: store.id, ...(from ? { dateFrom: from } : {}) }),
     })
@@ -332,7 +332,7 @@ function ImportStep({ store, startDate, fbConnected, now, keep }: {
   useEffect(() => {
     if (phase !== 'running' || finished) return
     let stop = false
-    const began = Date.now()
+    const began = Date.now() // clock-ok: import progress timing, not a period
     const tick = async () => {
       const r = await callApi<{ stores: Freshness[] }>(`/api/sync-status?storeId=${encodeURIComponent(store.id)}`)
       if (stop) return
@@ -340,7 +340,7 @@ function ImportStep({ store, startDate, fbConnected, now, keep }: {
       setPollError(null)
       setFresh(r.data?.stores.find(x => x.storeId === store.id) ?? null)
     }
-    const id = setInterval(() => { if (Date.now() - began > 15 * 60_000) { clearInterval(id); return } tick() }, 5000)
+    const id = setInterval(() => { if (Date.now() - began > 15 * 60_000) { clearInterval(id); return } tick() }, 5000) // clock-ok: import progress timing, not a period
     const first = setTimeout(tick, 800)
     return () => { stop = true; clearInterval(id); clearTimeout(first) }
   }, [phase, finished, store.id])

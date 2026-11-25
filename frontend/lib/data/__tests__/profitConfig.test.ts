@@ -399,6 +399,7 @@ describe('parseWindow', () => {
     expect(parseWindow({ period: 'week' }, 'UTC', '30d', now)).toMatchObject({ ok: false, issue: { path: 'period' } })
     expect(parseWindow({ period: 'custom', from: '2026-13-01', to: '2026-11-05' }, 'UTC', '30d', now)).toMatchObject({ ok: false, issue: { path: 'from' } })
     expect(parseWindow({ from: '2026-11-05', to: '2026-11-01' }, 'UTC', '30d', now)).toMatchObject({ ok: false, issue: { path: 'from' } })
-    expect(parseWindow({ from: '2025-01-01', to: '2026-11-01' }, 'UTC', '30d', now)).toMatchObject({ ok: false })
+    // A long range is not refused (lib/period R9): it keeps its last 366 days.
+    expect(parseWindow({ from: '2025-01-01', to: '2026-11-01' }, 'UTC', '30d', now)).toMatchObject({ ok: true, range: { from: '2025-11-01', to: '2026-11-01' } })
   })
 })

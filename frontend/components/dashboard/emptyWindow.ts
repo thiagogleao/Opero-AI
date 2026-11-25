@@ -18,9 +18,9 @@
 
 import type { DateRange, Period } from '@/lib/engine/dates'
 import type { PnL } from '@/lib/engine/pnl'
-import { formatRangeLabel } from '@/lib/format'
 import { periodPhrase, type Verdict, type VerdictChip, type VerdictLine } from '@/lib/views/verdict'
 import { dateBeside } from '@/components/campaigns/storeStart'
+import { rangeBeside } from '@/lib/period'
 
 export type EmptyWindow =
   /** The window ends before the first sale; `firstSale` as the verdict prints it ("7 nov"). */
@@ -162,7 +162,7 @@ export function frozenVerdict(i: FrozenVerdictInput): Verdict {
  * em 1–10 nov." and the note that nothing after 10 nov was read.
  */
 export function frozenTailVerdict(i: FrozenVerdictInput & { archivedOn: string }): Verdict {
-  const read = formatRangeLabel({ from: i.range.from, to: i.archivedOn }, i.today)
+  const read = rangeBeside({ from: i.range.from, to: i.archivedOn }, { window: i.range, clockToday: i.today })
   const chips: VerdictChip[] = [{ code: 'sem_vendas', label: 'Sem vendas no período', tone: 'neu', icon: 'ring' }]
   if (i.configured === false) chips.push({ code: 'sem_custos', label: 'Custos não configurados', tone: 'cfg', icon: 'sliders' })
   if (i.dayLabel) chips.push({ code: 'dia_fuso', label: i.dayLabel, tone: 'info', icon: 'clock' })

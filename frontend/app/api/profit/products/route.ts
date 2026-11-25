@@ -1,7 +1,8 @@
 import { getViewer, requireStore, resolveStore, accessErrorResponse, AccessError } from '@/lib/access'
 import { getProductReport, type ProductReport, type ProductRow } from '@/lib/data/products'
 import { isModel } from '@/lib/attributionModels'
-import { isIsoDate, isPeriod, resolveRange, type Period } from '@/lib/engine/dates'
+import { isIsoDate, isPeriod, type Period } from '@/lib/engine/dates'
+import { windowFor } from '@/lib/period'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -69,7 +70,7 @@ export async function GET(req: Request) {
     if (period === 'custom' && !(isIsoDate(from) && isIsoDate(to))) {
       return Response.json({ error: 'Informe as datas como AAAA-MM-DD' }, { status: 400 })
     }
-    const range = resolveRange(period, store.timezone, from, to)
+    const range = windowFor(period, store.timezone, from, to, new Date()) // clock-ok: request instant
     const rawModel = sp.get('model')
     const model = isModel(rawModel) ? rawModel : 'first'
 

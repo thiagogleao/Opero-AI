@@ -17,7 +17,7 @@
 
 import { Suspense } from 'react'
 import Link from 'next/link'
-import { ALL_STORES, getPageContext, pageMetadata, type PageContext, type SearchParams } from '@/lib/views/page'
+import { getPageContext, pageMetadata, type PageContext, type SearchParams } from '@/lib/views/page'
 import type { StoreRef } from '@/lib/access'
 import { empateGap, loadStoreSummary, type StoreSummary } from '@/lib/views/store'
 import { buildVerdict, verdictInputFromPortfolio } from '@/lib/views/verdict'
@@ -33,8 +33,8 @@ import { RefundsBlock } from '@/components/dashboard/RefundsBlock'
 import { SharedAccountNote } from '@/components/dashboard/SharedAccountNote'
 import { QuietStoreNote } from '@/components/dashboard/QuietStoreNote'
 import { emptyWindowOf, frozenTailOf } from '@/components/dashboard/emptyWindow'
-import { formatRangeLabel } from '@/lib/format'
 import s from '@/components/dashboard/dashboard.module.css'
+import { rangeBeside } from '@/lib/period'
 
 // Absolute: the root layout's "%s · Opero" template only reaches child
 // segments, and this page sits in the layout's own segment (the tab read
@@ -53,33 +53,33 @@ function headerCode(ctx: PageContext, store: StoreRef): string | null | undefine
 /** For a custom window the default sub line repeated the range ("1–12 nov ·
  *  1–12 nov"): name it once. */
 function customSub(ctx: PageContext) {
-  if (ctx.period !== 'custom') return undefined
-  return <><b>{periodName(ctx)}</b> · <span className="num">{ctx.rangeLabel}</span></>
+  if (ctx.selection.period.kind !== 'dates') return undefined
+  return <b>{periodName(ctx)}</b>
 }
 export const dynamic = 'force-dynamic'
 
 /**
- * The URL asked for "Todas" (a sidebar link from an all-stores page) and this
- * page reads one store at a time: getPageContext then shows the store the
- * browser last picked, which may have been chosen in another tab (ctx.fromAll).
- * Say which one, as Atribuição does, instead of switching silently. Not for a
- * one-store partner, who has no "Todas" to come from. The sidebar keeps
- * loja=todas meanwhile (ctx.navHref), so Campanhas or Produtos open Todas.
+ * Opened from Todas (`vem=todas`: a sidebar link from an all-stores page, an
+ * old ?loja=todas link redirected to the remembered store): this page reads
+ * one store at a time, so say which one, as Atribuição does. The dates it
+ * reads are announced by the header's landing note (lib/period announce).
  */
 function FromAllNote({ ctx, store }: { ctx: PageContext; store: StoreRef }) {
+  // R4: null when the viewer cannot open Todas (text, never a dead link).
+  const all = ctx.scopeHref('/overview', { kind: 'all' })
   return (
     <Callout tone="neu" icon="store" title={`Mostrando a ${store.name}`}>
-      O Resumo mostra uma loja por vez. Escolha outra no seletor de loja, ou veja todas juntas
-      em <Link href={ctx.hrefWith('/overview', { loja: ALL_STORES })}>Todas as lojas</Link>.
+      O Resumo mostra uma loja por vez. Escolha outra no seletor de loja{all ? <>, ou veja todas juntas
+      em <Link href={all}>Todas as lojas</Link></> : null}.
     </Callout>
   )
 }
 
 export default async function ResumoPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
   const sp = await searchParams
-  const ctx = await getPageContext(sp, { scope: 'store' })
+  const ctx = await getPageContext(sp, { path: '/', scope: 'store' })
   const store = ctx.store
-  const fromAll = ctx.fromAll && !!store
+  const fromAll = ctx.cameFrom?.kind === 'all' && !!store
 
   if (!store) {
     return (
@@ -97,7 +97,7 @@ export default async function ResumoPage({ searchParams }: { searchParams: Promi
 
   let summary: StoreSummary
   try {
-    summary = await loadStoreSummary(store, { period: ctx.period, range: ctx.range, comparison: ctx.comparison }, ctx.now)
+    summary = await loadStoreSummary(store, { period: ctx.period, range: ctx.range, comparison: ctx.comparison, resolution: ctx.resolution, facts: ctx.viewerStores }, ctx.now)
   } catch (err) {
     console.error('[resumo] summary', store.id, err)
     return (
@@ -134,7 +134,7 @@ export default async function ResumoPage({ searchParams }: { searchParams: Promi
   // A window read only up to the archive day (the verdict's "não teve vendas
   // em 1–10 nov"): the ledger names those days, not the whole window.
   const tail = summary.row.archived ? frozenTailOf(summary.row.archivedOn, ctx.range) : null
-  const readLabel = tail ? formatRangeLabel({ from: ctx.range.from, to: tail }, ctx.today) : ctx.rangeLabel
+  const readLabel = tail ? rangeBeside({ from: ctx.range.from, to: tail }, { window: ctx.range, comparison: ctx.comparison, clockToday: ctx.today }) : ctx.rangeLabel
   const storeNames = new Map(ctx.stores.map(st => [st.id, st.name]))
   if (!storeNames.has(store.id)) storeNames.set(store.id, store.name)
 
@@ -153,7 +153,9 @@ export default async function ResumoPage({ searchParams }: { searchParams: Promi
         />
         {fromAll && <FromAllNote ctx={ctx} store={store} />}
         <PeriodNote ctx={ctx} compared />
-        {!configured && (
+        {/* Before the first sale the verdict says so; costs change nothing
+            in a window with no activity (R11: "ainda não vendia" first). */}
+        {!configured && !notYet && (
           <Callout tone="warn" title="Custos não configurados">
             Sem o custo dos produtos, do frete e das taxas, esta tela mostra receita − anúncios, que não é lucro.{' '}
             <ButtonLink href={ctx.hrefWith('/profit')} size="sm" icon="sliders">Configurar custos</ButtonLink>

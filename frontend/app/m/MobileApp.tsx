@@ -3,12 +3,14 @@
 /**
  * Opero Mobile: the owner's phone screen.
  *
- * One selection (store + period, optionally an open tab) that only a tap
- * changes, kept in the URL and in localStorage (_lib/viewStore). One answer at
- * a time from GET /api/mobile, applied only when it echoes exactly what is on
- * screen (_lib/useMobileData). While another selection loads, the old answer
- * stays visible but dimmed under "Carregando …", so it is never read as the
- * new store's numbers.
+ * The state is lib/period/phone's (R16): the saved view (the owner's choices,
+ * localStorage) and, when an external link opened the app (a push, a deep
+ * link, an archived store), a one-visit view over it (sessionStorage, never
+ * saved, never rolling). _lib/viewStore is only the browser plumbing. One
+ * answer at a time from GET /api/mobile for the SHOWN selection, dropped only
+ * when it answers another selection (_lib/useMobileData, R19). While another
+ * selection loads, the old answer stays visible but dimmed under
+ * "Carregando …", so it is never read as the new store's numbers.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
@@ -17,14 +19,17 @@ import { buildVerdict, verdictInputFromPortfolio } from '@/lib/views/verdict'
 import type { MobileStoreOption } from '@/lib/views/mobile'
 import type { DetailSection } from '@/lib/views/mobileDetail'
 import { formatTimeInTz, tzCity } from '@/lib/format'
-import { REFERENCE_TZ, todayInTz } from '@/lib/engine/dates'
+import { REFERENCE_TZ } from '@/lib/engine/dates'
 import {
-  ALL, chipReturnLabel, chipSelection, chipView, clockDiffers, linkDayKey, linkDayNotice, patchSelection, periodLabel, periodShort,
-  rowTapSelection, selectionKey, selectionPeriodLabel, selectionTz, type Selection,
-} from './_lib/selection'
+  announce, archiveOpening, findStore, offsetMinutes, preset, resolve, valueName,
+  type PeriodValue, type ViewerStores,
+} from '@/lib/period'
+import { ALL, rowHelp, shownSelection, shownView, storeOptions, stripFor, stripNotes, type Tab } from '@/lib/period/phone'
+import { clientNow } from '@/lib/period/client/clock'
+import { selectionKey } from './_lib/request'
 import {
-  applyUrl, configureStores, getServerView, getView, persistCurrent, revalidate, setView, subscribeView, takeLinkNotice,
-  takeLinkRangeNotice,
+  applySwNavigate, dispatch, getFacts, getServerState, getState, markHidden, markVisible, rereadSaved, setFacts, subscribe,
+  touch,
 } from './_lib/viewStore'
 import { useMobileData, useNow, useRefresh } from './_lib/useMobileData'
 import { diffFeed, inScope, type FeedBaseline } from './_lib/feed'
@@ -42,12 +47,14 @@ import s from './m.module.css'
 
 type SheetName = 'period' | 'settings' | 'alerts' | null
 
-export default function MobileApp({ stores, archived, sharedAds }: {
+export default function MobileApp({ stores: firstStores, archived: firstArchived, facts, sharedAds }: {
   stores: MobileStoreOption[]; archived: MobileStoreOption[]
+  /** The store facts the period rules resolve with (lib/period ViewerStores);
+   *  every answer may bring newer ones (R19). */
+  facts: ViewerStores
   /** Shared ad-account pairs, streamed by page.tsx (never rejects). */
   sharedAds: Promise<SharedAds>
 }) {
-  configureStores(stores, archived)
   // Until the pairing arrives the screen simply has no pair note; it never
   // holds the numbers back.
   const [shared, setShared] = useState<SharedAds>(NO_SHARED_ADS)
@@ -56,106 +63,105 @@ export default function MobileApp({ stores, archived, sharedAds }: {
     sharedAds.then(v => { if (live) setShared(v) }, () => {})
     return () => { live = false }
   }, [sharedAds])
-  const view = useSyncExternalStore(subscribeView, getView, getServerView)
-  const sel = view?.sel ?? null
+  const phone = useSyncExternalStore(subscribe, getState, getServerState)
+  // The store lists follow the ADOPTED facts (R19): a store archived while the
+  // app is open leaves the chips, joins the archived list and stops being
+  // polled. The page's props are only the first paint. (A facts change always
+  // dispatches, so this re-renders with them.)
+  const adopted = phone ? getFacts() : null
+  const lists = useMemo(() => (adopted ? storeOptions(adopted) : null), [adopted])
+  const stores: MobileStoreOption[] = lists?.active ?? firstStores
+  const archived: MobileStoreOption[] = lists?.archived ?? firstArchived
+  const shownV = phone ? shownView(phone) : null
+  const sel = useMemo(() => (phone ? shownSelection(phone) : null), [phone])
   const selKey = sel ? selectionKey(sel) : null
   // An archived store is not synced: nothing new can arrive, so it is not
   // polled (the footer said "atualizam sozinhos a cada 45 s").
-  const archivedSel = !!sel && archived.some(a => a.id === sel.loja)
-  const home = useMobileData(sel, { poll: !archivedSel })
+  const archivedSel = !!shownV && archived.some(a => a.id === shownV.loja)
+  const home = useMobileData(sel, { poll: !archivedSel, onFacts: setFacts })
   const now = useNow()
   const push = usePush()
   const soundOn = useSyncExternalStore(subscribeSoundPref, getSoundPref, () => false)
   const [sheet, setSheet] = useState<SheetName>(null)
   const [force, setForce] = useState(0)
-  const [notice, setNotice] = useState<string | null>(null)
-  // A link whose custom range was cut before asking (selection linkRangeNotice).
-  const [rangeNotice, setRangeNotice] = useState<string | null>(null)
-  // The notification strip the owner closed (selection linkDayNotice), by the
-  // notification it was about (selection linkDayKey: not the store, so a
-  // store row does not bring it back); a new notification tap shows its own.
-  const [closedLinkDay, setClosedLinkDay] = useState<string | null>(null)
+  // The one-action strip (R4 announcements, open notes, facts changes) is
+  // lib/period/phone's PhoneState.transient: one owner, set by the actions and
+  // the facts rows of R16, replaced by the next action.
+  const transient = phone?.transient ?? []
   const deviceTz = useMemo(() => (typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : REFERENCE_TZ), [])
 
   const activeIds = useMemo(() => new Set(stores.map(x => x.id)), [stores])
   const nameOf = useCallback((id: string) => (id === ALL ? 'Todas as lojas' : [...stores, ...archived].find(x => x.id === id)?.name ?? 'esta loja'), [stores, archived])
 
-  // The resolved view goes to the URL and storage once; the service worker
-  // is registered so pushes, taps and key rotation reach this page.
+  // Open the app once (lib/period openApp: fresh open vs restore, R16), after
+  // the router's own mount effects; register the service worker so pushes,
+  // taps and key rotation reach this page.
   useEffect(() => {
-    // After the router's own mount effects, which rewrite the URL to the one
-    // the server rendered (plain /m) and would drop ?loja=&periodo=.
-    const t = setTimeout(persistCurrent, 0)
+    const t = setTimeout(() => setFacts(facts), 0)
     if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js').catch(() => {})
     // Not setSoundEnabled: no gesture here, so the context waits for the first tap.
     restoreSound(getSoundPref())
     return () => clearTimeout(t)
-  }, [])
+  }, [facts])
 
-  // A link (a notification, a saved URL) to a store that is neither active nor
-  // archived opens the stored store instead: say so, as for a store gone 404,
-  // so its numbers are not read as the link's store.
-  const linkNotice = useCallback((shownLoja: string) =>
-    `A loja do link não está disponível. Mostrando ${shownLoja === ALL ? 'Todas' : nameOf(shownLoja)}.`, [nameOf])
+  // Visit identity and storage on resume (R16, R8): hidden/visible, bfcache,
+  // another window's saved view, and a heartbeat while visible.
   useEffect(() => {
-    setRangeNotice(takeLinkRangeNotice())
-    if (!takeLinkNotice()) return
-    const v = getView()
-    if (v) setNotice(linkNotice(v.sel.loja))
-  }, [linkNotice])
-
-  // The clock tick: dates a store row opened give way to the owner's preset
-  // once Todas' day is over, so a "Hoje" keeps rolling after midnight.
-  useEffect(() => { if (now) revalidate() }, [now])
-
-  // A period or range the owner picks replaces dates a store row opened
-  // (selection patchSelection).
-  const pick = useCallback((patch: Partial<Selection>) => {
-    const v = getView()
-    if (!v) return
-    setNotice(null)
-    setRangeNotice(null)
-    setView({ ...v, sel: patchSelection(v.sel, patch) })
+    const onVis = () => (document.visibilityState === 'hidden' ? markHidden() : markVisible())
+    const onShow = (e: PageTransitionEvent) => { if (e.persisted) markVisible(true) }
+    const onStorage = (e: StorageEvent) => { if (e.key === null || e.key === 'opero.m.view.v3') rereadSaved() }
+    const beat = setInterval(() => { if (document.visibilityState === 'visible') touch() }, 60_000)
+    document.addEventListener('visibilitychange', onVis)
+    window.addEventListener('pageshow', onShow)
+    window.addEventListener('storage', onStorage)
+    return () => {
+      clearInterval(beat)
+      document.removeEventListener('visibilitychange', onVis)
+      window.removeEventListener('pageshow', onShow)
+      window.removeEventListener('storage', onStorage)
+    }
   }, [])
-  // A store row of "Todas" may also open the dates it showed, for that store
-  // only (selection storeRowSelection). It picks a store, not a period: a
-  // period a notification opened stays the link's (selection rowTapSelection),
-  // read from then on on the store's own clock.
-  const pickRow = useCallback((patch: Partial<Selection>) => {
-    const v = getView()
-    if (!v) return
-    setNotice(null)
-    setRangeNotice(null)
-    const todayOf = (loja: string) => todayInTz(selectionTz(loja, stores, archived), new Date())
-    setView({ ...v, sel: rowTapSelection(v.sel, patch, todayOf) })
-    window.scrollTo({ top: 0, behavior: 'smooth' })
-  }, [stores, archived])
-  // A store opened from inside the screen ("Abrir EPOCH" in Campanhas, "Ver
-  // as lojas juntas", an archived store in Ajustes): the period stays, except
-  // row dates and a notification's period, which go back to the owner's
-  // (selection chipSelection). The open tab stays: the link was read in it.
-  const pickStore = useCallback((loja: string) => {
-    const v = getView()
-    if (!v) return
-    setNotice(null)
-    setRangeNotice(null)
-    setView({ ...v, sel: chipSelection(v.sel, loja) })
+
+  // R4 on the phone: a chip or row tap that will show other dates than the
+  // place it sits in says so, with the desktop's words, until the next action
+  // (lib/period/phone act, inside dispatch: from what is on screen). The row
+  // help line below is the same function.
+  const rowLine = useCallback((storeId: string) => {
+    const f = getFacts()
+    const st = getState()
+    if (!f || !st) return null
+    const from = shownSelection(st)
+    return announce(from, from.scope, { kind: 'store', id: storeId }, f, clientNow())?.line ?? null
+  }, [])
+  // A period the owner picks: saved; a visit keeps only its store and tab.
+  const pick = useCallback((period: PeriodValue) => {
+    dispatch({ type: 'period', period })
+  }, [])
+  // A row of Todas, or an in-screen store link ("Abrir EPOCH", "Ver as lojas
+  // juntas"): outside a visit it pins the store (saved); inside a visit it is a
+  // drill-down that keeps the visit's dates and saves nothing (R5, R16).
+  const pickRow = useCallback((loja: string) => {
+    dispatch({ type: 'row', loja })
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }, [])
-  // The store buttons at the top: the same, and a tab a notification opened
-  // gives way to the owner's own (selection chipView).
+  // The store buttons at the top: the owner's choice; they end a visit (an
+  // archived store's chip, shown only while it is on screen, changes nothing).
   const pickChip = useCallback((loja: string) => {
-    const v = getView()
-    if (!v) return
-    setNotice(null)
-    setRangeNotice(null)
-    setView(chipView(v, loja))
+    dispatch({ type: 'chip', loja })
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }, [])
-  // A tab the owner opens or closes is theirs, whatever a notification opened.
+  // An archived store from Ajustes: a consultation visit on the 30 days
+  // ending on its archive day (R10, lib/period archiveOpening — the desktop
+  // list's opening too), never saved.
+  const openArchived = useCallback((loja: string) => {
+    const st = getFacts() ? findStore(getFacts()!, loja) : null
+    const open = st ? archiveOpening(st) : null
+    dispatch({ type: 'archive', loja, period: open ?? preset('30d') })
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }, [])
+  // A tab the owner opens or closes is theirs, whatever a link opened.
   const pickTab = useCallback((aba: DetailSection | null) => {
-    const v = getView()
-    if (v) setView({ sel: v.sel, aba })
+    dispatch({ type: 'tab', aba: aba as Tab | null })
   }, [])
 
   // ── Sound: new sales of what is on screen, never on a switch ────────────
@@ -163,7 +169,7 @@ export default function MobileApp({ stores, archived, sharedAds }: {
   const announced = useRef<Set<string>>(new Set())
   useEffect(() => {
     if (!home.data || !home.dataKey) return
-    const { baseline: next, fresh } = diffFeed(baseline.current, home.dataKey, home.data.liveFeed, announced.current, Date.now())
+    const { baseline: next, fresh } = diffFeed(baseline.current, home.dataKey, home.data.liveFeed, announced.current, Date.now()) // clock-ok: sale-chime baseline age, not a period
     baseline.current = next
     if (fresh.length) {
       for (const id of fresh) announced.current.add(id)
@@ -181,17 +187,14 @@ export default function MobileApp({ stores, archived, sharedAds }: {
       const m = e.data as { type?: string; url?: string; payload?: { tenantId?: string; orderId?: string } } | null
       if (!m?.type) return
       if (m.type === 'navigate' && m.url) {
-        const missing = applyUrl(m.url)
-        const v = getView()
-        setNotice(missing && v ? linkNotice(v.sel.loja) : null)
-        setRangeNotice(takeLinkRangeNotice())
-        setClosedLinkDay(null)
+        // A push tapped while /m is open: always a fresh open (R16, R17).
+        applySwNavigate(m.url)
         return
       }
-      const v = getView()
+      const v = getState()
       if (m.type === 'sale') {
         const storeId = m.payload?.tenantId
-        if (!v || !inScope(v.sel.loja, storeId, activeIds)) return
+        if (!v || !inScope(shownView(v).loja, storeId, activeIds)) return
         const id = `${storeId}|${m.payload?.orderId}`
         if (m.payload?.orderId && !announced.current.has(id)) {
           announced.current.add(id)
@@ -204,7 +207,7 @@ export default function MobileApp({ stores, archived, sharedAds }: {
     }
     navigator.serviceWorker.addEventListener('message', onMessage)
     return () => navigator.serviceWorker.removeEventListener('message', onMessage)
-  }, [activeIds, linkNotice])
+  }, [activeIds])
 
   // ── Atualizar: only the stores on screen, real progress ─────────────────
   const onRefreshed = useCallback(() => {
@@ -213,9 +216,10 @@ export default function MobileApp({ stores, archived, sharedAds }: {
   }, [])
   const refresh = useRefresh(onRefreshed)
   const onScreen = useCallback(() => {
-    const v = getView()
+    const v = getState()
     if (!v) return []
-    return v.sel.loja === ALL ? stores.map(x => x.id) : activeIds.has(v.sel.loja) ? [v.sel.loja] : []
+    const loja = shownView(v).loja
+    return loja === ALL ? stores.map(x => x.id) : activeIds.has(loja) ? [loja] : []
   }, [stores, activeIds])
   const refreshing = refresh.run.phase === 'starting' || refresh.run.phase === 'running'
   const { dismiss } = refresh
@@ -230,15 +234,19 @@ export default function MobileApp({ stores, archived, sharedAds }: {
     return () => clearTimeout(t)
   }, [refresh.run, dismiss])
 
-  // ── A store that disappeared (archived elsewhere): say so, go to Todas ───
+  // ── A store that disappeared (removed elsewhere): say so ─────────────────
+  // A visit's store gone ends the visit (unknown_store); the saved store
+  // gone falls back to Todas (saved_store_gone, R16).
   const storeGone = home.error?.kind === 'store' && home.errorKey === selKey
   useEffect(() => {
     if (!storeGone) return
-    const v = getView()
-    if (!v || v.sel.loja === ALL) return
-    const gone = nameOf(v.sel.loja)
-    setView({ ...v, sel: chipSelection(v.sel, ALL) })
-    setNotice(`${gone} não está mais disponível. Mostrando Todas.`)
+    const v = getState()
+    if (!v) return
+    if (v.visit) {
+      dispatch({ type: 'back', notes: [{ code: 'unknown_store', params: { saved: nameOf(v.saved.loja) } }] })
+    } else if (v.saved.loja !== ALL) {
+      dispatch({ type: 'chip', loja: ALL, notes: [{ code: 'saved_store_gone', params: { store: nameOf(v.saved.loja) } }] })
+    }
   }, [storeGone, nameOf])
 
   // ── What is shown ───────────────────────────────────────────────────────
@@ -250,28 +258,34 @@ export default function MobileApp({ stores, archived, sharedAds }: {
     () => (data ? buildVerdict(verdictInputFromPortfolio(data, { subject: data.request.store === 'all' ? 'Suas lojas' : undefined })) : null),
     [data],
   )
-  const scopeName = sel ? (sel.loja === ALL ? 'Todas as lojas' : nameOf(sel.loja)) : ''
-  // The selection's own calendar (the store's timezone, or Brasília for
-  // Todas), never the previous answer's: while another store loads or after
-  // it failed, `data` is still Hibikura's and its Tokyo clock built the period
-  // sheet (Tokyo's "today" offered for a Brazilian store).
-  const selTz = sel ? selectionTz(sel.loja, stores, archived) : REFERENCE_TZ
-  const selToday = now ? todayInTz(selTz, new Date(now)) : undefined
-  // A period a notification opened, for as long as it is on screen (it goes
-  // back to the owner's own on the next chip or day): which day, and to what.
-  const linkKey = sel ? linkDayKey(sel) : null
-  const linkDayText = sel && selToday && linkKey !== closedLinkDay ? linkDayNotice(sel, selToday) : null
-  const backTo = sel ? chipReturnLabel(sel, selToday) : null
-  // A custom period is named by its dates: "Escolher datas" is the action.
-  const pendingName = sel ? `${sel.loja === ALL ? 'Todas' : nameOf(sel.loja)} · ${selectionPeriodLabel(sel, selToday)}` : ''
-  const shownName = data
-    ? `${data.request.store === 'all' ? 'Todas' : data.stores[0]?.name ?? ''} · ${data.period === 'custom' ? data.rangeLabel : periodLabel(data.period)}`
+  const scopeName = shownV ? nameOf(shownV.loja) : ''
+  // The shown selection resolved locally on the server-corrected clock, only
+  // to label it while its answer loads (R19 a/b); the server's resolution
+  // wins as soon as it answers this selection.
+  const factsNow = getFacts() ?? facts
+  const local = sel && now ? resolve(sel, factsNow, new Date(now)) : null
+  const shownRes = fresh && data?.resolution ? data.resolution : local
+  const selTz = shownRes?.clockTz ?? REFERENCE_TZ
+  const selToday = shownRes?.clockToday
+  const strip = phone ? stripFor(phone, factsNow, shownRes, selToday) : null
+  // Notes of the answer on screen (fits, archive, first sale, with a link's
+  // own normalising folded into the same "Período ajustado" sentence, R9) and
+  // the one-action strip, as one text each.
+  // The one-action strip is computed again at this instant (lib/period/phone
+  // liveTransient): it follows the day turning and a reload the next day.
+  const { answer: answerNotes, transient: transientText } = stripNotes(
+    transient, fresh && data?.resolution ? data.resolution : null,
+    phone && now ? { state: phone, viewer: factsNow, now: new Date(now) } : undefined,
+  )
+  const pendingName = shownV ? `${shownV.loja === ALL ? 'Todas' : nameOf(shownV.loja)} · ${local?.label.short ?? valueName(shownV.period, selToday, true)}` : ''
+  const shownName = data?.resolution
+    ? `${data.request.store === 'all' ? 'Todas' : data.stores[0]?.name ?? ''} · ${data.resolution.label.short}`
     : ''
   const singleTz = data && data.request.store !== 'all' && data.stores.length === 1 ? data.stores[0].timezone : null
   // One store on another clock: every time on screen is the store's (the
   // banner, "parcial · até", the curve, the feed), so "Números de" is too, and
   // names the clock — it read 00h01 under a Tokyo screen at 12h01.
-  const screenTz = singleTz && now && clockDiffers(singleTz, deviceTz, new Date(now)) ? singleTz : deviceTz
+  const screenTz = singleTz && now && offsetMinutes(singleTz, new Date(now)) !== offsetMinutes(deviceTz, new Date(now)) ? singleTz : deviceTz
   const fetchedClock = home.fetchedAt
     ? `${formatTimeInTz(new Date(home.fetchedAt), screenTz)}${screenTz !== deviceTz ? `, no horário de ${tzCity(screenTz)}` : ''}`
     : '—'
@@ -301,37 +315,30 @@ export default function MobileApp({ stores, archived, sharedAds }: {
         onSettings={() => setSheet('settings')}
         settingsAlert={pushAlert}
       />
-      <StoreChips stores={stores} archived={archived} sel={sel} pendingKey={loadingThis && !fresh ? sel?.loja ?? null : null} onPick={pickChip} />
+      <StoreChips stores={stores} archived={archived} shown={shownV?.loja ?? null} saved={phone?.saved.loja ?? null}
+        pendingKey={loadingThis && !fresh ? shownV?.loja ?? null : null} onPick={pickChip} />
       <PeriodBar
-        sel={sel}
-        today={data?.anchorToday ?? selToday}
-        // The dates the numbers on screen use, once they answer this selection.
-        shown={fresh && data && data.period === 'custom' ? data.range : null}
-        onPick={periodo => pick({ periodo, de: null, ate: null })}
+        period={shownV?.period ?? null}
+        label={shownRes?.label ?? null}
+        onPick={p => pick(preset(p))}
         onMore={() => setSheet('period')}
       />
 
       <RefreshStrip run={refresh.run} onClose={refresh.dismiss} onRetry={() => void refresh.start(onScreen())} />
-      {/* The server cut a custom range (more than 366 days, or before 2000):
-          the button already names the dates used; this says why. */}
-      {fresh && data?.rangeNote && <Strip tone="info" icon="info">{data.rangeNote}</Strip>}
-      {/* The phone cut a link's custom range before asking (the server then
-          has nothing to cut and sends no rangeNote): this says why. */}
-      {rangeNotice && <Strip tone="info" icon="info" onClose={() => setRangeNotice(null)}>{rangeNotice}</Strip>}
-      {/* A period a notification opened (the day it was about, or Hoje over
-          another stored period): which day, and what the next chip brings back. */}
-      {linkDayText && <Strip tone="info" icon="info" onClose={() => setClosedLinkDay(linkKey)}>{linkDayText}</Strip>}
-      {/* Dates a store row opened: say whose they are and how to get the
-          owner's preset back on this store's own clock. */}
-      {fresh && data && sel?.rowPreset && (
-        <Strip tone="info" icon="clock">
-          Mesmas datas de Todas · {periodShort(sel.rowPreset)} ({data.rangeLabel}). Ao trocar de loja, volta para “{backTo}”.{' '}
-          <button type="button" className={s.linkBtn} onClick={() => pick({ periodo: sel.rowPreset, de: null, ate: null })}>
-            Ver “{periodShort(sel.rowPreset)}” no relógio de {tzCity(selTz)}
-          </button>
+      {/* The visit an external link opened (R16): built from what the visit
+          still overrides, with the way back to the owner's own view. */}
+      {strip && (
+        <Strip tone="info" icon="info" onClose={() => dispatch({ type: 'close_strip' })}>
+          {strip.text}{' '}
+          <button type="button" className={s.linkBtn} onClick={() => dispatch({ type: 'back' })}>{strip.button}</button>
         </Strip>
       )}
-      {notice &&<Strip tone="warn" icon="alert" onClose={() => setNotice(null)}>{notice}</Strip>}
+      {/* The answer's own notes: a fitted window (R9), an archived store's
+          clamp (R10), a store that started inside the window (R11). */}
+      {answerNotes && <Strip tone="info" icon="info">{answerNotes}</Strip>}
+      {/* A scope change that opens other dates (R4), or a link that could
+          not be used as it was: until the next action. */}
+      {transientText && <Strip tone="warn" icon="alert" onClose={() => dispatch({ type: 'close_transient' })}>{transientText}</Strip>}
 
       {sel && !fresh && !error && (
         <Strip tone="info" spin>
@@ -366,18 +373,19 @@ export default function MobileApp({ stores, archived, sharedAds }: {
         // inert: the dimmed answer is another selection's, so its rows must not
         // be focusable or tappable as if they were this one's.
         <div className={`${s.content}${fresh ? '' : ` ${s.dim}`}`} aria-busy={!fresh || undefined} aria-hidden={!fresh || undefined} inert={!fresh || undefined}>
-          {archivedSel && fresh && <Strip tone="info" icon="info">Loja arquivada: fora de “Todas” e sem sincronização. Só o histórico.</Strip>}
+          {/* One archived-store line: the visit strip already says it while shown. */}
+          {archivedSel && fresh && !strip && <Strip tone="info" icon="info">Loja arquivada: fora de “Todas” e sem sincronização. Só o histórico.</Strip>}
           {singleTz && <ClockBanner tz={singleTz} deviceTz={deviceTz} now={now} />}
           {data.stores.length === 0 ? (
             <EmptyState title="Nenhuma loja ativa" />
           ) : (
             <>
               <VerdictBlock data={data} v={verdict} />
-              <SharedAdsNotes data={data} shared={shared} onAll={() => pickStore(ALL)} />
+              <SharedAdsNotes data={data} shared={shared} onAll={() => pickRow(ALL)} />
               <DayBlock data={data} />
               <DailyBlock data={data} />
               <Attention data={data} />
-              <StoreList data={data} shared={shared} onPick={pickRow} />
+              <StoreList data={data} shared={shared} onPick={pickRow} opensOther={rowLine} help={phone ? rowHelp(phone) : undefined} />
               <LiveFeed data={data} now={now} deviceTz={deviceTz} />
             </>
           )}
@@ -386,8 +394,8 @@ export default function MobileApp({ stores, archived, sharedAds }: {
 
       {sel && (
         <div className={s.content}>
-          <DetailTabs sel={sel} aba={view?.aba ?? null} onTab={pickTab} forceSignal={force} pollSignal={home.fetchedAt ?? 0} homeRange={fresh && data ? `${data.range.from}|${data.range.to}` : null} now={now} scopeName={scopeName}
-            shared={shared} onStore={pickStore} frozen={archivedSel}
+          <DetailTabs sel={sel} aba={shownV?.aba ?? null} onTab={pickTab} forceSignal={force} pollSignal={home.fetchedAt ?? 0} homeRange={fresh && data ? `${data.range.from}|${data.range.to}` : null} now={now} scopeName={scopeName}
+            shared={shared} onStore={pickRow} frozen={archivedSel}
             // An empty list of a window with nothing to read (archived after it,
             // or before the first sale) says why, as the home blocks do.
             frozenTitle={fresh && data ? notYetTitle(data) ?? frozenTitle(data) : null} />
@@ -407,9 +415,9 @@ export default function MobileApp({ stores, archived, sharedAds }: {
         <button type="button" className={s.linkBtn} onClick={() => setSheet('settings')}>Ajustes deste aparelho</button>
       </footer>
 
-      {sheet === 'period' && sel && (
+      {sheet === 'period' && shownV && (
         <PeriodSheet
-          sel={sel}
+          period={shownV.period}
           tz={selTz}
           now={now}
           onPick={p => pick(p)}
@@ -422,7 +430,7 @@ export default function MobileApp({ stores, archived, sharedAds }: {
           soundOn={soundOn}
           onSound={setSoundPref}
           archived={archived}
-          onOpenStore={pickStore}
+          onOpenStore={openArchived}
           onAlerts={() => setSheet('alerts')}
           onClose={() => setSheet(null)}
         />

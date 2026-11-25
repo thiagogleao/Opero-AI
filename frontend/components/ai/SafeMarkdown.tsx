@@ -33,14 +33,14 @@ const ALLOWED = [
 const heading: Components['h1'] = ({ children }) => <p className={s.h}>{children}</p>
 
 /** The link renderer for one conversation's store. */
-const linkFor = (storeId: string | null): Components['a'] => function AnswerLink({ href, children }) {
+const linkFor = (storeId: string | null, archivedIds: readonly string[]): Components['a'] => function AnswerLink({ href, children }) {
   const to = internalHref(href)
   if (!to) return <span>{children}</span>
   // The conversation's store and the period on screen (the answers render in
   // the drawer, on the client only, so reading the address here never differs
   // from a server render).
   const search = typeof window === 'undefined' ? '' : window.location.search
-  return <Link href={withPageState(to, search, storeId)} className={s.link}>{children}</Link>
+  return <Link href={withPageState(to, search, storeId, archivedIds)} className={s.link}>{children}</Link>
 }
 
 const COMPONENTS: Omit<Components, 'a'> = {
@@ -55,8 +55,14 @@ const COMPONENTS: Omit<Components, 'a'> = {
 /** The URL kept on a link: only app pages (everything else becomes text). */
 const urlTransform = (url: string) => internalHref(url) ?? ''
 
-export function SafeMarkdown({ children, storeId, className }: { children: string; storeId: string | null; className?: string }) {
-  const components = useMemo<Components>(() => ({ ...COMPONENTS, a: linkFor(storeId) }), [storeId])
+const NO_IDS: readonly string[] = []
+
+export function SafeMarkdown({ children, storeId, className, archivedIds = NO_IDS }: {
+  children: string; storeId: string | null; className?: string
+  /** The viewer's archived stores: a link leaving one does not carry its period (R4). */
+  archivedIds?: readonly string[]
+}) {
+  const components = useMemo<Components>(() => ({ ...COMPONENTS, a: linkFor(storeId, archivedIds) }), [storeId, archivedIds])
   return (
     <div className={className ? `${s.md} ${className}` : s.md}>
       <Markdown

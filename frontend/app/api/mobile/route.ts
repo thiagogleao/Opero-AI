@@ -1,27 +1,29 @@
 import { mobileAuthOk, unauthorized } from '@/lib/mobileAuth'
 import { listStores } from '@/lib/access'
-import { isIsoDate, isPeriod } from '@/lib/engine/dates'
-import { buildPortfolio, COMPARE_AS, PortfolioInputError } from '@/lib/views/portfolio'
-import { tooEarlyRangeError } from '@/lib/views/portfolioLimits'
+import { landingNotes, resolve, viewerStores as buildViewerStores, type Selection } from '@/lib/period'
+import { viewerStoresOf } from '@/lib/views/periodFacts'
+import { PortfolioInputError } from '@/lib/views/portfolio'
 import {
-  portfolioOnce, selectStores, StoreSelectionError, toOption, type MobileResponse,
+  echoOf, parseMobilePeriod, portfolioOnce, selectStores, StoreSelectionError, toOption, type MobileResponse,
 } from '@/lib/views/mobile'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 /**
- * The phone's home screen: GET /api/mobile?period=&store=&from=&to=
+ * The phone's home screen: GET /api/mobile?store=&period=&from=&to=
  *
- *  period  a preset from lib/engine/dates PERIODS (default 'today'); 'custom'
- *          requires from and to (YYYY-MM-DD).
- *  store   'all' (default: every active store) or one or more store ids,
- *          comma-separated.
- *  compare optional, with 'custom' only: 'mtd' or 'lastmonth' compares the
- *          dates by that preset's rule (lib/views/portfolio compareAs).
- *
- * Answers with lib/views/mobile.ts MobileResponse: the portfolio view built on
- * the profit engine, the request echoed back, and the store picker.
+ * The request carries the SELECTION, not resolved dates (lib/period R19):
+ *  store   'all' (default: every active store) or a store id (an archived one
+ *          only by id: consultation). Several ids, comma-separated, are summed
+ *          as a Todas of those stores.
+ *  period  a preset (default 'today'), or 'custom' with from and to
+ *          (YYYY-MM-DD), normalised (ordered, at most 366 days ending at `to`).
+ * The server resolves with its own clock and answers with lib/views/mobile.ts
+ * MobileResponse: the portfolio view (with its `resolution`), `serverNow`,
+ * `facts` (the store facts it resolved with), the request echoed back, and the
+ * store picker. 400 only for a malformed request; a long or future range is
+ * fitted and announced in the resolution's notes (R9).
  *
  * Owner only (the magic-link cookie or the x-mobile-token header): this surface
  * spans every store, so a partner's Clerk session gets nothing here.
@@ -30,40 +32,39 @@ export async function GET(req: Request) {
   if (!(await mobileAuthOk(req))) return unauthorized()
 
   const sp = new URL(req.url).searchParams
-  const period = sp.get('period') ?? 'today'
-  if (!isPeriod(period)) return Response.json({ error: 'Período inválido' }, { status: 400 })
-  const from = sp.get('from') || null
-  const to = sp.get('to') || null
-  if ((from && !isIsoDate(from)) || (to && !isIsoDate(to))) {
-    return Response.json({ error: 'Data inválida' }, { status: 400 })
-  }
-  // "Escolher datas" before both dates are picked: an answer for today would
-  // silently replace whatever is on screen, so say what is missing instead.
-  if (period === 'custom' && !(from && to)) {
-    return Response.json({ error: 'Escolha a data inicial e a final' }, { status: 400 })
-  }
-  // Longer or older ranges are cut by buildPortfolio (rangeNote); one that
-  // ends before anything is priced has nothing to cut down to.
-  const early = period === 'custom' ? tooEarlyRangeError(from, to) : null
-  if (early) return Response.json({ error: early }, { status: 400 })
-
-  // Custom dates a store row opened from "Este mês" / "Mês passado" are
-  // compared by that preset's rule (app/m/_lib/selection compareAsOf).
-  const compare = sp.get('compare')
-  const compareAs = period === 'custom' && isPeriod(compare) && COMPARE_AS.includes(compare) ? compare : null
+  const parsed = parseMobilePeriod(sp)
+  if ('error' in parsed) return Response.json({ error: parsed.error }, { status: 400 })
 
   try {
+    const now = new Date() // clock-ok: the request instant every resolution of this answer uses
     const visible = await listStores({ kind: 'owner' }, { includeArchived: true })
     const { key, stores } = selectStores(sp.get('store'), visible)
-    const custom = period === 'custom'
-    // portfolioOnce shares in-flight answers by store and dates only: an
-    // answer compared as a preset is built on its own (rare: row dates only).
-    const view = compareAs
-      ? await buildPortfolio(stores, period, from, to, new Date(), { compareAs })
-      : await portfolioOnce(key, stores, period, custom ? from : null, custom ? to : null)
+    const facts = await viewerStoresOf(visible)
+    // Several ids: a Todas of exactly those stores, on Todas' rule.
+    const several = key !== 'all' && stores.length > 1
+    const vs = several
+      ? buildViewerStores(stores.map(s => {
+          const f = [...facts.active, ...facts.archived].find(x => x.id === s.id)
+          // selectStores refused any archived id in a list (R2, R10).
+          return { id: s.id, name: s.name, timezone: s.timezone, archived: false, firstOrderDate: f?.firstOrderDate, firstActivityDate: f?.firstActivityDate }
+        }))
+      : facts
+    const selection: Selection = {
+      scope: key === 'all' || several ? { kind: 'all' } : { kind: 'store', id: stores[0].id },
+      period: parsed.value,
+      split: false,
+    }
+    // How the asked dates were normalised (too_long, floor) is said in the
+    // answer's notes, with the same words as the desktop (R9).
+    const base = resolve(selection, vs, now)
+    const extra = landingNotes(parsed.notes.map(code => ({ code })), null, base, vs, now)
+    const resolution = extra.length ? resolve(selection, vs, now, { notes: extra }) : base
+    const view = await portfolioOnce(stores, resolution, vs)
     const body: MobileResponse = {
       ...view,
-      request: { store: key, period, from: custom ? from : null, to: custom ? to : null },
+      serverNow: new Date().toISOString(), // clock-ok: the answer's send instant, for the client's offset (R19)
+      facts,
+      request: echoOf(key, parsed.value),
       storeOptions: visible.filter(s => !s.archived).map(toOption),
       archivedStores: visible.filter(s => s.archived).map(toOption),
     }

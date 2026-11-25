@@ -20,7 +20,7 @@
 
 import type { StoreRef } from '../access'
 import {
-  anchorTz, formatRange, isIsoDate, isPeriod, safeTz, todayInTz,
+  formatRange, isIsoDate, isPeriod,
   type DateRange, type Period,
 } from '../engine/dates'
 import { getCampaignReport, spentAds, type CampaignReport } from '../data/campaigns'
@@ -37,7 +37,8 @@ import {
 } from '../campaignSignal'
 import { SIGNAL_LABEL, signalRank, type Signal } from '../creativeSignal'
 import { computePnL } from '../engine/pnl'
-import { resolvePortfolioWindow, tooEarlyRangeError } from './portfolioLimits'
+import { parsePeriod, pricedWindow, rangeBeside, resolve, type ViewerStores } from '../period'
+import { viewerStoresOf } from './periodFacts'
 import { adChannelOf, type AdChannel } from './adChannel'
 
 // ─── Request ──────────────────────────────────────────────────────────────────
@@ -78,9 +79,12 @@ export function parseDetailQuery(sp: URLSearchParams): DetailQuery {
   if ((from && !isIsoDate(from)) || (to && !isIsoDate(to))) throw new DetailQueryError('Data inválida')
   const custom = period === 'custom'
   if (custom && !(from && to)) throw new DetailQueryError('Escolha a data inicial e a final')
-  const early = custom ? tooEarlyRangeError(from, to) : null
-  if (early) throw new DetailQueryError(early)
-  return { section, period, from: custom ? from : null, to: custom ? to : null, store: sp.get('store') }
+  // lib/period parsePeriod (R9, R15): dates are normalised (ordered, at most
+  // 366 days ending at the asked end); only dates wholly before 2000 are refused.
+  const parsed = custom ? parsePeriod({ periodo: 'custom', de: from, ate: to }) : null
+  if (parsed && !parsed.value) throw new DetailQueryError('Escolha datas a partir de 1 jan 2000')
+  const v = parsed?.value?.kind === 'dates' ? parsed.value : null
+  return { section, period, from: v ? v.from : null, to: v ? v.to : null, store: sp.get('store') }
 }
 
 // ─── Response types ───────────────────────────────────────────────────────────
@@ -112,6 +116,9 @@ interface DetailBase {
   anchorTimezone: string
   /** The window includes the current day of at least one store. */
   partial: boolean
+  /** One archived store (consultation only, R10): the window is the days it
+   *  was read (up to its archive day) and no section judges an action. */
+  archived?: boolean
   /** Stores whose section loaded. */
   stores: DetailStore[]
   /** Stores whose section could not be loaded: named, never counted as zero. */
@@ -926,6 +933,33 @@ export interface DetailContext {
   /** Every store the viewer may see (id → name), to say where shared sales went. */
   storeNames?: ReadonlyMap<string, string>
   now?: Date
+  /** The stores' facts (archive instants, first dates); read when absent. */
+  viewerStores?: ViewerStores
+}
+
+/**
+ * The days a tab prices and names (R10, R19): the headline's resolution with
+ * the stores' facts; one store is priced on its member's read days
+ * (pricedWindow: an archived store up to its archive day), and an archived
+ * store is consultation only (no decision window, no action).
+ */
+export function detailWindow(
+  q: Pick<DetailQuery, 'period' | 'from' | 'to'>, stores: readonly Pick<StoreRef, 'id' | 'archived'>[], vs: ViewerStores, now: Date,
+): { range: DateRange; rangeLabel: string; anchorTimezone: string; partial: boolean; consultOnly: boolean } {
+  const scope = stores.length === 1 ? { kind: 'store' as const, id: stores[0].id } : { kind: 'all' as const }
+  const value = q.period === 'custom' && q.from && q.to
+    ? { kind: 'dates' as const, from: q.from, to: q.to }
+    : { kind: 'preset' as const, preset: (q.period === 'custom' ? 'today' : q.period) }
+  const resolution = resolve({ scope, period: value, split: false }, vs, now)
+  const one = scope.kind === 'store' ? stores[0] : null
+  const range = one ? pricedWindow(resolution, one.id) : resolution.window
+  return {
+    range,
+    rangeLabel: rangeBeside(range, { window: resolution.window, comparison: resolution.comparison?.range ?? null, clockToday: resolution.clockToday }),
+    anchorTimezone: resolution.clockTz,
+    partial: resolution.partial,
+    consultOnly: !!one?.archived,
+  }
 }
 
 /**
@@ -935,18 +969,22 @@ export interface DetailContext {
 export async function buildMobileDetail(
   q: DetailQuery & { storeKey: string }, stores: readonly StoreRef[], ctx: DetailContext = {},
 ): Promise<MobileDetailResponse> {
-  const now = ctx.now ?? new Date()
-  const anchor = anchorTz(stores.map(s => s.timezone))
-  // The headline's window, cut the same way (at most 366 days, nothing before
-  // 2000): a tab never prices other dates than the numbers above it.
-  const { range } = resolvePortfolioWindow(q.period, anchor, q.from, q.to, now)
+  const now = ctx.now ?? new Date() // clock-ok: request instant (injectable through ctx.now)
+  // The headline's window through the same resolve (lib/period), with the
+  // stores' real facts: a tab never prices other dates than the numbers above
+  // it, and an archived store is read up to its archive instant (R10: the
+  // member's read days, pricedWindow), never the whole window after it.
+  const vs = ctx.viewerStores ?? await viewerStoresOf(stores)
+  const w = detailWindow(q, stores, vs, now)
+  const { range, consultOnly } = w
   const base = (configured: (s: StoreRef) => boolean | null, ok: StoreRef[], failed: StoreRef[]): DetailBase => ({
     request: { section: q.section, store: q.storeKey, period: q.period, from: q.from, to: q.to },
     generatedAt: now.toISOString(),
     range,
-    rangeLabel: formatRange(range, todayInTz(anchor, now)),
-    anchorTimezone: anchor,
-    partial: stores.some(s => range.to >= todayInTz(safeTz(s.timezone), now)),
+    rangeLabel: w.rangeLabel,
+    anchorTimezone: w.anchorTimezone,
+    partial: w.partial,
+    archived: consultOnly,
     stores: ok.map(s => ({ id: s.id, name: s.name, timezone: s.timezone, configured: configured(s) })),
     failedStores: failed.map(s => ({ id: s.id, name: s.name })),
   })
@@ -972,7 +1010,8 @@ export async function buildMobileDetail(
         const t = pnl?.get(id)?.totals
         return t ? { metaSpend: t.metaSpend, shopSpend: t.shopSpend } : null
       }
-      return { section: 'campanhas', ...base(s => cfg.get(s.id) ?? null, r.ok.map(l => l.store), r.failed), ...mergeCampaigns(r.ok, DETAIL_LIMIT.campanhas, spendsOf) }
+      const merged = mergeCampaigns(r.ok, DETAIL_LIMIT.campanhas, spendsOf)
+      return { section: 'campanhas', ...base(s => cfg.get(s.id) ?? null, r.ok.map(l => l.store), r.failed), ...(consultOnly ? withoutDecisions(merged) : merged) }
     }
     case 'criativos': {
       const r = await perStore(stores, s => getCreativesReport(s, range, { storeNames: ctx.storeNames, now }))
@@ -1003,6 +1042,19 @@ export async function buildMobileDetail(
       const ltvComplete = ltvs.failed.length === 0 ? ltvs.ok : null
       return { section: 'clientes', ...base(() => null, splits.ok.map(l => l.store), splits.failed), ...mergeCustomers(splits.ok, ltvComplete) }
     }
+  }
+}
+
+/** An archived store's campaigns: what it spent and sold, no action judged
+ *  (R10: never given a decision block; the 7 closed days are after its
+ *  archive). */
+function withoutDecisions<T extends { campaigns: MobileCampaign[]; decisionWindows: unknown[]; totals: { actions: Record<CampaignAction, number> } }>(m: T): T {
+  const actions = Object.fromEntries(Object.keys(m.totals.actions).map(k => [k, 0])) as Record<CampaignAction, number>
+  return {
+    ...m,
+    decisionWindows: [],
+    totals: { ...m.totals, actions },
+    campaigns: m.campaigns.map(c => ({ ...c, action: null, actionLabel: null, reason: '', notes: [], trend: null, trendLabel: null, trendChange: null })),
   }
 }
 

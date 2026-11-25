@@ -20,8 +20,10 @@
  * with 2+ stores) · Resumo / · Todas as lojas /overview · Campanhas /campaigns ·
  * Produtos /products · Países e clientes /countries · Atribuição /attribution ·
  * Custos /profit · Ajustes /settings — active item from the pathname, every
- * link keeping loja/periodo/de/ate/parte (ctx.navHref: Todas stays Todas
- * across a one-store page until a store is picked) · footer with the clock used.
+ * link built by lib/period desktopHref: the same scope keeps the selection
+ * (R3); a one-store page from Todas is an R4 link to the remembered store
+ * with `vem=todas`, so it says which store and which days it shows · footer
+ * with the clock used.
  * Top bar: PeriodPicker · SplitToggle · Freshness (streams in) · Copilot ·
  * viewer ("Modo dono · sair" / "Sócio · sair").
  * Responsive: full sidebar ≥1200px, icon rail 768–1199px, drawer below 768px
@@ -30,31 +32,19 @@
 
 import { Suspense, type ReactNode } from 'react'
 import Link from 'next/link'
-import type { Period } from '@/lib/engine/dates'
-import { ALL_STORES, clockLabel, MAX_WINDOW_DAYS, MIN_PAGE_DATE, type PageContext } from '@/lib/views/page'
+import { desktopHref, pageScope, resolutionKey, type ScopeRef } from '@/lib/period'
+import { clockLabel, type PageContext } from '@/lib/views/page'
 import { CopilotLauncher } from '@/components/ai/CopilotLauncher'
 import { Freshness, FreshnessFallback } from './Freshness'
 import { NavLinks, type NavItem } from './NavLinks'
-import { PeriodPicker, type PeriodOption } from './PeriodPicker'
+import { PeriodPicker } from './PeriodPicker'
 import { MenuButton, ShellFrame } from './ShellFrame'
 import { SplitToggle } from './SplitToggle'
 import { StorePicker } from './StorePicker'
+import { LinkRelay } from './LinkRelay'
+import { TurnWatcher } from './TurnWatcher'
 import { ViewerIndicator } from './ViewerIndicator'
 import s from './shell.module.css'
-
-const MAIN: { key: Period; label: string }[] = [
-  { key: 'today', label: 'Hoje' },
-  { key: 'yesterday', label: 'Ontem' },
-  { key: '7d', label: '7 dias' },
-  { key: '30d', label: '30 dias' },
-]
-// 90 days is left out on purpose: it is clutter on the desktop picker (it
-// still resolves when a link carries ?periodo=90d).
-const MORE: { key: Period; label: string }[] = [
-  { key: '14d', label: '14 dias' },
-  { key: 'mtd', label: 'Este mês' },
-  { key: 'lastmonth', label: 'Mês passado' },
-]
 
 export function Logo() {
   return (
@@ -66,60 +56,57 @@ export function Logo() {
 }
 
 export function AppShell({ ctx, children, copilot = true }: { ctx: PageContext; children: ReactNode; copilot?: boolean }) {
-  // The shell's navigation is built from ctx.navHref, not hrefWith: after the
-  // viewer chose Todas, a one-store page shows the remembered store but its
-  // sidebar, period picker and split toggle keep loja=todas, so Todas →
-  // Resumo → Campanhas still opens Todas (lib/views/page carriedLoja).
-  const go = ctx.navHref
+  // One link per page (lib/period desktopHref). A page of the same scope keeps
+  // the selection (R3); a store-only page from Todas opens the remembered
+  // store, and "Todas as lojas" from a store, as R4 links with `vem` (R4).
+  const here = ctx.selection.scope
+  const store: ScopeRef | null = ctx.rememberedStoreId ? { kind: 'store', id: ctx.rememberedStoreId } : null
+  const navItem = (match: string, path: string) => {
+    const kind = pageScope(path)
+    const target: ScopeRef | null = kind === 'all' ? { kind: 'all' } : kind === 'store' && here.kind === 'all' ? store : null
+    const href = target ? ctx.scopeHref(path, target) ?? desktopHref(path, ctx.selection) : desktopHref(path, ctx.selection)
+    // At click time (R13): /overview names Todas; a one-store page opens the
+    // remembered store only if the latest REQUESTED scope is still Todas — a
+    // store picked a moment before is kept (the item does not name a store).
+    const link = {
+      kind: 'page' as const, path, keys: 'inherit' as const,
+      ...(kind === 'all' ? { scope: { kind: 'all' } as ScopeRef } : {}),
+      ...(kind === 'store' && store ? { storeFallback: store } : {}),
+    }
+    return { match, href, link }
+  }
   const nav: NavItem[] = [
-    { match: '/', label: 'Resumo', icon: 'sum', href: go('/') },
-    ...(ctx.allowAll ? [{ match: '/overview', label: 'Todas as lojas', icon: 'all' as const, href: go('/overview') }] : []),
-    { match: '/campaigns', label: 'Campanhas', icon: 'camp', href: go('/campaigns') },
-    { match: '/products', label: 'Produtos', icon: 'box', href: go('/products') },
-    { match: '/countries', label: 'Países e clientes', icon: 'globe', href: go('/countries') },
-    { match: '/attribution', label: 'Atribuição', icon: 'attr', href: go('/attribution') },
-    { match: '/profit', label: 'Custos', icon: 'coin', href: go('/profit') },
-    { match: '/settings', label: 'Ajustes', icon: 'set', href: go('/settings') },
+    { ...navItem('/', '/'), label: 'Resumo', icon: 'sum' },
+    ...(ctx.allowAll ? [{ ...navItem('/overview', '/overview'), label: 'Todas as lojas', icon: 'all' as const }] : []),
+    { ...navItem('/campaigns', '/campaigns'), label: 'Campanhas', icon: 'camp' },
+    { ...navItem('/products', '/products'), label: 'Produtos', icon: 'box' },
+    { ...navItem('/countries', '/countries'), label: 'Países e clientes', icon: 'globe' },
+    { ...navItem('/attribution', '/attribution'), label: 'Atribuição', icon: 'attr' },
+    { ...navItem('/profit', '/profit'), label: 'Custos', icon: 'coin' },
+    { ...navItem('/settings', '/settings'), label: 'Ajustes', icon: 'set' },
   ]
   // An archived store opened by id (its history) is listed too, so the picker
   // names what is on screen instead of silently showing another store.
-  const listed = ctx.store?.archived && ctx.storeOption ? [...ctx.storeOptions, ctx.storeOption] : ctx.storeOptions
-  // On a page that shows only one kind of scope, the other kind opens the page
-  // that has it (a one-store page cannot show Todas, the overview cannot show
-  // one store); everywhere else the choice reloads the same page — except a
-  // page of one store's object (/creatives/<ad>), where the picker opens the
-  // chosen store's list (./url DETAIL_ROUTES, resolved on the client).
-  const options = listed.map(o => ({
-    ...o,
-    query: ctx.hrefWith('', { loja: o.id }),
-    href: ctx.mode === 'all' ? ctx.hrefWith('/', { loja: o.id }) : undefined,
-  }))
-  const all = ctx.allowAll
-    ? {
-        query: ctx.hrefWith('', { loja: ALL_STORES }),
-        count: ctx.stores.length,
-        href: ctx.mode === 'store' ? ctx.hrefWith('/overview', { loja: ALL_STORES }) : undefined,
-      }
-    : null
-  const toOption = (p: { key: Period; label: string }): PeriodOption => ({ ...p, query: go('', { periodo: p.key }) })
-  // From the store on screen itself (ctx.storeOption), not a lookup in
-  // storeOptions, which leaves out an archived store opened for its history.
-  const tzNote = ctx.storeOption?.dayLabel ?? null
+  const options = ctx.store?.archived && ctx.storeOption ? [...ctx.storeOptions, ctx.storeOption] : ctx.storeOptions
+  const all = ctx.allowAll ? { count: ctx.stores.length } : null
+  const archivedIds = ctx.viewerStores.archived.map(x => x.id)
+  const r = ctx.resolution
+  const tzNote = r.clockDiffers && ctx.scope === 'store' ? `dia de ${r.clockNote}` : null
   const clock = clockLabel(ctx)
+  const home = nav[0].href
 
   const sidebar = (
     <>
-      <Link href={go('/')} className={s.brand} aria-label="Opero, início">
+      <Link href={home} className={s.brand} aria-label="Opero, início">
         <span className={s.brandMark}><Logo /></span>
         <span className={s.brandName}>opero</span>
         <span className={s.brandTag}>AI</span>
       </Link>
       <div style={{ width: '100%' }}>
         <div className={s.sideLabel}>Loja</div>
-        <StorePicker options={options} all={all} currentId={ctx.params.loja ?? ''}
-          carriedId={ctx.navParams.loja !== ctx.params.loja ? ctx.navParams.loja ?? undefined : undefined} />
+        <StorePicker options={options} all={all} currentId={ctx.params.loja ?? ''} archivedIds={archivedIds} />
       </div>
-      <NavLinks items={nav} />
+      <NavLinks items={nav} archivedIds={archivedIds} />
       <div className={s.sideFoot}>
         <div className={s.row}><span>Fuso</span><span>{clock}</span></div>
         <div className={s.row}><span>Valores</span><span>US$</span></div>
@@ -133,29 +120,28 @@ export function AppShell({ ctx, children, copilot = true }: { ctx: PageContext; 
         <div className={s.topLeft}>
           <MenuButton />
           <PeriodPicker
-            main={MAIN.map(toOption)}
-            more={MORE.map(toOption)}
-            current={ctx.period}
-            customBase={go('', { periodo: null })}
+            current={ctx.selection.period}
             today={ctx.today}
-            minDate={MIN_PAGE_DATE}
-            maxDays={MAX_WINDOW_DAYS}
             range={ctx.range}
             rangeLabel={ctx.rangeLabel}
             partialLabel={ctx.partialLabel}
             tzNote={tzNote}
+            archivedIds={archivedIds}
           />
         </div>
         <div className={s.topRight}>
-          <SplitToggle on={ctx.split} onQuery={go('', { parte: true })} offQuery={go('', { parte: false })} />
+          <SplitToggle on={ctx.split} />
           <Suspense fallback={<FreshnessFallback />}>
             <Freshness stores={ctx.selected} now={ctx.now} />
           </Suspense>
-          {copilot && <CopilotLauncher storeId={ctx.scope === 'all' ? null : ctx.store?.id ?? null} from={ctx.range.from} to={ctx.range.to} split={ctx.split} />}
+          {copilot && <CopilotLauncher storeId={ctx.scope === 'all' ? null : ctx.store?.id ?? null} from={ctx.range.from} to={ctx.range.to} split={ctx.split} archivedIds={archivedIds} />}
           <ViewerIndicator kind={ctx.viewer.kind} />
         </div>
       </header>
       <main id="conteudo" className={s.content} tabIndex={-1}>
+        <LinkRelay rootId="conteudo" archivedIds={archivedIds} />
+        <TurnWatcher nextTurnAt={r.nextTurnAt} serverNow={r.asOf} selection={ctx.selection} viewer={ctx.viewerStores}
+          shownKey={resolutionKey(r)} label={r.label.full} />
         {children}
       </main>
     </ShellFrame>

@@ -23,6 +23,7 @@ import { getSharedAdAccounts } from '@/lib/attribution'
 import type { SharedAdAccount } from '@/lib/attributionModels'
 import { getFreshness, type StoreFreshness } from '@/lib/sync/status'
 import { listStores, type StoreRef, type Viewer } from '@/lib/access'
+import type { ViewerStores } from '@/lib/period'
 import { trailRange } from './model'
 
 /** How far back a shared ad-account pair is looked for. The pairing is a
@@ -176,7 +177,7 @@ export interface ArchivedStore {
  * The viewer's archived stores with their whole selling history, priced by the
  * engine over the span of their orders. Only called when the section is open.
  */
-export async function loadArchived(viewer: Viewer, now: Date): Promise<ArchivedStore[]> {
+export async function loadArchived(viewer: Viewer, now: Date, viewerFacts?: ViewerStores): Promise<ArchivedStore[]> {
   const archived = (await listStores(viewer, { includeArchived: true })).filter(s => s.archived)
   if (!archived.length) return []
   // The span covers orders AND ad spend: spend on days without a sale is part
@@ -197,7 +198,12 @@ export async function loadArchived(viewer: Viewer, now: Date): Promise<ArchivedS
   const byId = new Map(facts.map(f => [f.id, f]))
   return Promise.all(archived.map(async store => {
     const f = byId.get(store.id)
-    const span = f?.first_d && f.last_d ? { from: f.first_d, to: f.last_d } : null
+    // The history starts at the store's first activity as lib/period knows it
+    // (orders, Meta and Shopify ads, refunds): the list said "histórico de
+    // 2 jun" beside a page saying "a loja começou em 24 fev".
+    const first = viewerFacts?.archived.find(x => x.id === store.id)?.firstActivityDate ?? null
+    const from = f?.first_d && first ? (first < f.first_d ? first : f.first_d) : f?.first_d ?? null
+    const span = from && f?.last_d ? { from, to: f.last_d } : null
     const p = span ? (await computePnL([store.id], span, {}, now)).get(store.id) ?? null : null
     return {
       store,

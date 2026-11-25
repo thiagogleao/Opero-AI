@@ -2,9 +2,10 @@ import { query } from './db'
 import { pushDeviceCount, pushKeysConfigured, sendPushToAll, type PushKind, type PushResult } from './push'
 import { listStores, type StoreRef } from './access'
 import { computePnL, type PnL } from './engine/pnl'
-import { REFERENCE_TZ, minutesIntoDay, safeTz, shiftDate, todayInTz, type Period } from './engine/dates'
+import { REFERENCE_TZ, minutesIntoDay, safeTz, shiftDate, todayInTz } from './engine/dates'
 import { getCampaignSignals, DEFAULT_SCALE_CONFIG, type CampaignSignal } from './scaleSignals'
-import { buildPortfolio, type PortfolioStoreRow, type PortfolioView } from './views/portfolio'
+import { buildPortfolioFor, type PortfolioStoreRow, type PortfolioView } from './views/portfolio'
+import { decisionWindow, newNonce, notificationHref, preset } from './period'
 import { buildVerdict, judgedStores, verdictInputFromPortfolio } from './views/verdict'
 import { formatMoney, formatPct, formatRoas, plural, readablePctChange } from './format'
 import { adChannelOf, channelRoas, type AdChannel } from './views/adChannel'
@@ -174,7 +175,7 @@ export async function saveAlertConfig(patch: unknown): Promise<AlertConfig> {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /** Hour of day (0-23) in `tz`, the reference timezone by default. */
-export function hourInTz(tz: string = REFERENCE_TZ, now: Date = new Date()): number {
+export function hourInTz(tz: string = REFERENCE_TZ, now: Date = new Date()): number { // clock-ok: default for the cron caller
   return Math.floor(minutesIntoDay(tz, now) / 60)
 }
 
@@ -248,33 +249,19 @@ function spendText(t: Pick<PnL, 'metaSpend' | 'shopSpend'>): string {
 }
 
 /**
- * The phone, opened on one store and on the period the push talks about.
- * The period is always explicit: without it the phone restores the last one
- * used (app/m/_lib/selection resolveView), so a tap on today's "ROAS 0,36×"
- * could open "30 dias · no lucro". "today" is the store's own day, as the
- * alerts are.
- *
- * `dia` is the date a "today" push is about, on the calendar the link opens
- * (the store's own; Todas' for the summary). "today" alone opened whatever day
- * it was at the tap: Hibikura's alert about Tokyo's 23 nov, sent at 11h in
- * Brasília and tapped at 12h05, landed on Tokyo's 24 nov at 00h05. The phone
- * opens "Hoje" while it is still that date, and that date otherwise
- * (selection resolveView, notificationDay).
- *
- * With another preset (the scale push's "7 dias") `dia` is the day it was
- * sent: it marks the period and the tab as the link's (selection linkDayOf),
- * so neither becomes the phone's saved choice. Without it the scale push's
- * "7 dias" and Campanhas were stored as the owner's and reopened on every
- * launch.
+ * The phone, opened on one store and on the days the push talks about: every
+ * push carries its dates (never a preset) through the one producer, lib/period
+ * notificationHref (R17). The phone opens a one-visit view on exactly those
+ * dates, never saved and never rolling, so a ROAS alert about Tokyo's 24 nov
+ * tapped after Tokyo midnight opens 24 nov, not the empty new day (L226).
  */
-export const storeUrl = (storeId: string, opts: { tab?: string; periodo?: Period; dia?: string } = {}) => {
-  const periodo = opts.periodo ?? 'today'
-  return `/m?loja=${encodeURIComponent(storeId)}&periodo=${periodo}${periodo !== 'custom' && opts.dia ? `&dia=${opts.dia}` : ''}${opts.tab ? `&aba=${encodeURIComponent(opts.tab)}` : ''}`
-}
+export const storeUrl = (storeId: string, opts: { from: string; to?: string; tab?: string; nonce?: string }) =>
+  notificationHref({ loja: storeId, from: opts.from, to: opts.to ?? opts.from, aba: opts.tab ?? null, nonce: opts.nonce ?? newNonce() })
 
-/** The daily summary is about every store's day: Todas · Hoje (of `day`, on
- *  Todas' calendar), never the store last pinned on the phone. */
-export const summaryUrl = (day: string) => `/m?loja=todas&periodo=today&dia=${day}`
+/** The daily summary is about Todas' day (`day`, on Todas' calendar), with a
+ *  hash of the stores it summed so the phone can say when the set changed. */
+export const summaryUrl = (day: string, members: readonly string[], nonce: string = newNonce()) =>
+  notificationHref({ loja: 'todas', from: day, to: day, members, nonce })
 
 // ─── Threshold alerts (pure evaluation) ───────────────────────────────────────
 
@@ -319,7 +306,7 @@ export function evaluateStoreAlerts(
   if (!opts.ignoreHour && s.minutesIntoDay < cfg.fromHour * 60) return []
   const t = s.today
   const out: AlertCandidate[] = []
-  const base = { storeId: s.storeId, store: s.name, day: s.day, url: storeUrl(s.storeId, { dia: s.day }) }
+  const base = { storeId: s.storeId, store: s.name, day: s.day, url: storeUrl(s.storeId, { from: s.day }) }
 
   // The worst day of all: money going out and nothing coming in. Its own rule,
   // because ROAS 0 and "no revenue, no margin" used to skip every other one.
@@ -405,7 +392,7 @@ export interface FiredAlert {
 
 /** Price every store on its own today, plus its last 7 complete days. Stores
  *  sharing a calendar date share one engine call. */
-export async function loadAlertInputs(stores: StoreRef[], now: Date = new Date()): Promise<StoreAlertInput[]> {
+export async function loadAlertInputs(stores: StoreRef[], now: Date = new Date()): Promise<StoreAlertInput[]> { // clock-ok: default for the cron caller
   const byDay = new Map<string, StoreRef[]>()
   for (const s of stores) {
     const day = todayInTz(safeTz(s.timezone), now)
@@ -468,7 +455,7 @@ async function deliver(
 export const QUIET_FROM_HOUR = 23
 export const QUIET_TO_HOUR = 8
 
-export function inQuietHours(now: Date = new Date()): boolean {
+export function inQuietHours(now: Date = new Date()): boolean { // clock-ok: default for the cron caller
   const h = Math.floor(minutesIntoDay(REFERENCE_TZ, now) / 60)
   return h >= QUIET_FROM_HOUR || h < QUIET_TO_HOUR
 }
@@ -544,13 +531,18 @@ export async function runScaleChecks(opts: RunOpts = {}): Promise<FiredAlert[]> 
 
   const stores = await activeStores()
   const fired: FiredAlert[] = []
+  // One instant for every store's claim day and decision window (P6).
+  const now = new Date() // clock-ok: the send instant of the cron run
 
   for (const store of stores) {
     const tz = safeTz(store.timezone)
-    const day = todayInTz(tz)
+    const day = todayInTz(tz, now)
+    const judged = decisionWindow(tz, now).window
     let signals
     try {
-      signals = await getCampaignSignals(store.id, { ...DEFAULT_SCALE_CONFIG, minMargin: cfg.scaleAlerts.threshold }, tz)
+      // The same instant as the link's dates below: a run that crosses a
+      // store's midnight still judges the days it links (R17, P6).
+      signals = await getCampaignSignals(store.id, { ...DEFAULT_SCALE_CONFIG, minMargin: cfg.scaleAlerts.threshold }, tz, now)
     } catch (err) {
       console.error('[alerts] scale check failed for', store.id, err)
       continue
@@ -565,11 +557,11 @@ export async function runScaleChecks(opts: RunOpts = {}): Promise<FiredAlert[]> 
       const { kind, title, body } = scalePushText(store.name, { ...c, verdict: c.verdict })
 
       // The phone, on this store's campaigns: /campaigns is a Clerk page the
-      // phone cannot open. On "7 dias": the push names the last 7 closed days,
-      // the window the action is judged on — the link's, never the phone's
-      // saved period (`dia`, storeUrl).
+      // phone cannot open. The dates are the decision window the action was
+      // judged on (the 7 closed days before the send day, store clock, R12),
+      // so a tap days later still opens the days the push judged (L537).
       const delivered = opts.dryRun ? 0 : await deliver(kind, `${store.id}:${c.campaignId}`, day, {
-        title, body, url: storeUrl(store.id, { tab: 'campanhas', periodo: '7d', dia: day }), kind: 'scale',
+        title, body, url: storeUrl(store.id, { tab: 'campanhas', from: judged.from, to: judged.to }), kind: 'scale',
         tag: `${kind}-${c.campaignId}-${day}`,
         data: { kind, tenantId: store.id, campaignId: c.campaignId },
       }, opts)
@@ -624,13 +616,15 @@ type SummaryStore = Pick<PortfolioStoreRow, 'name' | 'totals' | 'configured'>
  * ads, as the verdict names it. When no store has costs the amount is revenue
  * − ads and says so. Pure.
  */
-export function summaryText(t: PnL, before: PnL | null, stores: SummaryStore[], sameTimeOfDay: boolean): DailySummary {
+export function summaryText(t: PnL, before: PnL | null, stores: SummaryStore[], sameTimeOfDay: boolean, likeNow: PnL = t): DailySummary {
   const { judged, excluded } = judgedStores(stores)
   // No store at all (nothing to judge) still reads as profit.
   const withCosts = judged.every(s => s.configured)
   const result = (p: PnL) => (withCosts ? p.operatingProfit : p.revenue - p.adSpend)
   const moved = (s: SummaryStore) => s.totals.orders > 0 || s.totals.adSpend > 0
-  const delta = before ? vsYesterday(result(t), result(before), sameTimeOfDay) : ''
+  // The same stores on both sides of the delta (R6, buildVerdict likeTotals):
+  // a store with no base yesterday is out of today's side too.
+  const delta = before ? vsYesterday(result(likeNow), result(before), sameTimeOfDay) : ''
   const ranked = judged.filter(moved).sort((a, b) => result(b.totals) - result(a.totals))
   const best = ranked[0]
   const worst = ranked[ranked.length - 1]
@@ -661,7 +655,7 @@ export function summaryText(t: PnL, before: PnL | null, stores: SummaryStore[], 
  */
 export function dailySummaryOf(view: PortfolioView): DailySummary {
   const v = buildVerdict(verdictInputFromPortfolio(view))
-  return summaryText(v.totals, v.comparisonTotals, view.stores, view.comparison.sameTimeOfDay)
+  return summaryText(v.totals, v.comparisonTotals, view.stores, view.comparison.sameTimeOfDay, v.likeTotals)
 }
 
 export interface SummaryResult {
@@ -681,7 +675,10 @@ export async function sendDailySummary(opts: RunOpts = {}): Promise<SummaryResul
   const none: SummaryResult = { sent: false, delivered: 0, summary: null }
   if (!cfg.dailySummary.enabled && !opts.force && !opts.dryRun) return none
 
-  const day = todayInTz(REFERENCE_TZ)
+  // One instant for the claim day and the view it summarises (P6): the claim
+  // key and the push link must name the same day.
+  const now = new Date() // clock-ok: the send instant of the cron run
+  const day = todayInTz(REFERENCE_TZ, now)
   if (!opts.dryRun) {
     if ((await pushDeviceCount()) === 0) return none
     if (!opts.force && !(await claim('daily_summary', '*', day, { hour: cfg.dailySummary.hour }))) return none
@@ -695,7 +692,7 @@ export async function sendDailySummary(opts: RunOpts = {}): Promise<SummaryResul
       if (!opts.dryRun && !opts.force) await release('daily_summary', '*', day)
       return none
     }
-    const view = await buildPortfolio(stores, 'today', null, null, new Date(),
+    const view = await buildPortfolioFor(stores, preset('today'), now,
       { liveFeed: false, chargebackHealth: false, freshness: false })
     summary = dailySummaryOf(view)
     if (opts.dryRun) return { sent: false, delivered: 0, summary }
@@ -703,7 +700,7 @@ export async function sendDailySummary(opts: RunOpts = {}): Promise<SummaryResul
     res = await sendPushToAll({
       // The day the summary is about, on Todas' calendar: tapped after
       // midnight it opens that day, not the new and nearly empty one.
-      title: summary.title, body: summary.body, url: summaryUrl(view.anchorToday), kind: 'summary',
+      title: summary.title, body: summary.body, url: summaryUrl(view.anchorToday, view.storeIds), kind: 'summary',
       tag: `daily-summary-${day}`,
       data: { kind: 'daily_summary', profit: summary.profit },
     })
@@ -754,7 +751,7 @@ function pgTime(v: string | Date | null): Date | null {
 }
 
 /** The delivery of one alert_events row, from its payload. Pure. */
-export function deliveryOf(payload: unknown, sentAt: string | Date | null = null, now: Date = new Date()): AlertDelivery {
+export function deliveryOf(payload: unknown, sentAt: string | Date | null = null, now: Date = new Date()): AlertDelivery { // clock-ok: default for callers without a clock
   if (!isObj(payload) || !('delivered' in payload)) return { state: 'unknown' }
   const d = payload.delivered
   if (d === null) {
@@ -789,7 +786,7 @@ export interface AlertEventRow {
  * reached. `nameOf` names the stores (archived ones included). Empty when
  * the table does not exist yet.
  */
-export async function loadRecentAlerts(nameOf: ReadonlyMap<string, string>, now: Date = new Date()): Promise<AlertEventRow[]> {
+export async function loadRecentAlerts(nameOf: ReadonlyMap<string, string>, now: Date = new Date()): Promise<AlertEventRow[]> { // clock-ok: default for callers without a clock
   let rows: { kind: string; tenant_id: string; day: string; sent_at: string; payload: unknown }[]
   try {
     rows = await query(

@@ -46,13 +46,13 @@ describe('windowStatusText (regression: "37 disputas abertas" over 14 lost, 7 pr
     expect(windowStatusText({ open: 0, lost: 0, won: 0, prevented: 0, other: 0 })).toBeNull()
   })
   it('REGRESSION: an archived store\'s status is the one read when it was archived, not "hoje"', () => {
-    const sw = { on: '2026-11-10', today: '2026-11-24' }
+    const sw = { day: '10 nov', time: '09h02' }
     expect(windowStatusText({ open: 10, lost: 2, won: 1, prevented: 0, other: 0 }, sw))
-      .toBe('Situação em 10 nov, quando a loja foi arquivada: 10 em aberto · 2 perdidas. Mais 1 ganha, que não custa nada. O estado das abertas pode ter mudado desde então.')
-    expect(windowStatusText({ open: 1, lost: 0, won: 0, prevented: 0, other: 0 }, { on: null, today: '2026-11-24' }))
+      .toBe('Situação em 10 nov às 09h02, quando a loja foi arquivada: 10 em aberto · 2 perdidas. Mais 1 ganha, que não custa nada. O estado das abertas pode ter mudado desde então.')
+    expect(windowStatusText({ open: 1, lost: 0, won: 0, prevented: 0, other: 0 }, { day: null }))
       .toBe('Situação quando a loja foi arquivada: 1 em aberto. O estado da aberta pode ter mudado desde então.')
     // Nothing open: nothing that may have moved.
-    expect(windowStatusText({ open: 0, lost: 3, won: 0, prevented: 0, other: 0 }, sw)).toBe('Situação em 10 nov, quando a loja foi arquivada: 3 perdidas.')
+    expect(windowStatusText({ open: 0, lost: 3, won: 0, prevented: 0, other: 0 }, sw)).toBe('Situação em 10 nov às 09h02, quando a loja foi arquivada: 3 perdidas.')
   })
   it('one of each, singular', () => {
     expect(windowStatusText({ open: 1, lost: 1, won: 1, prevented: 1, other: 1 }))

@@ -1,6 +1,6 @@
 import type { StoreRef } from '@/lib/access'
 import { getMetaBreakdown } from '@/lib/data/meta'
-import { comparisonRange, computeStorePnL, type DateRange } from '@/lib/engine'
+import { computeStorePnL, type DateRange } from '@/lib/engine'
 import {
   adLists, campaignViews, contributionRateOf, loadAdData, loadDecisionBasis,
   type AdLists, type AdView, type CampaignList,
@@ -13,6 +13,9 @@ import {
   type CountriesView, type PartnerShareView, type ProductsView, type SeriesPoint, type TotalsView,
 } from '../views'
 import type { InsightsWindow } from '../window'
+import { previousFor } from '../../period'
+import { priceComparison } from '../../views/store'
+import { viewerStoresOf } from '../../views/periodFacts'
 
 /**
  * The fact sheet the insights are written from: built on the server, from the
@@ -28,7 +31,8 @@ import type { InsightsWindow } from '../window'
 export interface InsightsFacts {
   ctx: StoreContext
   window: InsightsWindow
-  previous: DateRange & { label: string }
+  /** baseNote: R6's "sem base" / "base incompleta" (then no variation %). */
+  previous: DateRange & { label: string; baseNote?: string | null }
   split: boolean
   configured: boolean
   totals: TotalsView
@@ -46,22 +50,29 @@ export interface InsightsFacts {
 export async function buildInsightsFacts(
   store: StoreRef, window: InsightsWindow, split: boolean, now: Date = new Date(),
 ): Promise<InsightsFacts> {
-  const ctx = await loadStoreContext(store, now)
-  const prevRange = comparisonRange('custom', window, ctx.timezone, now)
+  const [ctx, facts] = await Promise.all([
+    loadStoreContext(store, now),
+    viewerStoresOf([{ id: store.id, name: store.name, timezone: store.timezone, archived: !!store.archived }]),
+  ])
+  // The window's own rule (Este mês: the same days of the month before) and
+  // R6's base rule from the store's facts, as the page (sem base / base
+  // incompleta), never "N dias anteriores" of zeros before the store existed.
+  const first = (facts.active[0] ?? facts.archived[0])?.firstActivityDate ?? null
+  const prevRange = previousFor(window.period ?? 'custom', window, ctx.timezone, now, first)
   const [pnl, prev, adData, customers, metaCountry, decision] = await Promise.all([
     computeStorePnL(store.id, window, { products: true, countries: true }, now),
-    computeStorePnL(store.id, prevRange, {}, now),
+    prevRange.base === 'none' ? Promise.resolve(null) : priceComparison(store.id, prevRange, prevRange.cutAtMinute, now),
     loadAdData(store.id, window, ctx.timezone, 7),
     customerMix(store.id, ctx.timezone, window),
     getMetaBreakdown(store.id, window, 'country'),
-    loadDecisionBasis(store.id, window, ctx.today, now),
+    loadDecisionBasis(store.id, ctx.today, now, { archived: !!store.archived }),
   ])
   if (!pnl) throw new Error(`store ${store.id} not found by the engine`)
   const t = pnl.totals
   const breakEven = pnl.configured ? t.breakEvenRoas : null
   return {
     ctx, window,
-    previous: { from: prevRange.from, to: prevRange.to, label: prevRange.label },
+    previous: { from: prevRange.from, to: prevRange.to, label: prevRange.label, baseNote: prevRange.baseNote },
     split,
     configured: pnl.configured,
     totals: totalsView(t, pnl.configured),
@@ -182,10 +193,13 @@ export function factSheetText(f: InsightsFacts): string {
       `- Lucro operacional: ${usd(s.operatingProfit)} · lucro por pedido ${usd(s.profitPerOrder)} · resultado de caixa ${usd(s.cashResult)} · custo dos reembolsos ${usd(s.refunds)}`,
     )
   }
+  if (f.previous.baseNote && !f.previousTotals) {
+    push('', `PERÍODO ANTERIOR: ${f.previous.baseNote}. Não compare com antes disso.`)
+  }
   if (f.previousTotals) {
     const p = f.previousTotals
     push(
-      '', `PERÍODO ANTERIOR (${f.previous.label}: ${f.previous.from} a ${f.previous.to})`,
+      '', `PERÍODO ANTERIOR (${f.previous.label}: ${f.previous.from} a ${f.previous.to})${f.previous.baseNote ? ` — ${f.previous.baseNote}: não calcule variação percentual` : ''}`,
       `- Receita ${usd(p.revenue)} · ${int(p.orders)} pedidos · Meta ${usd(p.metaSpend)} · lucro operacional ${usd(p.operatingProfit)} · ROAS da conta ${times(p.roas)} · ROAS do Meta ${times(p.metaRoas)}${f.configured ? ` · ROAS de empate ${times(p.breakEvenRoas)}` : ''}`,
     )
   }

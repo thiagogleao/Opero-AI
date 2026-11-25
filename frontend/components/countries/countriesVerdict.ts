@@ -85,8 +85,8 @@ export function buildCountriesVerdict(input: {
     return beforeStartAllVerdict({ ...input.firstSaleAll, periodPhrase, rangeLabel: input.rangeLabel, totals, split: input.split })
   }
   const fs = input.firstSale
-  if (fs && isBeforeStart(fs.firstOrderDate, fs.range, { orders: totals.orders, revenue: totals.revenue, spend: totals.adSpend })) {
-    return beforeStartVerdict({ ...fs, rangeLabel: input.rangeLabel, dayLabel: input.dayLabel, totals, configured, split: input.split })
+  if (fs && isBeforeStart(fs.firstOrderDate, fs.range, { orders: totals.orders, revenue: totals.revenue, spend: totals.adSpend, adjustments: totals.adjustments })) {
+    return beforeStartVerdict({ ...fs, rangeLabel: input.rangeLabel, dayLabel: input.dayLabel, totals, split: input.split })
   }
   // An archived store's empty window, by the Resumo's rule (see Produtos):
   // "sem dados" after the archive day, "não teve vendas em 1–10 nov" with the

@@ -14,8 +14,8 @@ import { useRouter } from 'next/navigation'
 import { Avatar, Badge, Button, ButtonLink, Callout, Chip } from '@/components/ui'
 import { ConfirmDialog } from './ConfirmDialog'
 import { callApi, nothingChanged } from './messages'
-import { formatDate } from '@/lib/format'
 import s from './settings.module.css'
+import { dateBeside } from '@/lib/period'
 
 export interface StoreListItem {
   id: string
@@ -73,7 +73,7 @@ export function StoresList({ stores, today, addHref }: { stores: StoreListItem[]
           </div>
           <div className={s.sub}>
             {st.domain ?? 'sem domínio'} · {st.city}
-            {st.archivedOn ? ` · arquivada em ${formatDate(st.archivedOn, today)}` : ''}
+            {st.archivedOn ? ` · arquivada em ${dateBeside(st.archivedOn, { window: { from: st.archivedOn, to: st.archivedOn }, clockToday: today })}` : ''}
           </div>
         </div>
       </div>

@@ -26,11 +26,11 @@
  */
 
 import type { PnL } from '@/lib/engine/pnl'
-import { daysBetween, resolveRange, shiftDate, todayInTz, type DateRange, type Period } from '@/lib/engine/dates'
+import { daysBetween, shiftDate, todayInTz, type DateRange } from '@/lib/engine/dates'
 import type { SharedAdAccount } from '@/lib/attributionModels'
 import { formatDate, formatRelativeTime, plural } from '@/lib/format'
 import { adChannelOf, channelRoas, type AdChannel } from '@/lib/views/store'
-import { rowDateClocks, settleRowDates, type PageParams } from '@/lib/views/page'
+import { beforeFirstSale, firstSaleAfter } from '@/lib/period'
 import { isIdle, judgedStores, notSellingYet as notSellingYetVerdict } from '@/lib/views/verdict'
 
 // ─── The money of a row ──────────────────────────────────────────────────────
@@ -89,9 +89,11 @@ export function idleReasons<T extends { dayState: string; firstOrderDate: string
 
 /** The store's first sale came after the window (and its day has begun):
  *  the verdict's "ainda não vendia". Dates only: for a row's own cells use
- *  rowBeforeFirstSale, which also asks that nothing happened. */
+ *  rowBeforeFirstSale, which also asks that nothing happened. A null first
+ *  sale (never sold) is after every window, as lib/period reads it (R11): it
+ *  read "sem movimento" here while the verdict said "ainda não vendeu". */
 export function notSellingYet(s: { dayState: string; firstOrderDate: string | null }, range: DateRange): boolean {
-  return s.dayState !== 'not_started' && !!s.firstOrderDate && range.to < s.firstOrderDate
+  return s.dayState !== 'not_started' && firstSaleAfter(range.to, s.firstOrderDate)
 }
 
 /**
@@ -107,7 +109,11 @@ export function notSellingYet(s: { dayState: string; firstOrderDate: string | nu
 export function rowBeforeFirstSale(
   s: { dayState: string; firstOrderDate: string | null; totals: PnL }, range: DateRange,
 ): boolean {
-  return notSellingYet(s, range) && notSellingYetVerdict(s, range)
+  // lib/period beforeFirstSale (R11): the one test, desktop and phone.
+  const t = s.totals
+  return s.dayState !== 'not_started' && beforeFirstSale(range.to, {
+    orders: t.orders, adSpend: t.adSpend, adjustments: t.adjustments, refundCount: t.refundCount, chargebackCount: t.chargebackCount,
+  }, s)
 }
 
 /**
@@ -361,94 +367,6 @@ export function quietNote(i: QuietInput): QuietNote | null {
 
 // ─── The row's link ──────────────────────────────────────────────────────────
 
-/**
- * How a row's link to that store's Resumo keeps the period (overrides for
- * ctx.hrefWith). A store whose calendar is not Brasília's right now (Hibikura
- * from noon to midnight) is read on the overview on the same dates as the
- * others; the same `periodo` on its own Resumo resolves on Tokyo's clock and
- * lands a day later (the "Hoje" row showed the closed 17 nov at $589, the
- * click opened 18 nov at $281). Such a row opens on its exact dates instead,
- * so the number clicked is the number shown. Same calendar, or a custom
- * window the owner picked (already explicit dates): the period travels as it
- * is.
- *
- * Those dates are the row's, not a period the owner chose, so they carry the
- * owner's preset with them (`volta`, the phone's name for it: app/m/_lib/
- * selection rowPreset). Without it the opened page took them for the owner's
- * own period: the store picker, the sidebar and "Todas as lojas" carried
- * "24 nov" everywhere, and a reload the next day still opened it. With it,
- * lib/views/page brings the preset back as soon as the owner leaves that store
- * or picks a period, and once the dates are no longer that preset on any of
- * the stores' clocks (the next day).
- *
- * A page already on such dates (it has `volta` itself) priced its rows on
- * them, so every row opens them. The preset travels with them only when the
- * store page opened keeps them (rowKeepsDates): a store page holds row dates
- * that are the preset on Todas' clock or on its own, and turns any others
- * into the preset on its own clock. Todas opened on Hibikura's "Ontem" (24
- * nov, from Atribuição) handed `volta` to the MOKOO row too, and the MOKOO
- * opened its own Ontem, 23 nov, under a row that showed 24 nov. Such a row
- * gets the plain dates instead.
- *
- * A preset that names the same dates on the store's own clock stays the
- * preset (the phone's rowOpensDates, app/m/_lib/selection): "Mês passado" is
- * 1–31 out in Tokyo too, and fixed dates compared it with "31 dias
- * anteriores" instead of the month before. Needs the row's timezone and the
- * page's clock; without them (a bare { id, storeToday }) the dates travel,
- * and on a page with `volta` they travel without it.
- */
-export function resumoLinkOverrides(
-  row: { id: string; storeToday: string; timezone?: string },
-  page: {
-    today: string; period: Period; range: DateRange; now?: Date; params?: { periodo: Period; volta?: Period }
-    /** Every store of the viewer (PageContext.stores): Todas' clock, on which
-     *  a store page keeps row dates (lib/views/page rowDateClocks). */
-    stores?: readonly { timezone: string }[]
-  },
-): { loja: string; periodo?: 'custom'; de?: string; ate?: string; volta?: Period } {
-  const volta = page.params?.volta
-  if (page.period === 'custom') {
-    if (!volta) return { loja: row.id }
-    const dates = { loja: row.id, periodo: 'custom' as const, de: page.range.from, ate: page.range.to }
-    return rowKeepsDates(row, page, volta) ? { ...dates, volta } : dates
-  }
-  if (row.storeToday === page.today) return { loja: row.id }
-  if (row.timezone && page.now) {
-    const own = resolveRange(page.period, row.timezone, null, null, page.now)
-    if (own.from === page.range.from && own.to === page.range.to) return { loja: row.id }
-  }
-  return { loja: row.id, periodo: 'custom', de: page.range.from, ate: page.range.to, volta: page.period }
-}
-
-/**
- * Whether the store page a row opens shows the page's row dates when they
- * travel with `volta`: what that page's getPageContext does with them
- * (lib/views/page settleRowDates on rowDateClocks('store')) — keeps them, or
- * turns them into the preset, which must then name the same dates on the
- * store's own clock. Unknown clocks: false (the plain dates are always the
- * dates shown).
- */
-function rowKeepsDates(
-  row: { id: string; timezone?: string },
-  page: { range: DateRange; now?: Date; stores?: readonly { timezone: string }[] },
-  volta: Period,
-): boolean {
-  if (!row.timezone || !page.now || !page.stores?.length) return false
-  const p: PageParams = { loja: row.id, periodo: 'custom', de: page.range.from, ate: page.range.to, parte: false, volta }
-  const settled = settleRowDates(p, row.timezone, rowDateClocks('store', page.stores.map(s => s.timezone)), page.now)
-  if (settled === p) return true
-  const opened = resolveRange(settled.periodo, row.timezone, settled.de, settled.ate, page.now)
-  return opened.from === page.range.from && opened.to === page.range.to
-}
-
-/** The row's link carries fixed dates while the page shows a preset (the
- *  store's own clock names other dates: resumoLinkOverrides) — the stores the
- *  "Lojas" help line names as opening "nas mesmas datas", as the phone's
- *  rowOpensDates does. */
-export function linkOpensDates(page: { period: Period }, link: { periodo?: Period }): boolean {
-  return page.period !== 'custom' && link.periodo === 'custom'
-}
-
 // ─── Sparkline window ────────────────────────────────────────────────────────
 
 export const TRAIL_MIN_DAYS = 30
@@ -511,7 +429,9 @@ export function trailGap(
 ): TrailGap | null {
   if (!days?.length) return { kind: 'no_data' }
   const allIdle = days.every(trailIdle)
-  if (allIdle && row.firstOrderDate && row.firstOrderDate > days[days.length - 1].date) return { kind: 'not_yet' }
+  // lib/period's reading (R11): a store that never sold (null) is "ainda não
+  // vendeu", not "sem movimento em 31 dias".
+  if (allIdle && firstSaleAfter(days[days.length - 1].date, row.firstOrderDate)) return { kind: 'not_yet' }
   if (!row.configured) return { kind: 'unconfigured' }
   if (allIdle) return { kind: 'idle', days: trailSinceStart(days, row.firstOrderDate).days.length }
   return null

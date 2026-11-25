@@ -1,8 +1,10 @@
 import {
-  daysBetween, formatRange, isIsoDate, isPeriod, resolveRange, shiftDate, todayInTz,
+  daysBetween, isIsoDate, isPeriod, shiftDate, todayInTz,
   type DateRange, type Period,
 } from '@/lib/engine'
 import { INSIGHTS_MAX_DAYS } from './config'
+import { windowFor } from '../period'
+import { rangeBeside } from '../period'
 
 /**
  * Which days an AI answer is about. Always resolved on the server, in the
@@ -11,6 +13,9 @@ import { INSIGHTS_MAX_DAYS } from './config'
  */
 
 export interface InsightsWindow extends DateRange {
+  /** The preset the window came from ('custom' for dates): its comparison
+   *  follows the period's own rule (R6), as the page's does. */
+  period?: Period
   days: number
   label: string
   /** True when the requested window ran into today and was cut at yesterday. */
@@ -29,7 +34,7 @@ export function insightsWindow(
   tz: string, period: unknown, from: unknown, to: unknown, now: Date = new Date(),
 ): WindowResult {
   const p: Period = isPeriod(period) ? period : '30d'
-  const r = resolveRange(p, tz, isIsoDate(from) ? from : null, isIsoDate(to) ? to : null, now)
+  const r = windowFor(p, tz, isIsoDate(from) ? from : null, isIsoDate(to) ? to : null, now)
   const today = todayInTz(tz, now)
   const yesterday = shiftDate(today, -1)
   const end = r.to > yesterday ? yesterday : r.to
@@ -49,7 +54,7 @@ export function insightsWindow(
   return {
     ok: true,
     window: {
-      ...range, days: daysBetween(start, end), label: formatRange(range, today),
+      ...range, period: shortened ? 'custom' : p, days: daysBetween(start, end), label: rangeBeside(range, { window: range, clockToday: today }),
       cutAtYesterday: r.to > yesterday, shortened,
     },
   }
@@ -71,7 +76,7 @@ export function toolRange(
 ): ToolRange {
   const explicit = isIsoDate(input.from) && isIsoDate(input.to)
   const p: Period = explicit ? 'custom' : isPeriod(input.period) && input.period !== 'custom' ? input.period : fallback
-  const r = resolveRange(p, tz, explicit ? (input.from as string) : null, explicit ? (input.to as string) : null, now)
+  const r = windowFor(p, tz, explicit ? (input.from as string) : null, explicit ? (input.to as string) : null, now)
   const today = todayInTz(tz, now)
-  return { ...r, period: p, days: daysBetween(r.from, r.to), label: formatRange(r, today), partial: r.to >= today }
+  return { ...r, period: p, days: daysBetween(r.from, r.to), label: rangeBeside(r, { window: r, clockToday: today }), partial: r.to >= today }
 }

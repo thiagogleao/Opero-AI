@@ -25,7 +25,7 @@ describe('evaluateStoreAlerts', () => {
     const fired = evaluateStoreAlerts(input({ orders: 0, metaSpend: 400 }, WEEK), DEFAULT_CONFIG)
     expect(fired.map(a => a.kind)).toEqual(['spend_no_sales'])
     // The period is explicit: the phone would otherwise restore the last one used.
-    expect(fired[0].url).toBe('/m?loja=s1&periodo=today&dia=2026-11-17')
+    expect(fired[0].url).toMatch(/^\/m\?loja=s1&periodo=custom&de=2026-11-17&ate=2026-11-17&origem=push&n=[a-z0-9]{8}$/)
     expect(fired[0].title).toContain('nenhuma venda')
   })
   it('counts Shopify ads toward spend without sales', () => {
@@ -194,22 +194,24 @@ describe('quiet hours', () => {
   })
 })
 
-// A notification tap opens the day the push talks about, never the period
-// last used on the phone (a tap on today's ROAS alert opened "30 dias").
-describe('push links carry their period', () => {
-  it('store alerts open the store on its own today; a tab keeps the period too', () => {
-    expect(storeUrl('user_3CV')).toBe('/m?loja=user_3CV&periodo=today')
-    expect(storeUrl('a b', { tab: 'campanhas', periodo: '7d' })).toBe('/m?loja=a%20b&periodo=7d&aba=campanhas')
-    // The scale push names the day it was sent, so the phone keeps its "7 dias" as the link's.
-    expect(storeUrl('a b', { tab: 'campanhas', periodo: '7d', dia: '2026-11-24' })).toBe('/m?loja=a%20b&periodo=7d&dia=2026-11-24&aba=campanhas')
+// A notification tap opens the days the push talks about (lib/period
+// notificationHref, R17), never the period last used on the phone, and never
+// a preset that rolls.
+describe('push links carry their dates', () => {
+  it('store alerts carry their dates, origem=push and a nonce; a tab rides along', () => {
+    expect(storeUrl('user_3CV', { from: '2026-11-24', nonce: 'abcd1234' }))
+      .toBe('/m?loja=user_3CV&periodo=custom&de=2026-11-24&ate=2026-11-24&origem=push&n=abcd1234')
+    // The scale push carries the 7 closed days it judged.
+    expect(storeUrl('a b', { tab: 'campanhas', from: '2026-11-17', to: '2026-11-23', nonce: 'abcd1234' }))
+      .toBe('/m?loja=a+b&periodo=custom&de=2026-11-17&ate=2026-11-23&aba=campanhas&origem=push&n=abcd1234')
   })
-  it('the daily summary opens Todas · Hoje of its own day, not the store last pinned', () => {
-    expect(summaryUrl('2026-11-23')).toBe('/m?loja=todas&periodo=today&dia=2026-11-23')
-    const q = new URLSearchParams(summaryUrl('2026-11-23').split('?')[1])
-    expect([q.get('loja'), q.get('periodo'), q.get('dia')]).toEqual(['todas', 'today', '2026-11-23'])
+  it('the daily summary opens Todas on its own day, with the members it summed', () => {
+    const q = new URLSearchParams(summaryUrl('2026-11-23', ['s1', 's2'], 'abcd1234').split('?')[1])
+    expect([q.get('loja'), q.get('periodo'), q.get('de'), q.get('ate'), q.get('origem')]).toEqual(['todas', 'custom', '2026-11-23', '2026-11-23', 'push'])
+    expect(q.get('m')).toMatch(/^[a-z0-9]{6}$/)
   })
   it('a threshold alert names the store-day it is about (the phone opens that day once it is over)', () => {
     const [a] = evaluateStoreAlerts(input({ orders: 0, metaSpend: 400 }, WEEK, { day: '2026-11-23' }), DEFAULT_CONFIG)
-    expect(a.url).toBe('/m?loja=s1&periodo=today&dia=2026-11-23')
+    expect(a.url).toMatch(/^\/m\?loja=s1&periodo=custom&de=2026-11-23&ate=2026-11-23&origem=push&n=/)
   })
 })

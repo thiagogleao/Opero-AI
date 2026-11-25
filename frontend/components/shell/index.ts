@@ -6,11 +6,10 @@
  */
 import 'server-only'
 export { AppShell, Logo } from './AppShell'
-export { PageHeader, PeriodNote, periodName, periodNoteText, SplitChip, splitChipText } from './PageHeader'
+export { PageHeader, PeriodHeading, PeriodNote, periodName, periodNoteText, SplitChip, splitChipText } from './PageHeader'
 export { Freshness, FreshnessFallback } from './Freshness'
 export { StorePicker, type StorePickerProps } from './StorePicker'
-export { PeriodPicker, type PeriodPickerProps, type PeriodOption } from './PeriodPicker'
+export { PeriodPicker, type PeriodPickerProps } from './PeriodPicker'
 export { SplitToggle } from './SplitToggle'
 export { ViewerIndicator } from './ViewerIndicator'
 export { NavLinks, type NavItem } from './NavLinks'
-export { mergeQuery, hrefFor } from './url'

@@ -8,6 +8,7 @@ import {
   type CampaignAction, type ScaleThresholds, type TrendArrow,
 } from '@/lib/campaignSignal'
 import { computeStorePnL, daysBetween, shiftDate, todayInTz, type DateRange } from '@/lib/engine'
+import { DECISION_DAYS, decisionWindowOn } from '@/lib/period/decision'
 import { r2, safeDiv } from './format'
 
 /**
@@ -285,14 +286,13 @@ export function adLists(
 
 // ─── Campaigns ────────────────────────────────────────────────────────────────
 
-/** The days a campaign is judged on: the last 7 closed days of the window, the
- *  rule the campaign screens and push alerts use. Null when none is closed. */
-export function decisionWindow(range: DateRange, storeToday: string, days = 7): DateRange | null {
-  const yesterday = shiftDate(storeToday, -1)
-  const to = range.to > yesterday ? yesterday : range.to
-  if (to < range.from) return null
-  const from = shiftDate(to, -(days - 1)) < range.from ? range.from : shiftDate(to, -(days - 1))
-  return { from, to }
+/** The days a campaign is judged on (R12): lib/period decisionWindow, the
+ *  last 7 closed days on the store's clock — the days Campanhas and the scale
+ *  push judge, whatever window the conversation or the insights card reads.
+ *  It is never clipped to that window (Mês passado judged 25–31 out while
+ *  Campanhas judged 17–23 nov; a 3-day window gave a 3-day "decision"). */
+export function judgedDays(storeToday: string, days = DECISION_DAYS): { window: DateRange; previous: DateRange } {
+  return decisionWindowOn(storeToday, days)
 }
 
 export interface CampaignView {
@@ -333,24 +333,33 @@ export interface CampaignList {
  * AI's "escalar" is the badge the screen and the push alert show.
  */
 export interface DecisionBasis {
+  /** lib/period decisionWindow (R12); null for an archived store (R10: no
+   *  decision block). */
   window: DateRange | null
+  previous: DateRange | null
+  /** Ad-day facts of previous + window, by campaign: the judged days are not
+   *  the window's, so they are loaded on their own. */
+  facts: AdDayFact[]
   contributionRate: number | null
   costsConfigured: boolean
   thresholds: ScaleThresholds
 }
 
 export async function loadDecisionBasis(
-  storeId: string, range: DateRange, storeToday: string, now?: Date,
+  storeId: string, storeToday: string, now?: Date, opts: { archived?: boolean } = {},
 ): Promise<DecisionBasis> {
   // Loaded lazily: lib/alerts pulls in web-push, which nothing else here needs.
   const { getAlertConfig } = await import('@/lib/alerts')
   const thresholds: ScaleThresholds = { ...DEFAULT_THRESHOLDS, minMargin: (await getAlertConfig()).scaleAlerts.threshold }
-  const window = decisionWindow(range, storeToday, thresholds.windowDays)
-  if (!window) return { window, contributionRate: null, costsConfigured: false, thresholds }
-  const p = await computeStorePnL(storeId, window, {}, now)
+  if (opts.archived) return { window: null, previous: null, facts: [], contributionRate: null, costsConfigured: false, thresholds }
+  const { window, previous } = judgedDays(storeToday, thresholds.windowDays)
+  const [p, facts] = await Promise.all([
+    computeStorePnL(storeId, window, {}, now),
+    loadAdDayFacts(storeId, { from: previous.from, to: window.to }),
+  ])
   const configured = !!p?.configured
   return {
-    window, thresholds, costsConfigured: configured,
+    window, previous, facts, thresholds, costsConfigured: configured,
     contributionRate: p ? contributionRateOf(configured, p.totals.revenue, p.totals.contribution) : null,
   }
 }
@@ -369,7 +378,16 @@ export function campaignViews(
 ): CampaignList {
   const { range } = data
   const basis = opts.decision
-  const judged = basis ? basis.window : decisionWindow(range, opts.storeToday)
+  const judged = basis ? basis.window : judgedDays(opts.storeToday).window
+  // The judged days' facts by campaign (they lie outside the window when it
+  // is closed, e.g. Mês passado); without a basis (tests), the window's.
+  const decisionFacts = new Map<string, AdDayFact[]>()
+  for (const f of basis ? basis.facts : data.facts) {
+    const key = f.campaignId ?? '__unsynced__'
+    const list = decisionFacts.get(key) ?? []
+    list.push(f)
+    decisionFacts.set(key, list)
+  }
   const groups = new Map<string, { campaignId: string | null; facts: AdDayFact[] }>()
   for (const f of data.facts) {
     const key = f.campaignId ?? '__unsynced__'
@@ -397,7 +415,7 @@ export function campaignViews(
     if (judged) {
       const n = daysBetween(judged.from, judged.to)
       const d = decideCampaign({
-        days: g.facts.map(f => ({ date: f.date, spend: f.spend, revenue: f.purchaseValue, purchases: f.purchases })),
+        days: (decisionFacts.get(g.campaignId ?? '__unsynced__') ?? []).map(f => ({ date: f.date, spend: f.spend, revenue: f.purchaseValue, purchases: f.purchases })),
         window: judged,
         previous: { from: shiftDate(judged.from, -n), to: shiftDate(judged.from, -1) },
         contributionRate: basis ? basis.contributionRate : opts.contributionRate,

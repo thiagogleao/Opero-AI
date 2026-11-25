@@ -114,7 +114,7 @@ export function useCopilotChat(pageStoreId: string | null, split: boolean) {
     const q = question.trim()
     if (!q || !storeId || base.some(isOpen)) return
     const n = ++seq.current
-    const stamp = `${Date.now()}-${n}`
+    const stamp = `${Date.now()}-${n}` // clock-ok: message id, not a period
     const answerId = `a${stamp}`
     const history = historyFor(base, q)
     setTurns([

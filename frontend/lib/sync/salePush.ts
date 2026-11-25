@@ -22,8 +22,13 @@ export interface SalePushInput {
   /** The same total in dollars when the shop bills in another currency and a
    *  rate was found; null otherwise. */
   usdTotal: number | null
-  /** The store's "lucro" so far today, or null (no cost settings, slow lookup). */
+  /** The store's "lucro" on the sale's own day (the day the push link
+   *  opens), or null (no cost settings, slow lookup). */
   profitToday: number | null
+  /** How that day is said on the store's clock at send time (lib/period
+   *  dayPhrase): "hoje", "ontem", "em 24 nov". Absent: "hoje". The text and
+   *  the screen it opens name the same day (R17). */
+  profitDay?: string
   lineItems: SaleLine[]
   /** Shipping country code. */
   country: string | null
@@ -105,7 +110,7 @@ export function salePushText(s: SalePushInput): { title: string; body: string } 
   return {
     title: `💰 ${saleAmount(s.total, s.currency, s.usdTotal)} · ${s.orderLabel} — ${s.storeName}`,
     body: [
-      s.profitToday !== null ? `Lucro hoje: ${formatMoney(s.profitToday)}` : null,
+      s.profitToday !== null ? `Lucro ${s.profitDay ?? 'hoje'}: ${formatMoney(s.profitToday)}` : null,
       saleItemsLabel(s.lineItems),
       s.country,
     ].filter(Boolean).join(' · '),

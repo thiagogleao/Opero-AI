@@ -8,11 +8,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button, Chip, EmptyState, ErrorState, Icon, Skeleton } from '@/components/ui'
 import { formatDate, formatRangeLabel, formatTimeInTz } from '@/lib/format'
-import { resolveRange, type Period } from '@/lib/engine/dates'
+import { checkPickedDates, MENU, pickerDates, normaliseDates, presetInfo, presetRange, preset, samePeriod, todayIn, type PeriodValue, type Preset } from '@/lib/period'
 import type { AlertConfig, AlertsGetResponse, AlertsTestResponse } from '@/lib/alerts'
 import type { MobileStoreOption } from '@/lib/views/mobile'
-import { MAX_WINDOW_DAYS, MIN_WINDOW_DATE, MIN_WINDOW_LABEL } from '@/lib/views/portfolioLimits'
-import { customRange, PERIOD_MAIN, PERIOD_MORE, periodLabel, type Selection } from '../_lib/selection'
+
 import { alertDeliveryText, alertRowTitle, pushBlockedText } from '../_lib/labels'
 import type { usePush } from '../_lib/usePush'
 import { Sheet, SoundIcon, Switch } from './Sheet'
@@ -20,29 +19,32 @@ import s from '../sheet.module.css'
 
 // ─── Period ───────────────────────────────────────────────────────────────────
 
-export function PeriodSheet({ sel, tz, now, onPick, onClose }: {
-  sel: Selection
-  /** The timezone the selection is resolved in (the store's own, or Brasília). */
+export function PeriodSheet({ period, tz, now, onPick, onClose }: {
+  /** The period shown (a visit's or the saved one). */
+  period: PeriodValue
+  /** The clock the screen is resolved on (the store's own, or Brasília). */
   tz: string
+  /** clientNow() in ms (lib/period/client/clock): previews and the max date. */
   now: number
-  onPick: (p: Pick<Selection, 'periodo' | 'de' | 'ate'>) => void
+  onPick: (p: PeriodValue) => void
   onClose: () => void
 }) {
-  const at = new Date(now || Date.parse('2000-01-01'))
-  const today = resolveRange('today', tz, null, null, at).to
-  const [de, setDe] = useState(sel.periodo === 'custom' ? sel.de ?? '' : '')
-  const [ate, setAte] = useState(sel.periodo === 'custom' ? sel.ate ?? '' : '')
-  // Exactly what "Aplicar datas" will apply (null until both dates are set).
-  const range = customRange(de, ate, today)
-  const preview = (p: Period) => (now ? formatRangeLabel(resolveRange(p, tz, null, null, at), today) : '')
+  const today = todayIn(tz, new Date(now || Date.parse('2000-01-01T12:00:00Z')))
+  const [de, setDe] = useState(period.kind === 'dates' ? period.from : '')
+  const [ate, setAte] = useState(period.kind === 'dates' ? period.to : '')
+  // The same start and check as the desktop's date form (lib/period
+  // pickerDates / checkPickedDates, R9): an asked end beyond today stays valid.
+  const max = pickerDates(period, { from: today, to: today }, today).max
+  const checked = de && ate ? checkPickedDates(de, ate, max) : null
+  const preview = (p: Preset) => (now ? formatRangeLabel(presetRange(p, today), today) : '')
 
   return (
     <Sheet title="Período" lede="Dias completos no fuso da loja; com várias lojas, o mesmo dia de calendário em cada uma." onClose={onClose}>
       <div className={s.options}>
-        {[...PERIOD_MAIN, ...PERIOD_MORE].map(p => (
-          <button key={p} type="button" className={s.option} aria-pressed={sel.periodo === p}
-            onClick={() => { onPick({ periodo: p, de: null, ate: null }); onClose() }}>
-            <span>{periodLabel(p)}</span><small>{preview(p)}</small>
+        {[...MENU.main, ...MENU.more].map(p => (
+          <button key={p} type="button" className={s.option} aria-pressed={samePeriod(period, preset(p))}
+            onClick={() => { onPick(preset(p)); onClose() }}>
+            <span>{presetInfo(p).label}</span><small>{preview(p)}</small>
           </button>
         ))}
       </div>
@@ -50,29 +52,25 @@ export function PeriodSheet({ sel, tz, now, onPick, onClose }: {
         <div className={s.groupTitle}>Escolher datas</div>
         <div className={s.dates}>
           <label>De
-            <input type="date" className={`${s.input} ${s.dateInput}`} value={de} min={MIN_WINDOW_DATE} max={today} onChange={e => setDe(e.target.value)} />
+            <input type="date" className={`${s.input} ${s.dateInput}`} value={de} min="2000-01-01" max={max} onChange={e => setDe(e.target.value)} />
           </label>
           <label>Até
-            <input type="date" className={`${s.input} ${s.dateInput}`} value={ate} min={MIN_WINDOW_DATE} max={today} onChange={e => setAte(e.target.value)} />
+            <input type="date" className={`${s.input} ${s.dateInput}`} value={ate} min="2000-01-01" max={max} onChange={e => setAte(e.target.value)} />
           </label>
         </div>
-        {range && !range.ok ? (
-          <p className={`${s.msg} ${s.msgErr}`} style={{ padding: 0, marginTop: 8 }} role="alert">{range.error}.</p>
+        {checked && !checked.ok ? (
+          <p className={`${s.msg} ${s.msgErr}`} style={{ padding: 0, marginTop: 8 }} role="alert">{checked.error}</p>
         ) : (
           <p className={s.lede} style={{ marginTop: 8 }}>
-            {range?.ok
-              ? `Mostrar ${formatRangeLabel({ from: range.from, to: range.to }, today)}${[
-                range.cut === 'long' ? `só os últimos ${MAX_WINDOW_DAYS} dias, o máximo de uma vez` : null,
-                range.cut === 'floor' ? `a partir de ${MIN_WINDOW_LABEL}, nada antes disso entra` : null,
-                range.clamped ? 'até hoje: o resto ainda não aconteceu' : null,
-              ].filter(Boolean).map(t => ` (${t})`).join('')}.`
+            {checked?.ok
+              ? `Mostrar ${formatRangeLabel({ from: checked.value.from, to: checked.value.to }, today)}.`
               : 'Escolha as duas datas: até lá, o período atual continua na tela.'}
           </p>
         )}
-        <Button variant="primary" disabled={!range?.ok}
+        <Button variant="primary" disabled={!checked?.ok}
           onClick={() => {
-            if (!range?.ok) return
-            onPick({ periodo: 'custom', de: range.from, ate: range.to })
+            if (!checked?.ok) return
+            onPick(normaliseDates(checked.value.from, checked.value.to).value ?? checked.value)
             onClose()
           }}>
           Aplicar datas

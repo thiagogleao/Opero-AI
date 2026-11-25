@@ -14,9 +14,9 @@
  */
 
 import { AccessError, accessErrorResponse, getViewer, listStores, type StoreRef } from '@/lib/access'
-import { anchorTz } from '@/lib/engine/dates'
 import { parseWindow } from '@/lib/data/profitConfig'
 import { buildStoreWorkbook } from '@/lib/storeExport'
+import { anchorOf } from '@/lib/period'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -50,7 +50,7 @@ export async function GET(req: Request) {
 
     const win = parseWindow(
       { period: params.get('period'), from: params.get('from'), to: params.get('to') },
-      anchorTz(stores.map(s => s.timezone)),
+      anchorOf(stores.map(s => s.timezone)),
     )
     if (!win.ok) return Response.json({ error: win.issue.message, issues: [win.issue] }, { status: 400 })
     range = win.range

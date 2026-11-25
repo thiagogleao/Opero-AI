@@ -47,7 +47,7 @@ interface Row extends ProductLike {
 const pct = (a: number, b: number) => (b > 0 ? (a / b) * 100 : null)
 
 export default async function ProductsPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
-  const ctx = await getPageContext(searchParams)
+  const ctx = await getPageContext(searchParams, { path: '/products' })
   const title = ctx.scope === 'all' ? 'Produtos · todas as lojas' : `Produtos · ${ctx.store?.name ?? ''}`
   const header = <PageHeader ctx={ctx} title={title} halved={false} />
   if (ctx.scope === 'store' && !ctx.store) {

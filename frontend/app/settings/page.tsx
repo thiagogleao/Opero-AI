@@ -57,7 +57,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
     redirect(`/settings?${q}`)
   }
 
-  const ctx = await getPageContext(sp, { scope: 'store' })
+  const ctx = await getPageContext(sp, { path: '/settings', scope: 'store' })
   const store = ctx.store
   const flags = Object.fromEntries(FLAG_KEYS.map(k => [k, one(sp[k])]))
 
@@ -72,7 +72,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
       />
       <ReturnBanner params={flags} />
       {store?.archived && <ArchivedNote name={store.name} what="custos, contas de anúncio e a conexão com a Shopify não podem ser alterados" />}
-      {one(sp.loja) === 'todas' && store && (
+      {ctx.cameFrom?.kind === 'all' && store && (
         <Callout tone="info" title={`Ajustes são de uma loja por vez: esta é a ${store.name}`}>
           Para outra loja, troque no seletor de loja do menu ou abra pela lista em Lojas, abaixo.
         </Callout>

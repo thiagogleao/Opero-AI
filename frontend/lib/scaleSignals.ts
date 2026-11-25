@@ -21,7 +21,8 @@
 import { loadStores } from './engine/pnl'
 import { safeTz } from './engine/dates'
 import { DEFAULT_THRESHOLDS, type CampaignDecision } from './campaignSignal'
-import { decisionWindows, getCampaignReport } from './data/campaigns'
+import { getCampaignReport } from './data/campaigns'
+import { decisionWindow } from './period/decision'
 
 export type Verdict = 'scale' | 'watch' | 'hold' | 'cut' | 'insufficient'
 
@@ -101,6 +102,9 @@ export async function getCampaignSignals(
   tenantId: string,
   config: ScaleConfig = DEFAULT_SCALE_CONFIG,
   storeTz?: string,
+  /** The instant the caller judges at (lib/alerts: the cron run's one `now`,
+   *  the same one its push link's dates come from, R17/P6). */
+  now: Date = new Date(), // clock-ok: default for callers without a clock
 ): Promise<CampaignSignal[]> {
   let tz = storeTz ? safeTz(storeTz) : null
   if (!tz) {
@@ -108,8 +112,8 @@ export async function getCampaignSignals(
     if (!store) return []
     tz = safeTz(store.timezone)
   }
-  const { window } = decisionWindows(tz, new Date(), config.windowDays)
-  const report = await getCampaignReport({ id: tenantId, timezone: tz }, window, { thresholds: config })
+  const { window } = decisionWindow(tz, now, config.windowDays)
+  const report = await getCampaignReport({ id: tenantId, timezone: tz }, window, { thresholds: config, now })
 
   const out: CampaignSignal[] = []
   for (const c of report.campaigns) {

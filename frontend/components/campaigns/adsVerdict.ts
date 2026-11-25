@@ -34,12 +34,13 @@ import {
   EARLY_DAY_MINUTES, SPLIT_SHARE, storeRoas as channelStoreRoas,
   type Verdict, type VerdictChip, type VerdictLine,
 } from '@/lib/views/verdict'
-import { formatMoney, formatPct, formatRangeLabel, formatRoas, plural } from '@/lib/format'
+import { formatMoney, formatPct, formatRoas, plural } from '@/lib/format'
 import { breakEvenReason } from '@/components/ui/roasReason'
 import { actionCountsText } from './text'
 import { beforeStartVerdict, dateBeside, isBeforeStart, type BeforeStartInput } from './storeStart'
 import type { ArchivedStoreInput } from '@/components/dashboard/archivedStore'
 import { frozenVerdict, isFrozenWindow } from '@/components/dashboard/emptyWindow'
+import { rangeBeside } from '@/lib/period'
 
 type Part = { text: string; strong?: boolean; tone?: 'pos' | 'neg' | 'warn' }
 const line = (...parts: (string | Part)[]): VerdictLine => {
@@ -312,7 +313,7 @@ export function frozenTailOf(ar: ArchivedStoreInput | null | undefined): { day: 
   if (!ar || !on || !(ar.range.from <= on && on < ar.range.to)) return null
   return {
     day: dateBeside(on, [ar.range.from, ar.range.to], ar.today),
-    readSpan: formatRangeLabel({ from: ar.range.from, to: on }, ar.today),
+    readSpan: rangeBeside({ from: ar.range.from, to: on }, { window: ar.range, clockToday: ar.today }),
   }
 }
 
@@ -345,9 +346,9 @@ export function buildAdsVerdict(input: AdsVerdictInput): { verdict: Verdict; rec
   // ── No Meta spend: nothing to judge, never a fake $0.
   if (!(spend > 0)) {
     const fs = input.firstSale
-    if (fs && !input.billedElsewhere?.campaigns && isBeforeStart(fs.firstOrderDate, fs.range, { orders: pnl.orders, revenue: pnl.revenue, spend: pnl.adSpend })) {
+    if (fs && !input.billedElsewhere?.campaigns && isBeforeStart(fs.firstOrderDate, fs.range, { orders: pnl.orders, revenue: pnl.revenue, spend: pnl.adSpend, adjustments: pnl.adjustments })) {
       return {
-        verdict: beforeStartVerdict({ ...fs, rangeLabel: w.rangeLabel, dayLabel: w.dayLabel, totals: pnl, configured: report.configured, split }),
+        verdict: beforeStartVerdict({ ...fs, rangeLabel: w.rangeLabel, dayLabel: w.dayLabel, totals: pnl, split }),
         reconciliation: rec,
       }
     }

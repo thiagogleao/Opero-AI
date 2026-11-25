@@ -1,149 +1,198 @@
 /**
- * The phone's selection as an external store (useSyncExternalStore), backed
- * by the URL and localStorage.
+ * The phone's state as an external store (useSyncExternalStore): only the
+ * browser plumbing around lib/period/phone, which owns every rule (R16).
  *
- * The server cannot know what the owner picked last (that lives on the phone),
- * so the server snapshot is null and the first client render resolves the
- * view from the URL, then storage, then the default. From then on only a tap
- * (`setView`) or a notification tap changes it; a poll or a late answer never
- * does, because nothing else writes here. The one exception is the calendar:
- * dates a store row opened give way to the owner's preset once Todas' day
- * moves on, and a period a notification opened to the owner's own once its
- * day does (`revalidate`, on the clock tick).
+ *  - localStorage 'opero.m.view.v3': the saved view (the owner's choices);
+ *  - sessionStorage 'opero.m.visit': the visit an external link opened, with
+ *    hiddenAt / lastSeenAt / closedStrip — never in localStorage;
+ *  - the address bar mirrors the visit with window.history.replaceState only
+ *    (Next 16 integrates native replaceState into its router: docs
+ *    01-app/01-getting-started/04-linking-and-navigating.md, "Native History
+ *    API"); never router.replace, never pushState, so Back never lands on a
+ *    stateless /m.
+ *
+ * The server snapshot is null: the saved view lives on the phone. The clock
+ * never changes the state (P1); only actions, links and facts do.
+ *
+ * The visit's hiddenAt / lastSeenAt are written and compared on the DEVICE
+ * clock (deviceNow): a duration needs one clock, and the server offset does
+ * not survive a reload (P6, R16).
  */
 
-import { todayInTz } from '@/lib/engine/dates'
+import { clientNow, deviceNow } from '@/lib/period/client/clock'
 import {
-  clampSelection, expireLinkDay, expireRowDates, linkRangeNotice, rawFromSearch, rawFromStorage, resolveView, selectionTz, STORAGE_KEY, todasRangeAt,
-  toSearch, toStorage, unknownLinkStore, type StoreClock, type ViewState,
-} from './selection'
+  act, factsChange, LEGACY_SAVED_KEY, openApp, readSaved, SAVED_KEY, SESSION_KEY, toStorage, visitExpired,
+  type NavType, type PhoneAction, type PhoneState, type SessionRecord,
+} from '@/lib/period/phone'
+import type { Note, ViewerStores } from '@/lib/period'
 
-let current: ViewState | null = null
-let knownStore: (id: string) => boolean = () => false
-/** Today on the calendar the selection is read on (selectionTz). */
-let todayOf: ((loja: string) => string) | undefined
-/** The active stores' clocks, for Todas' calendar (todasRangeAt). */
-let activeClocks: readonly StoreClock[] = []
-/** The launch URL named a store the owner cannot open (takeLinkNotice). */
-let linkStoreMissing = false
-/** The last link's custom range was cut before asking (takeLinkRangeNotice). */
-let linkRangeNote: string | null = null
+/** sessionStorage: the one-action strip on screen, so a reload shows the
+ *  same screen until the next action (R16; the desktop keeps its landing
+ *  note through `vem` on reloads). */
+const STRIP_KEY = 'opero.m.strip'
+
+let state: PhoneState | null = null
+let viewer: ViewerStores | null = null
+let session: SessionRecord | null = null
 const listeners = new Set<() => void>()
 
-/** Which stores may be opened (active and archived) and their clocks. Set
- *  before reading. */
-export function configureStores(active: readonly StoreClock[], archived: readonly StoreClock[] = []) {
-  const set = new Set([...active, ...archived].map(s => s.id))
-  knownStore = id => set.has(id)
-  todayOf = loja => todayInTz(selectionTz(loja, active, archived), new Date())
-  activeClocks = active
+const newId = () => Math.random().toString(36).slice(2, 10)
+
+function notify() { for (const l of listeners) l() }
+
+function readSession(): SessionRecord | null {
+  try {
+    const raw = sessionStorage.getItem(SESSION_KEY)
+    const v = raw ? JSON.parse(raw) as SessionRecord : null
+    return v && v.visit && typeof v.visit.url === 'string' ? v : null
+  } catch { return null }
 }
 
-const todasRange = () => todasRangeAt(activeClocks, new Date())
-
-/** Every view that is stored goes through here: a custom range is clamped to
- *  the selected store's today, so switching from Hibikura (whose "today" is
- *  Brazil's tomorrow from noon on) to MOKOO or Todas cannot carry Tokyo's
- *  date into a Brazilian calendar — on screen, in the URL or in storage;
- *  dates a store row opened last only while Todas is still on that day, and a
- *  period a notification opened only while its calendar is. */
-function normalise(v: ViewState): ViewState {
-  if (!todayOf) return v
-  const sel = clampSelection(expireRowDates(expireLinkDay(v.sel, todayOf), todasRange()), todayOf(v.sel.loja))
-  return sel === v.sel ? v : { ...v, sel }
+function writeSession() {
+  try {
+    if (!state?.visit) { sessionStorage.removeItem(SESSION_KEY); session = null; return }
+    const nowIso = deviceNow().toISOString()
+    session = {
+      visit: state.visit,
+      hiddenAt: session?.visit.id === state.visit.id ? session.hiddenAt : null,
+      lastSeenAt: nowIso,
+      closedStrip: state.closedStrip,
+    }
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify(session))
+  } catch { /* private mode: the visit lives in memory only */ }
 }
 
-/** Why a link's custom range is not the one it asked for (linkRangeNotice).
- *  A notification's day has its own strip, drawn from the selection
- *  (selection linkDayNotice) for as long as it is on screen. */
-function linkNote(url: ReturnType<typeof rawFromSearch>, v: ViewState): string | null {
-  if (!todayOf) return null
-  return linkRangeNotice(url, v.sel, todayOf(v.sel.loja))
+function readStrip(): Note[] | null {
+  try {
+    const raw = sessionStorage.getItem(STRIP_KEY)
+    const v = raw ? JSON.parse(raw) as unknown : null
+    return Array.isArray(v) ? v.filter((n): n is Note => !!n && typeof (n as Note).code === 'string') : null
+  } catch { return null }
 }
 
-function storedRaw() {
-  try { return rawFromStorage(window.localStorage.getItem(STORAGE_KEY)) } catch { return {} }
+function writeStrip() {
+  try {
+    if (state?.transient.length) sessionStorage.setItem(STRIP_KEY, JSON.stringify(state.transient))
+    else sessionStorage.removeItem(STRIP_KEY)
+  } catch { /* private mode: the strip lives in memory only */ }
 }
 
-function persist(v: ViewState) {
-  try { window.localStorage.setItem(STORAGE_KEY, toStorage(v)) } catch { /* private mode: the URL still holds it */ }
-  const search = `?${toSearch(v)}`
-  if (window.location.search !== search) {
-    // replaceState: switching stores should not fill the back button. The
-    // state MUST be null: Next's router ignores a call that passes its own
-    // history state (`__NA`) and would later restore the URL it knows.
-    window.history.replaceState(null, '', `${window.location.pathname}${search}${window.location.hash}`)
-  }
+function writeSaved() {
+  if (!state) return
+  try { localStorage.setItem(SAVED_KEY, toStorage(state.saved)) } catch { /* ignore */ }
 }
 
-export function getView(): ViewState | null {
-  if (current === null && typeof window !== 'undefined') {
-    const url = rawFromSearch(window.location.search)
-    linkStoreMissing = unknownLinkStore(url, knownStore) !== null
-    current = resolveView(url, storedRaw(), knownStore, todayOf, todasRange())
-    linkRangeNote = linkNote(url, current)
-  }
-  return current
+function mirrorUrl() {
+  const url = state?.visit ? state.visit.url : '/m'
+  if (`${window.location.pathname}${window.location.search}` !== url) window.history.replaceState(null, '', url)
 }
 
-export const getServerView = (): ViewState | null => null
+function navType(): NavType {
+  try {
+    const e = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined
+    const t = e?.type
+    return t === 'navigate' || t === 'reload' || t === 'back_forward' || t === 'prerender' ? t : 'unknown'
+  } catch { return 'unknown' }
+}
 
-export function subscribeView(cb: () => void): () => void {
+function open(url: string, fromSwMessage: boolean, persisted = false) {
+  if (!viewer) return
+  const saved = readSaved(localStorage.getItem(SAVED_KEY), localStorage.getItem(LEGACY_SAVED_KEY), viewer)
+  session = readSession()
+  const opened = openApp({
+    url, navType: navType(), fromSwMessage, persisted, session, saved: saved.saved, viewer, now: deviceNow(), newId,
+    strip: readStrip(),
+  })
+  // One strip for the open: the saved view's own fallback and the link's.
+  state = { ...opened.state, transient: [...saved.notes, ...opened.state.transient] }
+  if (saved.migrated || saved.notes.length) writeSaved()
+  writeSession()
+  writeStrip()
+  mirrorUrl()
+  notify()
+}
+
+/** Set the store facts (from the page, then from every answer, R19). The
+ *  first call opens the app from the current URL. A changed version applies
+ *  R16's facts rows (a saved store archived → Todas; a visit store gone…). */
+export function setFacts(next: ViewerStores): void {
+  const prev = viewer
+  const changed = !!prev && prev.version !== next.version
+  viewer = next
+  if (!prev) { open(`${window.location.pathname}${window.location.search}`, false); return }
+  // R19: adopt, apply R16's facts rows and name the change (stores_changed).
+  if (changed) dispatch({ type: 'facts', change: factsChange(prev, next) })
+}
+
+export function getFacts(): ViewerStores | null {
+  return viewer
+}
+
+export function getState(): PhoneState | null {
+  return state
+}
+
+export const getServerState = (): PhoneState | null => null
+
+export function subscribe(cb: () => void): () => void {
   listeners.add(cb)
   return () => { listeners.delete(cb) }
 }
 
-export function setView(next: ViewState) {
-  current = normalise(next)
-  persist(current)
-  for (const l of listeners) l()
+/** The only writer after opening: an owner action (R16 transitions), with
+ *  its R4 strip computed by lib/period/phone act on the server-corrected
+ *  clock. */
+export function dispatch(action: PhoneAction): void {
+  if (!state || !viewer) return
+  const next = act(state, action, viewer, clientNow(), newId)
+  if (next === state) return
+  state = next
+  if (action.type !== 'storage') writeSaved()
+  writeSession()
+  writeStrip()
+  mirrorUrl()
+  notify()
 }
 
-/** Write the resolved view to the URL and storage once, after the first render. */
-export function persistCurrent() {
-  const v = getView()
-  if (v) persist(v)
+/** The service worker posted {type:'navigate', url}: always a fresh open (R17). */
+export function applySwNavigate(url: string): void {
+  open(url, true)
 }
 
-/** On the clock tick: row dates whose day is over give way to the preset (a
- *  "Hoje" keeps rolling to the new day), and a notification's period to the
- *  owner's own. Nothing else ever changes here. */
-export function revalidate() {
-  const v = getView()
-  if (v && normalise(v) !== v) setView(v)
+
+/** Re-read the saved view (another window changed it; or we resume). */
+export function rereadSaved(): void {
+  if (!viewer || !state) return
+  const saved = readSaved(localStorage.getItem(SAVED_KEY), null, viewer).saved
+  dispatch({ type: 'storage', saved })
 }
 
-/** Once: whether the launch URL named a store the owner cannot open, so the
- *  screen says it shows another store instead (as for a store gone 404). */
-export function takeLinkNotice(): boolean {
-  getView()
-  const missing = linkStoreMissing
-  linkStoreMissing = false
-  return missing
+/** visibilitychange → hidden. */
+export function markHidden(): void {
+  if (!session) return
+  session = { ...session, hiddenAt: deviceNow().toISOString() }
+  try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(session)) } catch { /* ignore */ }
 }
 
-/** Once: why the last link's custom range is not the one it asked for
- *  (selection linkRangeNotice), or null. The server never sees the uncut
- *  range, so its own rangeNote cannot say it. */
-export function takeLinkRangeNotice(): string | null {
-  getView()
-  const note = linkRangeNote
-  linkRangeNote = null
-  return note
+/**
+ * visibilitychange → visible / pageshow: a visit hidden for 30 minutes or more
+ * is gone (the expiry applies only to a restore, R16); the saved view is
+ * re-read (storage events fired while frozen are not replayed).
+ */
+export function markVisible(persisted = false): void {
+  if (persisted) { open(`${window.location.pathname}${window.location.search}`, false, true); return }
+  if (session?.hiddenAt && state?.visit && visitExpired(session, deviceNow())) {
+    dispatch({ type: 'expire' })
+  } else if (session) {
+    session = { ...session, hiddenAt: null, lastSeenAt: deviceNow().toISOString() }
+    try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(session)) } catch { /* ignore */ }
+  }
+  rereadSaved()
 }
 
-/** A notification tap on an open app: the service worker could not navigate
- *  it, so it posts the URL; take its loja/periodo/aba over the current view.
- *  Returns true when the URL's store could not be opened (the current one
- *  stays, and the screen must say so). */
-export function applyUrl(url: string): boolean {
-  let u: URL
-  try { u = new URL(url, window.location.origin) } catch { return false }
-  if (u.origin !== window.location.origin) return false
-  const base = getView()
-  const raw = rawFromSearch(u.search)
-  const next = resolveView(raw, base ? JSON.parse(toStorage(base)) : storedRaw(), knownStore, todayOf, todasRange())
-  linkRangeNote = linkNote(raw, next)
-  setView(next)
-  return unknownLinkStore(raw, knownStore) !== null
+/** Every 60 s while visible. */
+export function touch(): void {
+  if (!session) return
+  session = { ...session, lastSeenAt: deviceNow().toISOString() }
+  try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(session)) } catch { /* ignore */ }
 }

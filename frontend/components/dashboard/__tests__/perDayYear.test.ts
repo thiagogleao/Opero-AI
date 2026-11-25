@@ -7,7 +7,10 @@ import type { PageContext } from '@/lib/views/page'
 // "1 dez 2025 – 30 abr 2026"; today is 24 nov 2026.
 
 type Ctx = Pick<PageContext, 'today' | 'range' | 'comparison'>
-const cmp = (from: string, to: string) => ({ from, to, label: '', sameTimeOfDay: false })
+const cmp = (from: string, to: string) => ({
+  from, to, label: '', sameTimeOfDay: false, cutoffMinutes: null, noBase: false,
+  full: '', short: '', phrase: '', rangeText: '', cutText: null, none: null, partialBase: null, leftOut: [], fullBase: '', leftOutWhy: [],
+})
 
 describe('perDayRangeText', () => {
   const crossYear: Ctx = {

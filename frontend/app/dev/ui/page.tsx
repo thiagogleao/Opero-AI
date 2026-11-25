@@ -1,6 +1,7 @@
 import { notFound } from 'next/navigation'
 import { getPageContext, pageMetadata, type SearchParams } from '@/lib/views/page'
-import { buildPortfolio, type PortfolioView } from '@/lib/views/portfolio'
+import { buildPortfolioFor, type PortfolioView } from '@/lib/views/portfolio'
+import { preset } from '@/lib/period'
 import { buildVerdict, storeStatus, verdictInputFromPortfolio } from '@/lib/views/verdict'
 import { computeStorePnL } from '@/lib/engine/pnl'
 import { shiftDate, todayInTz } from '@/lib/engine/dates'
@@ -32,7 +33,7 @@ export const dynamic = 'force-dynamic'
 const NO_EXTRAS = { liveFeed: false, chargebackHealth: false, freshness: false } as const
 
 export default async function StyleguidePage({ searchParams }: { searchParams: Promise<SearchParams> }) {
-  const ctx = await getPageContext(searchParams)
+  const ctx = await getPageContext(searchParams, { path: '/dev/ui' })
   if (!ctx.isOwner) notFound()
 
   const byName = (n: string) => ctx.stores.find(st => st.shopName.toLowerCase() === n.toLowerCase())
@@ -45,11 +46,11 @@ export default async function StyleguidePage({ searchParams }: { searchParams: P
   const storeToday = todayInTz(store.timezone, ctx.now)
 
   const [main, todas, hibToday, glootyMonth, month, today, yesterday, prodPnl, quarter] = await Promise.all([
-    buildPortfolio([store], ctx.period, ctx.params.de, ctx.params.ate, ctx.now, { ...NO_EXTRAS, compareAs: ctx.comparePeriod }),
-    buildPortfolio(ctx.stores, 'today', null, null, ctx.now, NO_EXTRAS),
-    hib ? buildPortfolio([hib], 'today', null, null, ctx.now, NO_EXTRAS) : Promise.resolve(null),
+    buildPortfolioFor([store], ctx.selection.period, ctx.now, NO_EXTRAS, ctx.viewerStores),
+    buildPortfolioFor(ctx.stores, preset('today'), ctx.now, NO_EXTRAS, ctx.viewerStores),
+    hib ? buildPortfolioFor([hib], preset('today'), ctx.now, NO_EXTRAS, ctx.viewerStores) : Promise.resolve(null),
     // 30 days: Glooty has no cost settings and its ads passed its sales.
-    glooty ? buildPortfolio([glooty], '30d', null, null, ctx.now, NO_EXTRAS) : Promise.resolve(null),
+    glooty ? buildPortfolioFor([glooty], preset('30d'), ctx.now, NO_EXTRAS, ctx.viewerStores) : Promise.resolve(null),
     computeStorePnL(store.id, { from: shiftDate(storeToday, -30), to: storeToday }, {}, ctx.now),
     computeStorePnL(store.id, { from: storeToday, to: storeToday }, {}, ctx.now),
     computeStorePnL(store.id, { from: shiftDate(storeToday, -1), to: shiftDate(storeToday, -1) }, {}, ctx.now),

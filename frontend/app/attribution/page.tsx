@@ -1,12 +1,10 @@
 import { Suspense } from 'react'
 import Link from 'next/link'
-import { ALL_STORES, getPageContext, pageMetadata, type SearchParams } from '@/lib/views/page'
-import { anchorTz, resolveRange, todayInTz } from '@/lib/engine/dates'
-import { AppShell, PageHeader, PeriodNote, periodName } from '@/components/shell'
+import { getPageContext, pageMetadata, type SearchParams } from '@/lib/views/page'
+import { AppShell, PageHeader, PeriodHeading, PeriodNote } from '@/components/shell'
 import { Callout, EmptyState, SkeletonBlock } from '@/components/ui'
 import { AttributionReportSection, JourneySection } from '@/components/attribution/AttributionSections'
 import { MODEL_KEY, modelFromParam } from '@/components/attribution/model'
-import { allStoresWindow } from '@/components/attribution/allStoresLink'
 
 /**
  * /attribution — what Meta says it sold against what the store really sold,
@@ -22,7 +20,7 @@ export const dynamic = 'force-dynamic'
 
 export default async function AttributionPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
   const sp = await searchParams
-  const ctx = await getPageContext(sp, { scope: 'store' })
+  const ctx = await getPageContext(sp, { path: '/attribution', scope: 'store' })
   const model = modelFromParam(sp[MODEL_KEY])
   const store = ctx.store
 
@@ -40,24 +38,20 @@ export default async function AttributionPage({ searchParams }: { searchParams: 
   // Remount the streamed parts when the store, window or model changes, so
   // the skeleton shows instead of the previous store's numbers.
   const key = `${store.id}:${ctx.range.from}:${ctx.range.to}:${model}`
-  // Arriving with "Todas" (a sidebar link from an all-stores page): this page
-  // reads one store at a time, so say which one instead of switching silently.
-  const lojaParam = Array.isArray(sp.loja) ? sp.loja[0] : sp.loja
-  const fromAll = lojaParam === ALL_STORES
-  // Todas reads the period on its own clock (Brasília); Hibikura's dates travel
-  // as they are, so the link opens the days on screen. parte and a custom
-  // window ride along through hrefWith.
-  const allTz = anchorTz(ctx.stores.map(x => x.timezone))
-  const allClock = { range: resolveRange(ctx.period, allTz, null, null, ctx.now), today: todayInTz(allTz, ctx.now) }
-  const allStoresHref = ctx.hrefWith('/overview', { loja: ALL_STORES, ...allStoresWindow(ctx, allClock) })
+  // Arriving from Todas (`vem=todas`): this page reads one store at a time, so
+  // say which one. The link back is an R4 link (lib/period carry): the period
+  // travels as asked and Todas resolves it on its own clock, announcing the
+  // other dates on landing; null for a viewer without Todas (I-16).
+  const fromAll = ctx.cameFrom?.kind === 'all'
+  const allStoresHref = ctx.scopeHref('/overview', { kind: 'all' })
   return (
     <AppShell ctx={ctx}>
       <PageHeader
         ctx={ctx}
-        sub={<><b>Atribuição</b> · {periodName(ctx)} · <span className="num">{ctx.rangeLabel}</span></>}
+        sub={<><b>Atribuição</b> · <PeriodHeading ctx={ctx} /></>}
         halved={false}
       />
-      {fromAll && (
+      {fromAll && allStoresHref && (
         <Callout tone="neu" icon="store" title={`Mostrando a ${store.name}`}>
           A atribuição compara o Meta com a Shopify uma loja por vez. Escolha outra no seletor de loja, ou
           veja todas juntas em <Link href={allStoresHref}>Todas as lojas</Link>.

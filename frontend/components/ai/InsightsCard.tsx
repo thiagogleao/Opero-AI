@@ -88,10 +88,10 @@ function liveMessage(state: InsightsState): string {
  *  the time again as soon as it starts: a reading that arrives minutes after
  *  the card mounted must not show its age as of the mount. */
 function useNow(everyMs: number, active: boolean): number {
-  const [now, setNow] = useState(() => Date.now())
+  const [now, setNow] = useState(() => Date.now()) // clock-ok: relative "há N min" of an AI card, not a period
   useEffect(() => {
     if (!active) return
-    const tick = () => setNow(Date.now())
+    const tick = () => setNow(Date.now()) // clock-ok: relative time of an AI card, not a period
     const first = setTimeout(tick, 0)
     const t = setInterval(tick, everyMs)
     return () => { clearTimeout(first); clearInterval(t) }

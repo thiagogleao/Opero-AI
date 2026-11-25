@@ -7,16 +7,17 @@
  * and the period. Internal to the shell (AppShell builds the items).
  *
  * A click opens the page through the shell's navigation (./useShellNavigation):
- * a store or period still loading is kept (the link's page with the state
- * being opened, ./url onTopOfInFlight), and a picker used while this page
- * loads is laid on top of it. Ctrl/Cmd-click still opens a new tab with the
+ * the link's path (and its own scope, for an R4 link such as Resumo from
+ * Todas) laid over the latest requested URL at click time (lib/period layer,
+ * R13), so a store or period still loading is kept. Ctrl/Cmd-click still opens a new tab with the
  * plain href (Link's onNavigate only runs for in-app navigation).
  */
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { Icon, type IconName } from '@/components/ui/Icon'
-import { detailRoute, NAV_LAYER, onTopOfInFlight } from './url'
+import type { LayerLink } from '@/lib/period'
+import { detailRoute, layered } from './url'
 import { useShellNavigation } from './useShellNavigation'
 import s from './shell.module.css'
 
@@ -26,9 +27,12 @@ export interface NavItem {
   icon: IconName
   /** Path that marks it active: exact for "/", prefix for the others. */
   match: string
+  /** What the link changes (lib/period layer): its path, and its scope when
+   *  it opens another store or Todas. */
+  link: Extract<LayerLink, { kind: 'page' }>
 }
 
-export function NavLinks({ items }: { items: NavItem[] }) {
+export function NavLinks({ items, archivedIds = [] }: { items: NavItem[]; archivedIds?: readonly string[] }) {
   const pathname = usePathname() || '/'
   const nav = useShellNavigation()
   // A page of one object (/creatives/<ad>) lights the list it belongs to.
@@ -45,7 +49,7 @@ export function NavLinks({ items }: { items: NavItem[] }) {
           title={it.label}
           onNavigate={e => {
             e.preventDefault()
-            nav.push(onTopOfInFlight(it.href, NAV_LAYER.link))
+            nav.push(layered(it.link, archivedIds))
           }}
         >
           <Icon name={it.icon} size={16} />

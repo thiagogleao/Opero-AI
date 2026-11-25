@@ -13,6 +13,7 @@ import { eachDay, type DateRange } from '@/lib/engine/dates'
 import { formatDate, formatMoney, formatRangeLabel, formatRoas, plural } from '@/lib/format'
 import { adVerdictChip, ptText } from './text'
 import { dateBeside } from './storeStart'
+import { dateBeside as periodDateBeside } from '@/lib/period'
 
 const line = (...parts: (string | { text: string; strong?: boolean; tone?: 'pos' | 'neg' | 'warn' })[]): VerdictLine => {
   const ps = parts.map(p => (typeof p === 'string' ? { text: p } : p))
@@ -49,7 +50,7 @@ function verdictAgainstWindow(v: CreativeVerdict, windowProfit: number): string 
 /** The text after "não teve gasto": "hoje", "em 24 nov", "em 10–16 nov" —
  *  never "entre 24 nov e 24 nov". */
 export function noSpendWhen(range: DateRange, today: string): string {
-  if (range.from === range.to) return range.from === today ? 'hoje' : `em ${formatDate(range.from, today)}`
+  if (range.from === range.to) return range.from === today ? 'hoje' : `em ${periodDateBeside(range.from, { window: range, clockToday: today })}`
   return `em ${formatRangeLabel(range, today)}`
 }
 

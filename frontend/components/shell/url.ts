@@ -1,214 +1,26 @@
 /**
- * Client-side URL glue for the shell's pickers. The state keys (loja, periodo,
- * de, ate, volta, parte) are always computed on the SERVER by lib/views/page.ts
- * (ctx.hrefWith('', …) returns "?loja=…&periodo=…"), so the URL rules live in
- * one place; the client only merges that query with the page's own keys
- * (e.g. ?aba=criativos) and navigates. While a navigation is still loading,
- * the next choice is laid on top of the URL being opened (onTopOfInFlight),
- * so two quick choices add up instead of the second undoing the first.
+ * Client-side glue for the shell's controls. The URL rules themselves live in
+ * lib/period/url (desktopHref, layer, the four key lists): this file only keeps
+ * the URL being opened (the in-flight registry) and lays each control's change
+ * on top of it at click time (R13), so two quick choices add up instead of the
+ * second undoing the first.
  */
 
-/**
- * The page state: lib/views/page PageParams. `volta` (the preset that row
- * dates stand for) is one of them although only links set it, so that only the
- * server-built query decides whether it travels (buildHref drops it for a
- * period picked or another store). Copied from the current URL as a page key,
- * it stuck to the dates picked next: ?…&periodo=custom&de=…&ate=…&volta=today
- * opened "Hoje" instead of the dates (settleRowDates read them as stale row
- * dates), and it followed preset clicks and the store picker.
- */
-export const STATE_KEYS = ['loja', 'periodo', 'de', 'ate', 'volta', 'parte'] as const
-export type StateKey = (typeof STATE_KEYS)[number]
+import { layer, pickIsNoop as periodPickIsNoop, relayLink, type LayerLink, type ScopeRef } from '@/lib/period'
+import { pageScope as pageScopeOf } from '@/lib/period/url'
 
-const isStateKey = (k: string) => (STATE_KEYS as readonly string[]).includes(k)
-
-/**
- * Keys that report the result of one action (the OAuth round trips of
- * Shopify and Facebook) or that only exist to come back from it: `store` is
- * the old name of `loja` on those return URLs, `storeStartDate` rides along
- * from onboarding. They describe what just happened to ONE store, so they
- * never follow a picker: after linking Facebook on the MOKOO, picking Glooty
- * showed Glooty's Ajustes saying "Conta de anúncio ligada".
- */
-export const ONE_SHOT_KEYS = [
-  'shopify_connected', 'shopify_error', 'error', 'fb_connected', 'fb_extra_connected', 'fb_error', 'store', 'storeStartDate',
-] as const
-
-/**
- * Keys that name an object of ONE store (a campaign id on Campanhas →
- * Criativos, and that list's "mostrar todos"). Another store has no such
- * campaign, so the store picker drops them like the one-shot keys; the period
- * picker keeps them (same store). Carried along, the MOKOO's ?campanha= opened
- * EPOCH on "Filtro de campanha de outra loja", and picking the MOKOO again
- * brought the old filter back without anyone asking for it.
- */
-export const STORE_SCOPED_KEYS = ['campanha', 'mostrar'] as const
-
-/**
- * Pages that show one object of one store (an ad). Another store has no such
- * object, so picking another store opens the list the object belongs to (with
- * the state kept), and the sidebar lights that list's item. Reloading the same
- * path under ?loja=<other> was a 404.
- */
-export const DETAIL_ROUTES: readonly { prefix: string; list: string; nav: string }[] = [
-  { prefix: '/creatives/', list: '/campaigns?aba=criativos', nav: '/campaigns' },
-]
-
-export function detailRoute(pathname: string): (typeof DETAIL_ROUTES)[number] | null {
-  return DETAIL_ROUTES.find(r => pathname.startsWith(r.prefix)) ?? null
-}
-
-/** `stateQuery` ("?loja=x&periodo=today" or "") wins for the state keys; any
- *  other key of the current URL is kept, except the one-shot result flags.
- *  Returns "" or "?…". */
-export function mergeQuery(stateQuery: string, currentSearch: string): string {
-  const out = new URLSearchParams(stateQuery.startsWith('?') ? stateQuery.slice(1) : stateQuery)
-  const cur = new URLSearchParams(currentSearch.startsWith('?') ? currentSearch.slice(1) : currentSearch)
-  for (const [k, v] of cur) {
-    if ((STATE_KEYS as readonly string[]).includes(k) || (ONE_SHOT_KEYS as readonly string[]).includes(k)) continue
-    if (!out.has(k)) out.set(k, v)
-  }
-  const qs = out.toString()
-  return qs ? `?${qs}` : ''
-}
-
-/** Path + merged query, for router.push. */
-export function hrefFor(pathname: string, stateQuery: string): string {
-  const search = typeof window === 'undefined' ? '' : window.location.search
-  return `${pathname}${mergeQuery(stateQuery, search)}`
-}
-
-/**
- * Where the store picker goes from `pathname` with the server-built
- * `stateQuery` of the chosen store: the same page with its own keys (minus
- * STORE_SCOPED_KEYS), or, on a detail page (DETAIL_ROUTES), the list it
- * belongs to with the list's keys. `currentSearch` defaults to the browser's.
- */
-export function storeSwitchHref(pathname: string, stateQuery: string, currentSearch?: string): string {
-  const d = detailRoute(pathname)
-  if (d) {
-    const q = d.list.indexOf('?')
-    return q < 0 ? `${d.list}${mergeQuery(stateQuery, '')}` : `${d.list.slice(0, q)}${mergeQuery(stateQuery, d.list.slice(q))}`
-  }
-  const search = currentSearch ?? (typeof window === 'undefined' ? '' : window.location.search)
-  const cur = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search)
-  for (const k of STORE_SCOPED_KEYS) cur.delete(k)
-  return `${pathname}${mergeQuery(stateQuery, cur.toString())}`
-}
-
-/**
- * Pages that always show ONE store (their getPageContext scope is 'store').
- * Opened with ?loja=todas they show the remembered store and only CARRY Todas
- * in their links (lib/views/page carriedLoja), so on these paths a URL's
- * loja=todas does not mean Todas is on screen. Each entry covers its subpaths
- * ('/' only itself). __tests__/url.test.ts checks the list against every
- * page's own scope, so a page that changes scope fails the test.
- */
-export const STORE_ONLY_ROUTES: readonly string[] = ['/', '/attribution', '/creatives', '/facebook', '/profit', '/settings']
+export {
+  DETAIL_ROUTES, detailRoute, STORE_ONLY_ROUTES, STATE_KEYS, ONE_SHOT_KEYS, LEGACY_KEYS, PAGE_KEYS, pageScope,
+} from '@/lib/period/url'
 
 export function isStoreOnlyPath(pathname: string): boolean {
-  return STORE_ONLY_ROUTES.some(r => (r === '/' ? pathname === '/' : pathname === r || pathname.startsWith(`${r}/`)))
+  return pageScopeOf(pathname) === 'store'
 }
 
-/**
- * Whether picking `pickedId` in the store picker changes nothing. A store
- * counts as the current choice only when the URL names it: on a one-store
- * page opened from Todas (`carriedId` 'todas', lib/views/page carriedLoja) the
- * store on screen can still be picked, which pins it and ends the Todas the
- * sidebar was carrying. "Todas as lojas" is compared with what is shown, so
- * from there it still opens /overview.
- *
- * `openingHref` (navigationInFlight(): the URL of a navigation still loading,
- * null when nothing loads) wins over both, read by the same rule: its loja is
- * the choice, except that loja=todas on a one-store page (STORE_ONLY_ROUTES)
- * only carries Todas. That page will show a store, so every entry still
- * navigates — "Todas as lojas" opens /overview, a store pins it — exactly as
- * once it has landed. Reading the bare loja instead, "Todas as lojas" picked
- * while "Ontem" loaded on a Resumo opened from Todas (the period picker's URL
- * carries loja=todas) did nothing, and the Resumo landed still on the MOKOO.
- */
-export function pickIsNoop(pickedId: string, currentId: string, carriedId?: string, openingHref?: string | null): boolean {
-  if (openingHref != null) {
-    const u = new URL(openingHref, 'http://x')
-    const loja = u.searchParams.get('loja')
-    if (loja === 'todas' && isStoreOnlyPath(u.pathname)) return false
-    // A URL without loja shows the remembered store, never Todas.
-    if (pickedId === 'todas') return loja === 'todas'
-    return pickedId === (loja ?? currentId)
-  }
-  if (pickedId === 'todas') return currentId === 'todas'
-  return pickedId === (carriedId ?? currentId)
-}
-
-// ─── A choice made while another one is still loading ────────────────────────
-//
-// Every control builds its URL from the state ON SCREEN (the server-built
-// queries above). A page takes seconds to render, and a second control used
-// meanwhile replaced the first navigation with a URL that still carried the
-// old value of the first choice: Hibikura picked, then "7 dias" clicked while
-// it said "abrindo…", opened EPOCH · 7 dias. So the shell remembers the URL
-// it is opening, and a control used before it lands lays its own change on
-// top of that URL instead of on the screen's.
-
-/**
- * What a control changes in a navigation:
- *  keys  the state keys it sets (the others come from the URL being opened);
- *  page  who decides the page: 'target' — the control does (the store picker
- *        may open /overview or a creative's list; a sidebar link opens its
- *        page); 'base' — it stays on the page being opened (period, split).
- */
-export interface NavLayer {
-  keys: readonly StateKey[]
-  page: 'base' | 'target'
-}
-
-export const NAV_LAYER = {
-  store: { keys: ['loja'], page: 'target' },
-  period: { keys: ['periodo', 'de', 'ate', 'volta'], page: 'base' },
-  split: { keys: ['parte'], page: 'base' },
-  link: { keys: [], page: 'target' },
-} as const satisfies Record<string, NavLayer>
-
-/**
- * `target` (a URL built from the screen) rebuilt on top of `base` (the URL
- * being opened): the layer's keys from target, every other state key from
- * base, and the path, the page's own keys and the #hash from whichever owns
- * the page. A state key absent from its source stays absent (an absent
- * periodo is the default period). One-shot keys never survive.
- *
- * Row dates (volta, lib/views/page PageParams.volta) belong to the store they
- * were opened on: when the layer changes the store, the URL being opened gets
- * back the preset they stand for, as buildHref does on the server, so a store
- * picked while a Todas row's Hibikura page still loads opens on the owner's
- * preset and its URL never names Hibikura's dates.
- */
-export function layerHref(base: string, target: string, layer: NavLayer): string {
-  const b = new URL(base, 'http://x')
-  const t = new URL(target, 'http://x')
-  const page = layer.page === 'target' ? t : b
-  const out = new URLSearchParams()
-  for (const k of STATE_KEYS) {
-    const v = ((layer.keys as readonly string[]).includes(k) ? t : b).searchParams.get(k)
-    if (v !== null) out.set(k, v)
-  }
-  const volta = out.get('volta')
-  if (volta && out.get('loja') !== b.searchParams.get('loja')) {
-    out.set('periodo', volta)
-    out.delete('de'); out.delete('ate'); out.delete('volta')
-  }
-  for (const [k, v] of page.searchParams) {
-    if (isStateKey(k) || (ONE_SHOT_KEYS as readonly string[]).includes(k) || out.has(k)) continue
-    out.set(k, v)
-  }
-  const qs = out.toString()
-  return `${page.pathname}${qs ? `?${qs}` : ''}${page.hash}`
-}
 
 /**
  * How long a navigation counts as in flight at most. Only a safety net: the
- * control that started it clears it when it lands (useShellNavigation); this
- * keeps a navigation that never reported back (a redirect, a crash) from
- * steering a choice made minutes later.
+ * control that started it clears it when it lands (useShellNavigation).
  */
 export const IN_FLIGHT_TTL_MS = 120_000
 
@@ -216,33 +28,65 @@ let inFlight: { href: string; token: number; at: number } | null = null
 let lastToken = 0
 
 /** A control starts opening `href`; returns the token that ends it. */
-export function beginNavigation(href: string, now: number = Date.now()): number {
+export function beginNavigation(href: string, now: number = Date.now()): number { // clock-ok: in-flight TTL, not a period
   inFlight = { href, token: ++lastToken, at: now }
   return inFlight.token
 }
 
-/** The navigation of `token` landed (or its control left the screen). A
- *  token replaced by a newer navigation changes nothing. */
+/** The navigation of `token` landed (or its control left the screen). */
 export function endNavigation(token: number): void {
   if (inFlight?.token === token) inFlight = null
 }
 
 /** The URL being opened, or null when the screen is up to date. */
-export function navigationInFlight(now: number = Date.now()): string | null {
+export function navigationInFlight(now: number = Date.now()): string | null { // clock-ok: in-flight TTL, not a period
   if (inFlight && now - inFlight.at > IN_FLIGHT_TTL_MS) inFlight = null
   return inFlight?.href ?? null
 }
 
-/** `target` laid on top of the URL being opened (layerHref), or `target`
- *  itself when nothing is loading. */
-export function onTopOfInFlight(target: string, layer: NavLayer, now: number = Date.now()): string {
-  const base = navigationInFlight(now)
-  return base === null ? target : layerHref(base, target, layer)
+/** The latest REQUESTED URL: the one being opened, else the one on screen. */
+export function latestHref(): string {
+  const opening = navigationInFlight()
+  if (opening !== null) return opening
+  return typeof window === 'undefined' ? '/' : `${window.location.pathname}${window.location.search}`
+}
+
+/** The viewer's archived stores, registered by the shell (leaving one does
+ *  not carry its period, R4/R10). */
+let archived: readonly string[] = []
+export function registerArchived(ids: readonly string[]): void {
+  archived = ids
+}
+
+/** `link` applied over the latest requested URL (lib/period layer). */
+export function layered(link: LayerLink, archivedIds: readonly string[] = archived): string {
+  return layer(latestHref(), link, { archivedIds, inFlight: navigationInFlight() !== null })
+}
+
+/** The URL on screen (the page whose links are being clicked). */
+function shownHref(): string {
+  return typeof window === 'undefined' ? '/' : `${window.location.pathname}${window.location.search}`
+}
+
+/**
+ * A rendered period-aware href (a Todas row, a tab, an in-page drill-down)
+ * applied over the latest requested URL at click time (lib/period relayLink +
+ * layer, R13): a period, split or store still loading is kept. An href that
+ * is not a desktop page link is returned as written.
+ */
+export function relayed(href: string): string {
+  const link = relayLink(href, shownHref(), { archivedIds: archived })
+  return link ? layered(link) : href
+}
+
+/** Picking `scope` changes nothing (lib/period pickIsNoop on the latest URL). */
+export function pickIsNoop(scope: ScopeRef): boolean {
+  return periodPickIsNoop(scope, latestHref())
 }
 
 /** A state key of the URL being opened: its value, null when that URL has
- *  none (for periodo: the default period), undefined when nothing is loading. */
-export function inFlightParam(key: StateKey, now: number = Date.now()): string | null | undefined {
+ *  none, undefined when nothing is loading. */
+export function inFlightParam(key: string, now: number = Date.now()): string | null | undefined { // clock-ok: in-flight TTL
   const base = navigationInFlight(now)
   return base === null ? undefined : new URL(base, 'http://x').searchParams.get(key)
 }

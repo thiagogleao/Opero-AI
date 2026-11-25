@@ -14,7 +14,11 @@
  */
 
 import type { ChargebackHealth, DisputeStatusCounts } from '@/lib/adjustments'
-import { formatCount, formatDate } from '@/lib/format'
+import { formatCount } from '@/lib/format'
+
+/** An archived store's archive instant as lib/period archiveMoment says it
+ *  ("10 nov", "09h02"); day null when unknown. */
+export interface ArchivedAt { day: string | null; time?: string | null }
 
 type Counts = Pick<ChargebackHealth, 'open' | 'lost' | 'won' | 'prevented' | 'other'>
 
@@ -58,7 +62,7 @@ export function rateWithoutPrevented(h: Pick<ChargebackHealth, 'count' | 'orders
  * caveat. "Situação hoje: 10 em aberto" sat right above "Até 10 nov, quando a
  * loja foi arquivada…" in the same block.
  */
-export function windowStatusText(c: DisputeStatusCounts, archived?: { on: string | null; today: string } | null): string | null {
+export function windowStatusText(c: DisputeStatusCounts, archived?: ArchivedAt | null): string | null {
   const parts = [
     c.open > 0 ? `${formatCount(c.open)} em aberto` : null,
     c.lost > 0 ? word(c.lost, 'perdida', 'perdidas') : null,
@@ -68,7 +72,7 @@ export function windowStatusText(c: DisputeStatusCounts, archived?: { on: string
   const free = `não ${c.won === 1 ? 'custa' : 'custam'} nada`
   if (!parts.length) return c.won > 0 ? `${word(c.won, 'disputa ganha', 'disputas ganhas')} no período: ${free}.` : null
   const asOf = !archived ? 'Situação hoje'
-    : archived.on ? `Situação em ${formatDate(archived.on, archived.today)}, quando a loja foi arquivada` : 'Situação quando a loja foi arquivada'
+    : archived.day ? `Situação em ${archived.day}${archived.time ? ` às ${archived.time}` : ''}, quando a loja foi arquivada` : 'Situação quando a loja foi arquivada'
   const moved = archived && c.open > 0 ? ` O estado ${c.open === 1 ? 'da aberta' : 'das abertas'} pode ter mudado desde então.` : ''
   return `${asOf}: ${parts.join(' · ')}.${c.won > 0 ? ` Mais ${word(c.won, 'ganha', 'ganhas')}, que ${free}.` : ''}${moved}`
 }
