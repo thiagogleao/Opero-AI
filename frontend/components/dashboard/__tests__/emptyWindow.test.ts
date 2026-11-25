@@ -132,13 +132,15 @@ describe('frozenVerdict', () => {
 describe('StoreKpis with an empty window', () => {
   const ctx = { rangeLabel: '1–31 out' } as unknown as PageContext
   const html = renderToStaticMarkup(createElement(StoreKpis, {
-    ctx, summary: {} as unknown as StoreSummary, empty: { kind: 'before_start', firstSale: '7 nov' },
+    ctx, summary: {} as unknown as StoreSummary, band: { comparison: null }, empty: { kind: 'before_start', firstSale: '7 nov' },
   }))
   it('shows "—" and the reason on every card, with no $0 and no "nenhum pedido"', () => {
-    expect(html.match(/a loja ainda não vendia \(1ª venda em 7 nov\)/g)).toHaveLength(7)
+    // Six cards since the numbers-first Resumo: the totals (receita, pedidos,
+    // margem, ROAS) moved to the number band; "Por dia e por pedido" keeps the rest.
+    expect(html.match(/a loja ainda não vendia \(1ª venda em 7 nov\)/g)).toHaveLength(6)
     expect(html).not.toContain('$0')
     expect(html).not.toContain('nenhum pedido no período')
-    expect(html).toContain('Receita')
-    expect(html).toContain('Margem e lucro por pedido')
+    expect(html).toContain('Receita por dia')
+    expect(html).toContain('Lucro por pedido')
   })
 })

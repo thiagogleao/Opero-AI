@@ -3,16 +3,21 @@ import { getPageContext, pageMetadata, type PageContext, type SearchParams } fro
 import { buildPortfolio } from '@/lib/views/portfolio'
 import { shiftDate } from '@/lib/engine/dates'
 import { computeStorePnL, type StorePnL } from '@/lib/engine/pnl'
-import { formatRangeLabel, formatMoney } from '@/lib/format'
+import Link from 'next/link'
+import { formatCount, formatRangeLabel, formatMoney, formatRoas, plural } from '@/lib/format'
+import { storeRoas, type Verdict } from '@/lib/views/verdict'
+import { adChannelOf } from '@/lib/views/adChannel'
+import { detailsOf, roasChannelTag, statusChipsOf, type BandTile } from '@/lib/views/numberBand'
+import { DetailPara, NumberBandView, PeriodDetails, pageTile, roasPageTile } from '@/components/numbers'
 import { listStores, type StoreRef } from '@/lib/access'
 import { getAlertConfig } from '@/lib/alerts'
 import { getSharedAdAccounts, getSharedAdAccountsForStore } from '@/lib/attribution'
 import { decisionWindows, getCampaignReport, getMetaSpendSpan, getOwnAttribution, getStoreCampaignName, type CampaignReport } from '@/lib/data/campaigns'
 import { getCreativesReport } from '@/lib/data/creatives'
 import type { ScaleThresholds } from '@/lib/campaignSignal'
-import { AppShell, PageHeader, PeriodNote } from '@/components/shell'
-import { Block, Callout, EmptyState, ErrorState, RoasGauge, SkeletonBlock, Tabs, VerdictCard } from '@/components/ui'
-import { attributedRoasNote, buildAdsVerdict, type MetaHistory } from '@/components/campaigns/adsVerdict'
+import { AppShell, PageHeader, periodNoteText } from '@/components/shell'
+import { Block, Callout, Card, EmptyState, ErrorState, SkeletonBlock, Tabs } from '@/components/ui'
+import { attributedRoasNote, buildAdsVerdict, type MetaHistory, type Reconciliation } from '@/components/campaigns/adsVerdict'
 import { ReconciliationLedger } from '@/components/campaigns/ReconciliationLedger'
 import { ScaleRoom } from '@/components/campaigns/ScaleRoom'
 import { CampaignTable } from '@/components/campaigns/CampaignTable'
@@ -22,6 +27,7 @@ import { sharedCampaignsNote } from '@/components/campaigns/text'
 import { noSpendWhen } from '@/components/campaigns/creativeVerdict'
 import { BilledElsewhere } from '@/components/campaigns/BilledElsewhere'
 import { PortfolioAdsTable, SharedAccountsCallout, buildPortfolioAdsVerdict } from '@/components/campaigns/PortfolioAds'
+import { portfolioAttribution } from '@/components/campaigns/portfolioAdsModel'
 import { storeMarginFromPnL } from '@/components/campaigns/margin'
 import { loadFirstSale } from '@/components/campaigns/firstSale'
 import { loadArchivedStore, type ArchivedStoreInput } from '@/components/dashboard/archivedStore'
@@ -86,7 +92,8 @@ async function StoreCampaigns({ ctx, store, tab, campaignId, showAll }: {
   // The days actually read: an archived store's window stops at its archive day.
   const readLabel = ctx.readRange ? formatRangeLabel(ctx.readRange, ctx.today) : ctx.rangeLabel
   const sameWindow = ctx.range.from === decision.window.from && ctx.range.to === decision.window.to
-  const header = <PageHeader ctx={ctx} title={`Campanhas · ${store.name}`} />
+  // One header for every path (error, empty, the page): the period ⓘ on all.
+  const header = <PageHeader ctx={ctx} title={`Campanhas · ${store.name}`} periodInfo />
 
   let pnl: StorePnL | null, report: CampaignReport, decisionReport: CampaignReport, storeNames: Map<string, string>
   let firstSale: BeforeStartInput | null
@@ -164,25 +171,67 @@ async function StoreCampaigns({ ctx, store, tab, campaignId, showAll }: {
   const ownValue = report.campaigns.filter(c => !c.shared).reduce((t, c) => t + c.purchaseValue, 0)
   const margin = storeMarginFromPnL(ctx.range, pnl)
 
+  // ── The page row: numbers first, the ads verdict's prose in Detalhes.
+  const acts = decisionReport.totals.actions
+  const attributedRoas = ownSpend > 0 ? ownValue / ownSpend : null
+  const storeR = storeRoas(pnl.totals, report.configured)
+  const storeRoasTag = storeR ? roasChannelTag(pnl.totals, adChannelOf(pnl.totals)) : null
+  const roasNote = report.totals.spend > 0
+    ? attributedRoasNote({ sharedSpend: shared.reduce((t, c) => t + c.spend, 0), shopSpend: pnl.totals.shopSpend, credited: ownValue, storeRevenue: pnl.totals.revenue })
+    : null
+  const actionWindow = `ação: 7 dias fechados (${decisionLabel})`
+  const tiles = [
+    campaignsResultTile(verdict),
+    storeResultTile(reconciliation, ctx),
+    pageTile({
+      slot: 'receita', label: 'Gasto no Meta', value: formatMoney(report.totals.spend), raw: report.totals.spend,
+      subs: [{ text: `${formatCount(report.totals.campaigns)} ${report.totals.campaigns === 1 ? 'campanha' : 'campanhas'}` }],
+      info: 'Gasto no Meta das campanhas desta loja no período.',
+    }),
+    roasPageTile({
+      slot: 'pedidos', label: 'ROAS atribuído × empate', roas: attributedRoas,
+      facts: { breakEven: report.breakEvenRoas, configured: report.configured, revenue: pnl.totals.revenue, contribution: pnl.totals.contribution },
+      // Without spend there is no note to give, but the tile still says what it measures.
+      info: roasNote ?? 'Vendas que o Meta credita às campanhas desta loja ÷ o gasto delas no Meta, contra o empate da loja. Sem gasto no Meta no período, não há ROAS para medir.',
+    }),
+    roasPageTile({
+      slot: 'anuncios', label: `${storeR?.label ?? 'ROAS da loja'} × empate`, roas: storeR?.roas ?? null,
+      facts: { breakEven: storeR?.breakEven ?? null, configured: report.configured, revenue: pnl.totals.revenue, contribution: pnl.totals.contribution, reason: storeR?.reason ?? null },
+      // The Resumo tile's channel tag ("só Meta" when Shopify spend sits outside).
+      tags: storeRoasTag ? [storeRoasTag] : undefined,
+      info: `Receita da loja (todas as vendas) ÷ gasto em anúncios, como no Resumo. ${storeR?.explain ?? ''}`.trim(),
+    }),
+    pageTile({
+      slot: 'roas', label: 'Ações · 7 dias fechados',
+      value: consultOnly ? '—' : `${formatCount(acts.cortar)} cortar`, tone: consultOnly ? 'mut' : acts.cortar > 0 ? 'neg' : 'neu',
+      subs: consultOnly
+        ? [{ text: 'loja arquivada: sem ações', tone: 'mut' }]
+        : [{ text: `${formatCount(acts.escalar)} escalar · ${formatCount(acts.observar)} observar` }, { text: `${formatCount(acts.manter)} manter` }],
+      tags: [{ code: 'janela_acao', label: decisionLabel, tone: 'info', icon: 'clock', info: `As ações são julgadas nos últimos 7 dias fechados (${decisionLabel}), seja qual for o período escolhido acima; o dinheiro dos outros números é do período escolhido.` }],
+      info: `${actionWindow}. Cortar, escalar, observar e manter são as decisões das campanhas nesses dias.`,
+    }),
+  ]
+  const status = statusChipsOf(verdict)
+  if (sharedNote) status.push({ code: 'campanhas_compartilhadas', label: 'campanhas compartilhadas', tone: sharedNote.tone === 'warn' ? 'warn' : 'neu', info: `${sharedNote.title} ${sharedNote.text}` })
+  const periodText = periodNoteText(ctx)
+  const det = detailsOf(verdict, roasNote)
+
   return (
     <AppShell ctx={ctx}>
       {header}
-      <PeriodNote ctx={ctx} />
-      {sharedNote && (
-        <Callout tone={sharedNote.tone} title={sharedNote.title}>{' '}{sharedNote.text}</Callout>
-      )}
-      <VerdictCard
-        verdict={verdict}
-        headingLevel="h2"
-        aside={<ReconciliationLedger rec={reconciliation} rangeLabel={readLabel} split={ctx.split} elsewhere={billedElsewhere} why={why} />}
-        footer={report.totals.spend > 0 ? (
-          <div>
-            <RoasGauge roas={ownSpend > 0 ? ownValue / ownSpend : null} breakEven={report.breakEvenRoas} configured={report.configured}
-              revenue={pnl.totals.revenue} contribution={pnl.totals.contribution} label="ROAS atribuído" />
-            <p className={s.small}>{attributedRoasNote({ sharedSpend: shared.reduce((t, c) => t + c.spend, 0), shopSpend: pnl.totals.shopSpend, credited: ownValue, storeRevenue: pnl.totals.revenue })}</p>
-          </div>
-        ) : undefined}
+      <NumberBandView
+        tiles={tiles} status={status} costsHref={ctx.hrefWith('/profit')} ariaLabel="Números das campanhas"
+        tileExtra={reconciliation.bridge ? { margem: <Link className={s.small} href={ctx.hrefWith('/')}>Resumo →</Link> } : undefined}
+        details={
+          <PeriodDetails details={det} extraCount={(periodText ? 1 : 0) + (sharedNote ? 1 : 0)}>
+            {periodText && <DetailPara>{periodText}</DetailPara>}
+            {sharedNote && <Callout tone={sharedNote.tone} title={sharedNote.title}>{' '}{sharedNote.text}</Callout>}
+          </PeriodDetails>
+        }
       />
+      <Card className={s.recCard} as="section" aria-label="Das campanhas ao lucro da loja">
+        <ReconciliationLedger rec={reconciliation} rangeLabel={readLabel} split={ctx.split} elsewhere={billedElsewhere} why={why} />
+      </Card>
       <BilledElsewhere rows={report.billedElsewhere} storeName={store.name} rangeLabel={ctx.rangeLabel} hrefFor={id => otherStoreHref(ctx, id)} />
       {!consultOnly && <ScaleRoom report={decisionReport} windowLabel={decisionLabel} costsHref={ctx.hrefWith('/profit')} split={ctx.split} tableHasRows={report.campaigns.length > 0} why={decisionWhy} />}
       <Tabs
@@ -194,16 +243,82 @@ async function StoreCampaigns({ ctx, store, tab, campaignId, showAll }: {
         ]}
       />
       <Suspense key={`${tab}:${campaignId ?? ''}:${showAll}`} fallback={<SkeletonBlock lines={6} height={260} />}>
-        <TabContent ctx={ctx} store={store} tab={tab} report={report} campaignId={campaignId} showAll={showAll} storeNames={storeNames} margin={margin} why={why} />
+        <TabContent ctx={ctx} store={store} tab={tab} report={report} campaignId={campaignId} showAll={showAll} storeNames={storeNames} margin={margin} why={why} actionLabel={decisionLabel} />
       </Suspense>
     </AppShell>
   )
 }
 
-async function TabContent({ ctx, store, tab, report, campaignId, showAll, storeNames, margin, why }: {
+/**
+ * Tile 1: the ads verdict's own number, worded by its basis. With costs it is
+ * the campaigns' estimate (attribution × margin − spend); without costs the
+ * verdict's amount is the store's revenue − ads, never an estimate.
+ */
+function campaignsResultTile(verdict: Verdict): BandTile {
+  const none = verdict.amount === null
+  const value = verdict.amount === null ? '—' : formatMoney(verdict.amount)
+  const tone = none ? 'mut' : verdict.amountTone
+  if (verdict.basis === 'revenue_minus_ads') {
+    return pageTile({
+      slot: 'lucro', label: 'Receita − anúncios', value, raw: verdict.amount, tone,
+      tags: [{ code: 'sem_custos', label: 'sem custos', tone: 'cfg', info: 'Sem o custo dos produtos não há margem para estimar o lucro das campanhas: este número é vendas da loja − anúncios, que não é lucro.' }],
+      subs: [{ text: verdict.amountCaption, tone: 'mut' }],
+      info: 'Vendas da loja − gasto em anúncios (Meta e Anúncios Shopify), sem o custo dos produtos. Configure os custos para ver o lucro estimado das campanhas. Na visão de sócio, a sua parte.',
+    })
+  }
+  return pageTile({
+    slot: 'lucro', label: 'Lucro estimado das campanhas', value, raw: verdict.amount, tone,
+    tags: none ? [] : [{ code: 'estimado', label: 'estimado · atribuição do Meta', tone: 'neu', info: `${verdict.amountCaption}. Vendas que o Meta atribui às campanhas × a margem da loja − o gasto: uma estimativa, não o lucro real da loja.` }],
+    subs: none ? [{ text: verdict.amountCaption, tone: 'mut' }] : [],
+    info: 'Vendas atribuídas pelo Meta às campanhas desta loja × a margem da loja − o gasto no Meta. Na visão de sócio, a sua parte.',
+  })
+}
+
+/**
+ * Tile 2: the reconciliation ledger's final row, as the ledger prints it.
+ * With a bridge: "Lucro real da loja" (the Resumo's number). Without one:
+ * "Vendas − anúncios", "—" when the window had neither sales nor ad spend
+ * (never a $0 the Resumo lacks), and — without costs, where that row is tile
+ * 1's number — the ledger's other half, what Meta credits.
+ */
+function storeResultTile(rec: Reconciliation, ctx: PageContext): BandTile {
+  if (rec.bridge) {
+    const v = ctx.part(rec.bridge.storeProfit)
+    return pageTile({
+      slot: 'margem', label: 'Lucro real da loja', value: formatMoney(v), raw: v, tone: v < 0 ? 'neg' : 'pos',
+      subs: [{ text: `o número do Resumo${ctx.split ? ' · sua parte' : ''}` }],
+      info: 'O lucro da loja inteira no período, de todas as vendas e todos os custos (Anúncios Shopify e custos fixos incluídos). O quadro abaixo liga um ao outro.',
+    })
+  }
+  const empty = rec.orders === 0 && rec.storeRevenue <= 0 && Math.abs(rec.revenueMinusAds) < 0.005
+  if (empty) {
+    return pageTile({
+      slot: 'margem', label: 'Vendas − anúncios', value: '—', tone: 'mut',
+      subs: [{ text: 'nenhuma venda nem gasto em anúncios', tone: 'mut' }],
+      info: 'Sem vendas e sem gasto em anúncios na janela, não há resultado a ligar ao da loja. Reembolsos e chargebacks do período estão no Resumo.',
+    })
+  }
+  if (!rec.configured) {
+    return pageTile({
+      slot: 'margem', label: 'Creditado pelo Meta', value: formatMoney(rec.credited), raw: rec.credited, tone: 'neu',
+      subs: [{ text: `de ${formatMoney(rec.storeRevenue)} vendidos na loja` }],
+      info: 'Vendas que o Meta credita às campanhas desta loja, contra o que a loja vendeu de verdade (as duas barras do quadro abaixo). Sem custos, não há margem para transformar isso em lucro estimado.',
+    })
+  }
+  return pageTile({
+    slot: 'margem', label: 'Vendas − anúncios', value: formatMoney(rec.revenueMinusAds), raw: rec.revenueMinusAds,
+    tone: rec.revenueMinusAds < 0 ? 'neg' : 'neu',
+    subs: [{ text: 'sem vendas, não há margem para estimar', tone: 'mut' }],
+    info: 'A última linha do quadro abaixo: vendas da loja − anúncios (Meta e Anúncios Shopify), da loja inteira.',
+  })
+}
+
+async function TabContent({ ctx, store, tab, report, campaignId, showAll, storeNames, margin, why, actionLabel }: {
   ctx: PageContext; store: StoreRef; tab: 'campanhas' | 'criativos'; report: CampaignReport
   campaignId: string | null; showAll: boolean; storeNames: Map<string, string>; margin: ReturnType<typeof storeMarginFromPnL>
   why: EmptyWindowText | null
+  /** The 7 closed days the actions are judged on ("18–24 nov"). */
+  actionLabel: string
 }) {
   // A campaign filter only applies to the creatives tab. It stays on even when
   // the campaign has no row in this window (a period change keeps ?campanha=)
@@ -245,6 +360,7 @@ async function TabContent({ ctx, store, tab, report, campaignId, showAll, storeN
   return (
     <Block
       title="Campanhas no Meta"
+      eyebrow={`ação: 7 dias fechados (${actionLabel})`}
       howTo={`Gasto, vendas atribuídas e lucro estimado em ${ctx.rangeLabel}; o veredito e a tendência olham os últimos 7 dias fechados. Abra uma campanha para ver conjuntos e anúncios.`}
       info={report.formula}
       flush
@@ -308,7 +424,7 @@ function otherStoreHref(ctx: PageContext, storeId: string): string | null {
 }
 
 async function AllStores({ ctx }: { ctx: PageContext }) {
-  const header = <PageHeader ctx={ctx} title="Campanhas · todas as lojas" halved={false} />
+  const header = <PageHeader ctx={ctx} title="Campanhas · todas as lojas" halved={false} periodInfo />
   const names = new Map(ctx.selected.map(x => [x.id, x.name]))
   const loaded = await Promise.all([
     buildPortfolio(ctx.selected, ctx.resolution, { liveFeed: false, chargebackHealth: false, freshness: false }, ctx.viewerStores),
@@ -333,12 +449,56 @@ async function AllStores({ ctx }: { ctx: PageContext }) {
     stores: view.stores, attribution, pairs, rangeLabel: ctx.rangeLabel, periodPhrase: ctx.periodPhrase, partialLabel: ctx.partialLabel, split: ctx.split,
     range: ctx.range,
   })
+  // ── The page row: the ads verdict's own numbers (its amount is the Meta
+  // spend, its totals the stores' sum) and the attribution sum its sentence
+  // uses — no arithmetic in the page.
+  const shopSpend = verdict.totals.shopSpend
+  const shopStores = view.stores.filter(r => r.totals.shopSpend > 0).map(r => r.name)
+  const att = portfolioAttribution(view.stores, attribution)
+  const tiles = [
+    pageTile({
+      slot: 'lucro', label: 'Gasto no Meta',
+      value: verdict.amount === null ? '—' : formatMoney(verdict.amount), raw: verdict.amount, tone: verdict.amount === null ? 'mut' : 'neu',
+      subs: [{ text: verdict.amountCaption, tone: verdict.amount === null ? 'mut' : undefined }],
+      info: 'Todo o gasto no Meta que a contabilidade das lojas carrega, inclusive campanhas de conta compartilhada.',
+    }),
+    pageTile({
+      slot: 'margem', label: 'Vendas creditadas', value: att ? formatMoney(att.ownValue) : '—', raw: att?.ownValue ?? null, tone: att ? 'neu' : 'mut',
+      subs: att ? [] : [{ text: 'a divisão por campanha não carregou', tone: 'mut' }],
+      info: 'O que o Meta credita às campanhas da própria loja, somado. Campanhas de conta compartilhada ficam fora.',
+    }),
+    pageTile({
+      slot: 'receita', label: 'ROAS atribuído', value: att && att.roas !== null ? formatRoas(att.roas) : '—',
+      raw: att?.roas ?? null, tone: att && att.roas !== null ? 'neu' : 'mut',
+      subs: [{ text: 'vendas creditadas ÷ gasto das campanhas próprias' }],
+      info: 'Vendas creditadas ÷ gasto das campanhas da própria loja, somando as lojas. Cada loja contra o próprio empate está na tabela.',
+    }),
+    pageTile({
+      slot: 'pedidos', label: 'Anúncios Shopify', value: formatMoney(shopSpend), raw: shopSpend, tone: shopSpend > 0 ? 'neu' : 'mut',
+      subs: [{ text: shopStores.length ? shopStores.join(', ') : 'nenhuma loja', tone: shopStores.length ? undefined : 'mut' }],
+      info: 'Shop Campaigns, cobrados na fatura da Shopify, fora do Meta.',
+    }),
+  ]
+  const status = statusChipsOf(verdict)
+  if (pairs.length) {
+    status.push({
+      code: 'conta_compartilhada', label: 'conta compartilhada', tone: 'warn',
+      info: `${pairs.map(p => `Anúncios pagos pela ${p.adStoreName} trouxeram ${plural(p.orders, 'pedido', 'pedidos')} (${formatMoney(p.revenue)}) da ${p.salesStoreName}`).join('; ')}. O gasto fica na loja dona da conta e as vendas na loja que vendeu: some as duas para julgar o resultado.`,
+    })
+  }
+  const periodText = periodNoteText(ctx)
   return (
     <AppShell ctx={ctx}>
       {header}
-      <PeriodNote ctx={ctx} />
-      <VerdictCard verdict={verdict} roas={false} />
-      <SharedAccountsCallout pairs={pairs} />
+      <NumberBandView
+        tiles={tiles} status={status} ariaLabel="Números das campanhas, todas as lojas"
+        details={
+          <PeriodDetails details={detailsOf(verdict)} extraCount={(periodText ? 1 : 0) + (pairs.length ? 1 : 0)}>
+            {periodText && <DetailPara>{periodText}</DetailPara>}
+            <SharedAccountsCallout pairs={pairs} />
+          </PeriodDetails>
+        }
+      />
       <Block
         title="Anúncios por loja"
         howTo={`Cada loja contra o próprio empate, no canal em que anuncia (como no Resumo). Clique numa loja para ver as campanhas, os conjuntos e os anúncios dela${opensOther ? ` ${opensOther}` : ''}.`}

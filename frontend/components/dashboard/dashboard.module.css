@@ -2,21 +2,12 @@
 
 .page { display: flex; flex-direction: column; gap: var(--s4); }
 .grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s4); align-items: start; }
-.kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--s3); }
-@media (max-width: 1280px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 1100px) { .grid2 { grid-template-columns: minmax(0, 1fr); } }
-@media (max-width: 640px) { .kpis { grid-template-columns: minmax(0, 1fr); } }
 
 /* Notes under KPI numbers */
 .sub { font-size: 12px; color: var(--tx-3); }
 .kpiNote b { font-family: var(--mono); font-weight: 500; color: var(--tx); }
-.kpiWords { font-size: 12px; color: var(--tx-2); line-height: 1.45; }
 .cfg { display: inline-flex; align-items: center; gap: 5px; color: var(--warn); font-size: 12px; }
-/* A KPI's delta pill wraps inside its card instead of running past it: the
-   shared pill is nowrap, and "▲ 20,0 p.p. vs 1–24 out até 00h33 (−12,6%)" is
-   wider than a 4-column card at 1440 (the page scrolled sideways). Two
-   classes, so it wins over the pill's own rule whatever the CSS order. */
-.kpis .kpiDelta { white-space: normal; flex-wrap: wrap; row-gap: 2px; max-width: 100%; }
 
 /* RoasVsEmpate: the ROAS words when there is no break-even line to draw */
 .roasGap { font-size: 12.5px; color: var(--tx-2); display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 6px; line-height: 1.4; }
@@ -122,4 +113,13 @@
 .intraday { margin-top: var(--s4); padding-top: var(--s4); border-top: 1px solid var(--line); }
 .intradayHead { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s4); align-items: baseline; justify-content: space-between; margin-bottom: var(--s2); }
 .intradayHead h4 { font-size: 13.5px; font-weight: 600; }
-@media (max-width: 640px) { .kpis > * { grid-column: auto; } }
+
+/* Numbers-first Resumo: the ledger and "Por dia e por pedido" side by side
+   under the chart (7/12 + 5/12 from 1200 px; stacked below). */
+.ledgerRow { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s4); align-items: start; }
+@media (min-width: 1200px) { .ledgerRow { grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); } }
+.ledgerCard { padding: 20px 22px; min-width: 0; }
+.perDay { min-width: 0; }
+.kpis2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s3); }
+.kpis2 > * { background: var(--card-2); }
+@media (max-width: 640px) { .kpis2 { grid-template-columns: minmax(0, 1fr); } }

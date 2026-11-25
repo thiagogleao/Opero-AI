@@ -115,3 +115,11 @@
 .lgRef { height: 0 !important; border-top: 1.5px dashed var(--neu); border-radius: 0 !important; width: 14px !important; }
 .lgNow { height: 0 !important; border-top: 1.5px dashed var(--info); border-radius: 0 !important; width: 14px !important; }
 .noStroke { stroke: none !important; }
+
+/* Pinned bubble (ChartTips click/tap/Enter): a thin outline, and the pinned
+   point stays marked while another one is hovered. */
+.bubblePinned { border-color: var(--tx-3); box-shadow: 0 0 0 1px rgba(231, 235, 239, .12), 0 12px 30px rgba(0, 0, 0, .5); }
+.col[data-tip], .hourCol[data-tip] { cursor: pointer; }
+.col[data-pinned] .bar { opacity: .78; }
+.col[data-pinned] .hit { stroke: var(--tx-3); stroke-width: 1; stroke-dasharray: 3 2; fill: rgba(142, 167, 196, .06); }
+.hourCol[data-pinned] .hit { fill: rgba(142, 167, 196, .1); stroke: var(--tx-3); stroke-width: 1; stroke-dasharray: 3 2; }

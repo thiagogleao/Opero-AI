@@ -89,8 +89,11 @@ export function TopCountries({ ctx, summary, empty = null }: { ctx: PageContext;
   return (
     <Block
       title="Onde estão os compradores"
-      howTo={`Endereço de entrega dos pedidos reais da Shopify em ${ctx.rangeLabel} — não a divisão por país do Meta, que não serve para decidir geografia.`}
-      info={<>{TERRITORIES_NOTE} Com menos de {SMALL_SAMPLE} pedidos um país é amostra pequena: não decida por ele sozinho.</>}
+      eyebrow="pedidos reais da Shopify"
+      // A caveat: kept visible on one line, the whole sentence in the ⓘ.
+      howTo="Endereço de entrega — não a divisão por país do Meta"
+      howToVisible
+      info={<>Endereço de entrega dos pedidos reais da Shopify em {ctx.rangeLabel} — não a divisão por país do Meta, que não serve para decidir geografia. {TERRITORIES_NOTE} Com menos de {SMALL_SAMPLE} pedidos um país é amostra pequena: não decida por ele sozinho.</>}
       actions={<Link className={s.link} href={ctx.hrefWith('/countries')}>Ver países e clientes <Icon name="arrowRight" size={12} /></Link>}
       footer={list.rows.length ? (
         <div className={s.footLinks}>

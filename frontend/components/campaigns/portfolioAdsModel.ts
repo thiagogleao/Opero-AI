@@ -160,6 +160,25 @@ export function noSaleNoMetaText(
   return `Nenhuma venda e nenhum gasto no Meta ${periodPhrase}.`
 }
 
+/**
+ * What Meta credits across the stores, on the store pages' rule: own
+ * campaigns in the ROAS, shared-account campaigns apart. Null when the split
+ * did not load. One sum for the verdict's sentence and the page row's tiles.
+ */
+export function portfolioAttribution(
+  stores: readonly Pick<PortfolioAdsStore, 'id'>[], attribution: ReadonlyMap<string, OwnAttribution> | null | undefined,
+): { ownSpend: number; ownValue: number; shSpend: number; shValue: number; shCampaigns: number; roas: number | null } | null {
+  if (!attribution) return null
+  let ownSpend = 0, ownValue = 0, shSpend = 0, shValue = 0, shCampaigns = 0
+  for (const r of stores) {
+    const a = attribution.get(r.id)
+    if (!a) continue
+    ownSpend += a.own.spend; ownValue += a.own.purchaseValue
+    shSpend += a.shared.spend; shValue += a.shared.purchaseValue; shCampaigns += a.shared.campaigns
+  }
+  return { ownSpend, ownValue, shSpend, shValue, shCampaigns, roas: ownSpend > 0 ? ownValue / ownSpend : null }
+}
+
 export function buildPortfolioAdsVerdict(input: {
   stores: PortfolioAdsStore[]
   /** lib/data/campaigns getOwnAttribution; null when it failed to load (the
@@ -219,16 +238,11 @@ export function buildPortfolioAdsVerdict(input: {
         : `${covering.length} de ${judged.length} lojas cobriram o gasto com anúncios ${periodPhrase} — ${joinNames(below.map(r => r.name))} ${below.length === 1 ? 'ficou' : 'ficaram'} abaixo do empate.`
 
   // 1. What Meta credits, on the store pages' rule (own campaigns only).
-  if (input.attribution) {
-    let ownSpend = 0, ownValue = 0, shSpend = 0, shValue = 0, shCampaigns = 0
-    for (const r of stores) {
-      const a = input.attribution.get(r.id)
-      if (!a) continue
-      ownSpend += a.own.spend; ownValue += a.own.purchaseValue
-      shSpend += a.shared.spend; shValue += a.shared.purchaseValue; shCampaigns += a.shared.campaigns
-    }
+  const att = portfolioAttribution(stores, input.attribution)
+  if (att) {
+    const { ownValue, shSpend, shValue, shCampaigns } = att
     details.push(line('O Meta credita ', { text: formatMoney(ownValue), strong: true },
-      ` em vendas às campanhas das próprias lojas (ROAS atribuído ${formatRoas(ownSpend > 0 ? ownValue / ownSpend : null)})`,
+      ` em vendas às campanhas das próprias lojas (ROAS atribuído ${formatRoas(att.roas)})`,
       shSpend > 0
         ? `; ${formatMoney(shSpend)} em ${plural(shCampaigns, 'campanha', 'campanhas')} de conta compartilhada ficam fora, com ${formatMoney(shValue)} creditados a vendas que caem sobretudo em outra loja.`
         : '.'))

@@ -13,6 +13,16 @@ import { formatMoney, formatPct } from '@/lib/format'
 import { HorizontalBars } from '@/components/charts'
 import type { SharedAdAccount } from '@/lib/attributionModels'
 
+/** The rows ProfitShare draws: the judged stores with activity, biggest
+ *  profit first. Fewer than two → it draws nothing (the page skips its card). */
+export function profitShareRows(view: PortfolioView, verdict: Verdict): PortfolioView['stores'] {
+  if (verdict.basis !== 'profit') return []
+  const excluded = new Set(verdict.excluded.map(e => e.id))
+  return view.stores
+    .filter(r => !excluded.has(r.id) && r.configured && (r.totals.orders > 0 || r.totals.adSpend > 0))
+    .sort((a, b) => b.totals.operatingProfit - a.totals.operatingProfit)
+}
+
 export function ProfitShare({ view, verdict, part, split = false, shared = [] }: {
   view: PortfolioView; verdict: Verdict; part: (v: number) => number
   /** Partner view: the bars are the viewer's share (`part`), and say so — a
@@ -21,11 +31,7 @@ export function ProfitShare({ view, verdict, part, split = false, shared = [] }:
   split?: boolean
   shared?: SharedAdAccount[]
 }) {
-  if (verdict.basis !== 'profit') return null
-  const excluded = new Set(verdict.excluded.map(e => e.id))
-  const rows = view.stores
-    .filter(r => !excluded.has(r.id) && r.configured && (r.totals.orders > 0 || r.totals.adSpend > 0))
-    .sort((a, b) => b.totals.operatingProfit - a.totals.operatingProfit)
+  const rows = profitShareRows(view, verdict)
   if (rows.length < 2) return null
   const total = verdict.totals.operatingProfit
   // Shares only add up when nobody lost money: with Hibikura at −$147 the

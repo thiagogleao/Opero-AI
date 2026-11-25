@@ -22,6 +22,7 @@ function data(opts: { archived: boolean; archivedOn: string | null }): MobileRes
   return {
     range, rangeLabel: '25 out – 23 nov', anchorToday: '2026-11-24', anchorTimezone: 'America/Sao_Paulo',
     generatedAt: '2026-11-24T18:11:00.000Z', period: '30d',
+    request: { store: 'sw', period: '30d', from: null, to: null },
     daily: days, dailyJudged: days,
     stores: [{
       id: 'sw', name: 'Squishy World', timezone: 'America/Sao_Paulo', archived: opts.archived, archivedOn: opts.archivedOn,
@@ -30,14 +31,15 @@ function data(opts: { archived: boolean; archivedOn: string | null }): MobileRes
   } as unknown as MobileResponse
 }
 
-const bars = (html: string) => (html.match(/role="img"/g) ?? []).length
+// TapBars: one tappable column (a button) per day drawn.
+const bars = (html: string) => (html.match(/data-col=/g) ?? []).length
 
 describe('the phone\'s daily chart of an archived store', () => {
   it('stops on the archive day: no bars for the days never read', () => {
     const html = renderToStaticMarkup(createElement(DailyBlock, { data: data({ archived: true, archivedOn: '2026-11-10' }) }))
     // 25 out – 10 nov: 17 days read.
     expect(bars(html)).toBe(17)
-    expect(html).not.toMatch(/11 de nov|23 de nov/)
+    expect(html).not.toMatch(/(11|23) nov:/)
   })
 
   it('a store that syncs (or an archive day outside the window) draws every day', () => {

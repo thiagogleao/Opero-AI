@@ -116,7 +116,8 @@ export function AppShell({ ctx, children, copilot = true }: { ctx: PageContext; 
 
   return (
     <ShellFrame sidebar={sidebar}>
-      <header className={s.top}>
+      {/* data-shell-top: chart bubbles stay below this bar (components/charts/ChartTips). */}
+      <header className={s.top} data-shell-top="">
         <div className={s.topLeft}>
           <MenuButton />
           <PeriodPicker

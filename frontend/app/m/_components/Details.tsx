@@ -11,12 +11,14 @@
 
 import { useEffect, useRef, useState } from 'react'
 import {
-  Block, Button, Callout, Chip, EmptyState, ErrorState, Money, RoasGauge, Skeleton,
+  Block, Button, Callout, Chip, EmptyState, ErrorState, InfoTip, Money, RoasGauge, Skeleton,
 } from '@/components/ui'
+import { MiniTiles } from './MiniTiles'
 import { HorizontalBars, MiniBars } from '@/components/charts'
 import { formatCount, formatMoney, formatPct, formatRangeLabel, formatRelativeTime, formatRoas, formatSignedMoney, plural } from '@/lib/format'
 import type { CampaignAction } from '@/lib/campaignSignal'
 import { sharedLeftOutText } from '@/components/countries/sharedText'
+import { joinNames } from '@/lib/views/numberBand'
 import type {
   CampaignsDetail, CountriesDetail, CreativesDetail, CustomersDetail, DetailSection, MobileDetailResponse, ProductsDetail,
 } from '@/lib/views/mobileDetail'
@@ -259,6 +261,31 @@ function lateConversionsNote(c: { spend: number; purchases: number }): string {
   return c.purchases === 1 ? ' atribuída (de cliques anteriores)' : ' atribuídas (de cliques anteriores)'
 }
 
+/** C13: "ação: 7 dias fechados (18–24 nov)" — the window the actions are
+ *  judged on, beside money for the chosen period. Full sentence in the ⓘ. */
+function ActionWindowTag({ windows, archived, what = 'ação' }: {
+  windows: readonly { label: string; stores: readonly string[] }[]; archived: boolean; what?: string
+}) {
+  const label = archived ? 'só consulta: sem ação a julgar'
+    : `${what}: 7 dias fechados${windows.length === 1 ? ` (${windows[0].label})` : ''}`
+  const full = what === 'ação' ? judgedWindowsText(windows, archived)
+    : 'O veredito de cada anúncio olha os últimos 7 dias fechados; gasto e ROAS da linha são do período escolhido.'
+  return (
+    <InfoTip trigger={<Chip tone="neu" icon="clock" size="sm">{label}</Chip>} className={s.chipTip}>{full}</InfoTip>
+  )
+}
+
+/** A row's reason on one line; a tap opens the whole sentence (spec §3.10). */
+function Reason({ text }: { text: string }) {
+  const [open, setOpen] = useState(false)
+  if (!text) return null
+  return (
+    <button type="button" className={`${s.reason} ${open ? '' : s.reasonClamp}`} aria-expanded={open} onClick={() => setOpen(v => !v)}>
+      {text}
+    </button>
+  )
+}
+
 function Campaigns({ d, ctx }: { d: CampaignsDetail; ctx: SectionCtx }) {
   const more = useMore(d.campaigns.length)
   const several = d.stores.length > 1
@@ -279,8 +306,9 @@ function Campaigns({ d, ctx }: { d: CampaignsDetail; ctx: SectionCtx }) {
   return (
     <Block
       title={`Campanhas · ${formatCount(d.totalCampaigns)}`}
-      howTo={judgedWindowsText(d.decisionWindows, !!d.archived)}
-      info={<><p>{d.formula}</p>{(['cortar', 'escalar', 'manter', 'observar'] as CampaignAction[]).map(a => <p key={a} style={{ marginTop: 6 }}><b>{a[0].toUpperCase() + a.slice(1)}:</b> {d.rules[a]}</p>)}</>}
+      // C13: actions are judged on the last 7 closed days, money on the period: a caveat, kept visible.
+      eyebrow={<ActionWindowTag windows={d.decisionWindows} archived={!!d.archived} />}
+      info={<><p>{judgedWindowsText(d.decisionWindows, !!d.archived)}</p><p style={{ marginTop: 6 }}>{d.formula}</p>{(['cortar', 'escalar', 'manter', 'observar'] as CampaignAction[]).map(a => <p key={a} style={{ marginTop: 6 }}><b>{a[0].toUpperCase() + a.slice(1)}:</b> {d.rules[a]}</p>)}</>}
       infoLabel="Como cada ação é decidida"
       flush={d.campaigns.length > 0}
       footer={gaps.length ? gaps.join(' ') : undefined}
@@ -292,11 +320,14 @@ function Campaigns({ d, ctx }: { d: CampaignsDetail; ctx: SectionCtx }) {
         </>
       ) : (
         <>
-          <div style={{ padding: '0 16px 12px' }} className={s.metrics}>
-            <span>Gasto{shopSpend > 0 ? ' no Meta' : ''} <b>{formatMoney(t.spend)}</b></span>
-            <span>Receita pelo Meta <b>{formatMoney(t.purchaseValue)}</b></span>
-            <span>Lucro estimado <b><Money value={t.estimatedProfit} tone="auto" /></b></span>
-            {t.unpricedSpend > 0 && <span>Sem margem para estimar <b>{formatMoney(t.unpricedSpend)}</b></span>}
+          <div style={{ padding: '0 16px 12px' }}>
+            {/* Three numbers first, in the band's tile style (spec §3.10). */}
+            <MiniTiles label="Totais das campanhas" tiles={[
+              { label: `Gasto${shopSpend > 0 ? ' no Meta' : ''}`, value: formatMoney(t.spend) },
+              { label: 'Receita pelo Meta', value: formatMoney(t.purchaseValue), info: 'Vendas que o Meta atribui às campanhas (a atribuição dele, não os pedidos da loja).' },
+              { label: 'Lucro estimado', value: formatMoney(t.estimatedProfit), tone: t.estimatedProfit === null ? 'mut' : t.estimatedProfit < 0 ? 'neg' : t.estimatedProfit > 0 ? 'pos' : undefined, info: 'Estimado: vendas atribuídas pelo Meta × margem da loja − gasto.' },
+            ]} />
+            {t.unpricedSpend > 0 && <p className={s.note} style={{ marginTop: 6 }}>Sem margem para estimar: <b>{formatMoney(t.unpricedSpend)}</b> de gasto.</p>}
           </div>
           {bucket}
           <ul className={s.list} style={{ borderTop: '1px solid var(--line)' }}>
@@ -308,7 +339,7 @@ function Campaigns({ d, ctx }: { d: CampaignsDetail; ctx: SectionCtx }) {
                     {several && <><StoreName name={c.store} /> · </>}{c.running ? 'ativa' : 'pausada'}
                     {c.trendLabel && c.trend !== 'estavel' ? ` · ${c.trendLabel.toLowerCase()}${c.trendChange !== null ? ` (${formatPct(c.trendChange, { digits: 0, sign: true })} no ROAS)` : ''}` : ''}
                   </span>
-                  <p className={s.reason}>{c.shared ?? c.reason}</p>
+                  <Reason text={c.shared ?? c.reason} />
                   {c.spend > 0 && c.roas !== null && (() => {
                     // The store's revenue too: a store that sold nothing reads "sem empate → loja
                     // sem vendas" on every row, as the verdict above says, not "nada sobra antes
@@ -389,8 +420,8 @@ function Creatives({ d, ctx }: { d: CreativesDetail; ctx: SectionCtx }) {
       title={`Criativos · ${formatCount(d.totalCreatives)}`}
       // Two break-evens can sit on one row: the reason's is the 7 closed days',
       // the line under it the period's. Each says which it is.
-      howTo="Primeiro o que queima dinheiro (Desligar), depois o que pode crescer. O veredito de cada anúncio (e o empate citado nele) olha os últimos 7 dias fechados, como o das campanhas; gasto, ROAS e o empate da linha de baixo são do período escolhido."
-      info={<><p>{d.formula}</p><p style={{ marginTop: 6 }}>{d.notes.hookRate}</p>{d.notes.frequency && <p style={{ marginTop: 6 }}>{d.notes.frequency}</p>}</>}
+      eyebrow={<ActionWindowTag windows={[]} archived={false} what="veredito" />}
+      info={<><p>Primeiro o que queima dinheiro (Desligar), depois o que pode crescer. O veredito de cada anúncio (e o empate citado nele) olha os últimos 7 dias fechados, como o das campanhas; gasto, ROAS e o empate da linha de baixo são do período escolhido.</p><p style={{ marginTop: 6 }}>{d.formula}</p><p style={{ marginTop: 6 }}>{d.notes.hookRate}</p>{d.notes.frequency && <p style={{ marginTop: 6 }}>{d.notes.frequency}</p>}</>}
       flush={d.creatives.length > 0}
     >
       {d.creatives.length === 0 ? (
@@ -406,7 +437,7 @@ function Creatives({ d, ctx }: { d: CreativesDetail; ctx: SectionCtx }) {
                   <span className={s.rowSub} style={{ display: 'block' }}>
                     {several && <><StoreName name={c.store} /> · </>}{c.campaignName ?? 'campanha desconhecida'}{c.running ? '' : ' · pausado'}
                   </span>
-                  <p className={s.reason}>{c.shared ?? c.reason}</p>
+                  <Reason text={c.shared ?? c.reason} />
                   <span className={s.metrics}>
                     <span>Gasto <b>{formatMoney(c.spend)}</b></span>
                     <span>ROAS <b>{formatRoas(c.roas)}</b>{c.breakEvenRoas !== null && <> · empate do período <b>{formatRoas(c.breakEvenRoas)}</b></>}</span>
@@ -439,8 +470,7 @@ function Products({ d, frozen }: { d: ProductsDetail; frozen: string | null }) {
   return (
     <Block
       title={`Produtos · ${formatCount(d.totalProducts)}`}
-      howTo="O que vendeu e quanto sobrou de cada venda antes dos anúncios (contribuição)."
-      info={<><p>A receita de cada pedido é dividida entre os produtos pelo valor de cada linha, então a soma dá a receita da loja. Contribuição = receita − custo do produto, fornecedor, frete e taxas.</p><p style={{ marginTop: 6 }}><b>{d.attribution.label}:</b> {d.attribution.note}</p></>}
+      info={<><p>O que vendeu e quanto sobrou de cada venda antes dos anúncios (contribuição).</p><p style={{ marginTop: 6 }}>A receita de cada pedido é dividida entre os produtos pelo valor de cada linha, então a soma dá a receita da loja. Contribuição = receita − custo do produto, fornecedor, frete e taxas.</p><p style={{ marginTop: 6 }}><b>{d.attribution.label}:</b> {d.attribution.note}</p></>}
       flush={d.products.length > 0}
       footer={d.unconfiguredStores.length ? `${d.unconfiguredStores.join(', ')} sem custos configurados: a contribuição dos produtos ${d.unconfiguredStores.length > 1 ? 'delas' : 'dela'} não aparece.` : undefined}
     >
@@ -448,7 +478,21 @@ function Products({ d, frozen }: { d: ProductsDetail; frozen: string | null }) {
         frozen ? <FrozenEmpty title={frozen} /> : <EmptyState compact icon="box" title="Nenhum produto vendido no período" />
       ) : (
         <>
-          <ul className={s.list}>
+          <div style={{ padding: '0 16px 12px' }}>
+            <MiniTiles label="Totais dos produtos" tiles={[
+              d.totals.contribution !== null
+                ? { label: 'Contribuição', value: formatMoney(d.totals.contribution), sub: 'antes dos anúncios', info: 'Receita − custo do produto, fornecedor, frete e taxas: o que sobra antes dos anúncios. Não é lucro.' }
+                // Todas with one store unpriced: the total is missing because of
+                // that store, not because the portfolio has no costs.
+                : several && d.unconfiguredStores.length > 0 && d.unconfiguredStores.length < d.stores.length
+                  ? { label: 'Contribuição', value: '—', tone: 'mut', sub: `${joinNames(d.unconfiguredStores)} sem custos`,
+                    info: `${joinNames(d.unconfiguredStores)} ${d.unconfiguredStores.length > 1 ? 'não têm' : 'não tem'} custos configurados, então a contribuição total não fecha. Cada produto abaixo mostra a sua, quando a loja dele tem custos.` }
+                  : { label: 'Contribuição', value: '—', tone: 'mut', sub: 'custos não configurados' },
+              { label: 'Produto nº 1', value: formatPct(d.products[0].revenueShare, { digits: 0 }), sub: <span className={s.ellipsis}>{d.products[0].title}</span>, info: 'Parte das vendas do período que veio do produto que mais vendeu.' },
+              { label: 'Produtos vendidos', value: formatCount(d.totalProducts), sub: plural(d.totals.units, 'unidade', 'unidades') },
+            ]} />
+          </div>
+          <ul className={s.list} style={{ borderTop: '1px solid var(--line)' }}>
             {d.products.slice(0, more.limit).map(p => (
               <li key={p.key} className={`${s.row} ${s.rowThumb}`}>
                 <Thumb src={p.imageUrl} />
@@ -511,17 +555,18 @@ function Countries({ d, frozen }: { d: CountriesDetail; frozen: string | null })
   return (
     <Block
       title="Países"
-      howTo={side === 'split' ? `${lede} A linha do Meta traz o gasto dele no país e as compras que ele se atribui, só para comparar.` : lede}
-      info={<>{d.notes.map((n, i) => <p key={i} style={{ marginTop: i ? 6 : 0 }}>{n}</p>)}</>}
+      info={<><p>{side === 'split' ? `${lede} A linha do Meta traz o gasto dele no país e as compras que ele se atribui, só para comparar.` : lede}</p>{d.notes.map((n, i) => <p key={i} style={{ marginTop: 6 }}>{n}</p>)}</>}
       flush={d.countries.length > 0}
       // The Meta caveat is about comparing columns: noise under "Nenhum pedido".
-      footer={d.countries.length === 0 ? (leftOutLine ? <span>{leftOutLine}</span> : undefined) : <>
+      footer={d.countries.length === 0 ? (leftOutLine ? <span>{leftOutLine}</span> : undefined)
+        // Nothing left to say under the list (the Meta caveat is a chip above it): no empty footer.
+        : !leftOutLine && side === 'split' && !(d.meta.coveragePct !== null && d.meta.coveragePct < 95) && !(d.sharedLeftOut ?? []).length ? undefined : <>
         {leftOutLine && <span>{leftOutLine}</span>}
         {side === 'none'
           ? <span>Sem gasto no Meta no período: não há atribuição do Meta para comparar.</span>
           : side === 'no_split'
             ? <span>O Meta não mandou a divisão por país deste período ({formatMoney(d.meta.totalSpend)} de gasto sem país): não há atribuição para comparar.</span>
-            : <span>{d.meta.caveat}{d.meta.coveragePct !== null && d.meta.coveragePct < 95 ? ` A divisão do Meta cobre ${formatPct(d.meta.coveragePct, { digits: 0 })} do gasto.` : ''}</span>}
+            : d.meta.coveragePct !== null && d.meta.coveragePct < 95 ? <span>A divisão do Meta cobre {formatPct(d.meta.coveragePct, { digits: 0 })} do gasto.</span> : null}
         {/* CAMP HALLOW's campaigns on EPOCH's account are out of EPOCH's Meta
             columns (lib/data/countries): said with the amounts, as the
             desktop says it, so a lower "dos pedidos reais" is not a mystery. */}
@@ -533,6 +578,18 @@ function Countries({ d, frozen }: { d: CountriesDetail; frozen: string | null })
         ))}
       </>}
     >
+      {d.countries.length > 0 && (
+        // The caveats stay visible above the list (spec §3.10): the rows are the
+        // store's real orders; Meta's split by country does not decide geography.
+        <div className={s.rowTags} style={{ padding: '0 16px 10px' }}>
+          <Chip tone="neu" icon="check" size="sm">pedidos reais da Shopify</Chip>
+          {side === 'split' && (
+            <InfoTip trigger={<Chip tone="warn" icon="alert" size="sm">atribuição por país não serve para decidir</Chip>} className={s.chipTip}>
+              {d.meta.caveat}
+            </InfoTip>
+          )}
+        </div>
+      )}
       {d.countries.length === 0 ? (
         frozen ? <FrozenEmpty title={frozen} /> : <EmptyState compact icon="globe" title="Nenhum pedido no período" />
       ) : (

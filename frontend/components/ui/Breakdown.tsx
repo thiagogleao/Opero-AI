@@ -171,9 +171,13 @@ export interface BreakdownLedgerProps {
    *  mislead (a window before the store's first sale: "A loja ainda não vendia"). */
   emptyTitle?: ReactNode
   emptyText?: ReactNode
+  /** The rows in a native <details>, closed by default (summary "Ver as N
+   *  linhas"): header, ¢ bar and "De cada $1" legend stay visible. The phone
+   *  home uses it to keep its fold for the numbers. Default false. */
+  collapsibleRows?: boolean
 }
 
-export function BreakdownLedger({ pnl, configured = true, split, title, sub, bar = true, notes = {}, emptyTitle, emptyText }: BreakdownLedgerProps) {
+export function BreakdownLedger({ pnl, configured = true, split, title, sub, bar = true, notes = {}, emptyTitle, emptyText, collapsibleRows = false }: BreakdownLedgerProps) {
   const rev = pnl.revenue
   const parts = costParts(pnl)
   const profitBase = configured ? pnl.operatingProfit : pnl.revenue - pnl.adSpend
@@ -230,91 +234,101 @@ export function BreakdownLedger({ pnl, configured = true, split, title, sub, bar
     )
   }
 
+  const rowCount = 2 + shown.length + (split ? 1 : 0) + (pnl.adjustments > 0 ? (split ? 3 : 2) : 0)
+  const table = (
+    <table className={s.ledger} style={{ marginTop: bar ? 14 : 0 }}>
+      <tbody>
+        <tr className={s.rowRev}>
+          <td className={s.sw} />
+          <td><span className={s.op} /><span className={s.nm}>Vendas</span><span className={s.sub}>{notes.revenue ?? defaultNote.revenue}</span></td>
+          <td className={s.v}>{formatMoney(rev)}</td>
+          <td className={s.ct}>{rev > 0 ? '$1,00' : '—'}</td>
+        </tr>
+        {shown.map((p, i) => {
+          const isUnknown = unknown(p.key)
+          const zero = !isUnknown && p.value === 0
+          const note = notes[p.key] ?? (zero ? zeroNote[p.key] : defaultNote[p.key])
+          return (
+            <tr key={p.key} className={zero || isUnknown ? s.rowZero : undefined}>
+              <td className={s.sw}><span className={`${s.swk} ${zero || isUnknown ? s.swEmpty : p.sw}`} /></td>
+              <td>
+                <span className={s.op}>−</span><span className={s.nm}>{p.name}</span>
+                {/* The "why" once, on the first unknown line; the badges carry the rest. */}
+                {isUnknown
+                  ? p.key === 'cogs' && <span className={s.sub}>sem custos configurados: o lucro real é menor que o mostrado</span>
+                  : note && <span className={s.sub}>{note}</span>}
+              </td>
+              <td className={s.v}>
+                {isUnknown ? <Badge tone="warn" icon="alert">não configurado</Badge> : zero ? '$0' : `${formatMoney(-p.value)}`}
+              </td>
+              <td className={s.ct} title={isUnknown ? undefined : ctTitle(cents[i])}>{isUnknown ? '—' : ct(i)}</td>
+            </tr>
+          )
+        })}
+        <tr className={s.rowTotal}>
+          <td className={s.sw}><span className={`${s.swk} ${configured ? s.profit : s.swEmpty}`} /></td>
+          <td>
+            <span className={s.op}>=</span><span className={s.nm}>{configured ? 'Lucro real' : 'Vendas − anúncios'}</span>
+            {!configured && <span className={s.sub}>{notes.profit ?? 'não é lucro: falta o custo dos produtos'}</span>}
+            {configured && notes.profit && <span className={s.sub}>{notes.profit}</span>}
+          </td>
+          <td className={`${s.v} ${profitBase < 0 ? s.vNegT : configured ? s.vPosT : ''}`}>{formatMoney(profitBase)}</td>
+          <td className={s.ct} title={totalShare === null ? undefined : ctTitle(totalShare)}>{totalShare === null ? '—' : formatPerDollar(totalShare)}</td>
+        </tr>
+        {split && (
+          <tr className={s.rowPart}>
+            <td className={s.sw} />
+            <td><span className={s.op} /><span className={s.nm}>Sua parte (50%)</span></td>
+            <td className={`${s.v} ${profitBase < 0 ? s.vNegT : ''}`}>{formatMoney(profitBase * 0.5)}</td>
+            <td className={s.ct} />
+          </tr>
+        )}
+        {pnl.adjustments > 0 && (
+          <>
+            <tr>
+              <td className={s.sw}><span className={`${s.swk} ${s.swEmpty}`} /></td>
+              <td>
+                <span className={s.op}>−</span><span className={s.nm}>Reembolsos e chargebacks</span>
+                <span className={s.sub}>
+                  {notes.adjustments ?? [
+                    pnl.refundCount ? `${plural(pnl.refundCount, 'reembolso', 'reembolsos')} (a margem que voltou)` : null,
+                    pnl.chargebackCount ? plural(pnl.chargebackCount, 'chargeback', 'chargebacks') : null,
+                  ].filter(Boolean).join(' · ')}
+                </span>
+              </td>
+              <td className={s.v}>{formatMoney(-pnl.adjustments)}</td>
+              <td className={s.ct} />
+            </tr>
+            <tr className={s.rowTotal}>
+              <td className={s.sw} />
+              <td><span className={s.op}>=</span><span className={s.nm}>Resultado de caixa</span>{notes.cash && <span className={s.sub}>{notes.cash}</span>}</td>
+              <td className={`${s.v} ${pnl.cashResult < 0 ? s.vNegT : ''}`}>{formatMoney(pnl.cashResult)}</td>
+              <td className={s.ct} />
+            </tr>
+            {split && (
+              <tr className={s.rowPart}>
+                <td className={s.sw} />
+                <td><span className={s.op} /><span className={s.nm}>Sua parte (50%)</span></td>
+                <td className={s.v}>{formatMoney(pnl.cashResult * 0.5)}</td>
+                <td className={s.ct} />
+              </tr>
+            )}
+          </>
+        )}
+      </tbody>
+    </table>
+  )
+
   return (
     <div>
       {head}
       {bar && <BreakdownBar pnl={pnl} configured={configured} />}
-      <table className={s.ledger} style={{ marginTop: bar ? 14 : 0 }}>
-        <tbody>
-          <tr className={s.rowRev}>
-            <td className={s.sw} />
-            <td><span className={s.op} /><span className={s.nm}>Vendas</span><span className={s.sub}>{notes.revenue ?? defaultNote.revenue}</span></td>
-            <td className={s.v}>{formatMoney(rev)}</td>
-            <td className={s.ct}>{rev > 0 ? '$1,00' : '—'}</td>
-          </tr>
-          {shown.map((p, i) => {
-            const isUnknown = unknown(p.key)
-            const zero = !isUnknown && p.value === 0
-            const note = notes[p.key] ?? (zero ? zeroNote[p.key] : defaultNote[p.key])
-            return (
-              <tr key={p.key} className={zero || isUnknown ? s.rowZero : undefined}>
-                <td className={s.sw}><span className={`${s.swk} ${zero || isUnknown ? s.swEmpty : p.sw}`} /></td>
-                <td>
-                  <span className={s.op}>−</span><span className={s.nm}>{p.name}</span>
-                  {/* The "why" once, on the first unknown line; the badges carry the rest. */}
-                  {isUnknown
-                    ? p.key === 'cogs' && <span className={s.sub}>sem custos configurados: o lucro real é menor que o mostrado</span>
-                    : note && <span className={s.sub}>{note}</span>}
-                </td>
-                <td className={s.v}>
-                  {isUnknown ? <Badge tone="warn" icon="alert">não configurado</Badge> : zero ? '$0' : `${formatMoney(-p.value)}`}
-                </td>
-                <td className={s.ct} title={isUnknown ? undefined : ctTitle(cents[i])}>{isUnknown ? '—' : ct(i)}</td>
-              </tr>
-            )
-          })}
-          <tr className={s.rowTotal}>
-            <td className={s.sw}><span className={`${s.swk} ${configured ? s.profit : s.swEmpty}`} /></td>
-            <td>
-              <span className={s.op}>=</span><span className={s.nm}>{configured ? 'Lucro real' : 'Vendas − anúncios'}</span>
-              {!configured && <span className={s.sub}>{notes.profit ?? 'não é lucro: falta o custo dos produtos'}</span>}
-              {configured && notes.profit && <span className={s.sub}>{notes.profit}</span>}
-            </td>
-            <td className={`${s.v} ${profitBase < 0 ? s.vNegT : configured ? s.vPosT : ''}`}>{formatMoney(profitBase)}</td>
-            <td className={s.ct} title={totalShare === null ? undefined : ctTitle(totalShare)}>{totalShare === null ? '—' : formatPerDollar(totalShare)}</td>
-          </tr>
-          {split && (
-            <tr className={s.rowPart}>
-              <td className={s.sw} />
-              <td><span className={s.op} /><span className={s.nm}>Sua parte (50%)</span></td>
-              <td className={`${s.v} ${profitBase < 0 ? s.vNegT : ''}`}>{formatMoney(profitBase * 0.5)}</td>
-              <td className={s.ct} />
-            </tr>
-          )}
-          {pnl.adjustments > 0 && (
-            <>
-              <tr>
-                <td className={s.sw}><span className={`${s.swk} ${s.swEmpty}`} /></td>
-                <td>
-                  <span className={s.op}>−</span><span className={s.nm}>Reembolsos e chargebacks</span>
-                  <span className={s.sub}>
-                    {notes.adjustments ?? [
-                      pnl.refundCount ? `${plural(pnl.refundCount, 'reembolso', 'reembolsos')} (a margem que voltou)` : null,
-                      pnl.chargebackCount ? plural(pnl.chargebackCount, 'chargeback', 'chargebacks') : null,
-                    ].filter(Boolean).join(' · ')}
-                  </span>
-                </td>
-                <td className={s.v}>{formatMoney(-pnl.adjustments)}</td>
-                <td className={s.ct} />
-              </tr>
-              <tr className={s.rowTotal}>
-                <td className={s.sw} />
-                <td><span className={s.op}>=</span><span className={s.nm}>Resultado de caixa</span>{notes.cash && <span className={s.sub}>{notes.cash}</span>}</td>
-                <td className={`${s.v} ${pnl.cashResult < 0 ? s.vNegT : ''}`}>{formatMoney(pnl.cashResult)}</td>
-                <td className={s.ct} />
-              </tr>
-              {split && (
-                <tr className={s.rowPart}>
-                  <td className={s.sw} />
-                  <td><span className={s.op} /><span className={s.nm}>Sua parte (50%)</span></td>
-                  <td className={s.v}>{formatMoney(pnl.cashResult * 0.5)}</td>
-                  <td className={s.ct} />
-                </tr>
-              )}
-            </>
-          )}
-        </tbody>
-      </table>
+      {collapsibleRows ? (
+        <details className={s.ledgerRows}>
+          <summary className={s.ledgerSummary}>Ver as {rowCount} linhas</summary>
+          {table}
+        </details>
+      ) : table}
     </div>
   )
 }

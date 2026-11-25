@@ -1,2 +1,0 @@
-/* Four cards that share the row on desktop and stack two by two, then one by one. */
-.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }

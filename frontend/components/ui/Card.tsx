@@ -7,8 +7,10 @@
  *         pad 'none' (default) adds no class, so a className may set its own
  *         padding; never pass both an explicit pad and a padding className.
  *
- * Block   A card that opens with a title and ONE line telling how to read it.
- *         { title: ReactNode; howTo?: ReactNode; eyebrow?: ReactNode;
+ * Block   A card that opens with a title; how to read it sits in the title's ⓘ.
+ *         { title: ReactNode; howTo?: ReactNode (in the ⓘ, before `info`);
+ *           howToVisible?: boolean (a caveat: howTo stays visible on one line);
+ *           eyebrow?: ReactNode;
  *           info?: ReactNode (content of the ⓘ tooltip); infoLabel?: string;
  *           actions?: ReactNode (right side: legend, links, toggles);
  *           footer?: ReactNode (muted strip at the bottom);
@@ -73,7 +75,12 @@ export function Card({ as = 'div', pad = 'none', surface = 'card', className, ch
 
 export interface BlockProps {
   title: ReactNode
+  /** How to read the block. Lives in the title's ⓘ (first, then `info`):
+   *  the numbers come first, the prose on demand. */
   howTo?: ReactNode
+  /** Keep `howTo` visible as ONE line (ellipsis, full text on hover) — only
+   *  when it is a caveat that changes how the numbers read. */
+  howToVisible?: boolean
   eyebrow?: ReactNode
   info?: ReactNode
   infoLabel?: string
@@ -85,7 +92,12 @@ export interface BlockProps {
   children?: ReactNode
 }
 
-export function Block({ title, howTo, eyebrow, info, infoLabel, actions, footer, flush, id, className, children }: BlockProps) {
+export function Block({ title, howTo, howToVisible, eyebrow, info, infoLabel, actions, footer, flush, id, className, children }: BlockProps) {
+  // howTo goes into the ⓘ (before the definition) unless it is a caveat kept
+  // visible on one line.
+  const tip = howTo && !howToVisible
+    ? <><div>{howTo}</div>{info && <div className={s.tipGap}>{info}</div>}</>
+    : info
   return (
     <Card as="section" className={cx(s.block, className)} id={id} aria-label={typeof title === 'string' ? title : undefined}>
       <header className={s.head}>
@@ -93,9 +105,9 @@ export function Block({ title, howTo, eyebrow, info, infoLabel, actions, footer,
           {eyebrow && <div className={s.eyebrow}>{eyebrow}</div>}
           <div className={s.titleRow}>
             <h3 className={s.title}>{title}</h3>
-            {info && <InfoTip label={infoLabel ?? (typeof title === 'string' ? `Sobre: ${title}` : 'Como é calculado')}>{info}</InfoTip>}
+            {tip && <InfoTip label={infoLabel ?? (typeof title === 'string' ? `Sobre: ${title}` : 'Como é calculado')}>{tip}</InfoTip>}
           </div>
-          {howTo && <p className={s.howTo}>{howTo}</p>}
+          {howTo && howToVisible && <p className={cx(s.howTo, s.howToLine)} title={typeof howTo === 'string' ? howTo : undefined}>{howTo}</p>}
         </div>
         {actions && <div className={s.actions}>{actions}</div>}
       </header>

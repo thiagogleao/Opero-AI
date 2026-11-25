@@ -1,0 +1,17 @@
+.box { background: var(--card); border: 1px solid var(--line); border-radius: var(--r-card); overflow: hidden; }
+.summary {
+  width: 100%; min-height: 44px; padding: 0 14px; display: flex; align-items: center; gap: 8px;
+  font-size: 13.5px; font-weight: 600; color: var(--tx); text-align: left;
+}
+.summary small { font: 500 11.5px var(--mono); color: var(--tx-3); }
+.summary:focus-visible { outline: none; box-shadow: inset var(--focus); }
+.chev { color: var(--tx-3); transition: transform .15s ease; }
+.chevOpen { color: var(--tx-3); transform: rotate(90deg); transition: transform .15s ease; }
+.body { padding: 0 14px 14px; display: grid; gap: 10px; border-top: 1px solid var(--line); padding-top: 12px; }
+.body[hidden] { display: none; }
+.headline { font: 400 17px/1.4 var(--serif); color: var(--tx); }
+.lines, .notes { list-style: none; display: grid; gap: 6px; font-size: 13px; line-height: 1.5; color: var(--tx-2); }
+.notes { font-size: 12px; color: var(--tx-3); }
+.when, .para { font-size: 12.5px; line-height: 1.5; color: var(--tx-2); }
+.extra { display: grid; gap: 8px; }
+@media (prefers-reduced-motion: reduce) { .chev, .chevOpen { transition: none; } }

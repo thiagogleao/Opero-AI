@@ -1,0 +1,59 @@
+/* The phone's number band (spec §1.5, < 760 px): 2 columns, Lucro · Margem
+   the biggest numbers. Tokens only. */
+
+.band { display: grid; gap: 8px; }
+
+.chipTrigger { text-decoration: none !important; display: inline-flex; border-radius: var(--r-pill); }
+.chipTrigger:focus-visible { outline: none; box-shadow: var(--focus); }
+
+.cmp { display: flex; align-items: center; gap: 6px; font: 400 12px/1.4 var(--mono); color: var(--tx-3); min-width: 0; }
+.cmp > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+
+.tile {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--r-card);
+  padding: 10px 12px; min-width: 0; display: flex; flex-direction: column; gap: 2px;
+}
+.xl { min-height: 104px; }
+.md { min-height: 84px; }
+.grid > .tile:nth-child(5), .grid > .tile:nth-child(6) { min-height: 104px; }
+
+.label {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  font-size: 10.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--tx-3);
+}
+/* A long label ("ROAS do Meta × empate") wraps to two lines instead of losing its end. */
+.label > span:first-child { min-width: 0; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.25; }
+
+.value { font-family: var(--mono); font-weight: 500; font-variant-numeric: tabular-nums; letter-spacing: -.03em; white-space: nowrap; line-height: 1.15; margin-top: 2px; }
+.vXl { font-size: 32px; }
+.vXlLong { font-size: 26px; }
+.vMd { font-size: 22px; }
+.t_pos { color: var(--pos); }
+.t_neg { color: var(--neg); }
+.t_warn { color: var(--warn); }
+.t_neu { color: var(--tx); }
+.t_mut { color: var(--tx-3); }
+
+.tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; min-width: 0; }
+/* A tag never sticks out of its tile: it shrinks and ellipsises instead. */
+.tags > * { max-width: 100%; min-width: 0; }
+.tags > * > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.chipWrap { display: inline-flex; align-items: center; min-width: 0; }
+
+.delta { font: 500 12px/16px var(--mono); min-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.deltaTrigger { text-decoration: none !important; color: inherit; font: inherit; }
+.dPos { color: var(--pos); }
+.dNeg { color: var(--neg); }
+.dNeu { color: var(--neu); }
+.dMut { color: var(--tx-3); font-family: var(--sans); font-size: 11.5px; }
+
+.sub { font: 400 11px/1.35 var(--mono); color: var(--tx-2); overflow-wrap: anywhere; min-width: 0; }
+.nowrap { white-space: nowrap; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+
+/* Mini tiles (Detalhes tabs, Chargebacks): the band's tile look, 22 px values. */
+.mini { display: grid; gap: 6px; }
+.miniTile { background: var(--card-2); border: 1px solid var(--line); border-radius: 12px; padding: 8px 10px; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.vMini { font-size: 20px; overflow: hidden; text-overflow: ellipsis; }

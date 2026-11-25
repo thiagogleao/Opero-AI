@@ -107,6 +107,15 @@
 .stripOk { background: var(--pos-bg); color: var(--tx); }
 .strip small { display: block; color: var(--tx-2); font-size: 12px; margin-top: 2px; }
 .stripIcon { margin-top: 2px; }
+/* NoteStrip: one line, tap to read the rest. */
+.noteStrip { grid-template-columns: auto 1fr; padding: 7px 12px; align-items: center; }
+.noteStrip .stripIcon { margin-top: 0; display: inline-flex; }
+.noteText {
+  background: none; border: 0; padding: 0; margin: 0; color: inherit; font: inherit; text-align: left; cursor: pointer;
+  min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.noteText.noteOpen { white-space: normal; }
+.noteText:focus-visible { outline: none; box-shadow: var(--focus); border-radius: 4px; }
 .stripInfo .stripIcon { color: var(--info); }
 .stripWarn .stripIcon { color: var(--warn); }
 .stripNeg .stripIcon { color: var(--neg); }
@@ -135,14 +144,7 @@
 }
 .secLabel span { text-transform: none; letter-spacing: 0; font-weight: 500; font-size: 11.5px; }
 
-.clock {
-  display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: start;
-  padding: 12px 14px; border-radius: 14px; background: var(--info-bg); color: var(--info);
-}
-.clock b { display: block; font-size: 13.5px; font-weight: 600; color: var(--tx); }
-.clock span { display: block; font-size: 12px; line-height: 1.45; color: var(--tx-2); margin-top: 2px; }
 
-.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .pairCell { background: var(--card-2); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; min-width: 0; }
 .pairCell small { display: block; font-size: 11.5px; color: var(--tx-3); line-height: 1.3; }
 .pairCell b { display: block; font: 500 17px/1.3 var(--mono); letter-spacing: -.01em; margin-top: 2px; font-variant-numeric: tabular-nums; }
@@ -151,7 +153,6 @@
 .note { font-size: 12px; line-height: 1.5; color: var(--tx-3); }
 .note b, .note strong { color: var(--tx-2); font-weight: 600; }
 .stack { display: flex; flex-direction: column; gap: 8px; }
-.chartWrap { margin: 0 -4px; }
 
 /* ── Rows (stores, feed, lists) ─────────────────────────────────────────── */
 .list { list-style: none; }
@@ -231,22 +232,6 @@
 /* ── Revenue − ads bars (NetBars: stores without costs) ─────────────────── */
 /* Steel blue above zero, never the profit green: without product costs a
    positive day is not profit. Coral below zero is a loss either way. */
-.netSvg { display: block; width: 100%; height: auto; overflow: visible; font-family: var(--mono); font-size: 11px; fill: var(--tx-3); }
-.netGrid { stroke: var(--grid); stroke-width: 1; }
-.netZero { stroke: var(--zero); stroke-width: 1.25; }
-.netMonthSep { stroke: var(--line-2); stroke-width: 1; }
-.netSans { font-family: var(--sans); }
-.netTx2 { fill: var(--tx-2); }
-.netStrong { fill: var(--tx); font-weight: 500; paint-order: stroke; stroke: var(--card); stroke-width: 4px; stroke-linejoin: round; }
-.netBarPos { fill: var(--neu); }
-.netBarNeg { fill: var(--neg-m); }
-.netBarPartial { stroke: rgba(127, 178, 238, .8); stroke-width: 1.2; stroke-dasharray: 3 2; }
-.netHatchBg { fill: rgba(127, 178, 238, .06); }
-.netHatchLine { stroke: rgba(127, 178, 238, .6); stroke-width: 1.6; }
-.netCol { cursor: default; outline: none; }
-.netCol .netHit { fill: transparent; }
-.netCol:hover .netBar, .netCol[data-active] .netBar { opacity: .78; }
-.netCol:focus-visible .netHit { stroke: var(--info); stroke-width: 1.5; fill: rgba(127, 178, 238, .06); }
 .netLegend { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; font-size: 12px; color: var(--tx-2); margin-top: 6px; }
 .netLegend span { display: inline-flex; align-items: center; gap: 6px; }
 .netLegend i { width: 10px; height: 10px; border-radius: 2px; display: block; flex: none; }
@@ -265,3 +250,33 @@
   .spin, .live::before { animation: none; }
   .content, .barFill { transition: none; }
 }
+
+/* Stores beside the day chart: one line each (spec §3.10). */
+.asideLines { list-style: none; display: grid; gap: 4px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 12px; line-height: 1.45; color: var(--tx-3); }
+.asideLines b { color: var(--tx-2); font-weight: 600; }
+
+/* The ledger, on its own card under Detalhes (spec §3.10). */
+.ledgerCard { background: var(--card); border: 1px solid var(--line); border-radius: var(--r-card); padding: 14px 14px 12px; min-width: 0; }
+
+/* One-line row reasons in the Detalhes tabs; a tap opens them (spec §3.10). */
+button.reason { display: block; width: 100%; text-align: left; padding: 0; background: none; color: var(--tx-2); font: inherit; font-size: 12.5px; line-height: 1.45; }
+.reasonClamp { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chipTip { text-decoration: none !important; display: inline-flex; }
+.ellipsis { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Atenção (Todas): one compact numbers line per store; the sentence opens on a tap. */
+.attention { background: var(--card); border: 1px solid var(--line); border-radius: var(--r-card); padding: 10px 0 4px; }
+.attHead { display: flex; align-items: center; gap: 6px; padding: 0 14px 6px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--warn); }
+.attention ul { list-style: none; }
+.attention li { border-top: 1px solid var(--line); border-left: 3px solid transparent; }
+.attention li.attNeg { border-left-color: var(--neg-m); }
+.attention li.attWarn { border-left-color: var(--warn); }
+.attention summary { list-style: none; cursor: pointer; padding: 9px 12px; font: 400 12.5px/1.5 var(--mono); color: var(--tx-2); }
+.attention summary::-webkit-details-marker { display: none; }
+.attention summary b { font-family: var(--sans); color: var(--tx); font-weight: 600; }
+.attention summary:focus-visible { outline: none; box-shadow: inset var(--focus); }
+.attention details p { padding: 0 12px 10px; font-size: 12.5px; line-height: 1.5; color: var(--tx-2); }
+.rowMargin { font: 500 11.5px var(--mono); color: var(--tx-3); }
+.cbDetails { border-top: 1px solid var(--line); }
+.cbDetails > summary { cursor: pointer; padding: 11px 16px; font-size: 13px; font-weight: 600; color: var(--tx-2); }
+.cbDetails > summary:focus-visible { outline: none; box-shadow: inset var(--focus); }

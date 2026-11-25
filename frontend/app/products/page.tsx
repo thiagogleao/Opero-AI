@@ -3,12 +3,14 @@ import { getPageContext, pageMetadata, type PageContext, type SearchParams } fro
 import { computePnL, type PnL } from '@/lib/engine/pnl'
 import { getProductReport, type ProductReport } from '@/lib/data/products'
 import { sumTotals } from '@/lib/views/verdict'
-import { formatMoney, formatPct, formatShare, plural } from '@/lib/format'
-import { AppShell, PageHeader, PeriodNote } from '@/components/shell'
-import { Block, Callout, Count, EmptyState, ErrorState, Icon, Money, Pct, VerdictCard, type DataColumn } from '@/components/ui'
+import { formatCount, formatMoney, formatPct, formatShare, plural } from '@/lib/format'
+import { AppShell, PageHeader, periodNoteText } from '@/components/shell'
+import { Block, Callout, Card, Count, EmptyState, ErrorState, Icon, Money, Pct, type DataColumn } from '@/components/ui'
+import { detailsOf, statusChipsOf } from '@/lib/views/numberBand'
+import { DetailPara, NumberBandView, PeriodDetails, pageTile } from '@/components/numbers'
 import { HorizontalBars } from '@/components/charts'
 import { ProductTable, type SearchableRow } from '@/components/products/ProductTable'
-import { buildProductsVerdict, type ProductLike } from '@/components/products/productsVerdict'
+import { belowCost, buildProductsVerdict, type ProductLike } from '@/components/products/productsVerdict'
 import { metaSpendSplitText } from '@/components/products/metaSpendSplit'
 import { restLine, topBars, unpricedLine } from '@/components/products/topBars'
 import { loadFirstSale, loadFirstSales } from '@/components/campaigns/firstSale'
@@ -49,7 +51,7 @@ const pct = (a: number, b: number) => (b > 0 ? (a / b) * 100 : null)
 export default async function ProductsPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
   const ctx = await getPageContext(searchParams, { path: '/products' })
   const title = ctx.scope === 'all' ? 'Produtos · todas as lojas' : `Produtos · ${ctx.store?.name ?? ''}`
-  const header = <PageHeader ctx={ctx} title={title} halved={false} />
+  const header = <PageHeader ctx={ctx} title={title} halved={false} periodInfo />
   if (ctx.scope === 'store' && !ctx.store) {
     return <AppShell ctx={ctx}>{header}<EmptyState icon="store" title="Nenhuma loja para mostrar" /></AppShell>
   }
@@ -193,16 +195,80 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
     ? ` A linha de total fica com as lojas com custos: ${excludedStores.join(', ')} (${formatMoney(totals.revenue - pricedTotals.revenue)} em ${plural(totals.orders - pricedTotals.orders, 'pedido', 'pedidos')}) não ${excludedStores.length === 1 ? 'tem' : 'têm'} custos configurados.`
     : ''
 
+  // ── The page row: only numbers the verdict's input already has.
+  const priced = pricedTotals ?? totals
+  const sold = rows.filter(p => p.units > 0)
+  const top = [...rows].sort((a, b) => b.revenue - a.revenue)[0] ?? null
+  // Counted as the verdict counts them: free gifts are the promotion's cost,
+  // not products selling below cost (the chip "Todos acima do custo" and this
+  // tile must never disagree).
+  const split = configured ? belowCost(rows) : null
+  const below = split ? split.losers.length : null
+  const giftCount = split ? split.gifts.length : 0
+  const noneSold = !why && sold.length === 0
+  const dash = '—'
+  const tiles = [
+    pageTile({
+      slot: 'lucro', label: configured ? 'Contribuição dos produtos' : 'Vendas dos produtos',
+      value: why || verdict.amount === null ? dash : formatMoney(verdict.amount), raw: why ? null : verdict.amount,
+      tone: why || verdict.amount === null ? 'mut' : verdict.amount < 0 ? 'neg' : 'neu',
+      // Contribution is not profit: it is before the ads (it was drawn in the profit's green).
+      tags: configured ? [{ code: 'antes_anuncios', label: 'antes dos anúncios', tone: 'neu', info: `${verdict.amountCaption}. Contribuição = receita − produto, frete e taxas, antes dos anúncios e dos custos fixos: não é lucro.` }] : [],
+      subs: why ? [{ text: why.title, tone: 'mut' }] : [],
+      info: configured ? 'Receita dos produtos − produto, frete e taxas: o que sobra para pagar anúncios e custos fixos.' : 'Sem custos configurados: só as vendas dos produtos.',
+    }),
+    pageTile({
+      slot: 'margem', label: 'Margem de contribuição',
+      value: configured && !why ? formatPct(priced.contributionMargin) : dash, raw: configured && !why ? priced.contributionMargin : null,
+      tone: configured && !why ? 'neu' : 'mut',
+      tags: configured ? [] : [{ code: 'sem_custos', label: 'custos não configurados', tone: 'cfg', icon: 'sliders' }],
+      info: 'Contribuição ÷ receita, antes dos anúncios.',
+    }),
+    pageTile({ slot: 'receita', label: 'Produtos vendidos', value: why ? dash : formatCount(sold.length), raw: why ? null : sold.length, tone: why ? 'mut' : 'neu', info: 'Produtos com pelo menos uma unidade vendida no período.' }),
+    pageTile({ slot: 'pedidos', label: 'Unidades', value: why ? dash : formatCount(totals.units), raw: why ? null : totals.units, tone: why ? 'mut' : 'neu', subs: why ? [] : [{ text: plural(totals.orders, 'pedido', 'pedidos') }], info: 'Unidades vendidas no período.' }),
+    pageTile({
+      slot: 'anuncios', label: 'Produto nº 1', value: top && !why ? formatShare(top.revenueShare) : dash, raw: top?.revenueShare ?? null, tone: top && !why ? 'neu' : 'mut',
+      subs: top && !why ? [{ text: 'das vendas' }, { text: top.title }] : [], info: 'O produto com mais receita no período e a parte dele nas vendas.',
+    }),
+    pageTile({
+      slot: 'roas', label: 'Abaixo do custo', value: below === null || why || noneSold ? dash : below === 0 ? 'nenhum' : formatCount(below),
+      raw: noneSold ? null : below, tone: below === null || why || noneSold ? 'mut' : below > 0 ? 'neg' : 'pos',
+      subs: below === null ? [{ text: 'custos não configurados', tone: 'warn' }]
+        : noneSold ? []
+          : [{ text: 'produtos vendidos com contribuição negativa' }],
+      tags: !noneSold && giftCount > 0 ? [{ code: 'brindes', label: plural(giftCount, 'brinde à parte', 'brindes à parte'), tone: 'neu', info: `${plural(giftCount, 'produto de brinde', 'produtos de brinde')} (dados de graça ou chamados de brinde) também ${giftCount === 1 ? 'ficou' : 'ficaram'} abaixo do custo: é o custo da promoção, não um produto vendido no prejuízo. O total está em Detalhes.` }] : [],
+      info: 'Produtos vendidos cuja contribuição ficou negativa: custaram mais do que venderam, antes dos anúncios. Brindes dados de graça ficam à parte.',
+    }),
+  ]
+  // Todas with a store without costs: the contribution and margin tiles leave
+  // it out, unidades and pedidos count it. Said in the status line, not only
+  // under the table and in Detalhes (Países does the same).
+  const status = statusChipsOf(verdict)
+  if (pricedTotals && excludedStores.length) {
+    const outText = `Fora da contribuição e da margem: ${excludedStores.join(', ')} (${formatMoney(totals.revenue - pricedTotals.revenue)} em ${plural(totals.orders - pricedTotals.orders, 'pedido', 'pedidos')}), sem custos configurados. Unidades, pedidos e produtos vendidos contam todas as lojas.`
+    const at =status.findIndex(c => c.code === 'sem_custos')
+    if (at < 0) status.push({ code: 'sem_custos', label: plural(excludedStores.length, 'loja sem custos', 'lojas sem custos'), tone: 'cfg', icon: 'sliders', info: outText })
+    else if (!status[at].info) status[at] = { ...status[at], info: outText }
+  }
+  const periodText = periodNoteText(ctx)
+
   return (
     <AppShell ctx={ctx}>
       {header}
-      <PeriodNote ctx={ctx} />
-      <VerdictCard verdict={verdict} aside={aside} roas={false} />
-      {!configured && (
-        <Callout tone="warn" title="Custos não configurados.">
-          {' '}Sem o custo dos produtos não há contribuição nem margem por produto: a tabela mostra só vendas, unidades e pedidos.
-        </Callout>
-      )}
+      <NumberBandView
+        tiles={tiles} status={status} costsHref={ctx.hrefWith('/profit')} ariaLabel="Números dos produtos"
+        details={
+          <PeriodDetails details={detailsOf(verdict)} extraCount={(periodText ? 1 : 0) + (!configured ? 1 : 0)}>
+            {periodText && <DetailPara>{periodText}</DetailPara>}
+            {!configured && (
+              <Callout tone="warn" title="Custos não configurados.">
+                {' '}Sem o custo dos produtos não há contribuição nem margem por produto: a tabela mostra só vendas, unidades e pedidos.
+              </Callout>
+            )}
+          </PeriodDetails>
+        }
+      />
+      {aside && <Card className={s.asideCard} as="section" aria-label={configured ? 'Quem mais contribuiu' : 'Quem mais vendeu'}>{aside}</Card>}
       <Block
         title="Produtos vendidos"
         howTo={`Ordene por qualquer coluna e busque pelo nome. Receita = total do pedido dividido entre os itens pelo valor de cada um, em ${ctx.rangeLabel}.`}

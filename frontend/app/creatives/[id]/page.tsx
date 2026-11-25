@@ -8,14 +8,16 @@ import { formatMoney, formatNumber, formatPct, formatRoas, formatWeekdayDate, pl
 import { EARLY_DAY_MINUTES } from '@/lib/views/verdict'
 import { AppShell, PageHeader, periodName } from '@/components/shell'
 import {
-  Block, ButtonLink, Card, Count, DataTable, EmptyState, ErrorState, KpiCard, KpiGrid, Money, Pct,
-  VerdictCard, type DataColumn, type DataRow,
+  Block, ButtonLink, Card, Chip, Count, DataTable, EmptyState, ErrorState, KpiCard, KpiGrid, Money, Pct,
+  type DataColumn, type DataRow,
 } from '@/components/ui'
 import { DailyProfitBars } from '@/components/charts'
 import { buildCreativeVerdict, noSpendWhen } from '@/components/campaigns/creativeVerdict'
 import { storeMarginFromPnL } from '@/components/campaigns/margin'
 import { AdThumb } from '@/components/campaigns/AdThumb'
 import { RoasCell } from '@/components/campaigns/RoasCell'
+import { detailsOf, statusChipsOf } from '@/lib/views/numberBand'
+import { NumberBandView, PeriodDetails } from '@/components/numbers'
 import s from '@/components/campaigns/campaigns.module.css'
 
 /**
@@ -172,6 +174,27 @@ export default async function CreativePage({ params, searchParams }: {
     },
   }))
 
+  const kpis = (
+    <>
+    <KpiCard label="Gasto" swatch="meta" value={<Money value={c.spend} />} note={<>{plural(c.daysWithSpend, 'dia', 'dias')} com gasto · CPM <b>{formatMoney(c.cpm)}</b></>} />
+    <KpiCard label="Vendas atribuídas" value={<Money value={c.purchaseValue} />} note={<><b>{c.purchases}</b> {c.purchases === 1 ? 'compra' : 'compras'} · CPA <b>{formatMoney(c.cpa)}</b></>}
+      info="O que o Meta credita a este anúncio. Compras impossíveis (acima de $20.000 num dia de um anúncio) já foram descartadas." />
+    <KpiCard label="ROAS" value={<span>{formatRoas(c.roas)}</span>} note={<RoasCell roas={c.roas} breakEven={be} paused={!c.running} showValue={false}
+        configured={detail.configured} revenue={pnl.totals.revenue} contribution={pnl.totals.contribution}
+        reason={c.shared ? 'other_store' : null} />}
+      info="Vendas atribuídas ÷ gasto, contra o empate da loja no mesmo período (receita ÷ contribuição)." />
+    <KpiCard label="Cliques" value={<span>{formatPct(c.ctr, { digits: 2 })}</span>} note={<><b>{formatNumber(c.linkClicks)}</b> cliques no link · CPC <b>{formatMoney(c.cpc)}</b></>}
+      info="CTR = cliques no link ÷ impressões." />
+    <KpiCard label="Frequência" tone={c.frequency === null ? 'mut' : undefined}
+      value={c.frequency === null ? <span className={s.kpiNa}>indisponível</span> : <span>{c.frequency.toLocaleString('pt-BR', { maximumFractionDigits: 1 })}</span>}
+      note={single ? 'impressões ÷ alcance do dia' : 'só existe para um dia de cada vez'} info={FREQUENCY_UNAVAILABLE} />
+    <KpiCard label="Hook rate" tone="mut" value={<span className={s.kpiNa}>indisponível</span>}
+      note={c.video ? `vídeo: ${formatNumber(c.video.plays)} inícios de reprodução, não visualizações de 3 s`
+        : isVideo ? 'vídeo: quase nenhum início de reprodução neste período'
+          : detail.format === 'image' ? 'anúncio de imagem' : 'formato desconhecido'} info={HOOK_RATE_UNAVAILABLE} />
+    </>
+  )
+
   return (
     <AppShell ctx={ctx}>
       <PageHeader
@@ -180,7 +203,28 @@ export default async function CreativePage({ params, searchParams }: {
         sub={<><b>{periodName(ctx)}</b> · <span className="num">{ctx.rangeLabel}</span> · criativo da {store.name}</>}
         actions={<ButtonLink href={backHref} size="sm" icon="camp">Todos os criativos</ButtonLink>}
       />
-      <VerdictCard verdict={verdict} aside={aside} />
+      <div className={s.creativeTop}>
+        <div className={s.creativeMain}>
+          {/* Numbers first: the chips, the ad's numbers, then the verdict's sentences on demand. */}
+          <NumberBandView tiles={[]} status={statusChipsOf(verdict)} ariaLabel="Situação do anúncio" />
+          {detail.hasSpend && (
+            // Seven cards: 4 + 3 on a wide column, never one alone on a row.
+            <div className={s.creativeKpis}>
+              <KpiGrid>
+                <KpiCard label={ctx.split ? 'Lucro estimado (sua parte)' : 'Lucro estimado'}
+                  value={verdict.amount === null ? <span className="mut">—</span> : <Money value={verdict.amount} />}
+                  tone={verdict.amount === null ? 'mut' : verdict.amountTone === 'pos' ? 'pos' : verdict.amountTone === 'neg' ? 'neg' : undefined}
+                  // A short tag, as on Campanhas; the caption's formula is in the ⓘ.
+                  note={verdict.basis === 'profit' ? <Chip tone="neu" size="sm">estimado · atribuição do Meta</Chip> : verdict.amountCaption}
+                  info={verdict.basis === 'profit' ? `${verdict.amountCaption.replace(/^de /, 'Lucro estimado: ')}. ${detail.formula}` : detail.formula} />
+                {kpis}
+              </KpiGrid>
+            </div>
+          )}
+          <PeriodDetails details={detailsOf(verdict)} />
+        </div>
+        <Card className={s.creativeAside} as="aside" aria-label="O anúncio">{aside}</Card>
+      </div>
 
       {!detail.hasSpend ? (
         <Card pad="md">
@@ -193,24 +237,6 @@ export default async function CreativePage({ params, searchParams }: {
         </Card>
       ) : (
         <>
-          <KpiGrid>
-            <KpiCard label="Gasto" swatch="meta" value={<Money value={c.spend} />} note={<>{plural(c.daysWithSpend, 'dia', 'dias')} com gasto · CPM <b>{formatMoney(c.cpm)}</b></>} />
-            <KpiCard label="Vendas atribuídas" value={<Money value={c.purchaseValue} />} note={<><b>{c.purchases}</b> {c.purchases === 1 ? 'compra' : 'compras'} · CPA <b>{formatMoney(c.cpa)}</b></>}
-              info="O que o Meta credita a este anúncio. Compras impossíveis (acima de $20.000 num dia de um anúncio) já foram descartadas." />
-            <KpiCard label="ROAS" value={<span>{formatRoas(c.roas)}</span>} note={<RoasCell roas={c.roas} breakEven={be} paused={!c.running} showValue={false}
-                configured={detail.configured} revenue={pnl.totals.revenue} contribution={pnl.totals.contribution}
-                reason={c.shared ? 'other_store' : null} />}
-              info="Vendas atribuídas ÷ gasto, contra o empate da loja no mesmo período (receita ÷ contribuição)." />
-            <KpiCard label="Cliques" value={<span>{formatPct(c.ctr, { digits: 2 })}</span>} note={<><b>{formatNumber(c.linkClicks)}</b> cliques no link · CPC <b>{formatMoney(c.cpc)}</b></>}
-              info="CTR = cliques no link ÷ impressões." />
-            <KpiCard label="Frequência" tone={c.frequency === null ? 'mut' : undefined}
-              value={c.frequency === null ? <span className={s.kpiNa}>indisponível</span> : <span>{c.frequency.toLocaleString('pt-BR', { maximumFractionDigits: 1 })}</span>}
-              note={single ? 'impressões ÷ alcance do dia' : 'só existe para um dia de cada vez'} info={FREQUENCY_UNAVAILABLE} />
-            <KpiCard label="Hook rate" tone="mut" value={<span className={s.kpiNa}>indisponível</span>}
-              note={c.video ? `vídeo: ${formatNumber(c.video.plays)} inícios de reprodução, não visualizações de 3 s`
-                : isVideo ? 'vídeo: quase nenhum início de reprodução neste período'
-                  : detail.format === 'image' ? 'anúncio de imagem' : 'formato desconhecido'} info={HOOK_RATE_UNAVAILABLE} />
-          </KpiGrid>
 
           {c.video && (
             <Block title="Quanto do vídeo as pessoas assistem" howTo="Parte dos inícios de reprodução que chegou a cada ponto do vídeo. O autoplay conta como início, então é retenção, não gancho.">

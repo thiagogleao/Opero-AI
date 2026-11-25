@@ -18,7 +18,7 @@ import { Button, EmptyState, ErrorState, Skeleton } from '@/components/ui'
 import { buildVerdict, verdictInputFromPortfolio } from '@/lib/views/verdict'
 import type { MobileStoreOption } from '@/lib/views/mobile'
 import type { DetailSection } from '@/lib/views/mobileDetail'
-import { formatTimeInTz, tzCity } from '@/lib/format'
+import { formatRangeLabel, formatTimeInTz, tzCity } from '@/lib/format'
 import { REFERENCE_TZ } from '@/lib/engine/dates'
 import {
   announce, archiveOpening, findStore, offsetMinutes, preset, resolve, valueName,
@@ -36,11 +36,13 @@ import { diffFeed, inScope, type FeedBaseline } from './_lib/feed'
 import { refreshOutcome, refreshProgress } from './_lib/refreshProgress'
 import { getSoundPref, playChaChing, restoreSound, setSoundPref, subscribeSoundPref } from './_lib/sound'
 import { usePush } from './_lib/usePush'
-import { NO_SHARED_ADS, type SharedAds } from './_lib/sharedAds'
-import { Header, PeriodBar, RefreshStrip, StoreChips, Strip } from './_components/Top'
+import { NO_SHARED_ADS, type PairOrdersKnown, type SharedAds } from './_lib/sharedAds'
+import { Header, NoteStrip, PeriodBar, RefreshStrip, StoreChips, Strip } from './_components/Top'
 import {
-  Attention, ChargebackBlock, ClockBanner, DailyBlock, DayBlock, frozenTitle, LiveFeed, notYetTitle, RefundsBlock, SharedAdsNotes, StoreList, VerdictBlock,
+  Attention, ChargebackBlock, DailyBlock, DayBlock, frozenTitle, LedgerBlock, LiveFeed, notYetTitle, phoneBand, RefundsBlock, SharedAdsNotes, StoreList,
 } from './_components/Home'
+import { PhoneNumberBand } from './_components/NumberBand'
+import { PeriodDetails } from './_components/PeriodDetails'
 import { DetailTabs } from './_components/Details'
 import { AlertsSheet, PeriodSheet, SettingsSheet } from './_components/Sheets'
 import s from './m.module.css'
@@ -254,9 +256,47 @@ export default function MobileApp({ stores: firstStores, archived: firstArchived
   const fresh = !!data && home.dataKey === selKey
   const error = home.error && home.errorKey === selKey ? home.error : null
   const loadingThis = home.loadingKey !== null && home.loadingKey === selKey
-  const verdict = useMemo(
-    () => (data ? buildVerdict(verdictInputFromPortfolio(data, { subject: data.request.store === 'all' ? 'Suas lojas' : undefined })) : null),
+  const verdictInput = useMemo(
+    () => (data ? verdictInputFromPortfolio(data, { subject: data.request.store === 'all' ? 'Suas lojas' : undefined }) : null),
     [data],
+  )
+  const verdict = useMemo(() => (verdictInput ? buildVerdict(verdictInput) : null), [verdictInput])
+  // One store in a shared ad-account pair (EPOCH ↔ CAMP HALLOW): the pair's
+  // orders in the shown window and in its comparison base, as the desktop
+  // Resumo reads them (SharedAccountNote, R2-1 "base misturada"). Asked only
+  // for such a store, once per window; until it answers (or if it fails) the
+  // band keeps the cautious wording.
+  const one = data && data.request.store !== 'all' && data.stores.length === 1 ? data.stores[0].id : null
+  const pairStore = one && shared.pairs.some(p => p.adStoreId === one || p.salesStoreId === one) ? one : null
+  const wFrom = data?.range.from ?? ''
+  const wTo = data?.range.to ?? ''
+  const hasBase = !!data && data.comparison.none == null
+  const cFrom = hasBase ? data.comparison.from : ''
+  const cTo = hasBase ? data.comparison.to : ''
+  const baseRange = hasBase ? data.comparison.rangeText || formatRangeLabel({ from: cFrom, to: cTo }, data.anchorToday) : ''
+  const knownKey = pairStore ? [pairStore, wFrom, wTo, cFrom, cTo].join('|') : null
+  const [knownRead, setKnownRead] = useState<{ key: string; value: PairOrdersKnown } | null>(null)
+  useEffect(() => {
+    if (!knownKey || !pairStore) return
+    const ctrl = new AbortController()
+    const q = new URLSearchParams({ store: pairStore, from: wFrom, to: wTo })
+    if (cFrom && cTo) { q.set('cfrom', cFrom); q.set('cto', cTo) }
+    fetch(`/api/mobile/shared?${q}`, { signal: ctrl.signal, cache: 'no-store', credentials: 'same-origin' })
+      .then(r => (r.ok ? r.json() : null))
+      .then((j: { window?: PairOrdersKnown['now']; base?: PairOrdersKnown['base'] } | null) => {
+        if (j) setKnownRead({ key: knownKey, value: { now: j.window ?? null, base: j.base ?? null, baseRange } })
+      })
+      .catch(() => {})
+    return () => ctrl.abort()
+  }, [knownKey, pairStore, wFrom, wTo, cFrom, cTo, baseRange])
+  const known = knownRead && knownRead.key === knownKey ? knownRead.value : null
+  // The number band (spec §1): the verdict's numbers, the phone's own chips
+  // (another clock, an archived store, a shared ad account). The clock chip
+  // reads the time, so it follows the minute.
+  const nowMinute = now ? Math.floor(now / 60_000) : 0
+  const pb = useMemo(
+    () => (data && verdictInput && verdict ? phoneBand(data, verdictInput, verdict, shared, { now: nowMinute * 60_000, deviceTz, archived: archivedSel, known }) : null),
+    [data, verdictInput, verdict, shared, nowMinute, deviceTz, archivedSel, known],
   )
   const scopeName = shownV ? nameOf(shownV.loja) : ''
   // The shown selection resolved locally on the server-corrected clock, only
@@ -289,6 +329,8 @@ export default function MobileApp({ stores: firstStores, archived: firstArchived
   const fetchedClock = home.fetchedAt
     ? `${formatTimeInTz(new Date(home.fetchedAt), screenTz)}${screenTz !== deviceTz ? `, no horário de ${tzCity(screenTz)}` : ''}`
     : '—'
+  // C15c: the saved store, said in the footer (the old "Fixado em X" line).
+  const pinnedName = phone ? (phone.saved.loja === ALL ? 'Todas' : [...stores, ...archived].find(x => x.id === phone.saved.loja)?.name ?? null) : null
   const pushAlert = push.status === 'nao_inscrito' || push.status === 'bloqueado' || push.status === 'sem_chave'
 
   if (error?.kind === 'session') {
@@ -335,7 +377,7 @@ export default function MobileApp({ stores: firstStores, archived: firstArchived
       )}
       {/* The answer's own notes: a fitted window (R9), an archived store's
           clamp (R10), a store that started inside the window (R11). */}
-      {answerNotes && <Strip tone="info" icon="info">{answerNotes}</Strip>}
+      {answerNotes && <NoteStrip>{answerNotes}</NoteStrip>}
       {/* A scope change that opens other dates (R4), or a link that could
           not be used as it was: until the next action. */}
       {transientText && <Strip tone="warn" icon="alert" onClose={() => dispatch({ type: 'close_transient' })}>{transientText}</Strip>}
@@ -367,23 +409,30 @@ export default function MobileApp({ stores: firstStores, archived: firstArchived
             {error.message}. {data ? `Os números de ${shownName} foram tirados da tela para não serem lidos como desta seleção.` : ''}
           </ErrorState>
         </div>
-      ) : !data || !verdict ? (
+      ) : !data || !verdict || !pb ? (
         <HomeSkeleton />
       ) : (
         // inert: the dimmed answer is another selection's, so its rows must not
         // be focusable or tappable as if they were this one's.
         <div className={`${s.content}${fresh ? '' : ` ${s.dim}`}`} aria-busy={!fresh || undefined} aria-hidden={!fresh || undefined} inert={!fresh || undefined}>
-          {/* One archived-store line: the visit strip already says it while shown. */}
-          {archivedSel && fresh && !strip && <Strip tone="info" icon="info">Loja arquivada: fora de “Todas” e sem sincronização. Só o histórico.</Strip>}
-          {singleTz && <ClockBanner tz={singleTz} deviceTz={deviceTz} now={now} />}
+          {/* The archived store and another clock are status chips of the band
+              now (spec §3.10): nothing sits between the period bar and it. */}
           {data.stores.length === 0 ? (
             <EmptyState title="Nenhuma loja ativa" />
           ) : (
             <>
-              <VerdictBlock data={data} v={verdict} />
-              <SharedAdsNotes data={data} shared={shared} onAll={() => pickRow(ALL)} />
+              <PhoneNumberBand band={pb.band} heading={shownName || 'Números do período'} />
               <DayBlock data={data} />
               <DailyBlock data={data} />
+              <PeriodDetails
+                // Closed again on another store or period (spec §1.6: closed on load).
+                key={selKey ?? ''}
+                band={pb.band}
+                before={pb.before}
+                extraCount={pb.pairs.length}
+                extra={pb.pairs.length ? <SharedAdsNotes data={data} notes={pb.pairs} onAll={() => pickRow(ALL)} /> : null}
+              />
+              <LedgerBlock data={data} v={verdict} />
               <Attention data={data} />
               <StoreList data={data} shared={shared} onPick={pickRow} opensOther={rowLine} help={phone ? rowHelp(phone) : undefined} />
               <LiveFeed data={data} now={now} deviceTz={deviceTz} />
@@ -410,7 +459,7 @@ export default function MobileApp({ stores: firstStores, archived: firstArchived
 
       <footer className={s.footer}>
         {fresh && home.fetchedAt && (
-          <span>Números de {fetchedClock} · {archivedSel ? 'loja arquivada: sem sincronização, não atualizam sozinhos.' : 'atualizam sozinhos a cada 45 s com o app aberto.'}</span>
+          <span>Números de {fetchedClock} · {archivedSel ? 'loja arquivada: sem sincronização, não atualizam sozinhos' : 'atualizam sozinhos a cada 45 s com o app aberto'}{pinnedName ? ` · fixado em ${pinnedName}` : ''}.</span>
         )}
         <button type="button" className={s.linkBtn} onClick={() => setSheet('settings')}>Ajustes deste aparelho</button>
       </footer>

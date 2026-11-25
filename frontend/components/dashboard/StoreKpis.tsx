@@ -1,7 +1,11 @@
 /**
- * StoreKpis — the Resumo's key numbers, each with a one-line note under it and
- * the full definition in the ⓘ. Server component; every value comes from the
- * same engine pass as the verdict (lib/views/store StoreSummary).
+ * StoreKpis — "Por dia e por pedido": the Resumo's secondary numbers, the
+ * ones the number band at the top does not show (receita e pedidos por dia,
+ * Anúncios Meta, Anúncios Shopify, anúncio por pedido, lucro por pedido). The
+ * totals — receita, pedidos, margem, ROAS × empate — and their deltas live in
+ * the band (lib/views/numberBand), so they are not repeated here. Server
+ * component; every value comes from the same engine pass as the verdict
+ * (lib/views/store StoreSummary).
  *
  * Partner split: only money RESULTS are halved (profit per order); revenue,
  * spend, margins and ROAS stay whole, as the owner decided.
@@ -15,12 +19,13 @@
 import type { ReactNode } from 'react'
 import type { DateRange } from '@/lib/engine/dates'
 import type { PageContext } from '@/lib/views/page'
-import { CHANNEL_LABEL, daysRead, empateGap, ledgerAdCents, MINOR_CHANNEL_SHARE, type StoreSummary } from '@/lib/views/store'
+import { daysRead, ledgerAdCents, type StoreSummary } from '@/lib/views/store'
 import type { ComparisonWindow } from '@/lib/views/verdict'
-import { formatCents, formatCount, formatMoney, formatNumber, formatPct, formatRangeLabel, formatRoas, plural } from '@/lib/format'
-import { Count, Delta, Icon, KpiCard, Money, Pct, Roas, type DeltaProps } from '@/components/ui'
+import { followBand, type NumberBand, META_SPEND_INFO, ORDERS_INFO, REVENUE_INFO, SALES_PER_DAY_INFO, SHOP_SPEND_INFO, SPEND_PER_DAY_INFO } from '@/lib/views/numberBand'
+import { formatCents, formatCount, formatMoney, formatNumber, formatRangeLabel, plural } from '@/lib/format'
+import { Block, Icon, KpiCard, Money } from '@/components/ui'
+import { DeltaRow } from '@/components/numbers/NumberBandView'
 import { MiniBars, Sparkline } from '@/components/charts'
-import { RoasVsEmpate } from './RoasVsEmpate'
 import { kpiComparisonLabel, type KpiComparisonLabel } from './comparisonLabel'
 import { emptyWindowText, type EmptyWindow } from './emptyWindow'
 import s from './dashboard.module.css'
@@ -41,11 +46,27 @@ export function comparisonShort(
   return kpiComparisonLabel(cmp, ctx.today)
 }
 
-/** A KPI's delta pill: may wrap inside its card (a cut comparison with the
- *  previous value, "▲ 20,0 p.p. vs 1–24 out até 00h33 (−12,6%)", is wider
- *  than a 4-column card at 1440), with the full comparison on hover. */
-function KpiDelta({ vs, ...rest }: Omit<DeltaProps, 'className' | 'label'> & { vs: KpiComparisonLabel }) {
-  return <span title={vs.full}><Delta {...rest} label={vs.short} className={s.kpiDelta} /></span>
+/**
+ * A card's ▲▼: the band's compact delta row under the band's own comparison
+ * state (lib/views/numberBand followBand, components/numbers DeltaRow): no
+ * row where the band measures no variation (base incompleta, sem base…),
+ * uncoloured while the day is too young to judge. The comparison words are
+ * said once in the band's status line, and in full in the row's title and
+ * screen-reader text. The kind sets the colour: spend is neutral, a result
+ * green when it rose; lowerIsBetter flips it for the ad cost per order.
+ */
+function KpiDelta({ band, current, previous, kind, k = 1, lowerIsBetter = false }: {
+  band: Pick<NumberBand, 'comparison' | 'early'>
+  current: number; previous: number | null
+  kind: 'money' | 'money_result'; k?: number; lowerIsBetter?: boolean
+}) {
+  let d = followBand(band, kind, current, previous, k)
+  if (!d) return null
+  if (lowerIsBetter && d.kind !== 'none' && (d.good === 'up' || d.good === 'down') && d.dir && d.dir !== 'flat') {
+    // Spending less per order is the good news: green when it fell.
+    d = { ...d, good: d.dir === 'down' ? 'up' : 'down' }
+  }
+  return <DeltaRow d={d} />
 }
 
 /** "51¢ de cada dólar vendido" — or, when the spend passed the sales (Glooty:
@@ -93,46 +114,48 @@ export function perDayRangeText(
   return yearsShown && !/\d{4}$/.test(label) ? `${label} ${days.to.slice(0, 4)}` : label
 }
 
-// Revenue and orders per day start at the first sale; spend per day at the
-// store's start, which an ad before the first sale moves earlier (Glooty:
-// ads from 4 nov, first order on 6 nov). Each ⓘ says which days it divides by.
-const SALES_PER_DAY_INFO = 'Média por dia: só os dias fechados desde a primeira venda da loja; o dia de hoje, ainda em andamento, fica de fora.'
-const SPEND_PER_DAY_INFO = 'Média por dia: só os dias fechados desde que a loja começou (a primeira venda ou o primeiro anúncio, o que veio antes: anúncio antes da primeira venda é gasto de verdade); o dia de hoje, ainda em andamento, fica de fora.'
-
-/** "10%": the share under which a second ad channel stays out of the ROAS (lib/views/adChannel). */
-const MINOR_PCT = formatPct(MINOR_CHANNEL_SHARE * 100, { digits: 0 })
-
 function NotConfigured({ children }: { children: ReactNode }) {
   return <span className={s.cfg}><Icon name="sliders" size={12} />{children}</span>
 }
 
-/** The grid when the window has nothing in it for a reason other than "no
+// The ⓘ definitions are the band's (lib/views/numberBand: one copy).
+const REVENUE_PER_DAY_INFO = `Receita ÷ dias. ${REVENUE_INFO} ${SALES_PER_DAY_INFO}`
+const ORDERS_PER_DAY_INFO = `Pedidos ÷ dias. ${ORDERS_INFO} ${SALES_PER_DAY_INFO}`
+const META_INFO = `${META_SPEND_INFO} ${SPEND_PER_DAY_INFO}`
+const AD_PER_ORDER_INFO = '(Anúncios Meta + Anúncios Shopify) ÷ pedidos da loja — todos os pedidos, não só os que o Meta atribui a si.'
+const PROFIT_PER_ORDER_INFO = 'Lucro real ÷ pedidos. A margem (lucro real ÷ receita) está no topo da página e não muda na visão de sócio.'
+
+/** The block around the cards. */
+function Section({ children }: { children: ReactNode }) {
+  return (
+    <Block title="Por dia e por pedido" className={s.perDay}
+      howTo="Médias por dia e custos por pedido. Os totais do período, a margem e o ROAS estão no topo da página.">
+      <div className={s.kpis2}>{children}</div>
+    </Block>
+  )
+}
+
+/** The cards when the window has nothing in it for a reason other than "no
  *  sales": the same cards and definitions, "—" for every number, the reason
  *  under each, and no delta (there is nothing to compare). */
 function EmptyKpis({ note }: { note: string }) {
   const dash = <span className="mut">—</span>
   return (
-    <div className={s.kpis}>
-      <KpiCard label="Receita" value={dash} note={note}
-        info={`Total pago pelos clientes nos pedidos não reembolsados nem cancelados, com impostos e frete, nas datas do fuso da loja. ${SALES_PER_DAY_INFO}`} />
-      <KpiCard label="Pedidos e ticket" value={dash} note={note}
-        info={`Pedidos pagos no período (reembolsados e cancelados não entram). Ticket médio = receita ÷ pedidos. ${SALES_PER_DAY_INFO}`} />
-      <KpiCard wide label="ROAS × empate" value={dash} note={note}
-        info="ROAS = receita da loja ÷ gasto em anúncios. Empate = receita ÷ (receita − produto − frete − taxas): o ROAS em que os anúncios comem toda a margem." />
-      <KpiCard swatch="meta" label="Anúncios Meta" value={dash} note={note}
-        info={`Gasto em Facebook e Instagram das contas de anúncio da loja, dia a dia. ${SPEND_PER_DAY_INFO}`} />
-      <KpiCard swatch="shop" label="Anúncios Shopify" value={dash} note={note}
-        info="Shop Campaigns, cobrados na fatura da Shopify, fora do Meta. Entram no lucro como custo próprio e nunca no ROAS do Meta." />
-      <KpiCard label="Anúncio por pedido" value={dash} note={note}
-        info="(Anúncios Meta + Anúncios Shopify) ÷ pedidos da loja — todos os pedidos, não só os que o Meta atribui a si." />
-      <KpiCard label="Margem e lucro por pedido" value={dash} tone="mut" note={note}
-        info="Margem = lucro real ÷ receita: quantos centavos de cada dólar vendido sobram depois de todos os custos. Lucro por pedido = lucro real ÷ pedidos." />
-    </div>
+    <Section>
+      <KpiCard label="Receita por dia" value={dash} note={note} info={REVENUE_PER_DAY_INFO} />
+      <KpiCard label="Pedidos por dia" value={dash} note={note} info={ORDERS_PER_DAY_INFO} />
+      <KpiCard swatch="meta" label="Anúncios Meta" value={dash} note={note} info={META_INFO} />
+      <KpiCard swatch="shop" label="Anúncios Shopify" value={dash} note={note} info={SHOP_SPEND_INFO} />
+      <KpiCard label="Anúncio por pedido" value={dash} note={note} info={AD_PER_ORDER_INFO} />
+      <KpiCard label="Lucro por pedido" value={dash} tone="mut" note={note} info={PROFIT_PER_ORDER_INFO} />
+    </Section>
   )
 }
 
-export function StoreKpis({ ctx, summary, empty = null }: {
+export function StoreKpis({ ctx, summary, band, empty = null }: {
   ctx: PageContext; summary: StoreSummary
+  /** The number band at the top of the page: its comparison state rules these deltas too. */
+  band: Pick<NumberBand, 'comparison' | 'early'>
   /** The verdict's reason the window is empty (./emptyWindow emptyWindowOf). */
   empty?: EmptyWindow | null
 }) {
@@ -144,68 +167,34 @@ export function StoreKpis({ ctx, summary, empty = null }: {
   // (lib/views/store kpiDays): the days after it were never read.
   const daily = daysRead(summary.pnl.daily, summary.row.archived ? summary.row.archivedOn : null)
   const multiDay = daily.length > 2
-  const vs = comparisonShort(ctx, summary.view.comparison)
   const noOrders = k.orders === 0
   const lc = ledgerAdCents(summary.pnl.totals, configured)
-  const gap = empateGap(configured, k.breakEven, summary.pnl.totals)
   // Two closed days at least: one day's "average" is just that day.
   const salesPerDay = k.salesAvgDays > 1
   const spendPerDay = k.avgDays > 1
+  const dash = <span className="mut">—</span>
 
   return (
-    <div className={s.kpis}>
+    <Section>
       <KpiCard
-        label="Receita"
-        value={<Money value={k.revenue} />}
+        label="Receita por dia"
+        value={salesPerDay ? <Money value={k.revenuePerDay} /> : dash}
         note={noOrders
           ? 'nenhum pedido no período'
           : salesPerDay
-            ? <span className={s.kpiNote}><b>{formatMoney(k.revenuePerDay)}</b> por dia{perDayDays(k.salesAvgRange, ctx)}</span>
-            : 'pedidos pagos, impostos incluídos'}
+            ? <span className={s.kpiNote}>por dia{perDayDays(k.salesAvgRange, ctx)}</span>
+            : 'a média precisa de 2 dias fechados'}
         spark={multiDay ? <Sparkline values={daily.map(d => d.revenue)} ariaLabel="Receita por dia" /> : undefined}
-        delta={p && !(k.revenue === 0 && p.revenue === 0) && <KpiDelta current={k.revenue} previous={p?.revenue ?? null} vs={vs} goodWhen="neutral" showPrevious />}
-        info={<>Total pago pelos clientes nos pedidos não reembolsados nem cancelados, com impostos e frete, nas datas do fuso da loja.
-          Um pedido reembolsado por inteiro sai do dia em que foi feito. Vendas em outra moeda entram convertidas em dólar. {SALES_PER_DAY_INFO}</>}
+        info={REVENUE_PER_DAY_INFO}
       />
       <KpiCard
-        label="Pedidos e ticket"
-        value={<Count value={k.orders} />}
+        label="Pedidos por dia"
+        value={salesPerDay ? (k.ordersPerDay < 10 ? formatNumber(k.ordersPerDay, 1) : formatCount(k.ordersPerDay)) : dash}
         note={noOrders ? 'nenhum pedido no período' : (
-          <span className={s.kpiNote}>ticket médio <b>{formatMoney(k.aov)}</b>{salesPerDay && <> · <b>{k.ordersPerDay < 10 ? formatNumber(k.ordersPerDay, 1) : formatCount(k.ordersPerDay)}</b> por dia{perDayDays(k.salesAvgRange, ctx)}</>}</span>
+          <span className={s.kpiNote}>ticket médio <b>{formatMoney(k.aov)}</b>{salesPerDay && <> · por dia{perDayDays(k.salesAvgRange, ctx)}</>}</span>
         )}
         spark={multiDay ? <MiniBars values={daily.map(d => d.orders)} color="neu" width={0} height={30} ariaLabel="Pedidos por dia" /> : undefined}
-        delta={p && !(k.orders === 0 && p.orders === 0) && <KpiDelta current={k.orders} previous={p?.orders ?? null} vs={vs} kind="count" goodWhen="neutral" showPrevious />}
-        info={`Pedidos pagos no período (reembolsados e cancelados não entram). Ticket médio = receita ÷ pedidos. ${SALES_PER_DAY_INFO}`}
-      />
-      <KpiCard
-        wide
-        swatch={k.roasChannel === 'shop' ? 'shop' : k.roasChannel ? 'meta' : undefined}
-        // No spend at all: no channel to name ("ROAS do Meta" over a store with no ads).
-        label={k.roasChannel === 'both' ? 'ROAS dos anúncios (Meta + Shopify) × empate' : k.roasChannel === 'shop' ? 'ROAS dos Anúncios Shopify × empate' : k.roasChannel === 'meta' ? 'ROAS do Meta × empate' : 'ROAS × empate'}
-        value={k.channelRoas === null ? <span className="mut">—</span> : <Roas value={k.channelRoas} />}
-        note={k.channelRoas === null || !k.roasChannel
-          ? 'sem gasto em anúncios no período'
-          : (
-            <span className={s.kpiWords}>
-              Cada $1 em {k.roasChannel === 'both' ? 'anúncios (Meta e Shopify somados)' : CHANNEL_LABEL[k.roasChannel]} trouxe{' '}
-              <b className="num">{formatMoney(k.channelRoas, { cents: 'always' })}</b> em vendas da loja (todas as vendas, não só as atribuídas).
-              {k.roasChannel === 'both' && k.metaRoas !== null && <> Só o Meta: <b className="num">{formatRoas(k.metaRoas)}</b>, que credita ao Meta também as vendas dos Anúncios Shopify.</>}
-              {k.roasChannel === 'meta' && k.shopSpend > 0 && <> Os <b className="num">{formatMoney(k.shopSpend)}</b> de Anúncios Shopify ficam fora deste ROAS (menos de {MINOR_PCT} do gasto em anúncios) e entram no lucro.</>}
-              {k.roasChannel === 'shop' && k.metaSpend > 0 && <> Os <b className="num">{formatMoney(k.metaSpend)}</b> de Meta ficam fora deste ROAS (menos de {MINOR_PCT} do gasto em anúncios) e entram no lucro.</>}
-            </span>
-          )}
-        spark={k.channelRoas !== null && k.roasChannel
-          ? <RoasVsEmpate roas={k.channelRoas} breakEven={k.breakEven} gap={gap} label={k.roasChannel === 'both' ? 'ROAS dos anúncios' : `ROAS ${CHANNEL_LABEL[k.roasChannel]}`} />
-          : undefined}
-        footnote={p?.channelRoas != null ? <span title={vs.full}>{vs.short}: {formatRoas(p.channelRoas)}</span> : undefined}
-        // The rule actually applied (lib/views/adChannel adChannelOf): MOKOO's
-        // $194 of Shopify ads next to $5.931 of Meta stay out, and the ⓘ said
-        // "é o gasto dos dois somado" over a Meta-only number.
-        info={<>ROAS = receita da loja ÷ gasto em anúncios. Com um só canal gastando, é esse canal. Com Meta e Anúncios Shopify gastando,
-          é o gasto dos dois somado, porque dividir a receita só pelo Meta daria ao Meta as vendas que os Anúncios Shopify trouxeram.
-          A exceção: um canal com menos de {MINOR_PCT} do gasto em anúncios fica fora do ROAS, que passa a ser o do outro canal, e entra só no lucro.
-          Empate = receita ÷ (receita − produto − frete − taxas): o ROAS em que os anúncios comem toda a margem. Acima dele, os anúncios deixam lucro
-          antes dos custos fixos. Sem custos configurados, o empate é desconhecido.</>}
+        info={ORDERS_PER_DAY_INFO}
       />
       <KpiCard
         swatch="meta"
@@ -215,8 +204,8 @@ export function StoreKpis({ ctx, summary, empty = null }: {
           ? <span className={s.kpiNote}><SpendShare cents={k.metaCents} ledgerCents={lc.meta} />{spendPerDay && <> · <b>{formatMoney(k.metaPerDay)}</b>/dia{k.metaAvgRange && perDayDays(k.metaAvgRange, ctx)}</>}</span>
           : 'nenhum gasto no Meta no período'}
         spark={multiDay && k.metaSpend > 0 ? <Sparkline values={daily.map(d => d.metaSpend)} tone="meta" ariaLabel="Gasto no Meta por dia" /> : undefined}
-        delta={!p || underADollar(k.metaSpend, p.metaSpend) ? undefined : <KpiDelta current={k.metaSpend} previous={p?.metaSpend ?? null} vs={vs} goodWhen="neutral" showPrevious />}
-        info={`Gasto em Facebook e Instagram das contas de anúncio da loja, dia a dia. Uma conta desligada deixa de ser coletada, mas o gasto que já teve continua nas contas. ${SPEND_PER_DAY_INFO}`}
+        delta={!p || underADollar(k.metaSpend, p.metaSpend) ? undefined : <KpiDelta band={band} current={k.metaSpend} previous={p?.metaSpend ?? null} kind="money" />}
+        info={META_INFO}
       />
       <KpiCard
         swatch="shop"
@@ -226,8 +215,8 @@ export function StoreKpis({ ctx, summary, empty = null }: {
           ? <span className={s.kpiNote}><SpendShare cents={k.shopCents} ledgerCents={lc.shop} />{k.spanDays > 1 && <> · <b>{k.shopDays}</b> de {k.spanDays} dias com gasto{k.startedOn && <> desde <span className="num">{ctx.dateBeside(k.startedOn)}</span></>}</>}</span>
           : 'nenhum gasto com Shop Campaigns'}
         spark={multiDay && k.shopSpend > 0 ? <MiniBars values={daily.map(d => d.shopSpend)} color="shop" width={0} height={30} ariaLabel="Anúncios Shopify por dia" /> : undefined}
-        delta={!p || underADollar(k.shopSpend, p.shopSpend) ? undefined : <KpiDelta current={k.shopSpend} previous={p?.shopSpend ?? null} vs={vs} goodWhen="neutral" showPrevious />}
-        info="Shop Campaigns, cobrados na fatura da Shopify, fora do Meta. Entram no lucro como custo próprio e nunca no ROAS do Meta."
+        delta={!p || underADollar(k.shopSpend, p.shopSpend) ? undefined : <KpiDelta band={band} current={k.shopSpend} previous={p?.shopSpend ?? null} kind="money" />}
+        info={SHOP_SPEND_INFO}
       />
       <KpiCard
         label="Anúncio por pedido"
@@ -239,24 +228,24 @@ export function StoreKpis({ ctx, summary, empty = null }: {
             {ctx.split && ' (loja inteira)'}
           </span>
         ) : <NotConfigured>custos não configurados: não dá para saber quanto sobra</NotConfigured>}
-        delta={p && k.adCostPerOrder !== null && <KpiDelta current={k.adCostPerOrder} previous={p?.adCostPerOrder ?? null} vs={vs} goodWhen="down" showPrevious />}
-        info={<>(Anúncios Meta + Anúncios Shopify) ÷ pedidos da loja — todos os pedidos, não só os que o Meta atribui a si.
+        delta={p && k.adCostPerOrder !== null && <KpiDelta band={band} current={k.adCostPerOrder} previous={p?.adCostPerOrder ?? null} kind="money" lowerIsBetter />}
+        info={<>{AD_PER_ORDER_INFO}{' '}
           “Deixa para os anúncios” = (receita − produto − frete − taxas − custos fixos) ÷ pedidos. A diferença entre os dois é o lucro por pedido.</>}
       />
       <KpiCard
-        label="Margem e lucro por pedido"
-        value={configured ? <Pct value={k.margin} /> : <span className="mut">—</span>}
-        tone={!configured || k.margin === null ? 'mut' : k.margin < 0 ? 'neg' : 'pos'}
+        label={ctx.split ? 'Lucro por pedido · sua parte' : 'Lucro por pedido'}
+        value={configured && k.profitPerOrder !== null ? <Money value={ctx.part(k.profitPerOrder)} /> : dash}
+        tone={!configured || k.profitPerOrder === null ? 'mut' : k.profitPerOrder < 0 ? 'neg' : 'pos'}
         note={!configured
           ? <NotConfigured>custos não configurados</NotConfigured>
           : k.profitPerOrder === null
             ? 'sem pedidos no período'
-            : <span className={s.kpiNote}><b className={k.profitPerOrder < 0 ? 'neg' : undefined}>{formatMoney(ctx.part(k.profitPerOrder))}</b> de lucro por pedido{ctx.split ? ' · sua parte' : ''}</span>}
-        // No margin this window (no orders): a delta would only print "sem comparação".
-        delta={configured && p && k.margin !== null ? <KpiDelta current={k.margin} previous={p.margin} vs={vs} kind="pct" showPrevious /> : undefined}
-        info={<>Margem = lucro real ÷ receita: quantos centavos de cada dólar vendido sobram depois de todos os custos (não muda na visão de sócio).
-          Lucro por pedido = lucro real ÷ pedidos{ctx.split ? '; na visão de sócio, a sua metade' : ''}. {plural(k.orders, 'pedido', 'pedidos')} no período.</>}
+            : <span className={s.kpiNote}>em {plural(k.orders, 'pedido', 'pedidos')}{ctx.split ? ' · sua parte' : ''}</span>}
+        delta={configured && p && k.profitPerOrder !== null && p.profitPerOrder !== null
+          ? <KpiDelta band={band} current={ctx.part(k.profitPerOrder)} previous={ctx.part(p.profitPerOrder)} kind="money_result" k={ctx.splitFactor} />
+          : undefined}
+        info={`${PROFIT_PER_ORDER_INFO}${ctx.split ? ' Na visão de sócio, a sua metade.' : ''}`}
       />
-    </div>
+    </Section>
   )
 }

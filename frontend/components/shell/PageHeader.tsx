@@ -38,6 +38,8 @@ import { formatDate, formatRangeLabel, tzCity } from '@/lib/format'
 import { offsetDiffers } from '@/lib/period'
 import { Callout } from '@/components/ui/Card'
 import { Chip, CodePill } from '@/components/ui/Chip'
+import { InfoTip } from '@/components/ui/InfoTip'
+import { splitChipText } from './splitChip'
 import s from './shell.module.css'
 
 /** The period's name (R7): the preset's label, or the dates as asked. */
@@ -59,18 +61,7 @@ export function PeriodHeading({ ctx }: { ctx: Pick<PageContext, 'resolution' | '
   </>
 }
 
-/** The partner-view chip's words: what the page halves, and what it never does. */
-export function splitChipText(halved: boolean): { label: string; title: string } {
-  return halved
-    ? {
-        label: 'sua parte (50%)',
-        title: 'Visão de sócio: lucro, lucro por pedido, resultado de caixa e reembolsos aparecem pela metade, a sua parte. Vendas, gastos, contribuição, margens, ROAS e empate ficam inteiros.',
-      }
-    : {
-        label: 'sua parte (50%) · nada é dividido aqui',
-        title: 'Visão de sócio: só lucro, lucro por pedido, resultado de caixa e reembolsos aparecem pela metade, e esta página não mostra nenhum deles. Vendas, gastos, contribuição, margens e ROAS aparecem inteiros.',
-      }
-}
+export { splitChipText }
 
 /** The header's chip under ?parte=50 (see PageHeader `halved`). */
 export function SplitChip({ halved }: { halved: boolean }) {
@@ -78,9 +69,13 @@ export function SplitChip({ halved }: { halved: boolean }) {
   return <Chip tone={halved ? 'neu' : 'mut'} icon="split" size="sm" title={title}>{label}</Chip>
 }
 
-export function PageHeader({ ctx, title, sub, badges, actions, code, halved = true }: {
+export function PageHeader({ ctx, title, sub, badges, actions, code, halved = true, periodInfo }: {
   ctx: PageContext; title?: ReactNode; sub?: ReactNode; badges?: ReactNode; actions?: ReactNode; code?: string | null; halved?: boolean
+  /** The PeriodNote sentence as an ⓘ after the period sub-line, instead of a
+   *  box above the content (pass { compared: true } on the Resumo). */
+  periodInfo?: boolean | { compared?: boolean }
 }) {
+  const periodText = periodInfo ? periodNoteText(ctx, { compared: typeof periodInfo === 'object' && !!periodInfo.compared }) : null
   // The store itself, not a lookup in storeOptions: an archived store's
   // history page lost its code pill and "dia de …" chip that way.
   const opt = ctx.storeOption
@@ -102,6 +97,7 @@ export function PageHeader({ ctx, title, sub, badges, actions, code, halved = tr
             <PeriodHeading ctx={ctx} />
             {ctx.scope === 'all' ? ` · ${ctx.selected.length} lojas` : ''}
           </>}
+          {periodText && <> <InfoTip label="Como o período é contado">{periodText}</InfoTip></>}
         </div>
         {ctx.noteLine && <div className={s.noteLine} role="note">{ctx.noteLine}</div>}
       </div>

@@ -102,6 +102,8 @@ export function ScaleRoom({ report, windowLabel, costsHref, split = false, table
   return (
     <Block
       title="Onde há folga para escalar"
+      // A caveat (C13): the actions are judged on these days, not the period's.
+      eyebrow={`ação: ${t.windowDays} dias fechados (${windowLabel})`}
       howTo={`Cada campanha julgada nos últimos ${t.windowDays} dias fechados (${windowLabel}), seja qual for o período escolhido acima: margem estimada = vendas que o Meta atribui × margem da loja − gasto.`}
       info={<>{ptText(report.formula)} A margem mínima para escalar ({t.minMargin}%) é a mesma das notificações de escala, definida em Ajustes.</>}
       footer={rules}

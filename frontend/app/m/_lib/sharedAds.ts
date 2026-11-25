@@ -11,11 +11,13 @@
  *  - the row badges: components/portfolio/model sharedAccountBadges, rendered
  *    on the server in page.tsx (that module cannot load in the browser);
  *  - whether THIS window is mixed: the desktop reads the pair's orders inside
- *    the window (loadSharedInWindow). The phone only knows the store rows, so
- *    it knows one case for sure — the selling store had no order in the
- *    window, so none came from the other store's ads — and otherwise says the
- *    distortion conditionally ("se os pedidos deste período também vieram de
- *    lá"), never as a fact about a window it cannot see.
+ *    the window (loadSharedInWindow). For one store in a pair the phone asks
+ *    the same read (GET /api/mobile/shared → PairOrdersKnown), for the window
+ *    and for its comparison base (R2-1 "base misturada"). Until it answers, or
+ *    when it fails, the phone knows one case for sure — the selling store had
+ *    no order in the window, so none came from the other store's ads — and
+ *    otherwise says the distortion conditionally ("se os pedidos deste
+ *    período também vieram de lá"), never as a fact about a window it cannot see.
  *
  * The sentences mirror app/overview/page.tsx (Todas) and
  * components/dashboard/SharedAccountNote.tsx (one store). Pure; tested in
@@ -48,6 +50,38 @@ export interface PairNote {
   tone: 'info' | 'warn'
   title: string
   body: string
+  /** The status-line chip of the numbers band (spec §1.4): "anúncios na conta
+   *  da EPOCH ®️", "paga anúncios da CAMP HALLOW", or on Todas "conta
+   *  compartilhada" (pair names in the info, C9a). */
+  chip: string
+  /** One store: the tag on its Anúncios / ROAS tiles. */
+  tag: string | null
+  /** Pair orders in the window: 0 = not mixed, null = not known. */
+  now?: 0 | number | null
+  /** Pair orders in the comparison base (0 when not known): > 0 and a ▲▼ on
+   *  screen = the tile says "base misturada" (desktop R2-1). */
+  base?: number
+}
+
+/** A pair's orders inside one window (GET /api/mobile/shared, the desktop's
+ *  loadSharedInWindow trimmed to the store's pairs). */
+export interface PairCount { adStoreId: string; salesStoreId: string; orders: number }
+
+/** What the phone read of one store's pairs (GET /api/mobile/shared). */
+export interface PairOrdersKnown {
+  /** In the window on screen; null = the read failed (cautious wording). */
+  now: PairCount[] | null
+  /** In the comparison window; null = not asked or failed (no base marker). */
+  base: PairCount[] | null
+  /** The comparison's days as the band names them ("1–25 out"). */
+  baseRange: string
+}
+
+/** A pair's orders in a read (components/portfolio/model pairOrdersIn, word
+ *  for word: that module cannot load in the browser). */
+export function pairCountIn(list: readonly PairCount[] | null, p: Pick<PairCount, 'adStoreId' | 'salesStoreId'>): number | null {
+  if (list === null) return null
+  return list.find(w => w.adStoreId === p.adStoreId && w.salesStoreId === p.salesStoreId)?.orders ?? 0
 }
 
 /** Orders of the pair inside the window, as far as the phone can know:
@@ -92,10 +126,14 @@ const history = (p: SharedAdAccount, days: number) =>
  * sale says it did not sell yet (the desktop's pairBeforeStartText), not
  * "Para períodos anteriores, some as duas lojas" for a past that is in the
  * window's future.
+ * `o.known` (one store): the pair orders read for the window and its base;
+ * `o.deltas`: the band shows ▲▼ (a mixed base matters only then). With them
+ * the wording is the desktop SharedAccountNote's.
  */
 export function pairNotes(
   shared: SharedAds, onScreen: { all: boolean; storeId: string | null }, rangeLabel: string,
   ordersOf: (storeId: string) => number | null, win?: PairWindow,
+  o?: { known?: PairOrdersKnown | null; deltas?: boolean },
 ): PairNote[] {
   const out: PairNote[] = []
   for (const p of shared.pairs) {
@@ -106,7 +144,7 @@ export function pairNotes(
     const now = notYet ? 0 : pairOrdersKnown(ordersOf(p.salesStoreId))
     if (onScreen.all) {
       out.push({
-        key, tone: now === 0 ? 'info' : 'warn',
+        key, tone: now === 0 ? 'info' : 'warn', chip: 'conta compartilhada', tag: null,
         title: `${p.salesStoreName} ${now === 0 ? 'vendia' : 'vende'} com anúncios pagos pela ${p.adStoreName}`,
         body: `${history(p, shared.lookbackDays)} ` + (notYet ? beforeStartText(p.salesStoreName, notYet, rangeLabel) : now === 0
           ? `Em ${rangeLabel}, a ${p.salesStoreName} não teve pedidos: o resultado deste período não está misturado. Para períodos anteriores, some as duas lojas.`
@@ -116,25 +154,45 @@ export function pairNotes(
     }
     const sells = p.salesStoreId === onScreen.storeId
     if (!sells && p.adStoreId !== onScreen.storeId) continue
-    // The window's own cross-store orders are not known here (null), so the
+    // The window's own pair orders, when the phone read them (exact); else the
     // conclusion is conditional: a week the selling store sold only on its
     // own must not read "o lucro parece maior do que é".
+    const read = notYet || !o?.known ? null : pairCountIn(o.known.now, p)
+    const n = read ?? now
+    const exact = read !== null
+    const base = o?.known ? pairCountIn(o.known.base, p) ?? 0 : 0
+    // The window is clean but the ▲▼ compare with a mixed base: the chip names
+    // the base (desktop R2-1), the plain history note would hide it.
+    const baseOnly = !!o?.deltas && base > 0 && n === 0
     const title = sells
-      ? `Os anúncios da ${p.salesStoreName} ${now === 0 ? 'rodaram' : 'rodam'} na conta da ${p.adStoreName}`
-      : `A ${p.adStoreName} pagou anúncios que venderam na ${p.salesStoreName}`
-    out.push(now === 0
-      ? {
-        key, tone: 'info', title,
-        body: `${history(p, shared.lookbackDays)} ` + (notYet
-          ? beforeStartText(p.salesStoreName, notYet, rangeLabel)
-          : `Em ${rangeLabel}, a ${p.salesStoreName} não teve pedidos: o resultado deste período não está misturado. Para períodos anteriores, some as duas lojas.`),
-      }
-      : {
-        key, tone: 'warn', title,
-        body: `${history(p, shared.lookbackDays)} ` + (sells
+      ? `Os anúncios da ${p.salesStoreName} ${n === 0 ? 'rodaram' : 'rodam'} na conta da ${p.adStoreName}`
+      : exact && n !== 0
+        ? `A ${p.adStoreName} paga anúncios que vendem na ${p.salesStoreName}`
+        : `A ${p.adStoreName} pagou anúncios que venderam na ${p.salesStoreName}`
+    const chip = baseOnly
+      ? (sells ? `base com anúncios na ${p.adStoreName}` : `base misturada com a ${p.salesStoreName}`)
+      : sells ? `anúncios na conta da ${p.adStoreName}` : `paga anúncios da ${p.salesStoreName}`
+    // Shorter on a 175-px tile; the chip and the info carry the whole sentence.
+    const tag = sells ? `conta da ${p.adStoreName}` : `paga ${p.salesStoreName}`
+    // The base of the ▲▼: said whenever it is mixed, even when this window is not.
+    const baseText = base > 0 && o?.known
+      ? ` Na base da comparação (${o.known.baseRange}), ${plural(base, 'pedido', 'pedidos')} da ${p.salesStoreName} ${base === 1 ? 'veio' : 'vieram'} de anúncios pagos pela ${p.adStoreName}: as variações de lucro, margem, anúncios e ROAS desta loja comparam com um período misturado. Para comparar, some as duas lojas.`
+      : ''
+    const tone: PairNote['tone'] = n === 0 && !baseOnly ? 'info' : 'warn'
+    const body = n === 0
+      ? `${history(p, shared.lookbackDays)} ` + (notYet
+        ? beforeStartText(p.salesStoreName, notYet, rangeLabel)
+        : exact
+          ? `Em ${rangeLabel}, nenhum pedido rastreado da ${p.salesStoreName} veio de anúncios da ${p.adStoreName}: o resultado deste período não está misturado. Para períodos anteriores, some as duas lojas.`
+          : `Em ${rangeLabel}, a ${p.salesStoreName} não teve pedidos: o resultado deste período não está misturado. Para períodos anteriores, some as duas lojas.`)
+      : exact
+        ? `Em ${rangeLabel}, ${plural(n!, 'pedido', 'pedidos')} da ${p.salesStoreName} vieram de anúncios pagos pela ${p.adStoreName}. ${sells
+          ? `Esse gasto não aparece aqui: o lucro da ${p.salesStoreName} parece maior do que é, e o da ${p.adStoreName} menor.`
+          : `O gasto está aqui e a venda lá: o lucro da ${p.adStoreName} parece menor do que é, e o da ${p.salesStoreName} maior.`} Some as duas para julgar.`
+        : `${history(p, shared.lookbackDays)} ` + (sells
           ? `Esse gasto não aparece aqui: se os pedidos deste período também vieram de lá, o lucro da ${p.salesStoreName} parece maior do que é, e o da ${p.adStoreName} menor.`
-          : `O gasto fica aqui e a venda lá: se parte do gasto deste período vendeu na ${p.salesStoreName}, o lucro da ${p.adStoreName} parece menor do que é, e o da ${p.salesStoreName} maior.`) + ' Some as duas para julgar.',
-      })
+          : `O gasto fica aqui e a venda lá: se parte do gasto deste período vendeu na ${p.salesStoreName}, o lucro da ${p.adStoreName} parece menor do que é, e o da ${p.salesStoreName} maior.`) + ' Some as duas para julgar.'
+    out.push({ key, tone, title, chip, tag, body: body + baseText, now: n, base })
   }
   return out
 }

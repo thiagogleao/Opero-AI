@@ -57,7 +57,11 @@ export function BilledElsewhere({ rows, storeName, rangeLabel, hrefFor }: {
     <Block
       title={`Campanhas pagas por outra loja que vendem na ${storeName}`}
       eyebrow={rangeLabel}
-      howTo="O gasto destas campanhas está na contabilidade da outra loja; as vendas caíram aqui. Some as duas lojas para julgar o resultado. Os números são do período; a campanha está aqui porque a maior parte das vendas rastreadas dela, desde sempre, caiu nesta loja."
+      // A caveat (anúncios na conta de outra loja, spec §6): one visible line,
+      // the whole sentence in the ⓘ.
+      howTo="gasto na outra loja, vendas aqui: some as duas para julgar"
+      howToVisible
+      info="O gasto destas campanhas está na contabilidade da outra loja; as vendas caíram aqui. Some as duas lojas para julgar o resultado. Os números são do período; a campanha está aqui porque a maior parte das vendas rastreadas dela, desde sempre, caiu nesta loja."
       flush
     >
       <DataTable caption="Campanhas pagas por outra loja" columns={columns} rows={data} dense />

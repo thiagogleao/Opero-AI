@@ -115,3 +115,13 @@ export function reasonText(r: BreakEvenReason, mini = false): string {
   if (mini) return w.mini
   return w.lead ? `${w.lead} → ${w.verdict}` : w.verdict
 }
+
+/**
+ * How far a ROAS sits from its break-even, in whole percent (+17 = 17% above,
+ * −9 = 9% below): the RoasGauge's "17% acima" and the number band's ROAS tile
+ * ("empate 1,53× · 17% acima") read the same expression. Null without a
+ * usable break-even.
+ */
+export function roasGapPct(roas: number, breakEven: number | null): number | null {
+  return breakEven ? Math.round(((roas - breakEven) / breakEven) * 100) : null
+}

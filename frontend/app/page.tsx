@@ -1,12 +1,15 @@
 /**
- * Resumo (/) — one store, one period: the verdict and where each dollar went,
- * the key numbers, the daily profit with 30 days of context, refunds and
- * chargebacks, the biggest campaigns, top products and countries, and the AI's
- * reading.
+ * Resumo (/) — one store, one period, numbers first: the band of six numbers
+ * (lucro, margem, receita, pedidos, anúncios, ROAS × empate, each with its ▲▼)
+ * and a one-row status line right under the header; "Detalhes do período"
+ * (closed) holds the sentences; then the daily profit chart, where each dollar
+ * went beside the per-day and per-order numbers, the biggest campaigns, top
+ * products and countries, refunds and the AI's reading.
  *
  * Data: lib/views/store loadStoreSummary — ONE engine pass over the window
  * (daily, hourly, products, countries) plus the comparison, assembled like the
- * portfolio so this verdict is the one the phone and the overview show. Slow
+ * portfolio so this verdict is the one the phone and the overview show. The
+ * band is presentation only (lib/views/numberBand reads the verdict). Slow
  * or secondary blocks (context days, campaigns, 90-day chargebacks, AI) stream
  * in <Suspense>, each with its own error state: one failing block never blanks
  * the page or sends anyone to onboarding.
@@ -19,10 +22,12 @@ import { Suspense } from 'react'
 import Link from 'next/link'
 import { getPageContext, pageMetadata, type PageContext, type SearchParams } from '@/lib/views/page'
 import type { StoreRef } from '@/lib/access'
-import { empateGap, loadStoreSummary, type StoreSummary } from '@/lib/views/store'
+import { loadStoreSummary, type StoreSummary } from '@/lib/views/store'
 import { buildVerdict, verdictInputFromPortfolio } from '@/lib/views/verdict'
-import { AppShell, PageHeader, PeriodNote, periodName } from '@/components/shell'
-import { BreakdownLedger, ButtonLink, Callout, Card, Chip, EmptyState, ErrorState, SkeletonBlock, VerdictCard } from '@/components/ui'
+import { buildNumberBand, type BandChip, type BandTileKey } from '@/lib/views/numberBand'
+import { AppShell, PageHeader, periodName, periodNoteText } from '@/components/shell'
+import { BreakdownLedger, ButtonLink, Callout, Card, Chip, EmptyState, ErrorState, SkeletonBlock } from '@/components/ui'
+import { DetailPara, NumberBandView, PeriodDetails } from '@/components/numbers'
 import { InsightsSlot } from '@/components/ai/InsightsSlot'
 import { BlockBoundary } from '@/components/dashboard/BlockBoundary'
 import { StoreKpis } from '@/components/dashboard/StoreKpis'
@@ -63,6 +68,7 @@ export const dynamic = 'force-dynamic'
  * old ?loja=todas link redirected to the remembered store): this page reads
  * one store at a time, so say which one, as Atribuição does. The dates it
  * reads are announced by the header's landing note (lib/period announce).
+ * Lives in "Detalhes do período" (the header already names the store).
  */
 function FromAllNote({ ctx, store }: { ctx: PageContext; store: StoreRef }) {
   // R4: null when the viewer cannot open Todas (text, never a dead link).
@@ -119,7 +125,8 @@ export default async function ResumoPage({ searchParams }: { searchParams: Promi
   // Nothing in the window was read (an archived store after its archive day):
   // there is nothing to compare, and "hoje · vs ontem até esta hora" sat
   // beside "não há dados hoje".
-  const v = judged.frozen ? buildVerdict({ ...input, comparison: null }) : judged
+  const shownInput = judged.frozen ? { ...input, comparison: null } : input
+  const v = judged.frozen ? buildVerdict(shownInput) : judged
   const configured = summary.pnl.configured
   const sold = summary.pnl.totals.revenue > 0
   // A window before the first sale (the store did not sell yet) or after an
@@ -138,6 +145,36 @@ export default async function ResumoPage({ searchParams }: { searchParams: Promi
   const storeNames = new Map(ctx.stores.map(st => [st.id, st.name]))
   if (!storeNames.has(store.id)) storeNames.set(store.id, store.name)
 
+  // ── The band: chips the page words itself, and page tags on tiles.
+  const periodText = periodNoteText(ctx, { compared: true })
+  const extraChips: BandChip[] = []
+  // An archived store whose window reaches its archive day: what was read.
+  // A window wholly after it already says "Sem sincronização" (verdict chip).
+  const archivedOn = summary.row.archived ? summary.row.archivedOn ?? null : null
+  if (summary.row.archived && !frozen && (!archivedOn || ctx.range.to >= archivedOn)) {
+    extraChips.push({
+      code: 'arquivada', tone: 'mut',
+      label: archivedOn ? `arquivada · lido até ${ctx.dateBeside(archivedOn)}` : 'arquivada',
+      info: periodText ?? 'A loja está arquivada e não sincroniza mais: nada depois do arquivamento é lido.',
+    })
+  }
+  const sellsInTitle = summary.sellsIn ? `A loja vende em ${summary.sellsIn}; os valores aparecem convertidos em dólar, no câmbio de cada pedido.` : null
+  const band = buildNumberBand({
+    input: shownInput, verdict: v, scope: 'store', extraChips,
+    tileTags: sellsInTitle ? { receita: [{ code: 'moeda', label: `vende em ${summary.sellsIn}`, tone: 'info', info: sellsInTitle }] } : undefined,
+  })
+  // The costs callout keeps its home (with its button) in Detalhes.
+  const costsCallout = !configured && !notYet
+  const extraCount = (periodText ? 1 : 0) + (fromAll ? 1 : 0) + (costsCallout ? 1 : 0)
+  // The ▲▼ are on screen: a shared-account pair mixed into the comparison
+  // window is flagged beside the deltas it moves (SharedAccountNote 'base').
+  const deltas = band.comparison?.kind === 'ok'
+  /** The tile shows a ▲▼ (not a "—" with an empty row): only then is its base worth flagging. */
+  const moved = (key: BandTileKey) => {
+    const d = band.tiles.find(t => t.key === key)?.delta
+    return deltas && !!d && d.kind !== 'none'
+  }
+
   return (
     <AppShell ctx={ctx}>
       <div className={s.page}>
@@ -145,43 +182,55 @@ export default async function ResumoPage({ searchParams }: { searchParams: Promi
           ctx={ctx}
           code={headerCode(ctx, store)}
           sub={customSub(ctx)}
+          periodInfo={{ compared: true }}
           badges={summary.sellsIn && (
-            <Chip tone="info" size="sm" title={`A loja vende em ${summary.sellsIn}; os valores aparecem convertidos em dólar, no câmbio de cada pedido.`}>
+            <Chip tone="info" size="sm" title={sellsInTitle ?? undefined}>
               vende em {summary.sellsIn} · convertido em US$
             </Chip>
           )}
         />
-        {fromAll && <FromAllNote ctx={ctx} store={store} />}
-        <PeriodNote ctx={ctx} compared />
-        {/* Before the first sale the verdict says so; costs change nothing
-            in a window with no activity (R11: "ainda não vendia" first). */}
-        {!configured && !notYet && (
-          <Callout tone="warn" title="Custos não configurados">
-            Sem o custo dos produtos, do frete e das taxas, esta tela mostra receita − anúncios, que não é lucro.{' '}
-            <ButtonLink href={ctx.hrefWith('/profit')} size="sm" icon="sliders">Configurar custos</ButtonLink>
-          </Callout>
-        )}
-        <Suspense fallback={null}>
-          <SharedAccountNote ctx={ctx} store={store} />
-        </Suspense>
-        {/* No orders and a last sale days old: when it last sold and whether the
-            order reading is current, so a quiet store does not read as a broken sync. */}
-        <Suspense fallback={null}>
-          <QuietStoreNote ctx={ctx} store={store} summary={summary} />
+
+        <NumberBandView
+          band={band}
+          costsHref={ctx.hrefWith('/profit')}
+          ariaLabel="Números do período"
+          extra={<>
+            <Suspense fallback={null}><SharedAccountNote ctx={ctx} store={store} variant="chip" deltas={deltas} /></Suspense>
+            {/* No orders and a last sale days old: when it last sold and whether
+                the order reading is current, so a quiet store does not read as
+                a broken sync. */}
+            <Suspense fallback={null}><QuietStoreNote ctx={ctx} store={store} summary={summary} variant="chip" /></Suspense>
+          </>}
+          tileExtra={{
+            lucro: <Suspense fallback={null}><SharedAccountNote ctx={ctx} store={store} variant="base" deltas={moved('lucro')} /></Suspense>,
+            margem: <Suspense fallback={null}><SharedAccountNote ctx={ctx} store={store} variant="base" deltas={moved('margem')} /></Suspense>,
+            anuncios: <Suspense fallback={null}><SharedAccountNote ctx={ctx} store={store} variant="tag" deltas={moved('anuncios')} /></Suspense>,
+            roas: <Suspense fallback={null}><SharedAccountNote ctx={ctx} store={store} variant="tag" deltas={moved('roas')} /></Suspense>,
+          }}
+          details={
+            <PeriodDetails details={band.details} extraCount={extraCount}>
+              {periodText && <DetailPara>{periodText}</DetailPara>}
+              {fromAll && <FromAllNote ctx={ctx} store={store} />}
+              {/* Before the first sale the verdict says so; costs change nothing
+                  in a window with no activity (R11: "ainda não vendia" first). */}
+              {costsCallout && (
+                <Callout tone="warn" title="Custos não configurados">
+                  Sem o custo dos produtos, do frete e das taxas, esta tela mostra receita − anúncios, que não é lucro.{' '}
+                  <ButtonLink href={ctx.hrefWith('/profit')} size="sm" icon="sliders">Configurar custos</ButtonLink>
+                </Callout>
+              )}
+              <Suspense fallback={null}><SharedAccountNote ctx={ctx} store={store} /></Suspense>
+              <Suspense fallback={null}><QuietStoreNote ctx={ctx} store={store} summary={summary} /></Suspense>
+            </PeriodDetails>
+          }
+        />
+
+        <Suspense fallback={<SkeletonBlock height={240} lines={1} />}>
+          <ProfitChartBlock ctx={ctx} summary={summary} empty={empty} amount={v.amount} />
         </Suspense>
 
-        <VerdictCard
-          verdict={v}
-          headingLevel="h2"
-          // The verdict's ROAS box (components/ui/VerdictCard) still words it as
-          // "ROAS da loja" and "Cada $1 no Meta trouxe…", so it is shown only when
-          // the store's ad channel IS Meta; for Shopify ads or both the KPI below
-          // names the right channel. Without sales or without a break-even the
-          // sentence above already says what happened and the KPI says why, so
-          // the box would only repeat it.
-          roas={summary.kpis.roasChannel === 'meta' && sold
-            && !empateGap(configured, summary.kpis.breakEven, summary.pnl.totals)}
-          aside={
+        <div className={s.ledgerRow}>
+          <Card className={s.ledgerCard} as="section" aria-label="Para onde foi cada dólar">
             <BreakdownLedger pnl={v.totals} configured={v.basis !== 'revenue_minus_ads'} split={ctx.split}
               // "De cada $1: 0¢ Meta" over $0 of sales: no bar to split, and the sub says so.
               bar={sold}
@@ -193,14 +242,9 @@ export default async function ResumoPage({ searchParams }: { searchParams: Promi
                 ? `A ${store.name} começou a vender em ${notYet.text}: escolha um período a partir dessa data.`
                 : frozen ? `A loja está arquivada${frozen.text ? ` desde ${frozen.text}` : ''} e não sincroniza mais: nada é lido depois disso.`
                   : tail ? `Nenhum pedido e nenhum gasto com anúncios em ${readLabel}. Depois disso a loja já estava arquivada: nada foi lido.` : undefined} />
-          }
-        />
-
-        <StoreKpis ctx={ctx} summary={summary} empty={empty} />
-
-        <Suspense fallback={<SkeletonBlock height={240} lines={1} />}>
-          <ProfitChartBlock ctx={ctx} summary={summary} empty={empty} />
-        </Suspense>
+          </Card>
+          <StoreKpis ctx={ctx} summary={summary} band={band} empty={empty} />
+        </div>
 
         <Suspense fallback={<SkeletonBlock height={220} lines={2} />}>
           <CampaignsBlock ctx={ctx} summary={summary} storeNames={storeNames} empty={empty} />

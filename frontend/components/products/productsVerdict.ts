@@ -32,6 +32,14 @@ const GIFT = /free gift|brinde|gr[aá]tis/i
  *  is the promotion's cost, not a product selling below cost. */
 const isGift = (p: ProductLike) => p.revenue <= 0.005 || GIFT.test(p.title)
 
+/** Products below cost, split as the verdict judges them: `losers` are sold
+ *  products with a negative contribution, `gifts` the ones given away. The
+ *  page's "Abaixo do custo" tile counts the same losers as the status chip. */
+export function belowCost<P extends ProductLike>(products: readonly P[]): { losers: P[]; gifts: P[] } {
+  const negative = products.filter(p => p.contribution !== null && p.contribution < 0)
+  return { losers: negative.filter(p => !isGift(p)), gifts: negative.filter(isGift) }
+}
+
 /** A margin only means something with this many orders. */
 export const MIN_PRODUCT_ORDERS = 5
 
@@ -113,9 +121,10 @@ export function buildProductsVerdict(input: {
   const priced = products.filter((p): p is ProductLike & { contribution: number } => p.contribution !== null)
   const contributionTotal = input.contributionTotal ?? totals.contribution
   const excluded = input.excludedStores ?? []
-  const negative = configured ? priced.filter(p => p.contribution < 0).sort((a, b) => a.contribution - b.contribution) : []
-  const gifts = negative.filter(isGift)
-  const losers = negative.filter(p => !isGift(p))
+  // One counting rule with the page's "Abaixo do custo" tile (belowCost).
+  const { losers, gifts } = configured
+    ? belowCost([...priced].sort((a, b) => a.contribution - b.contribution))
+    : { losers: [], gifts: [] }
   if (!configured) chips.unshift({ code: 'sem_custos', label: 'Custos não configurados', tone: 'cfg', icon: 'sliders' })
   if (topShare >= 50) chips.unshift({ code: 'margem_fina', label: `1 produto = ${pct0(topShare)} das vendas`, tone: 'info', icon: 'diamond' })
   // A share of 2 orders is not a pattern: say how small the sample is.

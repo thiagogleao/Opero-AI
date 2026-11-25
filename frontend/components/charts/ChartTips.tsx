@@ -3,8 +3,16 @@
 /**
  * ChartTips — the tiny client layer that gives a server-rendered SVG chart its
  * tooltips. Any descendant with a `data-tip` attribute (built with tipAttr()
- * from ./scale) shows a bubble on hover, on keyboard focus and on tap; Esc or
- * a tap elsewhere hides it. Everything else in the chart stays server-side.
+ * from ./scale) shows a bubble on hover and on keyboard focus.
+ *
+ * Pin: a click or a tap on a point (or Enter/Space on a focused one) PINS its
+ * bubble — anchored above the point, never under the cursor, with a thin
+ * outline — so a number can be read without holding the pointer still. It
+ * stays when the pointer leaves and when the page scrolls (repositioned, not
+ * hidden). While pinned, hovering another point shows that point's transient
+ * bubble; leaving returns to the pinned one. Unpin: click the pinned point
+ * again, Esc, or click outside the chart. A drag (8 px or more) never pins.
+ * The pinned point carries `data-pinned`; the shown one `data-active`.
  *
  *   <ChartTips><svg>…<g data-tip={tipAttr({ title, rows })} tabIndex={i === 0 ? 0 : -1}>…</g></svg></ChartTips>
  *
@@ -20,7 +28,7 @@
  * your own SVG.
  */
 
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import { useIsClient } from '@/components/ui/InfoTip'
 import { createPortal } from 'react-dom'
 import { ROVING_KEYS, rovingStop, rovingTarget } from './roving'
@@ -41,72 +49,128 @@ function setStop(els: Element[], stop: number) {
   })
 }
 
+/** Movement past this many pixels between press and release is a drag. */
+const DRAG_PX = 8
+
+interface Shown { el: Element; tip: ChartTip; pinned: boolean }
+
 export function ChartTips({ children, className }: { children: ReactNode; className?: string }) {
   const box = useRef<HTMLDivElement>(null)
   const bubble = useRef<HTMLDivElement>(null)
-  const [tip, setTip] = useState<ChartTip | null>(null)
+  const [shown, setShown] = useState<Shown | null>(null)
   const mounted = useIsClient()
-  const at = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
-  const active = useRef<Element | null>(null)
+  /** The pointer, for a transient (hover) bubble. */
+  const at = useRef<{ x: number; y: number } | null>(null)
+  /** The point under the pointer or focus (transient) and the pinned one. */
+  const hover = useRef<Element | null>(null)
+  const pin = useRef<Element | null>(null)
+  const down = useRef<{ x: number; y: number; el: Element | null } | null>(null)
 
   const place = useCallback(() => {
     const b = bubble.current
-    if (!b) return
-    const { x, y } = at.current
+    const cur = hover.current ?? pin.current
+    if (!b || !cur) return
     const w = b.offsetWidth, h = b.offsetHeight
-    let left = x + 14, top = y + 14
-    if (left + w > window.innerWidth - 8) left = x - w - 14
-    if (top + h > window.innerHeight - 8) top = y - h - 14
-    b.style.transform = `translate(${Math.round(Math.max(8, left))}px, ${Math.round(Math.max(8, top))}px)`
+    const vw = window.innerWidth, vh = window.innerHeight
+    // The shell's sticky top bar is 56 px on one row and ~100 px when it wraps
+    // (1024): the bubble never goes under it, so it never covers its buttons.
+    const minTop = Math.max(8, (document.querySelector('[data-shell-top]')?.getBoundingClientRect().bottom ?? 0) + 8)
+    let left: number, top: number
+    if (cur === pin.current || !at.current) {
+      // Anchored above the point (below it when there is no room).
+      const r = cur.getBoundingClientRect()
+      left = r.left + r.width / 2 - w / 2
+      top = r.top - h - 10
+      if (top < minTop) top = Math.max(minTop, Math.min(r.bottom + 10, vh - h - 8))
+      left = Math.max(8, Math.min(left, vw - w - 8))
+    } else {
+      const { x, y } = at.current
+      left = x + 14; top = y + 14
+      if (left + w > vw - 8) left = x - w - 14
+      if (top + h > vh - 8) top = y - h - 14
+      left = Math.max(8, left); top = Math.max(minTop, top)
+    }
+    b.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`
   }, [])
 
-  useEffect(() => { if (tip) place() }, [tip, place])
-
-  const show = useCallback((el: Element, x?: number, y?: number) => {
-    const raw = el.getAttribute('data-tip')
-    if (!raw) return
-    try {
-      if (x === undefined || y === undefined) {
-        const r = el.getBoundingClientRect()
-        at.current = { x: r.left + r.width / 2, y: r.top }
-      } else at.current = { x, y }
-      if (active.current !== el) {
-        active.current?.removeAttribute('data-active')
-        el.setAttribute('data-active', '')
-        active.current = el
-        setTip(JSON.parse(raw) as ChartTip)
-      } else place()
-    } catch { /* a malformed tip is just not shown */ }
-  }, [place])
-
-  const hide = useCallback(() => {
-    active.current?.removeAttribute('data-active')
-    active.current = null
-    setTip(null)
+  /** Reflect hover/pin in the DOM attributes and the bubble state. */
+  const sync = useCallback(() => {
+    const el = hover.current ?? pin.current
+    box.current?.querySelectorAll('[data-active]').forEach(n => { if (n !== el) n.removeAttribute('data-active') })
+    box.current?.querySelectorAll('[data-pinned]').forEach(n => { if (n !== pin.current) n.removeAttribute('data-pinned') })
+    pin.current?.setAttribute('data-pinned', '')
+    if (!el) { setShown(null); return }
+    el.setAttribute('data-active', '')
+    const pinned = el === pin.current
+    setShown(prev => {
+      if (prev && prev.el === el && prev.pinned === pinned) return prev
+      try {
+        const raw = el.getAttribute('data-tip')
+        return raw ? { el, tip: JSON.parse(raw) as ChartTip, pinned } : null
+      } catch { return null /* a malformed tip is just not shown */ }
+    })
   }, [])
+
+  useLayoutEffect(() => { if (shown) place() }, [shown, place])
+
+  const setHover = useCallback((el: Element | null, x?: number, y?: number) => {
+    at.current = x === undefined || y === undefined ? null : { x, y }
+    const same = hover.current === el
+    hover.current = el
+    if (same) place()
+    else sync()
+  }, [place, sync])
+
+  const togglePin = useCallback((el: Element, touch = false) => {
+    if (pin.current === el) {
+      pin.current = null
+      // A finger does not hover: unpinning clears the bubble too.
+      if (touch) hover.current = null
+    } else {
+      pin.current = el
+    }
+    sync()
+    requestAnimationFrame(place)
+  }, [place, sync])
+
+  const clearAll = useCallback(() => {
+    pin.current = null
+    hover.current = null
+    sync()
+  }, [sync])
 
   useEffect(() => {
-    if (!tip) return
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') hide() }
-    const onDown = (e: PointerEvent) => { if (box.current && !box.current.contains(e.target as Node)) hide() }
+    if (!shown) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') clearAll() }
+    const onDown = (e: PointerEvent) => { if (box.current && !box.current.contains(e.target as Node)) clearAll() }
+    // A scroll drops the transient bubble and keeps the pinned one, moved.
+    const onScroll = () => {
+      if (hover.current && hover.current !== pin.current) { hover.current = null; sync() }
+      requestAnimationFrame(place)
+    }
+    const onResize = () => place()
     document.addEventListener('keydown', onKey)
     document.addEventListener('pointerdown', onDown)
-    window.addEventListener('scroll', hide, true)
+    window.addEventListener('scroll', onScroll, true)
+    window.addEventListener('resize', onResize)
     return () => {
       document.removeEventListener('keydown', onKey)
       document.removeEventListener('pointerdown', onDown)
-      window.removeEventListener('scroll', hide, true)
+      window.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('resize', onResize)
     }
-  }, [tip, hide])
+  }, [shown, clearAll, place, sync])
 
   // One tab stop per chart (see the header). Runs after hydration and whenever
-  // the chart's markup is replaced; the focused point keeps the stop.
+  // the chart's markup is replaced; the focused point keeps the stop. A pin
+  // whose point left the DOM (new data) is dropped.
   useEffect(() => {
     const els = points(box.current)
+    if (pin.current && !box.current?.contains(pin.current)) { pin.current = null; hover.current = null; requestAnimationFrame(sync) }
     if (els.length < 2) return
     const focused = els.findIndex(el => el === document.activeElement)
     setStop(els, rovingStop(els.map(el => el.getAttribute('tabindex')), focused))
-  }, [children])
+  }, [children, sync])
 
   const target = (e: { target: EventTarget | null }) =>
     e.target instanceof Element ? e.target.closest('[data-tip]') : null
@@ -114,6 +178,11 @@ export function ChartTips({ children, className }: { children: ReactNode; classN
   const onKeyDown = (e: ReactKeyboardEvent) => {
     const el = target(e)
     if (!el) return
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault()
+      togglePin(el)
+      return
+    }
     const els = points(box.current)
     const i = els.indexOf(el)
     const j = i < 0 ? null : rovingTarget(e.key, i, els.length)
@@ -128,9 +197,26 @@ export function ChartTips({ children, className }: { children: ReactNode; classN
     <div
       ref={box}
       className={`${s.tipsBox}${className ? ` ${className}` : ''}`}
-      onPointerMove={e => { const el = target(e); if (el) show(el, e.clientX, e.clientY); else if (e.pointerType === 'mouse') hide() }}
-      onPointerLeave={e => { if (e.pointerType === 'mouse') hide() }}
-      onPointerDown={e => { const el = target(e); if (el) show(el, e.clientX, e.clientY) }}
+      onPointerMove={e => {
+        const el = target(e)
+        if (el) setHover(el, e.clientX, e.clientY)
+        else if (e.pointerType === 'mouse' && hover.current) setHover(null)
+      }}
+      onPointerLeave={e => { if (e.pointerType === 'mouse') setHover(null) }}
+      onPointerDown={e => {
+        const el = target(e)
+        down.current = { x: e.clientX, y: e.clientY, el }
+        if (el && e.pointerType !== 'mouse') setHover(el, e.clientX, e.clientY)
+      }}
+      onPointerUp={e => {
+        const d = down.current
+        down.current = null
+        const el = target(e)
+        if (!d || !el || d.el !== el) return
+        if (Math.hypot(e.clientX - d.x, e.clientY - d.y) >= DRAG_PX) return
+        togglePin(el, e.pointerType !== 'mouse')
+      }}
+      onPointerCancel={() => { down.current = null }}
       onFocus={e => {
         const el = target(e)
         if (!el) return
@@ -139,22 +225,24 @@ export function ChartTips({ children, className }: { children: ReactNode; classN
         const els = points(box.current)
         const i = els.indexOf(el)
         if (i >= 0 && els.length > 1) setStop(els, i)
-        show(el)
+        // Focus from a click keeps the pointer's position; from the keyboard
+        // the bubble is anchored on the point.
+        setHover(el, down.current?.x, down.current?.y)
       }}
-      onBlur={hide}
+      onBlur={() => { if (hover.current && hover.current !== pin.current) setHover(null) }}
       onKeyDown={onKeyDown}
     >
       {children}
-      {mounted && tip && createPortal(
-        <div ref={bubble} className={s.bubble} role="tooltip">
-          <div className={s.bubbleTitle}>{tip.title}</div>
-          {tip.rows?.map(([k, v, tone], i) => (
+      {mounted && shown && createPortal(
+        <div ref={bubble} className={`${s.bubble}${shown.pinned ? ` ${s.bubblePinned}` : ''}`} role="tooltip">
+          <div className={s.bubbleTitle}>{shown.tip.title}</div>
+          {shown.tip.rows?.map(([k, v, tone], i) => (
             <div key={i} className={s.bubbleRow}>
               <span>{k}</span>
               <span className={tone ? s[tone] : undefined}>{v}</span>
             </div>
           ))}
-          {tip.note && <div className={s.bubbleNote}>{tip.note}</div>}
+          {shown.tip.note && <div className={s.bubbleNote}>{shown.tip.note}</div>}
         </div>,
         document.body,
       )}

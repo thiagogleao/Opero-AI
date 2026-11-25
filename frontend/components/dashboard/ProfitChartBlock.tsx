@@ -45,10 +45,13 @@ export function bandLabelFits(series: { inWindow: boolean }[], label: string): b
   return 56 + first * bar + 8 + label.replace(/\u2060/g, '').length * 6 <= 1000 - 8
 }
 
-export async function ProfitChartBlock({ ctx, summary, empty = null }: {
+export async function ProfitChartBlock({ ctx, summary, empty = null, amount }: {
   ctx: PageContext; summary: StoreSummary
   /** The verdict's reason the window is empty (./emptyWindow emptyWindowOf). */
   empty?: EmptyWindow | null
+  /** The verdict's amount, as the number band prints it: null = "—" (no sale
+   *  and no spend), and the band label then says "—" too, not "$0". */
+  amount?: number | null
 }) {
   const configured = summary.pnl.configured
   const title = configured ? 'Lucro real por dia' : 'Receita − anúncios por dia'
@@ -117,7 +120,10 @@ export async function ProfitChartBlock({ ctx, summary, empty = null }: {
   // verdict halves revenue − ads as well as profit in the split view.
   const bandSum = series.filter(d => d.inWindow)
     .reduce((a, d) => a + chartValue(d, configured, ctx.splitFactor), 0)
-  const bandLabel = bandLabelFits(series, `${formatRangeLabel(band, ctx.today)} · ${formatMoney(bandSum)}`) ? undefined : ' '
+  const noAmount = amount === null
+  const bandLabel = bandLabelFits(series, `${formatRangeLabel(band, ctx.today)} · ${noAmount ? '—' : formatMoney(bandSum)}`)
+    ? noAmount ? `${formatRangeLabel(band, ctx.today)} · —` : undefined
+    : ' '
 
   const footer = configured ? (
     <div className={s.footLinks}>

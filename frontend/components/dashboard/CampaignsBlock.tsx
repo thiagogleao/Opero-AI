@@ -127,6 +127,8 @@ export async function CampaignsBlock({ ctx, summary, storeNames, empty = null }:
   return (
     <Block
       title={title}
+      // A caveat (C13): actions are judged on the last 7 closed days, money on the period.
+      eyebrow={unjudged ? 'sem ação: dias não lidos' : `ação: 7 dias fechados (${decided})`}
       howTo={<>{h.top.length === 1 ? 'A campanha que mais gastou' : `As ${h.top.length} campanhas que mais gastaram`} em {ctx.rangeLabel}. {judgedText} O ROAS é comparado com o empate da loja{be ? ` (${formatRoas(be)})` : ''}.</>}
       info={report.formula}
       // The number the linked page shows on its tab ("Campanhas 6").

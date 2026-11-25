@@ -8,19 +8,21 @@
  * as what it is.
  */
 
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import {
-  Avatar, Badge, Block, BreakdownLedger, Button, Callout, Chip, EmptyState, Icon, Money, VerdictCard, VerdictChips,
+  Avatar, Badge, Block, BreakdownLedger, Button, Callout, Chip, EmptyState, Icon, InfoTip, Money, VerdictChips,
 } from '@/components/ui'
-import { DailyProfitBars, DailyProfitLegend, IntradayCurve, IntradayLegend } from '@/components/charts'
+import { MiniTiles } from './MiniTiles'
+import { buildNumberBand, joinNames, roasChannelTag, type BandChip, type BandTileKey, type NumberBand } from '@/lib/views/numberBand'
+import { DailyProfitLegend, IntradayLegend } from '@/components/charts'
 import {
-  dayOfLabel, formatClock, formatCount, formatDate, formatMoney, formatPct, formatRelativeTime,
+  dayOfLabel, formatClock, formatCount, formatDate, formatMoney, formatPct, formatRelativeTime, formatRoas,
   formatTimeInTz, formatWeekdayDate, partialLabel, plural, tzCity,
 } from '@/lib/format'
 import { minutesIntoDay, todayInTz } from '@/lib/engine/dates'
 import {
-  comparisonCut, disputeReasonText, judgedStores, noSalesCashHit, notSellingYet, periodPhrase, storeRoas, storeStatus, storeStatusChips,
-  type RoasSummary, type Verdict,
+  disputeReasonText, judgedStores, noSalesCashHit, notSellingYet, periodPhrase, storeRoas, storeStatus, storeStatusChips,
+  type RoasSummary, type Verdict, type VerdictInput,
 } from '@/lib/views/verdict'
 import type { MobileResponse } from '@/lib/views/mobile'
 import type { IntradayAside, LiveOrderItem, PortfolioStoreRow } from '@/lib/views/portfolio'
@@ -31,9 +33,11 @@ import { feedAheadText, feedSplit, offsetMinutes } from '@/lib/period'
 /** The store's clock reads differently from the phone's right now (UTC
  *  offsets compared, not zone names: Belém and São Paulo are both UTC−3). */
 const clockDiffers = (tz: string, deviceTz: string, at: Date) => offsetMinutes(tz, at) !== offsetMinutes(deviceTz, at)
-import { noSpendLine, pairNotes, type SharedAds } from '../_lib/sharedAds'
+import { noSpendLine, pairNotes, type PairNote, type PairOrdersKnown, type SharedAds } from '../_lib/sharedAds'
 import { dueByLabel, feedLine, liveFeedSpeed } from '../_lib/labels'
-import { NetBars, NetBarsLegend } from './NetBars'
+import { NetBarsLegend } from './NetBars'
+import { TapBars, TapHours } from './TapBars'
+import { daysToColumns, hoursToColumns } from './tapBarsLogic'
 import s from '../m.module.css'
 import { rangeBeside } from '@/lib/period'
 
@@ -53,9 +57,12 @@ export function StoreName({ name }: { name: string }) {
   return <>{main}{code && <> <small>{code}</small></>}</>
 }
 
-// ─── Clock banner (one store on another clock) ────────────────────────────────
+// ─── The number band (spec §1, §3.10) ─────────────────────────────────────────
 
-export function ClockBanner({ tz, deviceTz, now }: { tz: string; deviceTz: string; now: number }) {
+/** "Tóquio está 12 h à frente deste aparelho: o dia da loja vira às 12h00
+ *  daqui. “Hoje” é o dia de Tóquio." — the old ClockBanner sentence, now the
+ *  info of the status chip "dia de Tóquio · 02h00". Null on the phone's clock. */
+export function clockChip(tz: string, deviceTz: string, now: number): BandChip | null {
   if (!now) return null
   const at = new Date(now)
   if (!clockDiffers(tz, deviceTz, at)) return null
@@ -63,112 +70,135 @@ export function ClockBanner({ tz, deviceTz, now }: { tz: string; deviceTz: strin
   const hours = Math.round(Math.abs(diff) / 60)
   const turnedAt = ((-diff % 1440) + 1440) % 1440
   const city = tzCity(tz)
-  return (
-    <div className={s.clock} role="note">
-      <Icon name="clock" size={18} />
-      <div>
-        <b>Dia de {city} · {formatWeekdayDate(todayInTz(tz, at))} · {formatTimeInTz(at, tz)}</b>
-        <span>
-          {city} está {hours} h {diff > 0 ? 'à frente' : 'atrás'} deste aparelho: o dia da loja vira às {formatClock(turnedAt)} daqui.
-          “Hoje” é o dia de {city}.
-        </span>
-      </div>
-    </div>
-  )
+  return {
+    code: 'fuso', tone: 'info', icon: 'clock',
+    label: `dia de ${city} · ${formatTimeInTz(at, tz)}`,
+    info: `Dia de ${city} · ${formatWeekdayDate(todayInTz(tz, at))} · ${formatTimeInTz(at, tz)}. ${city} está ${hours} h ${diff > 0 ? 'à frente' : 'atrás'} deste aparelho: o dia da loja vira às ${formatClock(turnedAt)} daqui. “Hoje” é o dia de ${city}.`,
+  }
 }
 
-// ─── Verdict + ledger ─────────────────────────────────────────────────────────
+export interface PhoneBand {
+  band: NumberBand
+  /** The shared-account callouts, for Detalhes. */
+  pairs: PairNote[]
+  /** The previous window's absolute numbers, for Detalhes (C10). */
+  before: string | null
+}
 
-export function VerdictBlock({ data, v }: { data: Data; v: Verdict }) {
-  const t = v.totals
+/** The band of the answer on screen, with the phone's own chips: another
+ *  clock, an archived store, a shared ad account (spec §1.4 item 3). */
+export function phoneBand(data: Data, input: VerdictInput, v: Verdict, shared: SharedAds, o: {
+  now: number; deviceTz: string; archived: boolean
+  /** One store in a pair: its pair orders in the window and the base (GET /api/mobile/shared). */
+  known?: PairOrdersKnown | null
+}): PhoneBand {
+  const all = isAllAnswer(data)
+  const one = !all && data.stores.length === 1 ? data.stores[0] : null
+  const extraChips: BandChip[] = []
+  if (one && o.archived) {
+    const on = one.archivedOn ?? null
+    const frozen = frozenTitle(data)
+    extraChips.push({
+      code: 'arquivada', tone: 'mut',
+      label: on ? `arquivada · lido até ${dateBeside(on, [data.range.from, data.range.to], data.anchorToday)}` : 'arquivada',
+      info: `Loja arquivada: fora de “Todas” e sem sincronização. Só o histórico.${frozen ? ` ${frozen}.` : ''}`,
+    })
+  }
+  const clock = one ? clockChip(one.timezone, o.deviceTz, o.now) : null
+  if (clock) extraChips.push(clock)
+  const scope = all ? 'all' : 'store'
+  // Which tiles show a ▲▼ (desktop app/page.tsx `moved`): a mixed comparison
+  // base is flagged only beside a delta it moves. The chips and tags do not
+  // change the deltas, so a first band without them answers that.
+  const plain = shared.pairs.length && !all ? buildNumberBand({ input, verdict: v, scope, extraChips }) : null
+  const deltas = plain?.comparison?.kind === 'ok'
+  const moved = (key: BandTileKey) => {
+    const d = plain?.tiles.find(t => t.key === key)?.delta
+    return deltas && !!d && d.kind !== 'none'
+  }
+  const pairs = shared.pairs.length && data.stores.length
+    ? pairNotes(shared, { all, storeId: all ? null : data.stores[0].id }, data.rangeLabel,
+      id => data.stores.find(r => r.id === id)?.totals.orders ?? null,
+      { range: data.range, today: data.anchorToday, alsoShown: [data.comparison.from, data.comparison.to] },
+      { known: all ? null : o.known ?? null, deltas })
+    : []
+  const tileTags: Partial<Record<BandTileKey, BandChip[]>> = {}
+  const addTag = (key: BandTileKey, c: BandChip) => { (tileTags[key] ??= []).push(c) }
+  for (const n of pairs) {
+    const info = `${n.title}. ${n.body}`
+    extraChips.push({ code: 'conta_compartilhada', label: n.chip, tone: n.tone, icon: 'alert', info: all ? info : `${info} Em Detalhes do período: ver as lojas juntas.` })
+    const mixedBase = (n.base ?? 0) > 0
+    // "base misturada" beside lucro and margem when their ▲▼ compare with a
+    // mixed base; on anúncios / ROAS it replaces the pair tag when the window
+    // itself is clean (desktop SharedAccountNote 'base' and 'tag').
+    for (const key of ['lucro', 'margem'] as const) {
+      if (mixedBase && moved(key)) addTag(key, { code: 'conta_compartilhada', label: 'base misturada', tone: 'warn', info })
+    }
+    if (n.tag) {
+      for (const key of ['anuncios', 'roas'] as const) {
+        const baseOnly = mixedBase && moved(key) && n.now === 0
+        addTag(key, { code: 'conta_compartilhada', label: baseOnly ? 'base misturada' : n.tag, tone: baseOnly ? 'warn' : 'info', info })
+      }
+    }
+  }
+  const band = buildNumberBand({
+    input, verdict: v, scope, extraChips,
+    tileTags: Object.keys(tileTags).length ? tileTags : undefined,
+  })
   const cmp = v.comparisonTotals
-  // A window of several days ending today is compared with the earlier days
-  // whole and the last one cut at this hour: the cell says where it stops
-  // ("10 dias anteriores · até 04h16 de 9 nov"), as the verdict does.
-  // lib/period's words (R6/R7): the cut said once ("Mesmos dias do mês
-  // passado · até 18h11"); no comparison at all says why, never "Dia anterior".
-  const c = data.comparison
-  const none = c.none ?? null
-  const cut = c.cutText !== undefined ? (c.label === 'ontem até esta hora' ? null : c.cutText) : comparisonCut(c, data.anchorToday)
-  const cmpLabel = none !== null
-    ? 'Comparação'
-    : (c.label === 'ontem até esta hora' ? 'Ontem até esta hora' : c.label.replace(/^./, ch => ch.toUpperCase())) + (cut ? ` · ${cut}` : '')
-  const cmpEmpty = none !== null ? (none || 'sem comparação') : c.partialBase ?? 'sem vendas para comparar'
-  // The whole window is before the first sale: no "$0 · 0 pedidos" beside a
-  // verdict that says the store (or every store) was not selling yet.
+  // The band's own previous result (the verdict's resultOf, halved like the
+  // tile under the split); never re-derived here.
+  const lucroBefore = band.tiles[0].delta?.previousText ?? null
+  // Only a measured comparison has an "Antes": under "sem base" or "base
+  // incompleta" the band already says the variation is not measured.
+  const before = band.comparison?.kind === 'ok' && cmp && (cmp.orders > 0 || cmp.adSpend > 0)
+    // "Antes (1–25 out, até 15h40): …" — the comparison words without their "vs"
+    // and without parentheses inside the parentheses.
+    ? `Antes (${band.comparison.short.replace(/^vs\s+/, '').replace(/\s*\((até [^)]*)\)/, ', $1')}): ${lucroBefore ? `${v.basis === 'revenue_minus_ads' ? 'vendas − anúncios' : 'lucro'} ${lucroBefore} · ` : ''}vendas ${formatMoney(cmp.revenue)} · ${plural(cmp.orders, 'pedido', 'pedidos')}`
+    : null
+  return { band, pairs, before }
+}
+
+/** "Para onde foi cada dólar", under Detalhes (spec §3.10): the ledger the
+ *  verdict card used to carry, unchanged. */
+export function LedgerBlock({ data, v }: { data: Data; v: Verdict }) {
+  const t = v.totals
+  // The whole window is before the first sale, or after an archive day.
   const notYet = v.beforeStart ?? null
-  // An archived store's window after its archive day has no data: no "$0".
   const frozen = v.frozen ?? null
   const several = data.stores.length > 1
   return (
-    <VerdictCard
-      verdict={v}
-      compact
-      headingLevel="h1"
-      footer={
-        <div className={s.pair}>
-          <div className={s.pairCell}>
-            <small>Vendas</small>
-            {notYet ? (
-              <><b className="mut">—</b><em>{several ? 'ainda não vendiam' : 'ainda não vendia'}</em></>
-            ) : frozen ? (
-              <><b className="mut">—</b><em>sem dados: loja arquivada</em></>
-            ) : (
-              <>
-                <b>{formatMoney(t.revenue)}</b>
-                <em>{plural(t.orders, 'pedido', 'pedidos')}</em>
-              </>
-            )}
-          </div>
-          {/* A frozen archived window has no comparison at all (R10): no cell. */}
-          {none !== '' && <div className={s.pairCell}>
-            <small>{cmpLabel}</small>
-            {cmp && (cmp.orders > 0 || cmp.adSpend > 0) ? (
-              <>
-                <b className={cmp.operatingProfit < 0 ? 'neg' : undefined}>{formatMoney(cmp.operatingProfit)}</b>
-                {/* "−$40,77 de lucro" read as a contradiction. */}
-                <em>{v.basis === 'revenue_minus_ads' ? 'vendas − anúncios' : cmp.operatingProfit < 0 ? 'de prejuízo' : 'de lucro'} · {formatMoney(cmp.revenue)} em vendas</em>
-              </>
-            ) : (
-              <><b className="mut">—</b><em>{cmpEmpty}</em></>
-            )}
-          </div>}
-        </div>
-      }
-      aside={
-        <BreakdownLedger
-          pnl={t}
-          configured={v.basis !== 'revenue_minus_ads'}
-          title="Para onde foi cada dólar"
-          // Nothing sold: there is no dollar to split, so no "0¢ Meta" bar either.
-          bar={t.revenue > 0}
-          sub={t.revenue > 0
-            ? `De cada $1,00 vendido em ${data.rangeLabel}${v.excluded.length ? `, sem ${v.excluded.map(e => e.name).join(' e ')} (sem custos)` : ''}`
-            // Nothing sold and nothing spent: the ledger's own empty state says it.
-            : t.adSpend > 0 ? `Nenhuma venda em ${data.rangeLabel}${v.excluded.length ? ` (sem ${v.excluded.map(e => e.name).join(' e ')}, sem custos)` : ''}` : undefined}
-          // Before the first sale the generic "Sem vendas no período" would read
-          // as a dead window; say why it is empty, as the desktop Resumo does.
-          emptyTitle={notYet ? (several ? 'As lojas ainda não vendiam' : 'A loja ainda não vendia') : frozen ? 'Sem dados neste período' : undefined}
-          emptyText={notYet
-            ? `${several ? 'A primeira venda foi' : `A ${data.stores[0]?.name ?? 'loja'} começou a vender`} em ${notYet.text}: escolha um período a partir dessa data.`
-            : frozen ? `A loja está arquivada${frozen.text ? ` desde ${frozen.text}` : ''} e não sincroniza mais: nada é lido depois disso.` : undefined}
-        />
-      }
-    />
+    <section className={s.ledgerCard} aria-label="Para onde foi cada dólar">
+      <BreakdownLedger
+        pnl={t}
+        configured={v.basis !== 'revenue_minus_ads'}
+        title="Para onde foi cada dólar"
+        // Collapsed to its header, the ¢ bar and the legend; one tap opens the rows (spec §3.10, C20).
+        collapsibleRows
+        // Nothing sold: there is no dollar to split, so no "0¢ Meta" bar either.
+        bar={t.revenue > 0}
+        sub={t.revenue > 0
+          ? `De cada $1,00 vendido em ${data.rangeLabel}${v.excluded.length ? `, sem ${v.excluded.map(e => e.name).join(' e ')} (sem custos)` : ''}`
+          // Nothing sold and nothing spent: the ledger's own empty state says it.
+          : t.adSpend > 0 ? `Nenhuma venda em ${data.rangeLabel}${v.excluded.length ? ` (sem ${v.excluded.map(e => e.name).join(' e ')}, sem custos)` : ''}` : undefined}
+        // Before the first sale the generic "Sem vendas no período" would read
+        // as a dead window; say why it is empty, as the desktop Resumo does.
+        emptyTitle={notYet ? (several ? 'As lojas ainda não vendiam' : 'A loja ainda não vendia') : frozen ? 'Sem dados neste período' : undefined}
+        emptyText={notYet
+          ? `${several ? 'A primeira venda foi' : `A ${data.stores[0]?.name ?? 'loja'} começou a vender`} em ${notYet.text}: escolha um período a partir dessa data.`
+          : frozen ? `A loja está arquivada${frozen.text ? ` desde ${frozen.text}` : ''} e não sincroniza mais: nada é lido depois disso.` : undefined}
+      />
+    </section>
   )
 }
 
 // ─── Shared ad accounts (CAMP HALLOW on EPOCH's account) ──────────────────────
 
-/** The pair notes under the verdict, from the answer on screen (its stores,
- *  its range): Todas names every pair; one store the pairs it is in. */
-export function SharedAdsNotes({ data, shared, onAll }: { data: Data; shared: SharedAds; onAll: () => void }) {
-  if (!shared.pairs.length || !data.stores.length) return null
-  const all = isAllAnswer(data)
-  const ordersOf = (id: string) => data.stores.find(r => r.id === id)?.totals.orders ?? null
-  const notes = pairNotes(shared, { all, storeId: all ? null : data.stores[0].id }, data.rangeLabel, ordersOf,
-    { range: data.range, today: data.anchorToday, alsoShown: [data.comparison.from, data.comparison.to] })
+/** The pair callouts, full text, inside Detalhes do período (the status line
+ *  carries their chips): Todas names every pair; one store the pairs it is in. */
+export function SharedAdsNotes({ data, notes, onAll }: { data: Data; notes: PairNote[]; onAll: () => void }) {
   if (!notes.length) return null
+  const all = isAllAnswer(data)
   return (
     <div className={s.stack} role="region" aria-label="Contas de anúncio compartilhadas">
       {notes.map(n => (
@@ -233,14 +263,40 @@ export function DayBlock({ data }: { data: Data }) {
   const quiet = day.points.length > 0 && rows.length > 0 && rows.every(r => !active(r))
   const what = netOnly ? 'Vendas − anúncios acumuladas hora a hora' : 'Lucro acumulado hora a hora'
 
+  const hours = hoursToColumns(day.points, running)
+  // Stores beside the curve, named in the readout: the band's Lucro real
+  // counts Hibikura's closed Tokyo day, the curve does not ($775 vs $490).
+  const closedActive = day.closedStores.filter(asideActive)
+  const besides = [...closedActive.map(c => c.name), ...leftOut.map(a => a.name)]
+  const outside = besides.length ? {
+    label: besides.length === 1 ? `sem ${besides[0]}` : `sem ${besides.length} lojas`,
+    info: [
+      ...closedActive.map(c => {
+        const configured = data.stores.find(r => r.id === c.storeId)?.configured !== false
+        return `${c.name}: dia de ${tzCity(c.timezone)} já fechado, fora da curva (${configured ? `lucro ${formatMoney(c.operatingProfit)}` : `vendas − anúncios ${formatMoney(c.operatingProfit)}`}).`
+      }),
+      ...leftOut.map(a => `${a.name}: sem custos, fora da curva (vendas − anúncios ${formatMoney(a.revenue - a.adSpend)}).`),
+      closedActive.length ? 'Por isso o acumulado da curva não é o Lucro real do topo, que soma o dia inteiro dessas lojas.' : '',
+    ].filter(Boolean).join(' '),
+  } : null
+  // The how-to and the clock words live in the ⓘ (spec §4.3); the numbers line
+  // and the caveats stay visible.
+  const info = [
+    reference ? `${what}; o tracejado é ${netOnly ? 'o mesmo número' : 'o lucro'} de ontem até esta hora.` : `${what}.`,
+    'Toque numa barra para ver a hora no quadro acima dela; toque de novo para voltar à última hora.',
+    netOnly
+      ? 'Cada venda entra com o seu valor na hora em que aconteceu; os anúncios do dia são rateados pelas horas. Não é lucro: a loja não tem custos de produto, frete e taxas configurados.'
+      : 'Cada venda entra com a sua margem na hora em que aconteceu; anúncios e custos fixos do dia são rateados pelas horas. A curva é uma estimativa; o valor da última hora é exato.',
+    !one ? 'Hora h é a hora h do dia de cada loja.' : '',
+    clocksApart
+      ? `Depois das ${formatClock(behind!.minutesCovered)} só ${leaders.map(r => r.name).join(' e ')} ${leaders.length > 1 ? 'movem' : 'move'} a curva: ${leaders.length > 1 ? 'já estão' : 'já está'} às ${formatClock(ahead!.minutesCovered)} no ${leaders.length > 1 ? 'fuso delas' : `dia de ${tzCity(ahead!.timezone)}`}. As outras lojas ainda não chegaram nessa hora e entram com o último valor delas.`
+      : '',
+  ].filter(Boolean).join(' ')
+
   return (
     <Block
       title={title}
-      howTo={quiet || day.points.length === 0 ? undefined
-        : reference ? `${what}; o tracejado é ${netOnly ? 'o mesmo número' : 'o lucro'} de ontem até esta hora.` : `${what}.`}
-      info={netOnly
-        ? 'Cada venda entra com o seu valor na hora em que aconteceu; os anúncios do dia são rateados pelas horas. Não é lucro: a loja não tem custos de produto, frete e taxas configurados.'
-        : 'Cada venda entra com a sua margem na hora em que aconteceu; anúncios e custos fixos do dia são rateados pelas horas. A curva é uma estimativa; o valor da última hora é exato.'}
+      info={quiet || day.points.length === 0 ? undefined : info}
       infoLabel="Como a curva é feita"
     >
       {day.points.length === 0 ? (
@@ -251,18 +307,15 @@ export function DayBlock({ data }: { data: Data }) {
         <EmptyState compact icon="clock" title={running ? 'Nenhuma venda e nenhum gasto até agora' : `Nenhuma venda e nenhum gasto em ${formatDate(day.day, data.anchorToday)}`} />
       ) : (
         <div className={s.stack}>
-          <div className={s.chartWrap}>
-            <IntradayCurve
-              points={day.points}
-              nowMinutes={nowMinutes}
-              nowLabel={clocksApart ? `${tzCity(ahead!.timezone)} · ${formatClock(ahead!.minutesCovered)}` : undefined}
-              referenceValue={reference}
-              tzNote={tzLabel ? ` · ${tzCity(one!.timezone)}` : ''}
-              width={340}
-              height={200}
-              ariaLabel={`${what} em ${formatDate(day.day, data.anchorToday)}${one ? ` na ${one.name}` : ''}${netOnly ? ': sem custos configurados, não é lucro' : ''}`}
-            />
-          </div>
+          <TapHours
+            hours={hours}
+            net={netOnly}
+            reference={reference}
+            outside={outside}
+            cityNote={tzLabel ? ` · ${tzCity(one!.timezone)}` : ''}
+            resetKey={pinScope(data)}
+            ariaLabel={`${what} em ${formatDate(day.day, data.anchorToday)}${one ? ` na ${one.name}` : ''}${netOnly ? ': sem custos configurados, não é lucro' : ''}`}
+          />
           {netOnly ? (
             // IntradayLegend says "lucro acumulado" (components/charts): its
             // words do not fit a curve without costs.
@@ -274,68 +327,51 @@ export function DayBlock({ data }: { data: Data }) {
           ) : (
             <IntradayLegend reference={reference?.label} now={nowMinutes !== null} />
           )}
-          <p className={s.note}>
-            {day.peak && day.peak.profit > 0 && <>Pico de <b>{formatMoney(day.peak.profit)}</b> às {String(day.peak.hour).padStart(2, '0')}h. </>}
-            {day.greenSince !== null && day.greenSince > 0 && <>{netOnly ? 'Acima de zero' : 'No azul'} desde as {String(day.greenSince).padStart(2, '0')}h. </>}
-            {/* "Ainda" only while the day runs: a closed day (Glooty, 14 nov) ended there. */}
-            {day.greenSince === null && day.closing < 0 && <>{running ? 'Ainda abaixo de zero. ' : 'Fechou abaixo de zero. '}</>}
-            {!one && 'Hora h é a hora h do dia de cada loja.'}
-          </p>
-          {clocksApart && (
+          {(day.peak && day.peak.profit > 0) || (day.greenSince !== null && day.greenSince > 0) || (day.greenSince === null && day.closing < 0) ? (
             <p className={s.note}>
-              {/* The other stores are still on the curve, frozen at their last hour
-                  (combineIntraday): "só tem Hibikura" read as if they had dropped out. */}
-              Depois das {formatClock(behind!.minutesCovered)} só {leaders.map(r => r.name).join(' e ')} {leaders.length > 1 ? 'movem' : 'move'} a curva:{' '}
-              {leaders.length > 1 ? 'já estão' : 'já está'} às {formatClock(ahead!.minutesCovered)} no {leaders.length > 1 ? 'fuso delas' : `dia de ${tzCity(ahead!.timezone)}`}.
-              As outras lojas ainda não chegaram nessa hora e entram com o último valor delas.
+              {day.peak && day.peak.profit > 0 && <>Pico de <b>{formatMoney(day.peak.profit)}</b> às {String(day.peak.hour).padStart(2, '0')}h. </>}
+              {day.greenSince !== null && day.greenSince > 0 && <>{netOnly ? 'Acima de zero' : 'No azul'} desde as {String(day.greenSince).padStart(2, '0')}h. </>}
+              {/* "Ainda" only while the day runs: a closed day (Glooty, 14 nov) ended there. */}
+              {day.greenSince === null && day.closing < 0 && <>{running ? 'Ainda abaixo de zero.' : 'Fechou abaixo de zero.'}</>}
             </p>
-          )}
+          ) : null}
           {unconfigured.length > 0 && (
             <p className={s.note}>Sem custos configurados: a curva acima de zero não quer dizer lucro.</p>
           )}
         </div>
       )}
-      {leftOut.length > 0 && <LeftOutNote stores={leftOut} running={running} />}
-      {day.closedStores.map(c => (
-        <Callout key={c.storeId} tone="info" icon="clock" title={`${c.name}: dia de ${tzCity(c.timezone)} já fechado`}>
-          Fora da curva. {formatDate(day.day, data.anchorToday)} inteiro em {tzCity(c.timezone)}: {plural(c.orders, 'pedido', 'pedidos')},{' '}
-          {formatMoney(c.revenue)} em vendas e <ClosedDayResult value={c.operatingProfit} configured={data.stores.find(r => r.id === c.storeId)?.configured !== false} />.
-          {' '}Lá já é {formatDate(c.storeToday, data.anchorToday)}.
-        </Callout>
-      ))}
-      {day.notStartedStores.map(c => (
-        <Callout key={c.storeId} tone="neu" icon="clock" title={`${c.name}: dia ainda não começou`}>
-          Em {tzCity(c.timezone)} ainda não é {formatDate(day.day, data.anchorToday)}.
-        </Callout>
-      ))}
+      {/* Stores beside the curve: one line each (spec §3.10, C15a). */}
+      {(leftOut.length > 0 || day.closedStores.length > 0 || day.notStartedStores.length > 0) && (
+        <ul className={s.asideLines}>
+          {leftOut.map(a => (
+            <li key={`u-${a.storeId}`}>
+              <b>{a.name}</b>: fora da curva (sem custos) · {plural(a.orders, 'pedido', 'pedidos')} · {formatMoney(a.revenue)} · vendas − anúncios <Money value={a.revenue - a.adSpend} />{running ? ' até agora' : ''}
+            </li>
+          ))}
+          {day.closedStores.map(c => (
+            <li key={`c-${c.storeId}`} title={`${formatDate(day.day, data.anchorToday)} inteiro em ${tzCity(c.timezone)}; lá já é ${formatDate(c.storeToday, data.anchorToday)}.`}>
+              <b>{c.name}</b>: dia de {tzCity(c.timezone)} já fechado · {plural(c.orders, 'pedido', 'pedidos')} · {formatMoney(c.revenue)} · <ClosedDayLine value={c.operatingProfit} configured={data.stores.find(r => r.id === c.storeId)?.configured !== false} />
+            </li>
+          ))}
+          {day.notStartedStores.map(c => (
+            <li key={`n-${c.storeId}`}>
+              <b>{c.name}</b>: dia ainda não começou · em {tzCity(c.timezone)} ainda não é {formatDate(day.day, data.anchorToday)}
+            </li>
+          ))}
+        </ul>
+      )}
     </Block>
   )
 }
 
 const asideActive = (a: IntradayAside) => a.orders > 0 || a.revenue > 0 || a.adSpend > 0
 
-/** "$120 de lucro" / "$251 de prejuízo" for a closed store day, as the
- *  verdict's pair cell words it ("−$251 de lucro" read as a contradiction);
- *  a store without costs keeps the signed "vendas − anúncios". */
-function ClosedDayResult({ value, configured }: { value: number; configured: boolean }) {
-  if (!configured) return <><Money value={value} /> de vendas − anúncios</>
-  return value < 0 ? <><Money value={-value} tone="neg" /> de prejuízo</> : <><Money value={value} /> de lucro</>
-}
-
-/** "Glooty fica fora da curva…": a store without costs, beside the summed
- *  curve with its revenue − ads in words, never inside it as profit. */
-function LeftOutNote({ stores, running }: { stores: IntradayAside[]; running: boolean }) {
-  return (
-    <p className={s.note} style={{ marginTop: 8 }}>
-      {joinNames(stores.map(a => a.name))} {stores.length > 1 ? 'ficam' : 'fica'} fora da curva, como do número do topo: sem custos configurados.
-      {stores.map(a => (
-        <span key={a.storeId}>
-          {' '}{stores.length > 1 ? `${a.name}: v` : 'V'}endas {formatMoney(a.revenue)} − anúncios {formatMoney(a.adSpend)} ={' '}
-          <Money value={a.revenue - a.adSpend} />{running ? ' até agora' : ''}, antes do custo dos produtos.
-        </span>
-      ))}
-    </p>
-  )
+/** "lucro $310" / "prejuízo $251" for a closed store day; a store without
+ *  costs keeps the signed "vendas − anúncios" ("lucro −$251" reads as a
+ *  contradiction). */
+function ClosedDayLine({ value, configured }: { value: number; configured: boolean }) {
+  if (!configured) return <>vendas − anúncios <Money value={value} /></>
+  return value < 0 ? <>prejuízo <Money value={-value} tone="neg" /></> : <>lucro <Money value={value} /></>
 }
 
 // ─── Daily bars (several days) ────────────────────────────────────────────────
@@ -374,37 +410,28 @@ export function DailyBlock({ data }: { data: Data }) {
     )
   }
   const names = joinNames(judged.map(r => r.name))
+  const mode = netOnly ? 'net' as const : 'profit' as const
+  // C18: one store, a day before its first sale reads "a loja ainda não vendia".
+  const lone = !isAllAnswer(data) && data.stores.length === 1 ? data.stores[0] : null
+  const cols = daysToColumns(days, { mode, partialDate: partialDay, today: data.anchorToday, firstOrderDate: lone?.firstOrderDate ?? null })
   return (
     <Block
       title={title}
-      howTo={netOnly
-        ? 'Azul = vendeu mais do que gastou em anúncios; coral = gastou mais do que vendeu. Toque numa barra para ver o dia.'
-        : 'Barra acima da linha do zero = dia no lucro; toque numa barra para ver o dia.'}
-      info={netOnly
+      // The how-to words live in the ⓘ (spec §3.10); the caveats stay as lines below.
+      info={`${netOnly
+        ? 'Azul = vendeu mais do que gastou em anúncios; coral = gastou mais do que vendeu.'
+        : 'Barra acima da linha do zero = dia no lucro.'} Toque numa barra para ver o dia no quadro acima dela; toque de novo para voltar ao último dia fechado. ${netOnly
         ? `Vendas menos Anúncios Meta e Anúncios Shopify de cada dia, no fuso da loja. Não é lucro: ${names} ${judged.length > 1 ? 'não têm' : 'não tem'} custos de produto, frete e taxas configurados, e eles ainda saem dessas vendas.`
-        : 'Vendas menos todos os custos do dia, no fuso de cada loja. Reembolsos e chargebacks ficam fora das barras: entram no resultado de caixa.'}
+        : 'Vendas menos todos os custos do dia, no fuso de cada loja. Reembolsos e chargebacks ficam fora das barras: entram no resultado de caixa.'}`}
     >
-      <div className={s.chartWrap}>
-        {netOnly ? (
-          <NetBars
-            days={days.map(d => ({ date: d.date, value: d.revenue - d.adSpend, revenue: d.revenue, metaSpend: d.metaSpend, shopSpend: d.shopSpend, orders: d.orders }))}
-            partialDate={partialDay}
-            partialNote={partialDay ? partialLabel(minutes) : undefined}
-            today={data.anchorToday}
-            ariaLabel={`Vendas menos anúncios por dia, ${data.rangeLabel}: sem custos configurados, não é lucro`}
-          />
-        ) : (
-          <DailyProfitBars
-            days={days.map(d => ({ date: d.date, profit: d.operatingProfit, revenue: d.revenue, metaSpend: d.metaSpend, shopSpend: d.shopSpend, orders: d.orders }))}
-            partialDate={partialDay}
-            partialNote={partialDay ? partialLabel(minutes) : undefined}
-            today={data.anchorToday}
-            width={340}
-            height={210}
-            ariaLabel={`Lucro real por dia, ${data.rangeLabel}`}
-          />
-        )}
-      </div>
+      <TapBars
+        days={cols}
+        mode={mode}
+        partialNote={partialDay ? partialLabel(minutes) : undefined}
+        today={data.anchorToday}
+        resetKey={pinScope(data)}
+        ariaLabel={netOnly ? `Vendas menos anúncios por dia, ${data.rangeLabel}: sem custos configurados, não é lucro` : `Lucro real por dia, ${data.rangeLabel}`}
+      />
       {netOnly ? <NetBarsLegend partial={!!partialDay} /> : <DailyProfitLegend partial={!!partialDay} selected={false} />}
       {leftOut.length > 0 && (
         <p className={s.note} style={{ marginTop: 8 }}>{leftOut.map(r => r.name).join(' e ')} {leftOut.length > 1 ? 'ficam' : 'fica'} fora das barras, como do número do topo: sem custos configurados.</p>
@@ -414,6 +441,13 @@ export function DailyBlock({ data }: { data: Data }) {
       )}
     </Block>
   )
+}
+
+/** What resets a chart's pin: the store and the period (C17) — not the
+ *  45-s refresh, not the date rolling at midnight. */
+function pinScope(data: Data): string {
+  const r = data.request
+  return `${r.store}|${r.period}|${r.from ?? ''}|${r.to ?? ''}`
 }
 
 /** The archive day of a lone archived store when the whole window is after
@@ -463,17 +497,14 @@ function readSpan(data: Data): string {
   return tail ? `${rangeBeside({ from: data.range.from, to: tail }, { window: data.range, comparison: data.comparison, clockToday: data.anchorToday })}, até a loja ser arquivada` : data.rangeLabel
 }
 
-/** "MOKOO e Glooty", "MOKOO, EPOCH e Glooty". */
-function joinNames(names: string[]): string {
-  return names.length <= 1 ? names.join('') : `${names.slice(0, -1).join(', ')} e ${names[names.length - 1]}`
-}
 
 // ─── What needs attention (several stores) ────────────────────────────────────
 
 export function Attention({ data }: { data: Data }) {
   const phrase = periodPhrase(data.period, data.range, data.anchorToday)
   const singleDay = data.range.from === data.range.to
-  const items: { key: string; tone: 'neg' | 'warn'; title: string; body: string }[] = []
+  // Numbers first (spec §3.10): one compact line per store; the sentence opens on a tap.
+  const items: { key: string; tone: 'neg' | 'warn'; line: ReactNode; title: string; body: string }[] = []
   for (const r of data.stores) {
     // One rule with the store list and the desktop table (verdict
     // storeStatus): a store without costs whose ads passed its sales is "no
@@ -486,6 +517,7 @@ export function Attention({ data }: { data: Data }) {
       if (t.orders === 0) {
         items.push({
           key: `loss-${r.id}`, tone: 'neg',
+          line: <><b>{r.name}</b> · no prejuízo · <Money value={t.operatingProfit} tone="auto" /> · {formatMoney(t.adSpend)} em anúncios · 0 pedidos</>,
           // "está no prejuízo ontem" read wrong: a closed window already happened.
           title: `${r.name} ${r.partial ? 'está' : 'ficou'} no prejuízo ${phrase}`,
           body: `Gastou ${formatMoney(t.adSpend)} em anúncios e não vendeu nada.${open}`,
@@ -496,14 +528,23 @@ export function Attention({ data }: { data: Data }) {
         // nov while this block named only Hibikura's $147).
         items.push({
           key: `loss-${r.id}`, tone: 'neg',
+          line: <><b>{r.name}</b> · anúncios acima das vendas · vendas − anúncios <Money value={t.revenue - t.adSpend} tone="auto" /> · <Chip tone="cfg" size="sm">sem custos</Chip></>,
           title: `${r.name} ${r.partial ? 'está gastando mais em anúncios do que vende' : 'gastou mais em anúncios do que vendeu'} ${phrase}`,
           body: `Vendas ${formatMoney(t.revenue)} − anúncios ${formatMoney(t.adSpend)} = ${formatMoney(t.revenue - t.adSpend)}${r.partial ? ' até agora' : ''}, antes do custo dos produtos: o prejuízo real é maior. Configure os custos dela para ver o lucro.${open}`,
         })
       } else {
         const sr = storeRoas(t, r.configured)
         const roas = sr ? ` ${sr.text.replace(/^ROAS/, sr.label ?? 'ROAS')}.` : ''
+        // The channel the ratio is on, by the band's own rule (a plain "Meta"
+        // is the default and says nothing in a one-line row).
+        const chTag = sr ? roasChannelTag(t, sr.channel ?? null) : null
+        const tag = chTag && chTag.label !== 'Meta' ? chTag.label : null
         items.push({
           key: `loss-${r.id}`, tone: 'neg',
+          line: <>
+            <b>{r.name}</b> · no prejuízo · <Money value={t.operatingProfit} tone="auto" /> · margem {formatPct(t.margin)}
+            {sr && <> · ROAS {formatRoas(sr.roas)}{tag && <> <Chip tone="info" size="sm">{tag}</Chip></>} / empate {formatRoas(sr.breakEven)}</>}
+          </>,
           title: `${r.name} ${r.partial ? 'está' : 'ficou'} no prejuízo ${phrase}`,
           body: `Gastou ${formatMoney(t.adSpend)} em anúncios e vendeu ${formatMoney(t.revenue)}.${roas}${open}`,
         })
@@ -511,17 +552,25 @@ export function Attention({ data }: { data: Data }) {
     }
     for (const b of r.badges) {
       if (b.code === 'sync_atrasado' || b.code === 'sync_falhando') {
-        items.push({ key: `${b.code}-${r.id}`, tone: 'warn', title: `${r.name}: ${b.label.toLowerCase()}`, body: b.detail })
+        items.push({ key: `${b.code}-${r.id}`, tone: 'warn', line: <><b>{r.name}</b> · {b.label.toLowerCase()}</>, title: `${r.name}: ${b.label.toLowerCase()}`, body: b.detail })
       }
     }
   }
   if (!items.length) return null
   return (
-    <div className={s.stack} role="region" aria-label="Atenção">
-      {items.slice(0, 5).map(i => (
-        <Callout key={i.key} tone={i.tone} title={i.title}>{i.body}</Callout>
-      ))}
-    </div>
+    <section className={s.attention} role="region" aria-label="Atenção">
+      <div className={s.attHead}><Icon name="alert" size={14} />Atenção</div>
+      <ul>
+        {items.slice(0, 5).map(i => (
+          <li key={i.key} className={i.tone === 'neg' ? s.attNeg : s.attWarn}>
+            <details>
+              <summary>{i.line}</summary>
+              <p><b>{i.title}.</b> {i.body}</p>
+            </details>
+          </li>
+        ))}
+      </ul>
+    </section>
   )
 }
 
@@ -552,7 +601,7 @@ export function StoreList({ data, shared, onPick, opensOther, help = 'Toque numa
   return (
     <Block
       title={running ? 'Lojas hoje' : `Lojas · ${data.rangeLabel}`}
-      howTo={`Cada loja no seu dia e no seu fuso. ${help.replace(/\.$/, '')}${lines.length ? ` (${lines.join('; ')})` : ''}.`}
+      info={`Cada loja no seu dia e no seu fuso. ${help.replace(/\.$/, '')}${lines.length ? ` (${lines.join('; ')})` : ''}. À direita, o lucro e a margem do período.`}
       flush
     >
       <ul className={s.list}>
@@ -581,7 +630,7 @@ export function StoreList({ data, shared, onPick, opensOther, help = 'Toque numa
                   <span className={s.rowName}><StoreName name={r.name} /></span>
                   <span className={s.rowSub} style={{ display: 'block' }}>
                     {t.orders > 0
-                      ? <><b>{plural(t.orders, 'pedido', 'pedidos')}</b> · vendas <b>{formatMoney(t.revenue)}</b></>
+                      ? <><b>{plural(t.orders, 'pedido', 'pedidos')}</b> · <b>{formatMoney(t.revenue)}</b>{sr && <> · {rowRoas(sr)}</>}</>
                       // With the year whenever the window or its comparison is in another
                       // year, as the verdict above prints it ("1ª venda em 11 abr 2026").
                       : notYet ? `ainda não vendia · 1ª venda em ${dateBeside(r.firstOrderDate!, [data.range.from, data.range.to, data.comparison.from, data.comparison.to], data.anchorToday)}`
@@ -593,7 +642,6 @@ export function StoreList({ data, shared, onPick, opensOther, help = 'Toque numa
                     {/* ROAS on the store's ad channel (lib/views/adChannel), as the Resumo and
                         the verdict: Dumpling sells through Shop Campaigns and read "109×" on
                         its $56 of Meta. */}
-                    {sr && <><br />{rowRoas(sr)}</>}
                     {t.orders > 0 && t.shopSpend > 0 && <><br />Anúncios Shopify {formatMoney(t.shopSpend)}{t.metaSpend > 0 && t.metaSpend < t.shopSpend ? ` · Meta ${formatMoney(t.metaSpend)}` : ''}</>}
                     {/* CAMP HALLOW read "sem anúncios" while its ads ran on EPOCH's account. */}
                     {t.adSpend === 0 && on && <><br />{noSpendLine(shared, r.id, t.orders, data.range)}</>}
@@ -613,6 +661,8 @@ export function StoreList({ data, shared, onPick, opensOther, help = 'Toque numa
                     ? <b><Money value={t.operatingProfit} sign tone={r.configured ? 'auto' : 'mut'} /></b>
                     : <b className={s.mutedVal}>—</b>}
                   {on && !r.configured && <small>vendas − anúncios</small>}
+                  {/* The margin beside the profit (spec §3.10); none without costs. */}
+                  {on && <small className={s.rowMargin}>margem {r.configured ? formatPct(t.margin) : '—'}</small>}
                   <VerdictChips chips={chips} size="sm" />
                 </span>
               </button>
@@ -636,8 +686,7 @@ export function RefundsBlock({ data }: { data: Data }) {
   return (
     <Block
       title="Reembolsos e chargebacks"
-      howTo="Os que chegaram no período, de pedidos de qualquer data. Já estão descontados no resultado de caixa."
-      info="Um reembolso custa a margem que o pedido tinha deixado (o produto já foi comprado e enviado); um pedido reembolsado por inteiro sai do dia em que foi feito. Chargebacks custam o valor disputado mais a taxa."
+      info="Os que chegaram no período, de pedidos de qualquer data. Já estão descontados no resultado de caixa. Um reembolso custa a margem que o pedido tinha deixado (o produto já foi comprado e enviado); um pedido reembolsado por inteiro sai do dia em que foi feito. Chargebacks custam o valor disputado mais a taxa."
       flush={list.length > 0}
     >
       {list.length === 0 ? (
@@ -752,6 +801,11 @@ export function ChargebackBlock({ data, deviceTz, now }: { data: Data; deviceTz:
   const unreadableNote = unreadable.length ? (
     <>O app não tem permissão para ler as disputas {several ? `de ${joinNames(unreadable.map(u => u.name))}` : 'desta loja'} no Shopify Payments: zero aqui não quer dizer que não houve nenhuma. Reconecte a loja em Ajustes, no computador, para dar a permissão.</>
   ) : null
+  // Summary tiles (spec §3.10): the worst rate, the lost ones, the ones waiting.
+  const worst = h && h.byStore.length ? h.byStore.reduce((x, y) => (y.rate > x.rate ? y : x)) : null
+  const worstTone = worst ? rateTone(worst.rate) : 'pos'
+  const nextDue = due[0]?.dueBy ? dueByLabel(due[0].dueBy, deviceTz, at) : null
+  const neverRead = [...new Set([...(h?.rateLeftOut ?? []), ...unreadable].map(x => x.name))]
   const allArchived = data.stores.length > 0 && data.stores.every(r => r.archived)
   const frozenOn = allArchived ? data.stores.map(r => r.archivedOn).filter((d): d is string => !!d).sort().pop() ?? null : null
   const frozenNote = allArchived ? (
@@ -760,8 +814,7 @@ export function ChargebackBlock({ data, deviceTz, now }: { data: Data; deviceTz:
   return (
     <Block
       title="Chargebacks · últimos 90 dias"
-      howTo={`Cada loja é uma conta no Shopify Payments: acima de ${formatPct(CB_WARN)} acende o alerta, acima de ${formatPct(CB_LIMIT)} a conta corre risco.`}
-      info="Contado por número de disputas sobre pedidos, que é como o limite é medido. Não depende do período escolhido acima."
+      info={`Cada loja é uma conta no Shopify Payments: acima de ${formatPct(CB_WARN)} acende o alerta, acima de ${formatPct(CB_LIMIT)} a conta corre risco. Contado por número de disputas sobre pedidos, que é como o limite é medido. Não depende do período escolhido acima.`}
       flush={!!h && h.byStore.length > 0}
     >
       {!h ? (
@@ -789,6 +842,31 @@ export function ChargebackBlock({ data, deviceTz, now }: { data: Data; deviceTz:
         </>
       ) : (
         <>
+          {/* Summary tiles first (spec §3.10); the per-store list, the deadlines
+              and the long footer open on a tap. */}
+          <div style={{ padding: '0 16px 12px', display: 'grid', gap: 8 }}>
+            <MiniTiles label="Chargebacks · 90 dias" tiles={[
+              {
+                label: 'Pior taxa', value: formatPct(worst!.rate, { digits: 2 }), tone: worstTone,
+                sub: several ? <span className={s.ellipsis}>{splitName(worst!.name)[0]}</span> : worstTone === 'neg' ? 'acima do limite' : worstTone === 'warn' ? 'perto do limite' : 'abaixo do alerta',
+                info: `Acima de ${formatPct(CB_WARN)} acende o alerta, acima de ${formatPct(CB_LIMIT)} a conta corre risco. O limite vale por loja.`,
+              },
+              { label: 'Perdidas', value: formatCount(h.lost), tone: h.lost > 0 ? 'neg' : undefined, sub: `${formatCount(h.won)} ganhas` },
+              {
+                label: 'Esperando resposta', value: formatCount(due.length), tone: due.length > 0 || h.overdue > 0 ? 'warn' : undefined,
+                sub: nextDue ? `próximo: ${nextDue}` : h.overdue > 0 ? `${formatCount(h.overdue)} fora do prazo` : 'nada no prazo',
+              },
+            ]} />
+            {neverRead.length > 0 && (
+              <span className={s.rowTags}>
+                <InfoTip trigger={<Chip tone="warn" icon="alert" size="sm">{plural(neverRead.length, 'loja sem disputas lidas', 'lojas sem disputas lidas')}</Chip>} className={s.chipTip}>
+                  {`Sem ${joinNames(neverRead)}, cujas disputas nunca foram lidas: o app pode não ter permissão para ler as disputas no Shopify Payments, e zero aqui não quer dizer que não houve nenhuma. Reconecte a loja em Ajustes, no computador, para dar a permissão.`}
+                </InfoTip>
+              </span>
+            )}
+          </div>
+          <details className={s.cbDetails}>
+            <summary>Por loja, prazos e taxas</summary>
           <ul className={s.list}>
             {h.byStore.map(b => {
               const tone = rateTone(b.rate)
@@ -829,6 +907,7 @@ export function ChargebackBlock({ data, deviceTz, now }: { data: Data; deviceTz:
             {unreadableNote && <><br />{unreadableNote}</>}
             {frozenNote && <><br />{frozenNote}</>}
           </div>
+          </details>
         </>
       )}
     </Block>
@@ -867,12 +946,15 @@ export function LiveFeed({ data, now, deviceTz }: { data: Data; now: number; dev
   return (
     <Block
       title={<span className={s.live}>Vendas ao vivo</span>}
-      howTo={clockTz !== deviceTz
+      // C12: "esta loja não avisa vendas na hora" is a caveat and stays a
+      // visible line; the rest of the how-to lives in the ⓘ.
+      info={clockTz !== deviceTz
         ? `As mais recentes primeiro, no horário de ${tzCity(clockTz)}, como o resto da tela. ${speed.howTo}`
         : `As mais recentes primeiro. ${speed.howTo}`}
       flush={items.length > 0}
       footer={speed.footer ?? undefined}
     >
+      {/não avisa/.test(speed.howTo) && <p className={s.note} style={{ margin: items.length > 0 ? '0 16px 8px' : '0 0 8px' }}>{speed.howTo}</p>}
       {aheadLines.map(l => <p key={l} className={s.note} style={{ opacity: 0.7, margin: '8px 12px' }}>{l}</p>)}
       {items.length === 0 ? (
         <EmptyState compact icon="clock" title={several ? 'Nenhuma venda recente' : 'Nenhuma venda recente nesta loja'} />

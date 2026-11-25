@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { PnL } from '@/lib/engine/pnl'
-import { buildProductsVerdict, type ProductLike } from '../productsVerdict'
+import { belowCost, buildProductsVerdict, type ProductLike } from '../productsVerdict'
 
 const P = (key: string, orders: number, revenue: number, contribution: number | null, units = orders): ProductLike =>
   ({ key, title: key, units, orders, revenue, contribution })
@@ -62,5 +62,20 @@ describe('buildProductsVerdict', () => {
     const v = buildProductsVerdict({ ...base, products: [], totals: { revenue: 0, orders: 0, units: 0, contribution: 0 } as PnL })
     expect(v.amount).toBeNull()
     expect(v.headline).toBe('Nenhuma venda na MOKOO nos últimos 7 dias.')
+  })
+})
+
+describe('belowCost (r1: the "Abaixo do custo" tile counts what the chip counts)', () => {
+  it('splits sold losers from free gifts; null contribution is never below cost', () => {
+    const ps = [
+      { key: 'a', title: 'Capy', units: 3, orders: 3, revenue: 60, contribution: -4 },
+      { key: 'b', title: 'Free Gift Keychain', units: 9, orders: 9, revenue: 30, contribution: -12 },
+      { key: 'c', title: 'Sticker', units: 5, orders: 5, revenue: 0, contribution: -3 },
+      { key: 'd', title: 'Box', units: 2, orders: 2, revenue: 40, contribution: 15 },
+      { key: 'e', title: 'Glooty item', units: 1, orders: 1, revenue: 20, contribution: null },
+    ]
+    const { losers, gifts } = belowCost(ps)
+    expect(losers.map(p => p.title)).toEqual(['Capy'])
+    expect(gifts.map(p => p.title)).toEqual(['Free Gift Keychain', 'Sticker'])
   })
 })

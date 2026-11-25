@@ -7,20 +7,22 @@
  */
 
 import 'server-only'
+import type { ReactNode } from 'react'
+import type { BandChip } from '@/lib/views/numberBand'
+import s from './AttributionHeader.module.css'
 import { getAttributionReport, getJourneyPage, getSharedAdAccountsForStore, type JourneyPage, type Model, type SharedAdAccount } from '@/lib/attribution'
 import { computeStorePnL } from '@/lib/engine/pnl'
 import { shiftDate } from '@/lib/engine/dates'
 import type { PageContext } from '@/lib/views/page'
 import { formatRelativeTime, tzCity } from '@/lib/format'
 import { Block, ButtonLink, Card, ErrorState } from '@/components/ui'
-import { AttributionHeader } from './AttributionHeader'
-import { AttributionKpis } from './AttributionKpis'
+import { AttributionRow } from './AttributionRow'
 import { CreativeTable } from './CreativeTable'
 import { JourneyReader } from './JourneyReader'
 import { MODEL_ORDER, modelParam, DEFAULT_MODEL, MODEL_KEY } from './model'
 import { ModelPicker } from './ModelPicker'
 import { Reconciliation } from './Reconciliation'
-import { SharedAccountNote } from './SharedAccountNote'
+import { SharedAccountNote, sharedAccountText } from './SharedAccountNote'
 import { SourceBars } from './SourceBars'
 import { buildAttributionVerdict } from './verdict'
 import { loadFirstSale } from '@/components/campaigns/firstSale'
@@ -43,7 +45,11 @@ function storeNames(ctx: PageContext): Record<string, string> {
   return out
 }
 
-export async function AttributionReportSection({ ctx, model }: { ctx: PageContext; model: Model }) {
+export async function AttributionReportSection({ ctx, model, extraChips = [], extraDetails, extraCount = 0 }: {
+  ctx: PageContext; model: Model
+  /** Page chips ("mostrando a CAMP HALLOW") and Detalhes items (period sentence, callouts). */
+  extraChips?: BandChip[]; extraDetails?: ReactNode; extraCount?: number
+}) {
   const store = ctx.store
   if (!store) return null
   const names = storeNames(ctx)
@@ -74,6 +80,7 @@ export async function AttributionReportSection({ ctx, model }: { ctx: PageContex
   }
   const [report, pnl, recent, firstSale, archived] = data
   const t = report.totals
+  const journeysAge = report.coverage.journeysUpdatedAt ? formatRelativeTime(report.coverage.journeysUpdatedAt, ctx.now) : null
   const sales = { revenue: pnl?.totals.revenue ?? 0, orders: pnl?.totals.orders ?? 0 }
   const verdict = buildAttributionVerdict({
     storeId: store.id,
@@ -87,30 +94,36 @@ export async function AttributionReportSection({ ctx, model }: { ctx: PageContex
     coverage: report.coverage,
     phantom: report.phantom,
     shared: report.sharedAccounts,
-    journeysAge: report.coverage.journeysUpdatedAt ? formatRelativeTime(report.coverage.journeysUpdatedAt, ctx.now) : null,
+    journeysAge,
     firstSale,
     archived,
   })
   // Before the first sale or after the archive day, the blocks say why.
   const why = verdict.empty ? emptyWindowWords(verdict.empty, ctx.rangeLabel) : null
   const sharedAdStore = report.sharedAccounts.find(p => p.salesStoreId === store.id)?.adStoreName ?? null
+  // A shared ad account: a chip with the note's text, the note in Detalhes.
+  const sharedNote = sharedAccountText(store.id, report.sharedAccounts, recent, ctx.rangeLabel)
+  const sharedChips: BandChip[] = sharedNote ? [{
+    code: 'conta_compartilhada', tone: sharedNote.now ? 'info' : 'neu',
+    label: sharedAdStore ? `anúncios na conta da ${sharedAdStore}` : 'conta compartilhada',
+    info: `${sharedNote.title}. ${sharedNote.text}`,
+  }] : []
   const hrefs = Object.fromEntries(MODEL_ORDER.map(m => [m, modelHref(ctx, m)])) as Record<Model, string>
 
   return (
     <>
-      <AttributionHeader
-        verdict={verdict}
-        aside={<Reconciliation verdict={verdict} totals={t} sales={sales} shared={report.sharedAccounts} storeId={store.id} rangeLabel={ctx.rangeLabel} />}
+      <AttributionRow
+        verdict={verdict} totals={t} store={pnl?.totals ?? null} configured={!!pnl?.configured} sharedAdStore={sharedAdStore}
+        coverage={report.coverage} journeysAge={journeysAge} extraChips={[...sharedChips, ...extraChips]}
+        extraCount={extraCount + (sharedChips.length ? 1 : 0)}
+        details={<>
+          {extraDetails}
+          <SharedAccountNote storeId={store.id} shared={report.sharedAccounts} recent={recent} rangeLabel={ctx.rangeLabel} />
+        </>}
       />
-      <SharedAccountNote storeId={store.id} shared={report.sharedAccounts} recent={recent} rangeLabel={ctx.rangeLabel} />
-      {(t.spend > 0.005 || t.metaRevenue > 0.005) && (
-        <AttributionKpis
-          totals={t}
-          store={pnl?.totals ?? null}
-          configured={!!pnl?.configured}
-          sharedAdStore={sharedAdStore}
-        />
-      )}
+      <Card className={s.recCard} as="section" aria-label="O que cada lado conta">
+        <Reconciliation verdict={verdict} totals={t} sales={sales} shared={report.sharedAccounts} storeId={store.id} rangeLabel={ctx.rangeLabel} />
+      </Card>
       <ModelPicker active={model} hrefs={hrefs} />
       <CreativeTable report={report} storeId={store.id} storeName={store.name} names={names} model={model} rangeLabel={ctx.rangeLabel} now={ctx.now} why={why} />
       <SourceBars sources={report.sources} rangeLabel={ctx.rangeLabel} why={why} />

@@ -34,7 +34,7 @@
 
 import { formatPct, formatRoas } from '@/lib/format'
 import { clampLabel, textWidth } from '@/components/charts/axis'
-import { breakEvenReason, reasonText, REASON_WORDS, usableBreakEven, type BreakEvenReason } from './roasReason'
+import { breakEvenReason, reasonText, REASON_WORDS, roasGapPct, usableBreakEven, type BreakEvenReason } from './roasReason'
 import s from './Kpi.module.css'
 
 export type { BreakEvenReason } from './roasReason'
@@ -75,7 +75,7 @@ export function RoasGauge({
   const x = (v: number) => pad + (Math.min(Math.max(v, 0), top) / top) * iw
   const ty = mini ? 4 : 15
   const th = 6
-  const pctOff = be ? Math.round(((roas - be) / be) * 100) : null
+  const pctOff = roasGapPct(roas, be)
   const roasText = `${label ? `${label} ` : ''}${formatRoas(roas)}`
   const sentence = paused
     ? `${roasText}${be ? `, empate ${formatRoas(be)}` : ''}: pausada`

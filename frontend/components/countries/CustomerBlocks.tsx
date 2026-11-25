@@ -200,8 +200,10 @@ export function FunnelBlock({ funnel, rangeLabel, sharedNote, stores = 1, why = 
   return (
     <Block
       title="Funil"
-      howTo={`As etapas que o pixel do Meta mede em ${rangeLabel}, e os pedidos reais da Shopify à parte — são fontes diferentes e não se dividem uma pela outra como conversão.`}
-      info="Uma etapa que o pixel não mede (sempre zero enquanto as seguintes têm valor) fica de fora. Quando uma etapa conta mais que a anterior, a taxa não é mostrada: o Meta conta cada etapa separadamente."
+      // The caveat stays visible on one line; the how-to joins the ⓘ.
+      howTo="pixel do Meta e Shopify não se dividem como conversão"
+      howToVisible
+      info={`As etapas que o pixel do Meta mede em ${rangeLabel}, e os pedidos reais da Shopify à parte — são fontes diferentes e não se dividem uma pela outra como conversão. Uma etapa que o pixel não mede (sempre zero enquanto as seguintes têm valor) fica de fora. Quando uma etapa conta mais que a anterior, a taxa não é mostrada: o Meta conta cada etapa separadamente.`}
     >
       {steps.length === 0 ? (
         why ? <WhyEmpty why={why} />

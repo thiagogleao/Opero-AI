@@ -27,6 +27,17 @@ function sentence(p: SharedAdAccount, storeId: string, when: string): string {
 
 const ANY_TOUCH_NOTE = 'Esse número vale qualquer visita do caminho, por isso pode passar do que o modelo escolhido credita.'
 
+/** The note's title and text for this window (or the last 90 days), plain;
+ *  null when the store has no shared account. The number row's chip carries it. */
+export function sharedAccountText(storeId: string, shared: SharedAdAccount[], recent: SharedAdAccount[], rangeLabel: string): { title: string; text: string; now: boolean } | null {
+  const mine = (ps: SharedAdAccount[]) => ps.filter(p => p.adStoreId === storeId || p.salesStoreId === storeId)
+  const now = mine(shared)
+  if (now.length) return { now: true, title: 'Conta de anúncios compartilhada', text: `${now.map(p => sentence(p, storeId, `em ${rangeLabel}`)).join(' ')} ${ANY_TOUCH_NOTE} ${SHARED_ACCOUNT_NOTE}` }
+  const before = mine(recent)
+  if (!before.length) return null
+  return { now: false, title: 'Conta compartilhada nos últimos 90 dias', text: `${before.map(p => sentence(p, storeId, 'nos últimos 90 dias')).join(' ')} Neste período não houve venda cruzada entre as duas lojas.` }
+}
+
 export function SharedAccountNote({ storeId, shared, recent, rangeLabel }: {
   storeId: string
   /** Pairs in the window. */
@@ -35,20 +46,7 @@ export function SharedAccountNote({ storeId, shared, recent, rangeLabel }: {
   recent: SharedAdAccount[]
   rangeLabel: string
 }) {
-  const mine = (ps: SharedAdAccount[]) => ps.filter(p => p.adStoreId === storeId || p.salesStoreId === storeId)
-  const now = mine(shared)
-  if (now.length) {
-    return (
-      <Callout tone="info" icon="swap" title="Conta de anúncios compartilhada">
-        {now.map(p => sentence(p, storeId, `em ${rangeLabel}`)).join(' ')} {ANY_TOUCH_NOTE} {SHARED_ACCOUNT_NOTE}
-      </Callout>
-    )
-  }
-  const before = mine(recent)
-  if (!before.length) return null
-  return (
-    <Callout tone="neu" icon="swap" title="Conta compartilhada nos últimos 90 dias">
-      {before.map(p => sentence(p, storeId, 'nos últimos 90 dias')).join(' ')} Neste período não houve venda cruzada entre as duas lojas.
-    </Callout>
-  )
+  const n = sharedAccountText(storeId, shared, recent, rangeLabel)
+  if (!n) return null
+  return <Callout tone={n.now ? 'info' : 'neu'} icon="swap" title={n.title}>{n.text}</Callout>
 }

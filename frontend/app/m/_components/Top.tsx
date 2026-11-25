@@ -2,7 +2,7 @@
 
 /** Header, store chips, period bar and the status strips of the phone. */
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Icon, StatusDot } from '@/components/ui'
 import { formatRelativeTime } from '@/lib/format'
 import type { MobileResponse, MobileStoreOption } from '@/lib/views/mobile'
@@ -95,30 +95,33 @@ export function StoreChips({ stores, archived, shown, saved, pendingKey, onPick 
       el.scrollTo({ left: Math.max(0, left - (el.clientWidth - on.offsetWidth) / 2), behavior: 'smooth' })
     }
   }, [selected])
-  const chip = (id: string, label: React.ReactNode, extra = '') => {
+  const name = saved ? (saved === ALL ? 'Todas' : [...stores, ...archived].find(x => x.id === saved)?.name) : null
+  // The saved store's chip carries the pin (spec §3.10): the old line "Fixado
+  // em X até você escolher outra loja" is its aria-label and the footer's
+  // "· fixado em X" (C15c).
+  const chip = (id: string, label: React.ReactNode, extra = '', plainName?: string) => {
     const on = shown === id
+    const pinned = saved === id
     return (
-      <button key={id} type="button" className={`${s.chip}${on ? ` ${s.chipOn}` : ''}${extra}`} aria-pressed={on} onClick={() => onPick(id)}>
+      <button key={id} type="button" className={`${s.chip}${on ? ` ${s.chipOn}` : ''}${extra}`} aria-pressed={on} onClick={() => onPick(id)}
+        aria-label={pinned && plainName ? `${plainName}, fixada até você escolher outra loja` : undefined}>
         {on && pendingKey === id && <span className={s.spin} aria-hidden="true" style={{ width: 11, height: 11 }} />}
+        {pinned && !(on && pendingKey === id) && <Icon name="pin" size={12} />}
         {label}
       </button>
     )
   }
-  const name = saved ? (saved === ALL ? 'Todas' : [...stores, ...archived].find(x => x.id === saved)?.name) : null
   return (
     <>
       <div ref={row} className={s.chips} role="group" aria-label="Loja">
-        {chip(ALL, 'Todas')}
+        {chip(ALL, 'Todas', '', 'Todas')}
         {stores.map(st => {
           const [main, code] = splitName(st.name)
-          return chip(st.id, <>{main}{code && <small>{code}</small>}</>)
+          return chip(st.id, <>{main}{code && <small>{code}</small>}</>, '', st.name)
         })}
-        {archivedSel && chip(archivedSel.id, <>{archivedSel.name}<small>arquivada</small></>, ` ${s.chipArchived}`)}
+        {archivedSel && chip(archivedSel.id, <>{archivedSel.name}<small>arquivada</small></>, ` ${s.chipArchived}`, archivedSel.name)}
       </div>
-      <p className={s.pin}>
-        <Icon name="pin" size={13} />
-        {name ? <span>Fixado em <b>{name}</b> até você escolher outra loja</span> : <span>Abrindo a última loja escolhida…</span>}
-      </p>
+      {!name && <p className={s.pin}><span>Abrindo a última loja escolhida…</span></p>}
     </>
   )
 }
@@ -177,6 +180,24 @@ export function Strip({ tone, icon, spin, children, onClose, closeLabel }: {
       {spin ? <span className={`${s.spin} ${s.stripIcon}`} aria-hidden="true" /> : <span className={s.stripIcon}><Icon name={icon ?? 'info'} size={15} /></span>}
       <div>{children}</div>
       {onClose ? <button type="button" className={s.stripClose} onClick={onClose} aria-label={closeLabel ?? 'Fechar aviso'}><Icon name="x" size={14} /></button> : <span />}
+    </div>
+  )
+}
+
+/**
+ * The answer's own note (lib/period: "A Glooty começou em 4 nov: o período
+ * tem 3 dias antes disso.") as ONE line above the numbers; a tap opens the
+ * whole sentence in place. Nothing is cut for good: the text is the button's
+ * name and opens on tap or Enter.
+ */
+export function NoteStrip({ children }: { children: string }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className={`${s.strip} ${s.stripInfo} ${s.noteStrip}`} role="status">
+      <span className={s.stripIcon}><Icon name="info" size={15} /></span>
+      <button type="button" className={`${s.noteText} ${open ? s.noteOpen : ''}`} aria-expanded={open} onClick={() => setOpen(o => !o)}>
+        {children}
+      </button>
     </div>
   )
 }
